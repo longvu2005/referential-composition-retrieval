@@ -1,0 +1,45 @@
+<View>
+  <Header value="$meta" size="4"/>
+  <HyperText name="images" value="$images_html"/>
+  <HyperText name="subjects" value="$subjects_html"/>
+
+  <Header value="CASE TYPE" size="4"/>
+  <Choices
+    name="case_type"
+    toName="images"
+    value="$case_choices"
+    choice="single"
+    layout="select"
+    required="true"
+  />
+
+  <Header value="SELECT / WHO" size="4"/>
+  <TextArea
+    name="final_desc"
+    toName="images"
+    value="$final_desc"
+    rows="3"
+    editable="true"
+    transcription="true"
+    required="true"
+    maxSubmissions="1"
+  />
+
+  <Header value="CHANGE / WHAT" size="4"/>
+  <TextArea
+    name="final_change"
+    toName="images"
+    value="$final_change"
+    rows="3"
+    editable="true"
+    transcription="true"
+    required="true"
+    maxSubmissions="1"
+  />
+
+  <Collapse open="false" bordered="true">
+    <Panel value="Original annotation">
+      <HyperText name="original" value="$original_html"/>
+    </Panel>
+  </Collapse>
+</View>

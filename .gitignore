@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+
+# Runtime artifacts
+cache/
+runs/
+wandb/
+*.log
+*.tmp
+
+# Model checkpoints
+checkpoints/*
+!checkpoints/README.md
+
+# Machine-local image directory or symbolic link
+dataset/data/raw/images/*
+!dataset/data/raw/images/.gitkeep

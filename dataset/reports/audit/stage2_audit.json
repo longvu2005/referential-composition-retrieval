@@ -1,0 +1,55 @@
+{
+  "num_samples": 4348,
+  "case_types": {
+    "MULTI": 345,
+    "RELATIONAL": 192,
+    "SINGLE": 3811
+  },
+  "qc": {
+    "pass": 4311,
+    "fail": 37
+  },
+  "qc_issues": {
+    "caption_format": 21,
+    "caption_relational_format": 16
+  },
+  "failed_qc_submission_ids": [
+    "cmq7vdsyl0lug01s7oz245nap",
+    "cmq7v4gth0lsh01s7k7mveyc6",
+    "cmq7v2hyi0ls601s7vuq9qqmf",
+    "cmq7u5as60lm501s7077ljv0i",
+    "cmq7tp8yd0ljy01s7sbn206ov",
+    "cmq7tnbwy0ljr01s71epe1tqw",
+    "cmq7tk8ut0ljh01s77ze21gwx",
+    "cmq7slls90lhc01s7x48cq2b4",
+    "cmq7sba700lh401s70xtul0h2",
+    "cmq7qmr7a0lg401s77rlyscyu",
+    "cmq7qkc600lg201s7iruh26cw",
+    "cmq7qi9ft0lg001s7wj941ypf",
+    "cmq7qf59k0lfy01s78blr2amq",
+    "cmq7qc8zm0lfw01s72zezloh3",
+    "cmq7p5hbq0ley01s7vwj3z7b0",
+    "cmq7orzs60leo01s7eogkx97t",
+    "cmq6lrbdz0j2v01s7wbk56d50",
+    "cmq6lo2tp0j2t01s7n6qsbbue",
+    "cmq6kj0xy0j1x01s7lp1yofjx",
+    "cmq6jxb7w0j1f01s7mlt5r5gh",
+    "cmq6i0c5h0izi01s73996rr4i",
+    "cmq6hx9hi0izd01s7dzcr74en",
+    "cmq66ezm00hh301s74s5fjfli",
+    "cmq633f7v0h9l01s7l55527rm",
+    "cmq5uoo4s0gs701s7uqi6b4op",
+    "cmq5l0eqq0grw01s7ydkaobcr",
+    "cmq5kuhkj0grs01s76u43suta",
+    "cmq5kf2jx0g9901s739bs77o2",
+    "cmq5kd1hw0g9401s7vvmb3vep",
+    "cmq5jnb8l0g7p01s7k9mbm3f7",
+    "cmq5j7yam0g6u01s7t17tfggr",
+    "cmq5j5exb0g6r01s76s2oq1g5",
+    "cmq5j2o4u0g6o01s7jd8zcex8",
+    "cmq5izywn0g6k01s7pk5d3kyw",
+    "cmq5is1gv0g6501s7c4jgpojg",
+    "cmq5ht8dk0fyl01s75ff74h1f",
+    "cmq5hhbnq0fxm01s7lk1o4328"
+  ]
+}
