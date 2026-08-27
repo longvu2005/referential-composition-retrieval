@@ -49,7 +49,7 @@ def count_people(image_id):
     result = processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
-        box_threshold=0.35,
+        threshold=0.35,
         text_threshold=0.25,
         target_sizes=[image.size[::-1]],
     )[0]
