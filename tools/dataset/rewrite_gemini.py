@@ -138,26 +138,6 @@ def empty_rewrite(submission_id: str) -> dict:
     }
 
 
-def normalize_rewrite_records(records: list[dict]) -> list[dict]:
-    """Convert legacy sample errors to the current rewrite-output schema."""
-
-    outputs = []
-    rewrite_fields = {"submission_id", "final_desc", "final_change"}
-    legacy_error_fields = {"submission_id", "error"}
-
-    for row in records:
-        fields = set(row)
-        if fields == rewrite_fields:
-            outputs.append(row)
-        elif fields == legacy_error_fields:
-            outputs.append(empty_rewrite(row["submission_id"]))
-        else:
-            raise ValueError(
-                f"{row.get('submission_id')}: unexpected rewrite output fields"
-            )
-
-    return outputs
-
 
 def completed_ids(output_path: Path, work_dir: Path) -> set[str]:
     """Return every sample already processed by Gemini at sample level."""
@@ -489,11 +469,7 @@ def collect(args: argparse.Namespace) -> None:
 def merge(args: argparse.Namespace) -> None:
     input_path, output_path, work_dir = get_paths(args.stress_test)
     records = load_jsonl(input_path)
-    existing = (
-        normalize_rewrite_records(load_jsonl(output_path))
-        if output_path.exists()
-        else []
-    )
+    existing = load_jsonl(output_path) if output_path.exists() else []
 
     additions = collected_chunk_outputs(work_dir)
     outputs = merge_rewrite_outputs(records, existing, additions)

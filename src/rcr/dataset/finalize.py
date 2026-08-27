@@ -19,17 +19,10 @@ def _index_by_submission_id(
     records: Iterable[JsonObject],
     label: str,
 ) -> dict[str, JsonObject]:
-    """Index handoff records and reject missing or duplicate IDs."""
-
     indexed = {}
 
-    for position, record in enumerate(records, start=1):
-        if not isinstance(record, dict):
-            raise ValueError(f"{label}: record {position} must be a JSON object")
-
-        submission_id = record.get("submission_id")
-        if not isinstance(submission_id, str) or not submission_id:
-            raise ValueError(f"{label}: record {position} has an invalid submission_id")
+    for record in records:
+        submission_id = record["submission_id"]
         if submission_id in indexed:
             raise ValueError(f"{label}: duplicate submission_id {submission_id}")
         indexed[submission_id] = record
@@ -37,48 +30,41 @@ def _index_by_submission_id(
     return indexed
 
 
-def _validate_review(record: JsonObject) -> None:
-    required_fields = {"submission_id", "final_desc", "final_change"}
-    allowed_fields = required_fields | {"case_type"}
-    if not required_fields <= set(record) or not set(record) <= allowed_fields:
-        raise ValueError(
-            f"{record.get('submission_id')}: reviewed record must contain "
-            "submission_id, final_desc, final_change, and optional case_type"
-        )
+def _validate_handoffs(
+    selected_by_id: dict[str, JsonObject],
+    reviewed_by_id: dict[str, JsonObject],
+    positives_by_id: dict[str, JsonObject],
+) -> None:
+    expected_ids = set(selected_by_id)
 
-    case_type = record.get("case_type")
-    if case_type is not None and case_type not in CASE_TYPES:
-        raise ValueError(
-            f"{record['submission_id']}: invalid case_type {case_type!r}"
-        )
+    if set(reviewed_by_id) != expected_ids:
+        raise ValueError("reviewed samples do not match selected samples")
 
-    for field in ("final_desc", "final_change"):
-        value = record[field]
-        if not isinstance(value, str) or not value.strip():
+    if set(positives_by_id) != expected_ids:
+        raise ValueError("positive sets do not match selected samples")
+
+    for submission_id, source in selected_by_id.items():
+        review = reviewed_by_id[submission_id]
+
+        case_type = review.get("case_type")
+        if case_type is not None and case_type not in CASE_TYPES:
             raise ValueError(
-                f"{record['submission_id']}: {field} must be a non-empty string"
+                f"{submission_id}: invalid case_type {case_type!r}"
             )
 
-
-def _validate_positive_set(record: JsonObject) -> None:
-    expected_fields = {"submission_id", "target_image_ids"}
-    if set(record) != expected_fields:
-        raise ValueError(
-            f"{record.get('submission_id')}: positive-set record must contain "
-            "exactly submission_id and target_image_ids"
+        validate_rewrite_output(
+            prepare_rewrite_inputs([source])[0],
+            {
+                "final_desc": review["final_desc"],
+                "final_change": review["final_change"],
+            },
         )
 
-    targets = record["target_image_ids"]
-    if (
-        not isinstance(targets, list)
-        or not targets
-        or any(not isinstance(target, str) or not target for target in targets)
-        or len(targets) != len(set(targets))
-    ):
-        raise ValueError(
-            f"{record['submission_id']}: target_image_ids must be a non-empty "
-            "list of unique strings"
-        )
+        targets = positives_by_id[submission_id]["target_image_ids"]
+        if not targets or len(targets) != len(set(targets)):
+            raise ValueError(
+                f"{submission_id}: target_image_ids must be non-empty and unique"
+            )
 
 
 def build_final_dataset(
@@ -94,26 +80,12 @@ def build_final_dataset(
     selected_by_id = _index_by_submission_id(selected, "selected")
     reviewed_by_id = _index_by_submission_id(reviewed, "reviewed")
     positives_by_id = _index_by_submission_id(positive_sets, "positive_sets")
-    sample_ids = list(selected_by_id)
 
-    if set(reviewed_by_id) != set(sample_ids):
-        raise ValueError("reviewed samples do not match selected samples")
-
-    if set(positives_by_id) != set(sample_ids):
-        raise ValueError("positive sets do not match selected samples")
-
-    for submission_id, record in reviewed_by_id.items():
-        _validate_review(record)
-        source = prepare_rewrite_inputs([selected_by_id[submission_id]])[0]
-        validate_rewrite_output(
-            source,
-            {
-                "final_desc": record["final_desc"],
-                "final_change": record["final_change"],
-            },
-        )
-    for record in positives_by_id.values():
-        _validate_positive_set(record)
+    _validate_handoffs(
+        selected_by_id,
+        reviewed_by_id,
+        positives_by_id,
+    )
 
     images = [
         {
@@ -166,8 +138,12 @@ def build_final_dataset(
                 "subject_id": subject["subjectId"],
                 "identity_ids": subject["desc"]["queryGroupIds"],
             }
-            for subject in source["annotation"]["subjects"]
+            for subject in sorted(
+                source["annotation"]["subjects"],
+                key=lambda subject: subject["subjectId"],
+            )
         ]
+
         required_ids = {
             identity_id
             for subject in subjects
@@ -188,7 +164,8 @@ def build_final_dataset(
             {
                 "sample_id": submission_id,
                 "case_type": review.get(
-                    "case_type", source["annotation"]["caseType"]
+                    "case_type",
+                    source["annotation"]["caseType"],
                 ),
                 "query_image_id": source["query_image_id"],
                 "target_image_ids": targets,
@@ -198,12 +175,16 @@ def build_final_dataset(
                 "final_instruction": f"{final_desc}; {final_change}.",
             }
         )
+
         splits[source["split"].lower()].append(submission_id)
 
     return {
         "samples": samples,
         "images": images,
-        "gallery": [{"image_id": image["image_id"]} for image in images],
+        "gallery": [
+            {"image_id": image["image_id"]}
+            for image in images
+        ],
         "head_boxes": head_boxes,
         "splits": splits,
         "manifest": {
@@ -211,6 +192,9 @@ def build_final_dataset(
             "num_samples": len(samples),
             "num_images": len(images),
             "num_head_boxes": len(head_boxes),
-            "splits": {split: len(ids) for split, ids in splits.items()},
+            "splits": {
+                split: len(sample_ids)
+                for split, sample_ids in splits.items()
+            },
         },
     }
