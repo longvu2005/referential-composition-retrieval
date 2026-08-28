@@ -237,17 +237,20 @@ materializes these identities as fixed linked boxes. Selecting an identity in
 either image updates Query and Target together. `SINGLE` uses only `S1`; `MULTI`
 and `RELATIONAL` use `S1` and `S2`. One identity may belong to at most one Subject.
 
-Human handoffs are also incremental. `review_input.jsonl` excludes IDs already
-present in `reviewed.jsonl`. After review, prepare Full Positive labeling with:
+Human handoffs are also incremental, but rewrite review keeps a cumulative task
+catalog. `review_input.jsonl` retains both pending and reviewed task metadata, while
+`reviewed.jsonl` is the canonical completion state. Re-running review preparation
+refreshes known tasks by `submission_id` and appends new tasks without removing old
+ones. After review, prepare Full Positive labeling with:
 
 ```bash
 python tools/dataset/prepare_handoffs.py positives
 ```
 
 `positive_set_input.jsonl` excludes IDs already present in
-`positive_sets.jsonl`. Therefore adding new tasks does not send completed old
-tasks through Gemini or either human handoff again. The cumulative human files
-remain:
+`positive_sets.jsonl`. Therefore adding new tasks does not send completed old tasks through Gemini or
+Positive Expansion again, while the rewrite-review workspace can still reopen old
+completed tasks. The cumulative human files remain:
 
 ```text
 dataset/data/work/review/reviewed.jsonl

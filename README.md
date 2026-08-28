@@ -97,8 +97,10 @@ bash scripts/phase1_rewrite.bash merge
 ```
 
 `prepare` creates fixed chunks (1000 samples by default). Only one chunk may be
-active on Gemini at a time. `merge` creates `rewrite_output.jsonl` and the
-incremental `review_input.jsonl`. A sample-level Gemini failure is preserved as an
+active on Gemini at a time. `merge` creates `rewrite_output.jsonl` and refreshes the
+cumulative `review_input.jsonl` task catalog. Reviewed tasks remain in this catalog so
+the local UI can revisit them; completion state comes from `reviewed.jsonl`. A
+sample-level Gemini failure is preserved as an
 empty rewrite for human review and is treated as processed, so it is never
 resubmitted. Whole failed batch jobs remain retryable. Rewrite review runs through the
 repo-local UI, while Full Positive selection uses offline Label Studio

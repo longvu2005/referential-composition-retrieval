@@ -184,6 +184,7 @@ class ReviewState:
     def __init__(self) -> None:
         self.rows = load_jsonl(INPUT)
         self.rows_by_id = {row["submission_id"]: row for row in self.rows}
+        self.index_by_id = {row["submission_id"]: i for i, row in enumerate(self.rows)}
         if len(self.rows_by_id) != len(self.rows):
             raise ValueError("review_input.jsonl contains duplicate submission_id")
 
@@ -195,17 +196,48 @@ class ReviewState:
         self.boxes_by_image = load_box_index()
         self.lock = threading.Lock()
 
-    def task(self, index: int) -> dict:
-        if index < 0 or index >= len(self.rows):
-            raise ValueError("task index out of range")
-        row = self.rows[index]
+    def _meta(self, index: int, row: dict) -> dict:
         review = self.reviews.get(row["submission_id"])
         return {
             "index": index,
-            "total": len(self.rows),
-            "completed": sum(
-                row["submission_id"] in self.reviews for row in self.rows
-            ),
+            "submission_id": row["submission_id"],
+            "case_type": review["case_type"] if review is not None else row["case_type"],
+            "reviewed": review is not None,
+        }
+
+    def tasks(self) -> dict:
+        """Return lightweight task metadata for navigation and filtering."""
+
+        tasks = [self._meta(index, row) for index, row in enumerate(self.rows)]
+        completed = sum(item["reviewed"] for item in tasks)
+        return {
+            "total": len(tasks),
+            "completed": completed,
+            "pending": len(tasks) - completed,
+            "tasks": tasks,
+        }
+
+    def task(self, index: int | None = None, submission_id: str | None = None) -> dict:
+        """Load a task by stable submission ID, with index kept for compatibility."""
+
+        if submission_id is not None:
+            row = self.rows_by_id.get(submission_id)
+            if row is None:
+                raise ValueError("unknown submission_id")
+            index = self.index_by_id[submission_id]
+        else:
+            index = 0 if index is None else index
+            if index < 0 or index >= len(self.rows):
+                raise ValueError("task index out of range")
+            row = self.rows[index]
+
+        review = self.reviews.get(row["submission_id"])
+        summary = self.tasks()
+        return {
+            "index": index,
+            "total": summary["total"],
+            "completed": summary["completed"],
+            "pending": summary["pending"],
             "reviewed": review is not None,
             "task": build_task_payload(row, self.boxes_by_image, review),
         }
@@ -261,9 +293,17 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
 
+            if parsed.path == "/api/tasks":
+                self._json(self.state.tasks())
+                return
+
             if parsed.path == "/api/task":
-                index = int(parse_qs(parsed.query).get("index", ["0"])[0])
-                self._json(self.state.task(index))
+                params = parse_qs(parsed.query)
+                submission_id = params.get("id", [None])[0]
+                index = None
+                if submission_id is None:
+                    index = int(params.get("index", ["0"])[0])
+                self._json(self.state.task(index=index, submission_id=submission_id))
                 return
 
             if parsed.path == "/api/image":
@@ -296,7 +336,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length))
             row = self.state.save(payload)
-            self._json({"review": row})
+            self._json({"review": row, "summary": self.state.tasks()})
         except Exception as error:  # local review server: surface actionable errors
             self._error(error)
 

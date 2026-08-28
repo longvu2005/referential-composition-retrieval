@@ -58,6 +58,38 @@ def select_unfinished_records(
     ]
 
 
+def merge_handoff_catalog(
+    existing: Iterable[JsonObject],
+    prepared: Iterable[JsonObject],
+) -> list[JsonObject]:
+    """Merge task metadata by submission ID while preserving stable task order.
+
+    Existing tasks keep their position, refreshed versions replace their metadata,
+    and newly prepared tasks are appended. This makes a handoff input usable as a
+    cumulative task catalog rather than a transient pending-only queue.
+    """
+
+    existing_rows = list(existing)
+    prepared_rows = list(prepared)
+    existing_ids = [row["submission_id"] for row in existing_rows]
+    prepared_ids = [row["submission_id"] for row in prepared_rows]
+    if len(set(existing_ids)) != len(existing_ids):
+        raise ValueError("existing handoff catalog contains duplicate submission_id")
+    if len(set(prepared_ids)) != len(prepared_ids):
+        raise ValueError("prepared handoff rows contain duplicate submission_id")
+
+    prepared_by_id = {row["submission_id"]: row for row in prepared_rows}
+    merged = [
+        prepared_by_id.get(row["submission_id"], row)
+        for row in existing_rows
+    ]
+    existing_id_set = set(existing_ids)
+    merged.extend(
+        row for row in prepared_rows if row["submission_id"] not in existing_id_set
+    )
+    return merged
+
+
 def prepare_review_inputs(
     selected: list[JsonObject],
     rewrite_outputs: list[JsonObject],

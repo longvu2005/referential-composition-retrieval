@@ -3,6 +3,7 @@
 import pytest
 
 from rcr.dataset.handoff import (
+    merge_handoff_catalog,
     prepare_positive_set_inputs,
     prepare_review_inputs,
     select_unfinished_records,
@@ -116,6 +117,32 @@ def test_prepare_positive_set_inputs_filters_by_all_required_identities() -> Non
     assert output["candidates"][0]["is_seed"] is True
     assert output["case_type"] == "RELATIONAL"
     assert output["target_image_ids"] == ["1_2"]
+
+
+
+
+def test_merge_handoff_catalog_keeps_order_updates_existing_and_appends_new() -> None:
+    existing = [
+        {"submission_id": "old", "value": 1},
+        {"submission_id": "stable", "value": 2},
+    ]
+    prepared = [
+        {"submission_id": "stable", "value": 20},
+        {"submission_id": "new", "value": 3},
+    ]
+
+    outputs = merge_handoff_catalog(existing, prepared)
+
+    assert [row["submission_id"] for row in outputs] == ["old", "stable", "new"]
+    assert outputs[1]["value"] == 20
+
+
+def test_merge_handoff_catalog_rejects_duplicate_prepared_ids() -> None:
+    with pytest.raises(ValueError, match="prepared handoff rows contain duplicate"):
+        merge_handoff_catalog(
+            [],
+            [{"submission_id": "dup"}, {"submission_id": "dup"}],
+        )
 
 
 def test_select_unfinished_records_skips_completed_ids() -> None:

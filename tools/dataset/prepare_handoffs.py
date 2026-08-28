@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from rcr.dataset.handoff import (
+    merge_handoff_catalog,
     prepare_positive_set_inputs,
     prepare_review_inputs,
     select_unfinished_records,
@@ -41,16 +42,19 @@ def main() -> None:
 
     if args.handoff == "review":
         completed_ids = {row["submission_id"] for row in load_optional(REVIEWED)}
-        rewrites = select_unfinished_records(
-            load_jsonl(REWRITE_OUTPUT),
-            completed_ids,
-        )
-        outputs = prepare_review_inputs(
+        selected_ids = {row["submission_id"] for row in selected}
+        current_rewrites = [
+            row
+            for row in load_jsonl(REWRITE_OUTPUT)
+            if row["submission_id"] in selected_ids
+        ]
+        prepared = prepare_review_inputs(
             selected=selected,
-            rewrite_outputs=rewrites,
+            rewrite_outputs=current_rewrites,
             pair_data=pair_data,
             index_lines=index_lines,
         )
+        outputs = merge_handoff_catalog(load_optional(REVIEW_INPUT), prepared)
         output_path = REVIEW_INPUT
     else:
         completed_ids = {row["submission_id"] for row in load_optional(POSITIVE_SETS)}
@@ -67,8 +71,12 @@ def main() -> None:
         output_path = POSITIVE_INPUT
 
     write_jsonl(output_path, outputs)
-    print(f"Prepared: {len(outputs)}")
-    print(f"Already completed: {len(completed_ids)}")
+    if args.handoff == "review":
+        print(f"Review catalog: {len(outputs)}")
+        print(f"Already reviewed: {len(completed_ids)}")
+    else:
+        print(f"Prepared: {len(outputs)}")
+        print(f"Already completed: {len(completed_ids)}")
     print(f"Wrote handoff input to {output_path}")
 
 

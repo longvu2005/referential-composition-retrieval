@@ -31,7 +31,14 @@ The UI writes completed samples directly to:
 dataset/data/work/review/reviewed.jsonl
 ```
 
-The review flow is deliberately linear:
+The review UI is a task workspace rather than a strictly linear queue. The left
+navigator shows all tasks and supports `All`, `Pending`, and `Reviewed` status
+filters, case-type filtering, and search by task number or `submission_id`. Reviewed
+tasks remain reopenable. `Save & Next Pending` skips completed tasks, while `Prev`
+and `Next` still allow sequential inspection. Unsaved edits are protected before
+navigating away.
+
+Within each task:
 
 1. choose `SINGLE`, `MULTI`, or `RELATIONAL`;
 2. assign identities by clicking fixed person boxes;
@@ -117,7 +124,10 @@ completed annotation. Existing canonical outputs are merged by `submission_id`.
 
 The incremental boundary remains the canonical handoff files:
 
-- `prepare_handoffs.py review` excludes IDs already in `reviewed.jsonl`.
+- `prepare_handoffs.py review` maintains `review_input.jsonl` as a cumulative task
+  catalog, refreshing known IDs and appending new ones without dropping reviewed
+  tasks.
+- `reviewed.jsonl` is the canonical rewrite-review completion state used by the UI.
 - `prepare_handoffs.py positives` excludes IDs already in `positive_sets.jsonl`.
 - the rewrite UI merges each completed sample directly into `reviewed.jsonl`;
 - Positive `prepare.py` and `collect.py` keep the offline Label Studio handoff deterministic.
