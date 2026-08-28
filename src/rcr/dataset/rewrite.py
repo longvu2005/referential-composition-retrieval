@@ -13,6 +13,11 @@ CHANGE_PREFIX = "then retrieve target images where "
 SUBJECT_RE = re.compile(r"\bSubject\s+(\d+)\b")
 TERMINAL_PUNCTUATION = ".;:!?"
 CASE_TYPES = ("SINGLE", "MULTI", "RELATIONAL")
+CASE_SUBJECT_IDS = {
+    "SINGLE": (1,),
+    "MULTI": (1, 2),
+    "RELATIONAL": (1, 2),
+}
 
 
 def prepare_rewrite_inputs(records: Iterable[JsonObject]) -> list[JsonObject]:
@@ -91,12 +96,11 @@ def _validate_select(text: str, subject_ids: list[int]) -> None:
             )
 
 
-def validate_rewrite_output(
-    source: JsonObject,
+def _validate_output(
     output: JsonObject,
+    subject_ids: list[int],
+    required_change_ids: set[int],
 ) -> tuple[str, str]:
-    """Validate one rewrite output."""
-
     if not isinstance(output, dict):
         raise ValueError("model output must be a JSON object.")
 
@@ -120,8 +124,6 @@ def validate_rewrite_output(
     if final_change.endswith(tuple(TERMINAL_PUNCTUATION)):
         raise ValueError("final_change must not end with punctuation.")
 
-    subject_ids = [subject["subject_id"] for subject in source["subjects"]]
-
     if _subject_ids(final_desc) != subject_ids:
         raise ValueError(
             "final_desc must mention every Subject exactly once in input order."
@@ -129,6 +131,41 @@ def validate_rewrite_output(
 
     _validate_select(final_desc, subject_ids)
 
+    if set(_subject_ids(final_change)) != required_change_ids:
+        raise ValueError(
+            "final_change must mention exactly the Subjects required by the "
+            "current structure."
+        )
+
+    return final_desc, final_change
+
+
+def subject_ids_for_case(case_type: str) -> list[int]:
+    """Return the canonical Subject IDs for a reviewed case type."""
+
+    try:
+        return list(CASE_SUBJECT_IDS[case_type])
+    except KeyError as error:
+        raise ValueError(f"invalid case_type {case_type!r}") from error
+
+
+def validate_review_output(
+    case_type: str,
+    output: JsonObject,
+) -> tuple[str, str]:
+    """Validate human-reviewed text against the reviewed case structure."""
+
+    subject_ids = subject_ids_for_case(case_type)
+    return _validate_output(output, subject_ids, set(subject_ids))
+
+
+def validate_rewrite_output(
+    source: JsonObject,
+    output: JsonObject,
+) -> tuple[str, str]:
+    """Validate one model rewrite against its source annotation."""
+
+    subject_ids = [subject["subject_id"] for subject in source["subjects"]]
     required_change_ids = {
         subject["subject_id"]
         for subject in source["subjects"]
@@ -141,12 +178,7 @@ def validate_rewrite_output(
             pair_change["subject_2_id"],
         }
 
-    if set(_subject_ids(final_change)) != required_change_ids:
-        raise ValueError(
-            "final_change must mention exactly the Subjects required by the source."
-        )
-
-    return final_desc, final_change
+    return _validate_output(output, subject_ids, required_change_ids)
 
 
 def build_rewrite_result(

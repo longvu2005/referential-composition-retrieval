@@ -55,11 +55,14 @@ def _index() -> list[str]:
     return [
         "1 1 10 20 30 40 7 1",
         "1 1 50 20 20 30 8 1",
+        "1 1 75 20 15 20 9 1",
         "1 2 10 10 20 20 7 1",
         "1 2 40 10 20 20 8 1",
+        "1 2 70 10 15 20 9 1",
         "1 3 20 20 20 20 7 1",
         "1 3 60 20 20 20 8 1",
         "1 4 30 30 20 20 7 1",
+        "1 4 60 30 20 20 9 1",
     ]
 
 
@@ -68,6 +71,10 @@ def _reviewed() -> list[dict]:
         {
             "submission_id": "sample-1",
             "case_type": "RELATIONAL",
+            "subjects": [
+                {"subject_id": 1, "identity_ids": ["7"]},
+                {"subject_id": 2, "identity_ids": ["8"]},
+            ],
             "final_desc": "Identify Subject 1 as the man and Subject 2 as the woman",
             "final_change": (
                 "then retrieve target images where Subject 1 is smiling and "
@@ -89,6 +96,7 @@ def test_prepare_review_inputs_adds_labeling_context() -> None:
     assert output["query_image_url"] == "/images/1_1.jpg"
     assert output["target_image_url"] == "/images/1_2.jpg"
     assert [box["subject_id"] for box in output["query_boxes"]] == [1, 2]
+    assert output["candidate_identity_ids"] == ["7", "8", "9"]
     assert output["final_desc"] == _reviewed()[0]["final_desc"]
 
 
@@ -169,3 +177,60 @@ def test_prepare_positive_set_inputs_requires_completed_review() -> None:
             pair_data=_pair_data(),
             index_lines=_index(),
         )
+
+
+def test_prepare_positive_set_inputs_uses_reviewed_subject_identities() -> None:
+    reviewed = _reviewed()
+    reviewed[0]["subjects"][1]["identity_ids"] = ["9"]
+
+    outputs = prepare_positive_set_inputs(
+        selected=_selected(),
+        reviewed=reviewed,
+        pair_data=_pair_data(),
+        index_lines=_index(),
+    )
+
+    output = outputs[0]
+    assert output["subjects"] == [
+        {"subject_id": 1, "identity_ids": ["7"]},
+        {"subject_id": 2, "identity_ids": ["9"]},
+    ]
+    assert [candidate["image_id"] for candidate in output["candidates"]] == [
+        "1_2",
+        "1_4",
+    ]
+
+
+def test_prepare_positive_set_inputs_rejects_identity_missing_from_query() -> None:
+    reviewed = _reviewed()
+    reviewed[0]["subjects"][0]["identity_ids"] = ["999"]
+
+    with pytest.raises(ValueError, match="must appear in both query and seed target"):
+        prepare_positive_set_inputs(
+            selected=_selected(),
+            reviewed=reviewed,
+            pair_data=_pair_data(),
+            index_lines=_index(),
+        )
+
+
+def test_prepare_positive_set_inputs_allows_multi_to_single_case_change() -> None:
+    reviewed = [
+        {
+            "submission_id": "sample-1",
+            "case_type": "SINGLE",
+            "subjects": [{"subject_id": 1, "identity_ids": ["7"]}],
+            "final_desc": "Identify Subject 1 as the man",
+            "final_change": "then retrieve target images where Subject 1 is smiling",
+        }
+    ]
+
+    output = prepare_positive_set_inputs(
+        selected=_selected(),
+        reviewed=reviewed,
+        pair_data=_pair_data(),
+        index_lines=_index(),
+    )[0]
+
+    assert output["case_type"] == "SINGLE"
+    assert output["subjects"] == [{"subject_id": 1, "identity_ids": ["7"]}]

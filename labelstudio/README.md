@@ -1,12 +1,63 @@
-# Label Studio handoffs
+# Human review handoffs
 
-This directory contains only the offline files and converters needed for the two
-human-labeling handoffs. Canonical data remains under `dataset/data/work/`.
-There is no Label Studio SDK, API key, project ID, push, or pull step in the repo.
+This directory contains two independent interfaces: the repo-local Rewrite Review
+UI under `review/` and the offline Label Studio handoff for Full Positive selection
+under `positives/`. Rewrite Review does not use Label Studio. Canonical data remains
+under `dataset/data/work/`, and the repo never calls the Label Studio SDK or API.
 
-## Setup
+## Rewrite review
 
-Install and start Label Studio separately if needed:
+Prepare the canonical review input if needed:
+
+```bash
+python tools/dataset/prepare_handoffs.py review
+```
+
+Run the repo-local review UI:
+
+```bash
+python -m labelstudio.review.app
+```
+
+Open:
+
+```text
+http://127.0.0.1:8090
+```
+
+The UI writes completed samples directly to:
+
+```text
+dataset/data/work/review/reviewed.jsonl
+```
+
+The review flow is deliberately linear:
+
+1. choose `SINGLE`, `MULTI`, or `RELATIONAL`;
+2. assign identities by clicking fixed person boxes;
+3. review `final_desc` and `final_change`.
+
+`SINGLE` has only `S1`; `MULTI` and `RELATIONAL` require both `S1` and `S2`.
+The same identity box is linked across Query and Target: clicking either side
+updates both images immediately. Boxes are metadata, not annotations, so they
+cannot be moved, resized, created, or deleted. Zoom and pan transform the image
+and boxes together. Selected boxes display only `S1` or `S2`; identity IDs remain
+internal.
+
+The assignment state is single-valued (`identity -> Subject`), so one identity
+cannot belong to two Subjects. Clicking an identity already assigned to the other
+Subject reassigns it; clicking an identity already assigned to the active Subject
+unassigns it. Server-side validation enforces the same invariant before writing
+canonical output.
+
+The candidate set remains restricted to identities present in both Query and the
+seed Target. Changing the reviewed case also changes the canonical Subject
+structure: `SINGLE` stores only Subject 1, while the other cases store Subjects 1
+and 2.
+
+## Label Studio setup for Full Positive selection
+
+Install and start Label Studio separately only for the Full Positive handoff:
 
 ```bash
 python -m pip install label-studio
@@ -15,56 +66,8 @@ export LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT="$PWD/dataset/data/raw/images"
 label-studio start
 ```
 
-Create two projects manually:
-
-- `RCR Rewrite Review`: use `labelstudio/review/config.xml`.
-- `RCR Positive Selection`: use `labelstudio/positives/config.xml` and enable
-  **Allow empty annotations** so a group may contain zero valid candidates.
-
-## Rewrite review
-
-Prepare the canonical handoff input if needed:
-
-```bash
-python tools/dataset/prepare_handoffs.py review
-```
-
-Create the Label Studio task file:
-
-```bash
-python -m labelstudio.review.prepare
-```
-
-Import this file manually in the `RCR Rewrite Review` project:
-
-```text
-dataset/data/work/review/labelstudio_tasks.json
-```
-
-After annotation, export the project as JSON and save it as:
-
-```text
-dataset/data/work/review/labelstudio_export.json
-```
-
-Collect completed annotations:
-
-```bash
-python -m labelstudio.review.collect
-```
-
-Canonical output:
-
-```text
-dataset/data/work/review/reviewed.jsonl
-```
-
-The UI shows Query and Target with Subject-colored boxes, Subject identity IDs,
-a required Case Type dropdown preselected to the existing case, and editable
-`final_desc` / `final_change`. Reviewers may correct the case type. Empty Gemini
-rewrites remain empty required text boxes for human correction. New reviewed
-records store `case_type`; legacy reviewed records without it still fall back to
-the original annotation case.
+Create `RCR Positive Selection` with `labelstudio/positives/config.xml` and enable
+**Allow empty annotations** so a group may contain zero valid candidates.
 
 ## Full Positive selection
 
@@ -116,7 +119,7 @@ The incremental boundary remains the canonical handoff files:
 
 - `prepare_handoffs.py review` excludes IDs already in `reviewed.jsonl`.
 - `prepare_handoffs.py positives` excludes IDs already in `positive_sets.jsonl`.
-- `prepare.py` deterministically rewrites the current offline import file.
-- `collect.py` merges completed exported annotations into the cumulative output.
+- the rewrite UI merges each completed sample directly into `reviewed.jsonl`;
+- Positive `prepare.py` and `collect.py` keep the offline Label Studio handoff deterministic.
 
 Therefore completed samples are not prepared again when new data is added.

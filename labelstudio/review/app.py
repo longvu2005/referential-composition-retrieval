@@ -1,0 +1,328 @@
+"""Minimal local UI for RCR rewrite review.
+
+The review state is identity-based: selecting one box assigns the same identity
+in both images. Bounding-box geometry is metadata and is never editable.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import threading
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+from labelstudio.common import load_box_index
+from rcr.dataset.review import normalize_review_subjects
+from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
+from rcr.utils.jsonl import load_jsonl, write_jsonl
+
+INPUT = Path("dataset/data/work/review/review_input.jsonl")
+OUTPUT = Path("dataset/data/work/review/reviewed.jsonl")
+IMAGE_ROOT = Path("dataset/data/raw/images")
+HTML = Path(__file__).with_name("app.html")
+
+
+def _image_relative_path(url: str) -> Path:
+    """Map PIPA/local-files URLs to split-relative image paths."""
+
+    parsed = urlparse(url)
+    value = parse_qs(parsed.query).get("d", [parsed.path])[0]
+    value = unquote(value).replace("\\", "/")
+    for marker in ("/PIPA/images/", "/images/"):
+        if marker in value:
+            value = value.split(marker, 1)[1]
+            break
+    value = value.lstrip("/")
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe image path {url!r}")
+    return path
+
+
+def _candidate_boxes(
+    row: dict,
+    image_id: str,
+    boxes_by_image: dict[str, list[dict]],
+) -> list[dict]:
+    candidate_ids = row.get("candidate_identity_ids")
+    if not isinstance(candidate_ids, list) or not candidate_ids:
+        raise ValueError(f"{row['submission_id']}: candidate_identity_ids are required")
+
+    by_identity: dict[str, dict] = {}
+    for box in boxes_by_image.get(image_id, []):
+        identity_id = box["label"]
+        if identity_id not in candidate_ids:
+            continue
+        if identity_id in by_identity:
+            raise ValueError(
+                f"{row['submission_id']}: duplicate box for identity {identity_id} "
+                f"in {image_id}"
+            )
+        by_identity[identity_id] = box
+
+    missing = set(candidate_ids) - set(by_identity)
+    if missing:
+        missing_text = ", ".join(sorted(missing))
+        raise ValueError(
+            f"{row['submission_id']}: missing candidate boxes in {image_id}: "
+            f"{missing_text}"
+        )
+
+    return [
+        {
+            "identity_id": identity_id,
+            "x": 100 * by_identity[identity_id]["x"],
+            "y": 100 * by_identity[identity_id]["y"],
+            "width": 100 * by_identity[identity_id]["width"],
+            "height": 100 * by_identity[identity_id]["height"],
+        }
+        for identity_id in candidate_ids
+    ]
+
+
+def _initial_subjects(row: dict, review: dict | None) -> list[dict]:
+    if review is not None:
+        return normalize_review_subjects(
+            row["submission_id"],
+            review["case_type"],
+            review["subjects"],
+            row["candidate_identity_ids"],
+        )
+    return [
+        {
+            "subject_id": subject["subject_id"],
+            "identity_ids": list(subject["identity_ids"]),
+        }
+        for subject in row["subjects"]
+    ]
+
+
+def build_task_payload(
+    row: dict,
+    boxes_by_image: dict[str, list[dict]],
+    review: dict | None = None,
+) -> dict:
+    """Build one browser task from canonical review input and box metadata."""
+
+    case_type = review["case_type"] if review is not None else row["case_type"]
+    subjects = _initial_subjects(row, review)
+    final_desc = review["final_desc"] if review is not None else row.get("final_desc")
+    final_change = (
+        review["final_change"] if review is not None else row.get("final_change")
+    )
+
+    return {
+        "submission_id": row["submission_id"],
+        "case_type": case_type,
+        "subjects": subjects,
+        "candidate_identity_ids": row["candidate_identity_ids"],
+        "query": {
+            "image_id": row["query_image_id"],
+            "image_url": (
+                "/api/image?path="
+                f"{_image_relative_path(row['query_image_url']).as_posix()}"
+            ),
+            "boxes": _candidate_boxes(row, row["query_image_id"], boxes_by_image),
+        },
+        "target": {
+            "image_id": row["target_image_id"],
+            "image_url": (
+                "/api/image?path="
+                f"{_image_relative_path(row['target_image_url']).as_posix()}"
+            ),
+            "boxes": _candidate_boxes(row, row["target_image_id"], boxes_by_image),
+        },
+        "final_desc": final_desc or "",
+        "final_change": final_change or "",
+        "original": {
+            "case_type": row["case_type"],
+            "subjects": row["subjects"],
+            "pair_change": row.get("pair_change"),
+        },
+    }
+
+
+def validate_submission(source: dict, payload: dict) -> dict:
+    """Validate one browser submission and return the canonical review row."""
+
+    submission_id = source["submission_id"]
+    if payload.get("submission_id") != submission_id:
+        raise ValueError(f"{submission_id}: submission_id mismatch")
+
+    case_type = payload.get("case_type")
+    if case_type not in CASE_TYPES:
+        raise ValueError(f"{submission_id}: invalid case_type {case_type!r}")
+
+    subjects = normalize_review_subjects(
+        submission_id,
+        case_type,
+        payload.get("subjects"),
+        source.get("candidate_identity_ids"),
+    )
+    final_desc, final_change = validate_review_output(
+        case_type,
+        {
+            "final_desc": payload.get("final_desc"),
+            "final_change": payload.get("final_change"),
+        },
+    )
+    return {
+        "submission_id": submission_id,
+        "case_type": case_type,
+        "subjects": subjects,
+        "final_desc": final_desc,
+        "final_change": final_change,
+    }
+
+
+class ReviewState:
+    def __init__(self) -> None:
+        self.rows = load_jsonl(INPUT)
+        self.rows_by_id = {row["submission_id"]: row for row in self.rows}
+        if len(self.rows_by_id) != len(self.rows):
+            raise ValueError("review_input.jsonl contains duplicate submission_id")
+
+        existing = load_jsonl(OUTPUT) if OUTPUT.exists() else []
+        self.reviews = {row["submission_id"]: row for row in existing}
+        self.review_order = [row["submission_id"] for row in existing]
+        if len(self.reviews) != len(self.review_order):
+            raise ValueError("reviewed.jsonl contains duplicate submission_id")
+        self.boxes_by_image = load_box_index()
+        self.lock = threading.Lock()
+
+    def task(self, index: int) -> dict:
+        if index < 0 or index >= len(self.rows):
+            raise ValueError("task index out of range")
+        row = self.rows[index]
+        review = self.reviews.get(row["submission_id"])
+        return {
+            "index": index,
+            "total": len(self.rows),
+            "completed": sum(
+                row["submission_id"] in self.reviews for row in self.rows
+            ),
+            "reviewed": review is not None,
+            "task": build_task_payload(row, self.boxes_by_image, review),
+        }
+
+    def save(self, payload: dict) -> dict:
+        submission_id = payload.get("submission_id")
+        source = self.rows_by_id.get(submission_id)
+        if source is None:
+            raise ValueError("unknown submission_id")
+        row = validate_submission(source, payload)
+
+        with self.lock:
+            if submission_id not in self.reviews:
+                self.review_order.append(submission_id)
+            self.reviews[submission_id] = row
+            OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+            temporary = OUTPUT.with_name(f".{OUTPUT.name}.tmp")
+            write_jsonl(
+                temporary,
+                [
+                    self.reviews[item_id]
+                    for item_id in self.review_order
+                    if item_id in self.reviews
+                ],
+            )
+            os.replace(temporary, OUTPUT)
+        return row
+
+
+class ReviewHandler(BaseHTTPRequestHandler):
+    state: ReviewState
+
+    def _json(self, value: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _error(self, error: Exception) -> None:
+        self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def do_GET(self) -> None:  # noqa: N802
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                data = HTML.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if parsed.path == "/api/task":
+                index = int(parse_qs(parsed.query).get("index", ["0"])[0])
+                self._json(self.state.task(index))
+                return
+
+            if parsed.path == "/api/image":
+                raw_path = parse_qs(parsed.query).get("path", [""])[0]
+                relative = Path(unquote(raw_path))
+                if not raw_path or relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError("unsafe image path")
+                image_path = IMAGE_ROOT / relative
+                data = image_path.read_bytes()
+                content_type = (
+                    mimetypes.guess_type(image_path.name)[0]
+                    or "application/octet-stream"
+                )
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            self.send_error(HTTPStatus.NOT_FOUND)
+        except Exception as error:  # local review server: surface actionable errors
+            self._error(error)
+
+    def do_POST(self) -> None:  # noqa: N802
+        try:
+            if urlparse(self.path).path != "/api/review":
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            row = self.state.save(payload)
+            self._json({"review": row})
+        except Exception as error:  # local review server: surface actionable errors
+            self._error(error)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the local RCR rewrite-review UI.")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8090)
+    args = parser.parse_args()
+
+    state = ReviewState()
+    handler = type("BoundReviewHandler", (ReviewHandler,), {"state": state})
+    server = ThreadingHTTPServer((args.host, args.port), handler)
+    print(f"RCR rewrite review: http://{args.host}:{args.port}")
+    print(f"Input:  {INPUT}")
+    print(f"Output: {OUTPUT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

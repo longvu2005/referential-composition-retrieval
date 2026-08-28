@@ -6,11 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from rcr.dataset.rewrite import (
-    CASE_TYPES,
-    prepare_rewrite_inputs,
-    validate_rewrite_output,
-)
+from rcr.dataset.review import normalize_review_subjects
+from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
 
 JsonObject = dict[str, Any]
 
@@ -28,6 +25,8 @@ def _index_by_submission_id(
         indexed[submission_id] = record
 
     return indexed
+
+
 
 
 def _validate_handoffs(
@@ -52,8 +51,14 @@ def _validate_handoffs(
                 f"{submission_id}: invalid case_type {case_type!r}"
             )
 
-        validate_rewrite_output(
-            prepare_rewrite_inputs([source])[0],
+        reviewed_case = case_type or source["annotation"]["caseType"]
+        normalize_review_subjects(
+            submission_id,
+            reviewed_case,
+            review.get("subjects"),
+        )
+        validate_review_output(
+            reviewed_case,
             {
                 "final_desc": review["final_desc"],
                 "final_change": review["final_change"],
@@ -133,22 +138,26 @@ def build_final_dataset(
         if source["query_image_id"] in targets:
             raise ValueError(f"{submission_id}: query image is positive")
 
-        subjects = [
-            {
-                "subject_id": subject["subjectId"],
-                "identity_ids": subject["desc"]["queryGroupIds"],
-            }
-            for subject in sorted(
-                source["annotation"]["subjects"],
-                key=lambda subject: subject["subjectId"],
-            )
-        ]
+        case_type = review.get(
+            "case_type",
+            source["annotation"]["caseType"],
+        )
+        subjects = normalize_review_subjects(
+            submission_id,
+            case_type,
+            review.get("subjects"),
+        )
 
         required_ids = {
             identity_id
             for subject in subjects
             for identity_id in subject["identity_ids"]
         }
+
+        if not required_ids <= identities_by_image[source["query_image_id"]]:
+            raise ValueError(
+                f"{submission_id}: reviewed identities must appear in the query image"
+            )
 
         for target in targets:
             if (
@@ -163,10 +172,7 @@ def build_final_dataset(
         samples.append(
             {
                 "sample_id": submission_id,
-                "case_type": review.get(
-                    "case_type",
-                    source["annotation"]["caseType"],
-                ),
+                "case_type": case_type,
                 "query_image_id": source["query_image_id"],
                 "target_image_ids": targets,
                 "subjects": subjects,

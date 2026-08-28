@@ -10,7 +10,6 @@ MODULE = runpy.run_path("tools/dataset/rewrite_gemini.py")
 collected_chunk_outputs = MODULE["collected_chunk_outputs"]
 completed_ids = MODULE["completed_ids"]
 process_batch_results = MODULE["process_batch_results"]
-normalize_rewrite_records = MODULE["normalize_rewrite_records"]
 
 
 def _make_chunk(work_dir: Path, number: int) -> Path:
@@ -21,26 +20,6 @@ def _make_chunk(work_dir: Path, number: int) -> Path:
         encoding="utf-8",
     )
     return chunk_dir
-
-
-def test_normalize_rewrite_records_converts_legacy_error() -> None:
-    rows = [
-        {
-            "submission_id": "success",
-            "final_desc": "Identify Subject 1 as the man",
-            "final_change": "then retrieve target images where Subject 1 is smiling",
-        },
-        {"submission_id": "blocked", "error": "PROHIBITED_CONTENT"},
-    ]
-
-    assert normalize_rewrite_records(rows) == [
-        rows[0],
-        {
-            "submission_id": "blocked",
-            "final_desc": None,
-            "final_change": None,
-        },
-    ]
 
 
 def test_completed_ids_includes_sample_errors(tmp_path: Path) -> None:
@@ -69,7 +48,7 @@ def test_completed_ids_includes_sample_errors(tmp_path: Path) -> None:
     }
 
 
-def test_collected_chunk_outputs_converts_legacy_errors_to_empty_rewrites(
+def test_collected_chunk_outputs_keeps_error_samples_as_empty_rewrites(
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "rewrite"
@@ -89,7 +68,7 @@ def test_collected_chunk_outputs_converts_legacy_errors_to_empty_rewrites(
     write_jsonl(
         chunk_dir / "errors.jsonl",
         [
-            {"submission_id": "success", "error": "old error"},
+            {"submission_id": "success", "error": "stale error"},
             {"submission_id": "blocked", "error": "PROHIBITED_CONTENT"},
         ],
     )

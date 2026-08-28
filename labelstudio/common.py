@@ -158,27 +158,44 @@ def image_html(
     subjects: list[dict],
     boxes_by_image: dict[str, list[dict]],
     title: str,
+    candidate_identity_ids: set[str] | None = None,
 ) -> str:
     subject_by_identity = _subject_by_identity(subjects)
     overlays = []
 
     for box in boxes_by_image.get(image_id, []):
-        subject_id = subject_by_identity.get(box["label"])
-        if subject_id is None:
+        identity_id = box["label"]
+        subject_id = subject_by_identity.get(identity_id)
+        if subject_id is None and (
+            candidate_identity_ids is None or identity_id not in candidate_identity_ids
+        ):
             continue
+
+        if subject_id is None:
+            border = "2px dashed #757575"
+            label = (
+                "position:absolute;left:0;top:0;padding:1px 4px;"
+                "background:#757575;color:white;font-size:12px"
+            )
+            text = f"ID {html.escape(identity_id)}"
+        else:
+            color = _color(subject_id)
+            border = f"3px solid {color}"
+            label = (
+                "position:absolute;left:0;top:0;padding:1px 4px;"
+                f"background:{color};color:white;font-size:12px"
+            )
+            text = f"S{subject_id} · ID {html.escape(identity_id)}"
+
         style = (
             f"left:{100 * box['x']:.3f}%;top:{100 * box['y']:.3f}%;"
             f"width:{100 * box['width']:.3f}%;"
             f"height:{100 * box['height']:.3f}%;"
-            f"border:3px solid {_color(subject_id)};"
+            f"border:{border};"
             "position:absolute;box-sizing:border-box;pointer-events:none"
         )
-        label = (
-            "position:absolute;left:0;top:0;padding:1px 4px;"
-            f"background:{_color(subject_id)};color:white;font-size:12px"
-        )
         overlays.append(
-            f'<div style="{style}"><span style="{label}">S{subject_id}</span></div>'
+            f'<div style="{style}"><span style="{label}">{text}</span></div>'
         )
 
     url = html.escape(local_image_url(image_url), quote=True)
@@ -234,10 +251,15 @@ def textarea(annotation: dict, name: str) -> str | None:
 
 
 def choices(annotation: dict, name: str) -> list[str]:
+    selected = optional_choices(annotation, name)
+    return selected if selected is not None else []
+
+
+def optional_choices(annotation: dict, name: str) -> list[str] | None:
     for result in annotation.get("result", []):
         if result.get("from_name") == name:
             return result.get("value", {}).get("choices", [])
-    return []
+    return None
 
 
 def latest_annotation(task: dict) -> dict | None:

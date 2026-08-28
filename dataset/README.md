@@ -228,8 +228,14 @@ with empty rewrite fields:
 The corresponding reason remains in that chunk's `errors.jsonl` for audit. The
 empty fields are passed unchanged into `review_input.jsonl`, where the human
 reviewer supplies the rewrite. Such samples are considered processed and are not
-sent to Gemini again. The resulting `reviewed.jsonl` must contain non-empty
-`final_desc` and `final_change` before the Positive Expansion handoff is prepared.
+sent to Gemini again. The resulting `reviewed.jsonl` must contain reviewed
+`subjects` plus non-empty `final_desc` and `final_change` before the Positive
+Expansion handoff is prepared.
+For each review task, `candidate_identity_ids` is the deterministic intersection
+of identities present in the Query and seed Target. The repo-local review UI
+materializes these identities as fixed linked boxes. Selecting an identity in
+either image updates Query and Target together. `SINGLE` uses only `S1`; `MULTI`
+and `RELATIONAL` use `S1` and `S2`. One identity may belong to at most one Subject.
 
 Human handoffs are also incremental. `review_input.jsonl` excludes IDs already
 present in `reviewed.jsonl`. After review, prepare Full Positive labeling with:
@@ -248,15 +254,16 @@ dataset/data/work/review/reviewed.jsonl
 dataset/data/work/positives/positive_sets.jsonl
 ```
 
-The Full Positive labeling input contains the reviewed instruction, Query
-Subject boxes, and an identity-compatible `candidates` list. A candidate is
-included only when it contains every required identity and is not the query
-image. The seed target is always first, and `target_image_ids` starts with that
-seed.
+The Full Positive labeling input contains the reviewed instruction, reviewed
+Subject identities, Query Subject boxes, and an identity-compatible `candidates`
+list. Candidate construction uses the reviewed `subjects[].identity_ids`, not the
+original annotation assignment. A candidate is included only when it contains
+every required identity and is not the query image. The seed target is always
+first, and `target_image_ids` starts with that seed.
 
-Local human labeling uses offline Label Studio import/export files under
-`labelstudio/`. Rewrite review uses one task per RCR sample. Positive Expansion
-groups at most 10 non-seed candidates from the same sample onto one Label Studio
+Human labeling remains file-based under `dataset/data/work/`. Rewrite review uses
+the repo-local UI and writes canonical `reviewed.jsonl` directly. Positive
+Expansion groups at most 10 non-seed candidates from the same sample onto one Label Studio
 screen, then aggregates all completed groups back into one `positive_sets.jsonl`
 record. The grouping exists only in the Label Studio handoff; it does not change
 the dataset contract. See `labelstudio/README.md` for the manual workflow.
@@ -270,9 +277,9 @@ bash scripts/phase2_finalize.bash --version 0.1.0
 ```
 
 The launcher calls `tools/dataset/build_final.py`. Validation remains in the
-Python dataset builder, which checks the handoff IDs, record structure, seed
-positive, query exclusion, gallery membership, and required identities before
-writing `dataset/data/final/`.
+Python dataset builder, which checks the handoff IDs, reviewed Subject structure,
+seed positive, query exclusion, gallery membership, and reviewed identity
+compatibility before writing `dataset/data/final/`.
 
 At this stage only, the final instruction is created as:
 

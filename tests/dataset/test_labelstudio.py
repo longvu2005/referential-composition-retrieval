@@ -1,4 +1,4 @@
-"""Tests for the offline Label Studio handoff adapter."""
+"""Tests for shared image helpers and Full Positive Label Studio handoff."""
 
 import pytest
 
@@ -6,8 +6,6 @@ import labelstudio.positives.collect as positive_collect
 from labelstudio.common import load_box_index, local_image_url
 from labelstudio.positives.collect import aggregate
 from labelstudio.positives.prepare import build_tasks
-from labelstudio.review.collect import parse_task
-from labelstudio.review.prepare import build_task
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
 SUBJECTS = [{"subject_id": 1, "identity_ids": ["7"]}]
@@ -20,7 +18,15 @@ BOXES = {
             "y": 0.2,
             "width": 0.3,
             "height": 0.4,
-        }
+        },
+        {
+            "image_id": "1_1",
+            "label": "8",
+            "x": 0.5,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+        },
     ]
 }
 
@@ -55,113 +61,6 @@ def test_load_box_index_recovers_boxes_missing_from_pair_data(tmp_path) -> None:
 def test_local_image_url_uses_repo_image_root() -> None:
     url = "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
     assert local_image_url(url) == "/data/local-files/?d=train/1_1.jpg"
-
-
-def test_review_task_keeps_empty_rewrite_for_human() -> None:
-    row = {
-        "submission_id": "s1",
-        "case_type": "SINGLE",
-        "query_image_id": "1_1",
-        "query_image_url": "/data/local-files/?d=train/1_1.jpg",
-        "target_image_id": "1_1",
-        "target_image_url": "/data/local-files/?d=train/1_1.jpg",
-        "subjects": [
-            {
-                "subject_id": 1,
-                "identity_ids": ["7"],
-                "description": "the man",
-                "change": "is smiling",
-            }
-        ],
-        "pair_change": None,
-        "final_desc": None,
-        "final_change": None,
-    }
-
-    task = build_task(row, BOXES)
-
-    assert task["data"]["final_desc"] == ""
-    assert task["data"]["case_choices"] == [
-        {"value": "SINGLE", "selected": True},
-        {"value": "MULTI", "selected": False},
-        {"value": "RELATIONAL", "selected": False},
-    ]
-    assert "Subject 1" in task["data"]["subjects_html"]
-    assert "border:3px solid" in task["data"]["images_html"]
-
-
-def test_review_collect_reads_both_textareas() -> None:
-    task = {
-        "data": {"task_key": "s1"},
-        "annotations": [
-            {
-                "result": [
-                    {
-                        "from_name": "case_type",
-                        "value": {"choices": ["RELATIONAL"]},
-                    },
-                    {
-                        "from_name": "final_desc",
-                        "value": {"text": ["Identify Subject 1 as the man"]},
-                    },
-                    {
-                        "from_name": "final_change",
-                        "value": {
-                            "text": [
-                                "then retrieve target images where Subject 1 is smiling"
-                            ]
-                        },
-                    },
-                ]
-            }
-        ],
-    }
-
-    source = {
-        "submission_id": "s1",
-        "subjects": [{"subject_id": 1, "change": "is smiling"}],
-        "pair_change": None,
-    }
-    row = parse_task(task, source)
-
-    assert row is not None
-    assert row["submission_id"] == "s1"
-    assert row["case_type"] == "RELATIONAL"
-
-
-def test_review_collect_falls_back_to_existing_case() -> None:
-    task = {
-        "data": {"task_key": "s1"},
-        "annotations": [
-            {
-                "result": [
-                    {
-                        "from_name": "final_desc",
-                        "value": {"text": ["Identify Subject 1 as the man"]},
-                    },
-                    {
-                        "from_name": "final_change",
-                        "value": {
-                            "text": [
-                                "then retrieve target images where Subject 1 is smiling"
-                            ]
-                        },
-                    },
-                ]
-            }
-        ],
-    }
-    source = {
-        "submission_id": "s1",
-        "case_type": "SINGLE",
-        "subjects": [{"subject_id": 1, "change": "is smiling"}],
-        "pair_change": None,
-    }
-
-    row = parse_task(task, source)
-
-    assert row is not None
-    assert row["case_type"] == "SINGLE"
 
 
 def test_positive_prepare_groups_candidates_by_ten() -> None:

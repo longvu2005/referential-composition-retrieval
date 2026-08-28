@@ -6,7 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from rcr.dataset.rewrite import CASE_TYPES
+from rcr.dataset.review import normalize_review_subjects
+from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
 
 JsonObject = dict[str, Any]
 
@@ -87,11 +88,33 @@ def prepare_review_inputs(
                 key=lambda subject: subject["subjectId"],
             )
         ]
-        subject_by_identity = {
-            identity_id: subject["subject_id"]
-            for subject in subjects
-            for identity_id in subject["identity_ids"]
+        subject_by_identity = {}
+        for subject in subjects:
+            for identity_id in subject["identity_ids"]:
+                if identity_id in subject_by_identity:
+                    raise ValueError(
+                        f"{rewrite['submission_id']}: identity_id {identity_id} is "
+                        "assigned to multiple subjects"
+                    )
+                subject_by_identity[identity_id] = subject["subject_id"]
+
+        query_identity_ids = {
+            box["identity_id"] for box in boxes_by_image.get(query_id, [])
         }
+        target_identity_ids = {
+            box["identity_id"] for box in boxes_by_image.get(target_id, [])
+        }
+        candidate_identity_ids = sorted(
+            query_identity_ids & target_identity_ids,
+            key=int,
+        )
+        missing_ids = set(subject_by_identity) - set(candidate_identity_ids)
+        if missing_ids:
+            missing = ", ".join(sorted(missing_ids))
+            raise ValueError(
+                f"{rewrite['submission_id']}: subject identities are not present "
+                f"in both query and seed target: {missing}"
+            )
 
         query_boxes = [
             {
@@ -129,6 +152,7 @@ def prepare_review_inputs(
                 "target_image_id": target_id,
                 "target_image_url": image_by_id[target_id]["url"],
                 "subjects": subjects,
+                "candidate_identity_ids": candidate_identity_ids,
                 "pair_change": pair_change,
                 "query_boxes": query_boxes,
                 "target_boxes": target_boxes,
@@ -173,21 +197,32 @@ def prepare_positive_set_inputs(
         query_id = source["query_image_id"]
         seed_id = source["target_image_id"]
 
-        subjects = [
+        subjects = normalize_review_subjects(
+            submission_id,
+            case_type,
+            review.get("subjects"),
+        )
+        validate_review_output(
+            case_type,
             {
-                "subject_id": subject["subjectId"],
-                "identity_ids": subject["desc"]["queryGroupIds"],
-            }
-            for subject in sorted(
-                annotation["subjects"],
-                key=lambda subject: subject["subjectId"],
-            )
-        ]
+                "final_desc": review["final_desc"],
+                "final_change": review["final_change"],
+            },
+        )
+
         subject_by_identity = {
             identity_id: subject["subject_id"]
             for subject in subjects
             for identity_id in subject["identity_ids"]
         }
+
+        for identity_id in subject_by_identity:
+            identity_images = images_by_identity.get(identity_id, set())
+            if query_id not in identity_images or seed_id not in identity_images:
+                raise ValueError(
+                    f"{submission_id}: reviewed identity_id {identity_id} must appear "
+                    "in both query and seed target"
+                )
         required_ids = list(subject_by_identity)
 
         candidate_sets = [

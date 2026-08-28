@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RCR Rewrite Review</title>
+<style>
+:root{--line:#d9d9d9;--muted:#6b7280;--text:#171717;--bg:#f5f5f5;--s1:#e53935;--s2:#1e88e5}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1500px;margin:0 auto;padding:18px}.topbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}.topbar .spacer{flex:1}.muted{color:var(--muted)}
+button{font:inherit;border:1px solid #cfcfcf;background:#fff;border-radius:6px;padding:7px 12px;cursor:pointer}button:hover{background:#f7f7f7}button:disabled{opacity:.45;cursor:default}.primary{background:#171717;color:#fff;border-color:#171717}.primary:hover{background:#303030}
+.section{background:#fff;border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:12px}.section h2{font-size:12px;letter-spacing:.07em;margin:0 0 12px;color:#525252}.case-row,.subject-row{display:flex;gap:8px;flex-wrap:wrap}.case.active{background:#171717;color:#fff;border-color:#171717}.subject.s1.active{background:var(--s1);border-color:var(--s1);color:#fff}.subject.s2.active{background:var(--s2);border-color:var(--s2);color:#fff}
+.images{display:grid;grid-template-columns:1fr 1fr;gap:12px}.image-card{min-width:0}.image-head{display:flex;align-items:center;gap:6px;margin-bottom:6px}.image-head strong{margin-right:auto}.zoom-label{width:48px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
+.viewport{position:relative;height:min(62vh,620px);min-height:380px;overflow:hidden;border:1px solid var(--line);border-radius:6px;background:#ececec;cursor:grab}.viewport.dragging{cursor:grabbing}.stage{position:absolute;left:0;top:0;width:100%;transform-origin:0 0;will-change:transform}.stage img{display:block;width:100%;height:auto;pointer-events:none;user-select:none}.person-box{position:absolute;border:2px solid #8a8a8a;background:rgba(255,255,255,.04);cursor:pointer;z-index:2}.person-box:hover{border-width:3px}.person-box.s1{border:3px solid var(--s1)}.person-box.s2{border:3px solid var(--s2)}.box-tag{position:absolute;left:-3px;top:-22px;height:20px;padding:1px 5px;border-radius:3px 3px 0 0;color:#fff;font-weight:700;font-size:12px;line-height:18px}.person-box.s1 .box-tag{background:var(--s1)}.person-box.s2 .box-tag{background:var(--s2)}
+.assignment-foot{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}.status{color:var(--muted)}.status .ok{color:#1f7a36;font-weight:600}.status .missing{color:#a16207;font-weight:600}
+label{display:block;font-weight:600;margin:10px 0 6px}textarea{width:100%;min-height:78px;resize:vertical;border:1px solid #cfcfcf;border-radius:6px;padding:9px 10px;font:inherit}textarea:focus{outline:2px solid #b8d5ff;border-color:#6aa3e8}.error{min-height:20px;margin-top:8px;color:#b42318;white-space:pre-wrap}.actions{display:flex;align-items:center;gap:10px}.actions .spacer{flex:1}
+details{margin-top:12px;border-top:1px solid #eee;padding-top:10px}summary{cursor:pointer;color:var(--muted)}pre{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:900px){.images{grid-template-columns:1fr}.viewport{height:480px}}
+</style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <button id="prev">← Prev</button><button id="next">Next →</button>
+    <span id="position" class="muted"></span><span id="progress" class="muted"></span>
+    <span class="spacer"></span><span class="muted">Ctrl/⌘+Enter: Save & Next</span>
+  </div>
+
+  <section class="section">
+    <h2>1 · CASE</h2>
+    <div id="cases" class="case-row"></div>
+  </section>
+
+  <section class="section">
+    <h2>2 · SUBJECT ASSIGNMENT</h2>
+    <div class="images">
+      <div class="image-card">
+        <div class="image-head"><strong>QUERY</strong><button data-zoom="query" data-delta="-1">−</button><span id="queryZoom" class="zoom-label">100%</span><button data-zoom="query" data-delta="1">+</button><button data-reset="query">Reset</button></div>
+        <div id="queryViewport" class="viewport"><div id="queryStage" class="stage"><img id="queryImage" alt="Query"><div id="queryBoxes"></div></div></div>
+      </div>
+      <div class="image-card">
+        <div class="image-head"><strong>TARGET</strong><button data-zoom="target" data-delta="-1">−</button><span id="targetZoom" class="zoom-label">100%</span><button data-zoom="target" data-delta="1">+</button><button data-reset="target">Reset</button></div>
+        <div id="targetViewport" class="viewport"><div id="targetStage" class="stage"><img id="targetImage" alt="Target"><div id="targetBoxes"></div></div></div>
+      </div>
+    </div>
+    <div class="assignment-foot">
+      <strong>Active subject</strong><div id="subjects" class="subject-row"></div><span id="subjectStatus" class="status"></span>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>3 · TEXT REVIEW</h2>
+    <label for="finalDesc">SELECT / WHO</label><textarea id="finalDesc"></textarea>
+    <label for="finalChange">CHANGE / WHAT</label><textarea id="finalChange"></textarea>
+    <details><summary>Original annotation</summary><pre id="original"></pre></details>
+    <div id="error" class="error"></div>
+  </section>
+
+  <div class="actions"><span id="saved" class="muted"></span><span class="spacer"></span><button id="save" class="primary">Save & Next</button></div>
+</main>
+<script>
+const CASES=["SINGLE","MULTI","RELATIONAL"];
+const state={index:0,total:0,task:null,activeSubject:1,assignment:new Map(),view:{query:{scale:1,x:0,y:0},target:{scale:1,x:0,y:0}}};
+const $=id=>document.getElementById(id);
+function requiredSubjects(){return state.task.case_type==="SINGLE"?[1]:[1,2]}
+function buildAssignment(subjects){state.assignment=new Map();for(const s of subjects)for(const id of s.identity_ids)state.assignment.set(id,s.subject_id)}
+function subjectsPayload(){return requiredSubjects().map(subject_id=>({subject_id,identity_ids:state.task.candidate_identity_ids.filter(id=>state.assignment.get(id)===subject_id)}))}
+function setCase(caseType){
+  state.task.case_type=caseType;
+  if(caseType==="SINGLE"){
+    for(const [id,subject] of [...state.assignment])if(subject===2)state.assignment.delete(id);
+    state.activeSubject=1;
+  }
+  renderCase();renderSubjects();renderBoxes();
+}
+function renderCase(){
+  const root=$("cases");root.innerHTML="";
+  for(const name of CASES){const b=document.createElement("button");b.className="case"+(state.task.case_type===name?" active":"");b.textContent=name;b.onclick=()=>setCase(name);root.appendChild(b)}
+}
+function renderSubjects(){
+  const root=$("subjects");root.innerHTML="";
+  for(const id of requiredSubjects()){
+    const b=document.createElement("button");b.className=`subject s${id}`+(state.activeSubject===id?" active":"");b.textContent=`S${id}`;b.onclick=()=>{state.activeSubject=id;renderSubjects()};root.appendChild(b)
+  }
+  const parts=requiredSubjects().map(id=>{const ok=[...state.assignment.values()].includes(id);return `<span class="${ok?"ok":"missing"}">S${id} ${ok?"✓":"—"}</span>`});
+  $("subjectStatus").innerHTML=parts.join(" &nbsp; ");
+}
+function toggleIdentity(identityId){
+  const current=state.assignment.get(identityId);
+  if(current===state.activeSubject)state.assignment.delete(identityId);else state.assignment.set(identityId,state.activeSubject);
+  renderSubjects();renderBoxes();
+}
+function renderBoxes(){renderSide("query");renderSide("target")}
+function renderSide(side){
+  const root=$(side+"Boxes");root.innerHTML="";
+  for(const box of state.task[side].boxes){
+    const subject=state.assignment.get(box.identity_id);
+    const el=document.createElement("div");el.className="person-box"+(subject?` s${subject}`:"");
+    Object.assign(el.style,{left:box.x+"%",top:box.y+"%",width:box.width+"%",height:box.height+"%"});
+    el.onpointerdown=e=>e.stopPropagation();el.onclick=e=>{e.stopPropagation();toggleIdentity(box.identity_id)};
+    if(subject){const tag=document.createElement("span");tag.className="box-tag";tag.textContent=`S${subject}`;el.appendChild(tag)}
+    root.appendChild(el);
+  }
+}
+function applyView(side){
+  const v=state.view[side];$(side+"Stage").style.transform=`translate(${v.x}px,${v.y}px) scale(${v.scale})`;$(side+"Zoom").textContent=Math.round(v.scale*100)+"%";
+}
+function zoom(side,factor,cx=null,cy=null){
+  const viewport=$(side+"Viewport"),v=state.view[side],rect=viewport.getBoundingClientRect();
+  const px=cx===null?rect.width/2:cx-rect.left,py=cy===null?rect.height/2:cy-rect.top;
+  const old=v.scale,next=Math.min(5,Math.max(.5,old*factor));if(next===old)return;
+  v.x=px-(px-v.x)*(next/old);v.y=py-(py-v.y)*(next/old);v.scale=next;applyView(side);
+}
+function resetView(side){state.view[side]={scale:1,x:0,y:0};applyView(side)}
+function setupViewport(side){
+  const viewport=$(side+"Viewport");let drag=null;
+  viewport.addEventListener("wheel",e=>{e.preventDefault();zoom(side,e.deltaY<0?1.12:1/1.12,e.clientX,e.clientY)},{passive:false});
+  viewport.addEventListener("pointerdown",e=>{if(e.target.closest(".person-box"))return;drag={x:e.clientX,y:e.clientY,ox:state.view[side].x,oy:state.view[side].y};viewport.setPointerCapture(e.pointerId);viewport.classList.add("dragging")});
+  viewport.addEventListener("pointermove",e=>{if(!drag)return;state.view[side].x=drag.ox+e.clientX-drag.x;state.view[side].y=drag.oy+e.clientY-drag.y;applyView(side)});
+  const stop=()=>{drag=null;viewport.classList.remove("dragging")};viewport.addEventListener("pointerup",stop);viewport.addEventListener("pointercancel",stop);
+}
+async function load(index){
+  $("error").textContent="";const res=await fetch(`/api/task?index=${index}`);const data=await res.json();if(!res.ok)throw new Error(data.error||"Failed to load task");
+  state.index=data.index;state.total=data.total;state.task=data.task;state.activeSubject=1;buildAssignment(data.task.subjects);resetView("query");resetView("target");
+  $("queryImage").src=data.task.query.image_url;$("targetImage").src=data.task.target.image_url;$("finalDesc").value=data.task.final_desc;$("finalChange").value=data.task.final_change;$("original").textContent=JSON.stringify(data.task.original,null,2);
+  $("position").textContent=`${data.index+1} / ${data.total}`;$("progress").textContent=`Reviewed ${data.completed}/${data.total}`;$("saved").textContent=data.reviewed?"Saved":"";$("prev").disabled=index===0;$("next").disabled=index>=data.total-1;
+  renderCase();renderSubjects();renderBoxes();
+}
+async function save(next=true){
+  $("error").textContent="";$("saved").textContent="Saving…";
+  const payload={submission_id:state.task.submission_id,case_type:state.task.case_type,subjects:subjectsPayload(),final_desc:$("finalDesc").value.trim(),final_change:$("finalChange").value.trim()};
+  const res=await fetch("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const data=await res.json();
+  if(!res.ok){$("saved").textContent="";$("error").textContent=data.error||"Save failed";return false}
+  $("saved").textContent="Saved";if(next&&state.index<state.total-1)await load(state.index+1);return true;
+}
+for(const side of ["query","target"])setupViewport(side);
+document.querySelectorAll("[data-zoom]").forEach(b=>b.onclick=()=>zoom(b.dataset.zoom,b.dataset.delta==="1"?1.2:1/1.2));document.querySelectorAll("[data-reset]").forEach(b=>b.onclick=()=>resetView(b.dataset.reset));
+$("prev").onclick=()=>load(Math.max(0,state.index-1));$("next").onclick=()=>load(Math.min(state.total-1,state.index+1));$("save").onclick=()=>save(true);
+document.addEventListener("keydown",e=>{if((e.ctrlKey||e.metaKey)&&e.key==="Enter"){e.preventDefault();save(true);return}if(["TEXTAREA","INPUT"].includes(document.activeElement.tagName))return;if(e.key==="1"){state.activeSubject=1;renderSubjects()}if(e.key==="2"&&requiredSubjects().includes(2)){state.activeSubject=2;renderSubjects()}});
+load(0).catch(e=>$("error").textContent=e.message);
+</script>
+</body>
+</html>

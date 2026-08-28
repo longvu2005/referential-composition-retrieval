@@ -30,7 +30,7 @@ A Subject is a semantic identifier and may represent one or multiple people.
 ```text
 referential-composition-retrieval/
 ├── dataset/              dataset files, prompt, and reports
-├── labelstudio/          offline Label Studio handoff files
+├── labelstudio/          local review UI + offline positive handoff
 ├── src/rcr/
 │   ├── dataset/          dataset construction logic
 │   ├── methods/          retrieval methods
@@ -100,8 +100,10 @@ bash scripts/phase1_rewrite.bash merge
 active on Gemini at a time. `merge` creates `rewrite_output.jsonl` and the
 incremental `review_input.jsonl`. A sample-level Gemini failure is preserved as an
 empty rewrite for human review and is treated as processed, so it is never
-resubmitted. Whole failed batch jobs remain retryable. Human labeling uses offline import/export files under `labelstudio/`; see
-[`labelstudio/README.md`](labelstudio/README.md). No Label Studio API client is used.
+resubmitted. Whole failed batch jobs remain retryable. Rewrite review runs through the
+repo-local UI, while Full Positive selection uses offline Label Studio
+import/export files. See [`labelstudio/README.md`](labelstudio/README.md). No
+Label Studio API client is used.
 After producing
 `reviewed.jsonl`, prepare the positive-set labeling input with:
 
