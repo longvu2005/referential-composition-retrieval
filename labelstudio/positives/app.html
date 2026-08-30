@@ -1,0 +1,894 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RCR Full Positive Selection</title>
+<style>
+:root {
+  --line: #d9d9d9;
+  --line-soft: #ececec;
+  --muted: #6b7280;
+  --text: #171717;
+  --bg: #f5f5f5;
+  --panel: #fff;
+  --s1: #e53935;
+  --s2: #1e88e5;
+  --ok: #1f7a36;
+  --warn: #a16207;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button, input, select { font: inherit; }
+button {
+  border: 1px solid #cfcfcf;
+  background: #fff;
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+button:hover { background: #f7f7f7; }
+button:disabled { opacity: .45; cursor: default; }
+.primary { background: #171717; color: #fff; border-color: #171717; }
+.primary:hover { background: #303030; }
+.muted { color: var(--muted); }
+
+/* Shared annotation shell */
+.app {
+  min-height: 100%;
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+}
+.sidebar {
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sidebar-head {
+  padding: 16px 14px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { font-weight: 750; font-size: 15px; }
+.tool-name { margin: 2px 0 8px; font-size: 12px; color: var(--muted); }
+.summary { font-size: 12px; color: var(--muted); margin-bottom: 9px; }
+.progress-track {
+  height: 5px;
+  background: #ededed;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: #252525;
+  transition: width .15s ease;
+}
+.filters {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.status-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.status-tab { padding: 6px 4px; font-size: 12px; }
+.status-tab.active { background: #171717; border-color: #171717; color: #fff; }
+.filter-input,
+.filter-select {
+  width: 100%;
+  border: 1px solid #cfcfcf;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #fff;
+}
+.filter-input { margin-bottom: 7px; }
+.task-list { overflow: auto; padding: 7px; flex: 1; }
+.task-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  border-color: transparent;
+  padding: 8px 7px;
+  margin-bottom: 2px;
+}
+.task-item:hover { border-color: #ddd; }
+.task-item.active { background: #f0f0f0; border-color: #cfcfcf; }
+.task-dot { font-size: 14px; text-align: center; }
+.task-dot.completed { color: var(--ok); font-weight: 700; }
+.task-dot.pending { color: #8b8b8b; }
+.task-number { font-variant-numeric: tabular-nums; font-size: 12px; color: #4b5563; }
+.task-case {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 650;
+}
+.task-empty { padding: 18px 10px; text-align: center; color: var(--muted); font-size: 12px; }
+
+.workspace { min-width: 0; }
+.workspace-top {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: rgba(245, 245, 245, .96);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+  padding: 10px 18px;
+}
+.workspace-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1500px;
+  margin: auto;
+}
+.workspace-top .spacer,
+.actions .spacer { flex: 1; }
+.task-title { font-weight: 700; }
+.task-id {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #fff;
+}
+.badge.completed { color: var(--ok); border-color: #b9d9c1; background: #f5fbf6; }
+.badge.pending { color: #656565; }
+.unsaved { color: var(--warn); font-size: 12px; font-weight: 650; }
+
+main { max-width: 1500px; margin: 0 auto; padding: 16px 18px 24px; }
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: rgba(245, 245, 245, .96);
+  backdrop-filter: blur(6px);
+  padding: 10px 0 2px;
+}
+.save-state { font-size: 12px; }
+
+/* Positive-selection task */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.reference { position: sticky; top: 70px; }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+.panel-title {
+  font-size: 12px;
+  letter-spacing: .07em;
+  color: #525252;
+  font-weight: 750;
+  margin: 0 0 10px;
+}
+.image-wrap {
+  position: relative;
+  background: #f0f0f0;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid #e1e1e1;
+}
+.image-wrap img { display: block; width: 100%; height: auto; }
+.image-link { display: block; }
+.box { position: absolute; box-sizing: border-box; pointer-events: none; }
+.box.s1 { border: 3px solid var(--s1); }
+.box.s2 { border: 3px solid var(--s2); }
+.box-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+  padding: 3px 5px;
+}
+.box.s1 .box-label { background: var(--s1); }
+.box.s2 .box-label { background: var(--s2); }
+.image-id {
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  margin-top: 6px;
+  word-break: break-all;
+}
+.instruction {
+  margin-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
+}
+.instruction-text { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+.subjects { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.subject-pill {
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid #d9d9d9;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #fff;
+}
+.subject-pill.s1 { color: var(--s1); border-color: #efb0ae; }
+.subject-pill.s2 { color: var(--s2); border-color: #aaccec; }
+.candidates-head { display: flex; align-items: center; gap: 8px; margin: 0 0 9px; }
+.candidates-head h2 {
+  font-size: 12px;
+  letter-spacing: .07em;
+  color: #525252;
+  margin: 0;
+}
+.selected-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.view-toggle {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #525252;
+}
+.view-toggle.active {
+  background: #171717;
+  border-color: #171717;
+  color: #fff;
+}
+.candidate-list { display: flex; flex-direction: column; gap: 10px; }
+.candidate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.candidate.selected { border-color: #9e9e9e; box-shadow: 0 0 0 1px #d1d1d1; }
+.candidate.filtered-out { display: none; }
+.candidate-main { padding: 10px; min-width: 0; }
+.candidate-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.candidate-index { font-size: 12px; font-weight: 750; color: #525252; }
+.seed-badge {
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .04em;
+  border: 1px solid #cfcfcf;
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: #555;
+  background: #f7f7f7;
+}
+.candidate-id {
+  margin-left: auto;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-rail {
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: #fafafa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-height: 150px;
+}
+.select-rail:hover { background: #f1f1f1; }
+.select-rail .mark {
+  width: 30px;
+  height: 30px;
+  border: 2px solid #aaa;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 800;
+  color: transparent;
+}
+.candidate.selected .select-rail { background: #f5f8f5; }
+.candidate.selected .select-rail .mark {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: #fff;
+}
+.select-rail.locked {
+  position: relative;
+  cursor: default;
+  background: #f7f7f7;
+  opacity: 1;
+}
+.select-rail.locked:hover { background: #f7f7f7; }
+.locked-text {
+  position: absolute;
+  margin-top: 54px;
+  font-size: 9px;
+  font-weight: 750;
+  color: #777;
+  letter-spacing: .04em;
+}
+.empty-workspace { padding: 50px; text-align: center; color: var(--muted); }
+.error { min-height: 20px; color: #b42318; white-space: pre-wrap; }
+
+@media (max-width: 1050px) {
+  .app { grid-template-columns: 220px minmax(0, 1fr); }
+  .task-id { display: none; }
+  .layout { grid-template-columns: 1fr; }
+  .reference { position: static; }
+}
+@media (max-width: 720px) {
+  .app { display: block; }
+  .sidebar {
+    height: auto;
+    position: relative;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .task-list { max-height: 240px; }
+  .workspace-top { position: relative; padding: 9px 12px; }
+  .workspace-top-row { flex-wrap: wrap; }
+  main { padding: 12px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="brand">RCR Annotation</div>
+      <div class="tool-name">Full Positive Selection</div>
+      <div id="summary" class="summary">Loading tasks…</div>
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    </div>
+
+    <div class="filters">
+      <div class="status-tabs">
+        <button class="status-tab" data-status="all">All <span id="allCount">0</span></button>
+        <button class="status-tab" data-status="pending">Pending <span id="pendingCount">0</span></button>
+        <button class="status-tab" data-status="completed">Completed <span id="completedCount">0</span></button>
+      </div>
+      <input id="taskSearch" class="filter-input" type="search" placeholder="Search # or submission ID">
+      <select id="caseFilter" class="filter-select" aria-label="Filter by case type">
+        <option value="all">All case types</option>
+        <option value="SINGLE">SINGLE</option>
+        <option value="MULTI">MULTI</option>
+        <option value="RELATIONAL">RELATIONAL</option>
+      </select>
+    </div>
+
+    <div id="taskList" class="task-list"></div>
+  </aside>
+
+  <section class="workspace">
+    <header class="workspace-top">
+      <div class="workspace-top-row">
+        <button id="prev">← Prev</button>
+        <button id="next">Next →</button>
+        <span id="taskTitle" class="task-title">No task</span>
+        <span id="caseBadge" class="badge"></span>
+        <span id="statusBadge" class="badge pending">Pending</span>
+        <span id="dirtyBadge" class="unsaved" hidden>● Unsaved changes</span>
+        <span class="spacer"></span>
+        <code id="taskId" class="task-id"></code>
+        <button id="copyId" title="Copy submission ID">Copy ID</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="taskWorkspace" class="empty-workspace">Loading tasks…</div>
+      <div id="error" class="error"></div>
+
+      <div class="actions">
+        <span id="saved" class="muted save-state"></span>
+        <span class="spacer"></span>
+        <span class="muted">Ctrl/⌘+Enter: Save &amp; Next Pending</span>
+        <button id="saveOnly">Save</button>
+        <button id="saveNext" class="primary">Save &amp; Next Pending</button>
+      </div>
+    </main>
+  </section>
+</div>
+
+<script>
+const STORAGE = {
+  last: "rcr.positives.lastTask",
+  status: "rcr.positives.statusFilter",
+  case: "rcr.positives.caseFilter",
+};
+
+const state = {
+  tasks: [],
+  current: null,
+  currentIndex: -1,
+  completed: false,
+  selected: new Set(),
+  savedSelection: new Set(),
+  dirty: false,
+  statusFilter: localStorage.getItem(STORAGE.status) || "pending",
+  caseFilter: localStorage.getItem(STORAGE.case) || "all",
+  search: "",
+  selectedOnly: false,
+};
+
+const $ = id => document.getElementById(id);
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, character => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+  })[character]);
+}
+
+function instruction(task) {
+  const desc = task.final_desc.trim().replace(/[;.]\s*$/g, "");
+  const change = task.final_change.trim().replace(/[.]\s*$/g, "");
+  return `${desc}; ${change}.`;
+}
+
+function setDirty(value = true) {
+  state.dirty = value;
+  $("dirtyBadge").hidden = !value;
+}
+
+function sameSelection(left, right) {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+}
+
+function currentMeta() {
+  return state.tasks.find(task => task.submission_id === state.current?.submission_id) || null;
+}
+
+function renderSummary(summary = null) {
+  const total = summary?.total ?? state.tasks.length;
+  const completed = summary?.completed ?? state.tasks.filter(task => task.completed).length;
+  const pending = summary?.pending ?? total - completed;
+
+  $("summary").textContent = `${completed} / ${total} completed · ${pending} pending`;
+  $("progressFill").style.width = total ? `${100 * completed / total}%` : "0%";
+  $("allCount").textContent = total;
+  $("pendingCount").textContent = pending;
+  $("completedCount").textContent = completed;
+
+  document.querySelectorAll("[data-status]").forEach(button => {
+    button.classList.toggle("active", button.dataset.status === state.statusFilter);
+  });
+}
+
+function filteredTasks() {
+  const query = state.search.trim().toLowerCase();
+
+  return state.tasks.filter(task => {
+    if (state.statusFilter === "pending" && task.completed) return false;
+    if (state.statusFilter === "completed" && !task.completed) return false;
+    if (state.caseFilter !== "all" && task.case_type !== state.caseFilter) return false;
+
+    if (query) {
+      const number = String(task.index + 1);
+      if (!task.submission_id.toLowerCase().includes(query) && !number.includes(query)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function renderTaskList() {
+  const root = $("taskList");
+  root.innerHTML = "";
+  const items = filteredTasks();
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "task-empty";
+    empty.textContent = "No tasks match the current filters.";
+    root.appendChild(empty);
+    return;
+  }
+
+  for (const task of items) {
+    const button = document.createElement("button");
+    button.className = `task-item${task.submission_id === state.current?.submission_id ? " active" : ""}`;
+    button.title = task.submission_id;
+    button.onclick = () => requestLoad(task.submission_id);
+
+    const dot = document.createElement("span");
+    dot.className = `task-dot ${task.completed ? "completed" : "pending"}`;
+    dot.textContent = task.completed ? "✓" : "○";
+
+    const number = document.createElement("span");
+    number.className = "task-number";
+    number.textContent = `#${task.index + 1}`;
+
+    const caseType = document.createElement("span");
+    caseType.className = "task-case";
+    caseType.textContent = task.case_type;
+
+    button.append(dot, number, caseType);
+    root.appendChild(button);
+  }
+
+  root.querySelector(".task-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function renderHeader() {
+  const meta = currentMeta();
+  if (!meta || !state.current) {
+    $("taskTitle").textContent = "No task";
+    return;
+  }
+
+  $("taskTitle").textContent = `Task #${meta.index + 1}`;
+  $("taskId").textContent = state.current.submission_id;
+  $("caseBadge").textContent = state.current.case_type;
+
+  const badge = $("statusBadge");
+  badge.textContent = state.completed ? "✓ Completed" : "○ Pending";
+  badge.className = `badge ${state.completed ? "completed" : "pending"}`;
+
+  $("saveOnly").textContent = state.completed ? "Update" : "Save";
+  $("saveNext").textContent = state.completed ? "Update & Next Pending" : "Save & Next Pending";
+  $("prev").disabled = meta.index <= 0;
+  $("next").disabled = meta.index >= state.tasks.length - 1;
+}
+
+function boxHtml(box) {
+  const subjectId = Number(box.subject_id);
+  const className = subjectId === 2 ? "s2" : "s1";
+  return `
+    <div class="box ${className}" style="left:${box.x}%;top:${box.y}%;width:${box.width}%;height:${box.height}%">
+      <span class="box-label">S${subjectId}</span>
+    </div>`;
+}
+
+function imageHtml(image) {
+  return `
+    <a class="image-link" href="${escapeHtml(image.image_url)}" target="_blank" rel="noopener noreferrer">
+      <div class="image-wrap">
+        <img src="${escapeHtml(image.image_url)}" alt="${escapeHtml(image.image_id)}">
+        ${image.boxes.map(boxHtml).join("")}
+      </div>
+    </a>
+    <div class="image-id">${escapeHtml(image.image_id)}</div>`;
+}
+
+function candidateHtml(candidate, index) {
+  const selected = state.selected.has(candidate.image_id);
+  const seed = candidate.is_seed;
+
+  return `
+    <article class="candidate ${selected ? "selected" : ""}" data-candidate="${escapeHtml(candidate.image_id)}">
+      <div class="candidate-main">
+        <div class="candidate-head">
+          <span class="candidate-index">Target ${index + 1}</span>
+          ${seed ? '<span class="seed-badge">SEED</span>' : ""}
+          <span class="candidate-id">${escapeHtml(candidate.image_id)}</span>
+        </div>
+        ${imageHtml(candidate)}
+      </div>
+      <button
+        class="select-rail ${seed ? "locked" : ""}"
+        data-select="${escapeHtml(candidate.image_id)}"
+        ${seed ? 'disabled aria-label="Seed target locked"' : 'aria-label="Toggle Full Positive"'}>
+        <span class="mark">✓</span>
+        ${seed ? '<span class="locked-text">LOCKED</span>' : ""}
+      </button>
+    </article>`;
+}
+
+function renderTask(payload) {
+  const task = payload.task;
+  state.current = task;
+  state.currentIndex = payload.index;
+  state.completed = payload.is_completed;
+  state.selected = new Set(task.target_image_ids);
+  state.savedSelection = new Set(task.target_image_ids);
+  state.selectedOnly = false;
+  setDirty(false);
+
+  const meta = currentMeta();
+  if (meta) {
+    meta.completed = payload.is_completed;
+    meta.case_type = task.case_type;
+  }
+
+  const subjectPills = task.subjects
+    .map(subject => `<span class="subject-pill s${subject.subject_id}">S${subject.subject_id}</span>`)
+    .join("");
+  const candidates = task.candidates.map(candidateHtml).join("");
+
+  $("taskWorkspace").className = "";
+  $("taskWorkspace").innerHTML = `
+    <div class="layout">
+      <aside class="reference">
+        <div class="panel">
+          <div class="panel-title">QUERY</div>
+          ${imageHtml(task.query)}
+          <div class="instruction">
+            <div class="panel-title">INSTRUCTION</div>
+            <div class="instruction-text">${escapeHtml(instruction(task))}</div>
+            <div class="subjects">${subjectPills}</div>
+          </div>
+        </div>
+      </aside>
+
+      <section>
+        <div class="candidates-head">
+          <h2>TARGET CANDIDATES</h2>
+          <span id="selectedCount" class="selected-count"></span>
+          <button id="selectedOnly" class="view-toggle" type="button">Selected only</button>
+        </div>
+        <div class="candidate-list">${candidates}</div>
+      </section>
+    </div>`;
+
+  wireCandidateRails();
+  $("selectedOnly").onclick = toggleSelectedOnly;
+  updateSelectedCount();
+  renderCandidateVisibility();
+  renderHeader();
+  renderTaskList();
+}
+
+function wireCandidateRails() {
+  document.querySelectorAll(".select-rail:not(.locked)").forEach(button => {
+    button.addEventListener("click", () => toggleCandidate(button.dataset.select));
+  });
+}
+
+function toggleCandidate(imageId) {
+  if (state.selected.has(imageId)) {
+    state.selected.delete(imageId);
+  } else {
+    state.selected.add(imageId);
+  }
+
+  setDirty(!sameSelection(state.selected, state.savedSelection));
+  const card = document.querySelector(`[data-candidate="${CSS.escape(imageId)}"]`);
+  card?.classList.toggle("selected", state.selected.has(imageId));
+  updateSelectedCount();
+  renderCandidateVisibility();
+}
+
+function toggleSelectedOnly() {
+  state.selectedOnly = !state.selectedOnly;
+  renderCandidateVisibility();
+}
+
+function renderCandidateVisibility() {
+  const button = $("selectedOnly");
+  if (button) {
+    button.classList.toggle("active", state.selectedOnly);
+    button.setAttribute("aria-pressed", String(state.selectedOnly));
+  }
+
+  document.querySelectorAll(".candidate").forEach(card => {
+    const imageId = card.dataset.candidate;
+    card.classList.toggle("filtered-out", state.selectedOnly && !state.selected.has(imageId));
+  });
+}
+
+function updateSelectedCount() {
+  const node = $("selectedCount");
+  if (node && state.current) {
+    node.textContent = `Selected: ${state.selected.size} / ${state.current.candidates.length}`;
+  }
+}
+
+async function requestJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Request failed: ${response.status}`);
+  return data;
+}
+
+async function loadTask(submissionId) {
+  $("error").textContent = "";
+  $("saved").textContent = "Loading…";
+
+  const payload = await requestJson(`/api/task?id=${encodeURIComponent(submissionId)}`);
+  renderTask(payload);
+  renderSummary();
+  localStorage.setItem(STORAGE.last, submissionId);
+  $("saved").textContent = payload.is_completed ? "Loaded completed task" : "";
+}
+
+async function requestLoad(submissionId, force = false) {
+  if (!force && submissionId === state.current?.submission_id) return;
+  if (!force && state.dirty && !window.confirm("You have unsaved changes. Discard them and open another task?")) {
+    return;
+  }
+
+  try {
+    await loadTask(submissionId);
+  } catch (error) {
+    $("error").textContent = error.message;
+  }
+}
+
+function navigate(delta) {
+  const meta = currentMeta();
+  if (!meta) return;
+  const next = state.tasks[meta.index + delta];
+  if (next) requestLoad(next.submission_id);
+}
+
+function nextPendingAfter(index) {
+  return state.tasks.slice(index + 1).find(task => !task.completed)
+    || state.tasks.slice(0, index).find(task => !task.completed)
+    || null;
+}
+
+async function save(goNextPending) {
+  if (!state.current) return false;
+
+  $("error").textContent = "";
+  $("saved").textContent = "Saving…";
+  $("saveOnly").disabled = true;
+  $("saveNext").disabled = true;
+
+  const targetImageIds = state.current.candidates
+    .map(candidate => candidate.image_id)
+    .filter(imageId => state.selected.has(imageId));
+
+  try {
+    const data = await requestJson("/api/positive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        submission_id: state.current.submission_id,
+        target_image_ids: targetImageIds,
+      }),
+    });
+
+    state.tasks = data.summary.tasks;
+    state.completed = true;
+    state.savedSelection = new Set(data.positive.target_image_ids);
+    state.selected = new Set(data.positive.target_image_ids);
+    setDirty(false);
+    $("saved").textContent = "Saved";
+
+    renderSummary(data.summary);
+    renderTaskList();
+    renderHeader();
+
+    if (goNextPending) {
+      const next = nextPendingAfter(state.currentIndex);
+      if (next) {
+        await loadTask(next.submission_id);
+      } else {
+        $("saved").textContent = "Saved · all tasks completed";
+      }
+    }
+    return true;
+  } catch (error) {
+    $("saved").textContent = "";
+    $("error").textContent = error.message;
+    return false;
+  } finally {
+    $("saveOnly").disabled = false;
+    $("saveNext").disabled = false;
+  }
+}
+
+async function init() {
+  const summary = await requestJson("/api/tasks");
+  state.tasks = summary.tasks;
+  renderSummary(summary);
+  renderTaskList();
+
+  if (!state.tasks.length) {
+    $("taskWorkspace").className = "empty-workspace";
+    $("taskWorkspace").textContent = "No positive tasks available.";
+    return;
+  }
+
+  const last = localStorage.getItem(STORAGE.last);
+  const lastExists = state.tasks.some(task => task.submission_id === last);
+  const firstPending = state.tasks.find(task => !task.completed);
+  const initial = lastExists ? last : (firstPending || state.tasks[0]).submission_id;
+  await loadTask(initial);
+}
+
+document.querySelectorAll("[data-status]").forEach(button => {
+  button.onclick = () => {
+    state.statusFilter = button.dataset.status;
+    localStorage.setItem(STORAGE.status, state.statusFilter);
+    renderSummary();
+    renderTaskList();
+  };
+});
+
+$("caseFilter").value = state.caseFilter;
+$("caseFilter").onchange = event => {
+  state.caseFilter = event.target.value;
+  localStorage.setItem(STORAGE.case, state.caseFilter);
+  renderTaskList();
+};
+
+$("taskSearch").oninput = event => {
+  state.search = event.target.value;
+  renderTaskList();
+};
+
+$("prev").onclick = () => navigate(-1);
+$("next").onclick = () => navigate(1);
+$("saveOnly").onclick = () => save(false);
+$("saveNext").onclick = () => save(true);
+$("copyId").onclick = async () => {
+  if (!state.current) return;
+  try {
+    await navigator.clipboard.writeText(state.current.submission_id);
+    $("saved").textContent = "Submission ID copied";
+  } catch {
+    $("saved").textContent = "Could not copy ID";
+  }
+};
+
+document.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    save(true);
+  }
+});
+
+window.addEventListener("beforeunload", event => {
+  if (!state.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+init().catch(error => {
+  $("taskWorkspace").className = "empty-workspace";
+  $("taskWorkspace").textContent = "Failed to initialize positive workspace.";
+  $("error").textContent = error.message;
+});
+</script>
+</body>
+</html>

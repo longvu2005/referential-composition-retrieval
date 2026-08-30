@@ -247,10 +247,11 @@ ones. After review, prepare Full Positive labeling with:
 python tools/dataset/prepare_handoffs.py positives
 ```
 
-`positive_set_input.jsonl` excludes IDs already present in
-`positive_sets.jsonl`. Therefore adding new tasks does not send completed old tasks through Gemini or
-Positive Expansion again, while the rewrite-review workspace can still reopen old
-completed tasks. The cumulative human files remain:
+`positive_set_input.jsonl` is also a cumulative task catalog. Re-running
+positive preparation refreshes known tasks by `submission_id` and appends new ones
+without dropping completed tasks. Completion state stays in `positive_sets.jsonl`,
+so the local workspace can reopen prior decisions without resubmitting any model
+work. The cumulative human files remain:
 
 ```text
 dataset/data/work/review/reviewed.jsonl
@@ -265,11 +266,12 @@ every required identity and is not the query image. The seed target is always
 first, and `target_image_ids` starts with that seed.
 
 Human labeling remains file-based under `dataset/data/work/`. Rewrite review uses
-the repo-local UI and writes canonical `reviewed.jsonl` directly. Positive
-Expansion groups at most 10 non-seed candidates from the same sample onto one Label Studio
-screen, then aggregates all completed groups back into one `positive_sets.jsonl`
-record. The grouping exists only in the Label Studio handoff; it does not change
-the dataset contract. See `labelstudio/README.md` for the manual workflow.
+the repo-local UI and writes canonical `reviewed.jsonl` directly. Full Positive
+selection uses a second repo-local UI: Query and reviewed instruction remain visible
+while all identity-compatible target candidates are inspected in one vertical list.
+The seed is locked positive, and every additional candidate is selected independently.
+The UI writes one canonical `positive_sets.jsonl` record per completed sample. See
+`labelstudio/README.md` for the workflow.
 
 ### Phase 2
 

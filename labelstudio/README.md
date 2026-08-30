@@ -1,19 +1,22 @@
-# Human review handoffs
+# Human annotation UIs
 
-This directory contains two independent interfaces: the repo-local Rewrite Review
-UI under `review/` and the offline Label Studio handoff for Full Positive selection
-under `positives/`. Rewrite Review does not use Label Studio. Canonical data remains
-under `dataset/data/work/`, and the repo never calls the Label Studio SDK or API.
+This directory contains two repo-local, file-backed annotation interfaces:
+
+- `review/` for rewrite and Subject review;
+- `positives/` for Full Positive selection.
+
+Neither interface requires Label Studio. Canonical data remains under
+`dataset/data/work/`, and both UIs write canonical JSONL directly.
 
 ## Rewrite review
 
-Prepare the canonical review input if needed:
+Prepare or refresh the cumulative review catalog:
 
 ```bash
 python tools/dataset/prepare_handoffs.py review
 ```
 
-Run the repo-local review UI:
+Run:
 
 ```bash
 python -m labelstudio.review.app
@@ -25,111 +28,75 @@ Open:
 http://127.0.0.1:8090
 ```
 
-The UI writes completed samples directly to:
+The UI writes completed samples to:
 
 ```text
 dataset/data/work/review/reviewed.jsonl
 ```
 
-The review UI is a task workspace rather than a strictly linear queue. The left
-navigator shows all tasks and supports `All`, `Pending`, and `Reviewed` status
-filters, case-type filtering, and search by task number or `submission_id`. Reviewed
-tasks remain reopenable. `Save & Next Pending` skips completed tasks, while `Prev`
-and `Next` still allow sequential inspection. Unsaved edits are protected before
-navigating away.
-
-Within each task:
-
-1. choose `SINGLE`, `MULTI`, or `RELATIONAL`;
-2. assign identities by clicking fixed person boxes;
-3. review `final_desc` and `final_change`.
-
-`SINGLE` has only `S1`; `MULTI` and `RELATIONAL` require both `S1` and `S2`.
-The same identity box is linked across Query and Target: clicking either side
-updates both images immediately. Boxes are metadata, not annotations, so they
-cannot be moved, resized, created, or deleted. Zoom and pan transform the image
-and boxes together. Selected boxes display only `S1` or `S2`; identity IDs remain
-internal.
-
-The assignment state is single-valued (`identity -> Subject`), so one identity
-cannot belong to two Subjects. Clicking an identity already assigned to the other
-Subject reassigns it; clicking an identity already assigned to the active Subject
-unassigns it. Server-side validation enforces the same invariant before writing
-canonical output.
-
-The candidate set remains restricted to identities present in both Query and the
-seed Target. Changing the reviewed case also changes the canonical Subject
-structure: `SINGLE` stores only Subject 1, while the other cases store Subjects 1
-and 2.
-
-## Label Studio setup for Full Positive selection
-
-Install and start Label Studio separately only for the Full Positive handoff:
-
-```bash
-python -m pip install label-studio
-export LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
-export LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT="$PWD/dataset/data/raw/images"
-label-studio start
-```
-
-Create `RCR Positive Selection` with `labelstudio/positives/config.xml` and enable
-**Allow empty annotations** so a group may contain zero valid candidates.
+The left navigator keeps `All`, `Pending`, and `Reviewed` tasks available. Reviewed
+tasks remain reopenable. Subject boxes are fixed metadata: they can be selected for
+Subject assignment but cannot be moved, resized, created, or deleted.
 
 ## Full Positive selection
 
-Prepare the canonical candidate input:
+Prepare or refresh the cumulative positive catalog after rewrite review:
 
 ```bash
 python tools/dataset/prepare_handoffs.py positives
 ```
 
-Create the Label Studio task file:
+Run:
 
 ```bash
-python -m labelstudio.positives.prepare
+python -m labelstudio.positives.app
 ```
 
-Import this file manually in the `RCR Positive Selection` project:
+Open:
 
 ```text
-dataset/data/work/positives/labelstudio_tasks.json
+http://127.0.0.1:8091
 ```
 
-Each task contains at most 10 non-seed candidates from one sample. The seed target
-is shown only as reference and is always retained as a positive.
+Each task shows a sticky Query and reviewed instruction beside a vertical list of
+identity-compatible target candidates. Subject boxes are read-only visual metadata.
+The seed target is first, permanently selected, and cannot be removed. For every
+other candidate, only the selection rail on the right changes its Full Positive
+state; clicking the image opens it for inspection without changing the label.
 
-After annotation, export the project as JSON and save it as:
+Use `Save` to persist the current task or `Save & Next Pending` to continue through
+unfinished tasks. `Cmd/Ctrl + Enter` also saves and advances. Completed tasks remain
+reopenable and editable.
 
-```text
-dataset/data/work/positives/labelstudio_export.json
-```
-
-Collect completed groups:
-
-```bash
-python -m labelstudio.positives.collect
-```
-
-Canonical output:
+The UI writes directly to:
 
 ```text
 dataset/data/work/positives/positive_sets.jsonl
 ```
 
-A sample is collected only after every candidate group for that sample has a
-completed annotation. Existing canonical outputs are merged by `submission_id`.
+Each canonical record remains:
+
+```json
+{
+  "submission_id": "sample_000001",
+  "target_image_ids": ["seed_image_id", "additional_positive_id"]
+}
+```
+
+Target IDs are stored in canonical candidate order, so repeated saves are
+deterministic.
 
 ## Incremental behavior
 
-The incremental boundary remains the canonical handoff files:
+Both handoff inputs are cumulative task catalogs:
 
-- `prepare_handoffs.py review` maintains `review_input.jsonl` as a cumulative task
-  catalog, refreshing known IDs and appending new ones without dropping reviewed
-  tasks.
-- `reviewed.jsonl` is the canonical rewrite-review completion state used by the UI.
-- `prepare_handoffs.py positives` excludes IDs already in `positive_sets.jsonl`.
-- the rewrite UI merges each completed sample directly into `reviewed.jsonl`;
-- Positive `prepare.py` and `collect.py` keep the offline Label Studio handoff deterministic.
+```text
+dataset/data/work/review/review_input.jsonl
+dataset/data/work/positives/positive_set_input.jsonl
+```
 
-Therefore completed samples are not prepared again when new data is added.
+Re-running `prepare_handoffs.py` refreshes existing task metadata by
+`submission_id`, keeps stable task order, and appends new tasks. Completion state is
+stored separately in `reviewed.jsonl` and `positive_sets.jsonl`. This allows old
+completed tasks to remain visible without re-running model work or creating a
+second annotation format.

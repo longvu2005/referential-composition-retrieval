@@ -1,14 +1,19 @@
-"""Tests for shared image helpers and Full Positive Label Studio handoff."""
+"""Tests for shared annotation metadata and the Full Positive local UI."""
+
+import threading
 
 import pytest
 
-import labelstudio.positives.collect as positive_collect
-from labelstudio.common import load_box_index, local_image_url
-from labelstudio.positives.collect import aggregate
-from labelstudio.positives.prepare import build_tasks
+import labelstudio.positives.app as positive_app
+from labelstudio.common import load_box_index
+from labelstudio.positives.app import (
+    PositiveState,
+    _image_relative_path,
+    build_task_payload,
+    validate_submission,
+)
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
-SUBJECTS = [{"subject_id": 1, "identity_ids": ["7"]}]
 BOXES = {
     "1_1": [
         {
@@ -18,17 +23,59 @@ BOXES = {
             "y": 0.2,
             "width": 0.3,
             "height": 0.4,
-        },
+        }
+    ],
+    "1_2": [
         {
-            "image_id": "1_1",
-            "label": "8",
-            "x": 0.5,
+            "image_id": "1_2",
+            "label": "7",
+            "x": 0.2,
+            "y": 0.1,
+            "width": 0.2,
+            "height": 0.4,
+        }
+    ],
+    "1_3": [
+        {
+            "image_id": "1_3",
+            "label": "7",
+            "x": 0.3,
             "y": 0.2,
             "width": 0.2,
             "height": 0.3,
-        },
-    ]
+        }
+    ],
 }
+
+
+def _source(submission_id: str = "s1") -> dict:
+    return {
+        "submission_id": submission_id,
+        "case_type": "SINGLE",
+        "query_image_id": "1_1",
+        "query_image_url": (
+            "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
+        ),
+        "seed_target_image_id": "1_2",
+        "subjects": [{"subject_id": 1, "identity_ids": ["7"]}],
+        "final_desc": "Identify Subject 1 as the man",
+        "final_change": "then retrieve target images where Subject 1 is smiling",
+        "candidates": [
+            {
+                "image_id": "1_2",
+                "image_url": "/data/local-files/?d=train/1_2.jpg",
+                "is_seed": True,
+                "subject_boxes": [],
+            },
+            {
+                "image_id": "1_3",
+                "image_url": "/data/local-files/?d=train/1_3.jpg",
+                "is_seed": False,
+                "subject_boxes": [],
+            },
+        ],
+        "target_image_ids": ["1_2"],
+    }
 
 
 def test_load_box_index_recovers_boxes_missing_from_pair_data(tmp_path) -> None:
@@ -58,136 +105,108 @@ def test_load_box_index_recovers_boxes_missing_from_pair_data(tmp_path) -> None:
     }
 
 
-def test_local_image_url_uses_repo_image_root() -> None:
-    url = "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
-    assert local_image_url(url) == "/data/local-files/?d=train/1_1.jpg"
+def test_positive_task_payload_keeps_query_and_candidate_boxes_read_only() -> None:
+    task = build_task_payload(_source(), BOXES)
+
+    assert task["target_image_ids"] == ["1_2"]
+    assert task["query"]["boxes"][0]["subject_id"] == 1
+    assert task["query"]["boxes"][0]["x"] == pytest.approx(10.0)
+    assert task["candidates"][0]["is_seed"] is True
+    assert task["candidates"][1]["boxes"][0]["subject_id"] == 1
 
 
-def test_positive_prepare_groups_candidates_by_ten() -> None:
-    candidates = [
-        {
-            "image_id": "seed",
-            "image_url": "/data/local-files/?d=train/seed.jpg",
-            "is_seed": True,
-            "subject_boxes": [],
-        }
-    ]
-    candidates.extend(
-        {
-            "image_id": f"c{i}",
-            "image_url": f"/data/local-files/?d=train/c{i}.jpg",
-            "is_seed": False,
-            "subject_boxes": [],
-        }
-        for i in range(23)
+def test_positive_submission_requires_seed_and_rejects_unknown_candidates() -> None:
+    source = _source()
+
+    with pytest.raises(ValueError, match="seed target must remain selected"):
+        validate_submission(
+            source,
+            {"submission_id": "s1", "target_image_ids": ["1_3"]},
+        )
+
+    with pytest.raises(ValueError, match="invalid target_image_id"):
+        validate_submission(
+            source,
+            {"submission_id": "s1", "target_image_ids": ["1_2", "unknown"]},
+        )
+
+
+def test_positive_submission_uses_canonical_candidate_order() -> None:
+    row = validate_submission(
+        _source(),
+        {"submission_id": "s1", "target_image_ids": ["1_3", "1_2"]},
     )
-    row = {
+
+    assert row == {
         "submission_id": "s1",
-        "query_image_id": "1_1",
-        "query_image_url": "/data/local-files/?d=train/1_1.jpg",
-        "subjects": SUBJECTS,
-        "final_desc": "Identify Subject 1 as the man",
-        "final_change": "then retrieve target images where Subject 1 is smiling",
-        "candidates": candidates,
+        "target_image_ids": ["1_2", "1_3"],
     }
 
-    tasks = build_tasks(row, BOXES)
-
-    assert [len(task["data"]["candidate_choices"]) for task in tasks] == [10, 10, 3]
-    assert [task["data"]["task_key"] for task in tasks] == [
-        "s1::000",
-        "s1::001",
-        "s1::002",
-    ]
 
 
-def test_positive_collect_waits_for_all_groups() -> None:
-    inputs = [
-        {
-            "submission_id": "s1",
-            "seed_target_image_id": "seed",
-            "candidates": [
-                {"image_id": "seed", "is_seed": True},
-                *[{"image_id": f"c{i}", "is_seed": False} for i in range(11)],
-            ],
-        }
-    ]
-    task = {
-        "data": {"submission_id": "s1", "group_index": 0, "group_count": 2},
-        "annotations": [
-            {
-                "result": [
-                    {
-                        "from_name": "positives",
-                        "value": {"choices": ["c0"]},
-                    }
-                ]
-            }
-        ],
-    }
-
-    assert aggregate([task], inputs) == []
-
-    second = {
-        "data": {"submission_id": "s1", "group_index": 1, "group_count": 2},
-        "annotations": [{"result": []}],
-    }
-    assert aggregate([task, second], inputs) == [
-        {"submission_id": "s1", "target_image_ids": ["seed", "c0"]}
-    ]
-
-
-def test_positive_collect_rejects_choice_outside_canonical_group() -> None:
-    inputs = [
-        {
-            "submission_id": "s1",
-            "seed_target_image_id": "seed",
-            "candidates": [
-                {"image_id": "seed", "is_seed": True},
-                {"image_id": "a", "is_seed": False},
-            ],
-        }
-    ]
-    task = {
-        "data": {"submission_id": "s1", "group_index": 0, "group_count": 1},
-        "annotations": [
-            {
-                "result": [
-                    {
-                        "from_name": "positives",
-                        "value": {"choices": ["not-a-candidate"]},
-                    }
-                ]
-            }
-        ],
-    }
-
-    with pytest.raises(ValueError, match="invalid positive choice"):
-        aggregate([task], inputs)
-
-
-def test_positive_collect_handles_seed_only_without_export(
-    tmp_path, monkeypatch
-) -> None:
+def test_positive_state_loads_cumulative_catalog(tmp_path, monkeypatch) -> None:
     input_path = tmp_path / "positive_set_input.jsonl"
-    export_path = tmp_path / "missing_export.json"
     output_path = tmp_path / "positive_sets.jsonl"
+    write_jsonl(input_path, [_source("s1"), _source("s2")])
     write_jsonl(
-        input_path,
-        [
-            {
-                "submission_id": "s1",
-                "seed_target_image_id": "seed",
-                "candidates": [{"image_id": "seed", "is_seed": True}],
-            }
-        ],
+        output_path,
+        [{"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]}],
     )
-    monkeypatch.setattr(positive_collect, "INPUT", input_path)
-    monkeypatch.setattr(positive_collect, "EXPORT", export_path)
-    monkeypatch.setattr(positive_collect, "OUTPUT", output_path)
+    monkeypatch.setattr(positive_app, "INPUT", input_path)
+    monkeypatch.setattr(positive_app, "OUTPUT", output_path)
+    monkeypatch.setattr(positive_app, "load_box_index", lambda: BOXES)
 
-    positive_collect.main()
+    state = PositiveState()
 
-    assert load_jsonl(output_path) == [
-        {"submission_id": "s1", "target_image_ids": ["seed"]}
+    assert state.tasks()["completed"] == 1
+    assert state.task(submission_id="s1")["is_completed"] is True
+    assert state.task(submission_id="s1")["task"]["target_image_ids"] == [
+        "1_2",
+        "1_3",
     ]
+
+def test_positive_state_tasks_keeps_completed_tasks_visible() -> None:
+    first = _source("s1")
+    second = _source("s2")
+    state = PositiveState.__new__(PositiveState)
+    state.rows = [first, second]
+    state.positives = {
+        "s1": {"submission_id": "s1", "target_image_ids": ["1_2"]}
+    }
+
+    summary = state.tasks()
+
+    assert summary["total"] == 2
+    assert summary["completed"] == 1
+    assert summary["pending"] == 1
+    assert summary["tasks"][0]["completed"] is True
+    assert summary["tasks"][1]["completed"] is False
+
+
+def test_positive_state_save_writes_catalog_order(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "positive_sets.jsonl"
+    first = _source("s1")
+    second = _source("s2")
+    state = PositiveState.__new__(PositiveState)
+    state.rows = [first, second]
+    state.rows_by_id = {"s1": first, "s2": second}
+    state.positives = {}
+    state.lock = threading.Lock()
+    monkeypatch.setattr(positive_app, "OUTPUT", output)
+
+    state.save({"submission_id": "s2", "target_image_ids": ["1_2"]})
+    state.save({"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]})
+
+    assert load_jsonl(output) == [
+        {"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]},
+        {"submission_id": "s2", "target_image_ids": ["1_2"]},
+    ]
+
+
+def test_positive_image_relative_path_is_safe() -> None:
+    assert _image_relative_path(
+        "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
+    ).as_posix() == "train/1_1.jpg"
+
+    with pytest.raises(ValueError, match="unsafe image path"):
+        _image_relative_path("/images/../secret.jpg")

@@ -102,12 +102,10 @@ cumulative `review_input.jsonl` task catalog. Reviewed tasks remain in this cata
 the local UI can revisit them; completion state comes from `reviewed.jsonl`. A
 sample-level Gemini failure is preserved as an
 empty rewrite for human review and is treated as processed, so it is never
-resubmitted. Whole failed batch jobs remain retryable. Rewrite review runs through the
-repo-local UI, while Full Positive selection uses offline Label Studio
-import/export files. See [`labelstudio/README.md`](labelstudio/README.md). No
-Label Studio API client is used.
-After producing
-`reviewed.jsonl`, prepare the positive-set labeling input with:
+resubmitted. Whole failed batch jobs remain retryable. Rewrite review and Full Positive
+selection both run through repo-local file-backed UIs. See
+[`labelstudio/README.md`](labelstudio/README.md).
+After producing `reviewed.jsonl`, prepare the positive-set catalog with:
 
 ```bash
 python tools/dataset/prepare_handoffs.py positives

@@ -1,4 +1,4 @@
-"""Prepare incremental inputs for the two human labeling handoffs."""
+"""Prepare cumulative inputs for the two human labeling handoffs."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from rcr.dataset.handoff import (
     merge_handoff_catalog,
     prepare_positive_set_inputs,
     prepare_review_inputs,
-    select_unfinished_records,
 )
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
@@ -41,7 +40,7 @@ def main() -> None:
     index_lines = INDEX.read_text(encoding="utf-8").splitlines()
 
     if args.handoff == "review":
-        completed_ids = {row["submission_id"] for row in load_optional(REVIEWED)}
+        completed = load_optional(REVIEWED)
         selected_ids = {row["submission_id"] for row in selected}
         current_rewrites = [
             row
@@ -57,26 +56,19 @@ def main() -> None:
         outputs = merge_handoff_catalog(load_optional(REVIEW_INPUT), prepared)
         output_path = REVIEW_INPUT
     else:
-        completed_ids = {row["submission_id"] for row in load_optional(POSITIVE_SETS)}
-        reviewed = select_unfinished_records(
-            load_jsonl(REVIEWED),
-            completed_ids,
-        )
-        outputs = prepare_positive_set_inputs(
+        completed = load_optional(POSITIVE_SETS)
+        prepared = prepare_positive_set_inputs(
             selected=selected,
-            reviewed=reviewed,
+            reviewed=load_jsonl(REVIEWED),
             pair_data=pair_data,
             index_lines=index_lines,
         )
+        outputs = merge_handoff_catalog(load_optional(POSITIVE_INPUT), prepared)
         output_path = POSITIVE_INPUT
 
     write_jsonl(output_path, outputs)
-    if args.handoff == "review":
-        print(f"Review catalog: {len(outputs)}")
-        print(f"Already reviewed: {len(completed_ids)}")
-    else:
-        print(f"Prepared: {len(outputs)}")
-        print(f"Already completed: {len(completed_ids)}")
+    print(f"Catalog: {len(outputs)}")
+    print(f"Completed: {len(completed)}")
     print(f"Wrote handoff input to {output_path}")
 
 

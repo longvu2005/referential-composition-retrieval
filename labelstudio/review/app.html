@@ -5,34 +5,329 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RCR Rewrite Review</title>
 <style>
-:root{--line:#d9d9d9;--line-soft:#ececec;--muted:#6b7280;--text:#171717;--bg:#f5f5f5;--panel:#fff;--s1:#e53935;--s2:#1e88e5;--ok:#1f7a36;--warn:#a16207}
-*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-button,input,select,textarea{font:inherit}button{border:1px solid #cfcfcf;background:#fff;border-radius:6px;padding:7px 12px;cursor:pointer}button:hover{background:#f7f7f7}button:disabled{opacity:.45;cursor:default}.primary{background:#171717;color:#fff;border-color:#171717}.primary:hover{background:#303030}.muted{color:var(--muted)}
-.app{min-height:100%;display:grid;grid-template-columns:270px minmax(0,1fr)}
-.sidebar{height:100vh;position:sticky;top:0;background:#fff;border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}.sidebar-head{padding:16px 14px 12px;border-bottom:1px solid var(--line-soft)}.brand{font-weight:750;font-size:15px;margin-bottom:4px}.summary{font-size:12px;color:var(--muted);margin-bottom:9px}.progress-track{height:5px;background:#ededed;border-radius:999px;overflow:hidden}.progress-fill{height:100%;width:0;background:#252525;transition:width .15s ease}
-.filters{padding:12px 10px;border-bottom:1px solid var(--line-soft)}.status-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:9px}.status-tab{padding:6px 4px;font-size:12px}.status-tab.active{background:#171717;border-color:#171717;color:#fff}.filter-input{width:100%;border:1px solid #cfcfcf;border-radius:6px;padding:7px 8px;margin-bottom:7px}.filter-select{width:100%;border:1px solid #cfcfcf;border-radius:6px;padding:7px 8px;background:#fff}
-.task-list{overflow:auto;padding:7px;flex:1}.task-item{width:100%;display:grid;grid-template-columns:18px 48px minmax(0,1fr);align-items:center;gap:5px;text-align:left;border-color:transparent;padding:8px 7px;margin-bottom:2px}.task-item:hover{border-color:#ddd}.task-item.active{background:#f0f0f0;border-color:#cfcfcf}.task-dot{font-size:14px;text-align:center}.task-dot.reviewed{color:var(--ok);font-weight:700}.task-dot.pending{color:#8b8b8b}.task-number{font-variant-numeric:tabular-nums;font-size:12px;color:#4b5563}.task-case{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:650}.task-empty{padding:18px 10px;text-align:center;color:var(--muted);font-size:12px}
-.workspace{min-width:0}.workspace-top{position:sticky;top:0;z-index:20;background:rgba(245,245,245,.96);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:10px 18px}.workspace-top-row{display:flex;align-items:center;gap:8px;max-width:1500px;margin:auto}.workspace-top .spacer,.actions .spacer{flex:1}.task-title{font-weight:700}.task-id{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.badge{font-size:11px;font-weight:700;border:1px solid #d4d4d4;border-radius:999px;padding:3px 7px;background:#fff}.badge.reviewed{color:var(--ok);border-color:#b9d9c1;background:#f5fbf6}.badge.pending{color:#656565}.unsaved{color:var(--warn);font-size:12px;font-weight:650}
-main{max-width:1500px;margin:0 auto;padding:16px 18px 24px}.section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:12px}.section h2{font-size:12px;letter-spacing:.07em;margin:0 0 12px;color:#525252}.case-row,.subject-row{display:flex;gap:8px;flex-wrap:wrap}.case.active{background:#171717;color:#fff;border-color:#171717}.subject.s1.active{background:var(--s1);border-color:var(--s1);color:#fff}.subject.s2.active{background:var(--s2);border-color:var(--s2);color:#fff}
-.images{display:grid;grid-template-columns:1fr 1fr;gap:12px}.image-card{min-width:0}.image-head{display:flex;align-items:center;gap:6px;margin-bottom:6px}.image-head strong{margin-right:auto}.zoom-label{width:48px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}.viewport{position:relative;height:min(62vh,620px);min-height:380px;overflow:hidden;border:1px solid var(--line);border-radius:6px;background:#ececec;cursor:grab}.viewport.dragging{cursor:grabbing}.stage{position:absolute;left:0;top:0;width:100%;transform-origin:0 0;will-change:transform}.stage img{display:block;width:100%;height:auto;pointer-events:none;user-select:none}.person-box{position:absolute;border:2px solid #8a8a8a;background:rgba(255,255,255,.04);cursor:pointer;z-index:2}.person-box:hover{border-width:3px}.person-box.s1{border:3px solid var(--s1)}.person-box.s2{border:3px solid var(--s2)}.box-tag{position:absolute;left:-3px;top:-22px;height:20px;padding:1px 5px;border-radius:3px 3px 0 0;color:#fff;font-weight:700;font-size:12px;line-height:18px}.person-box.s1 .box-tag{background:var(--s1)}.person-box.s2 .box-tag{background:var(--s2)}
-.assignment-foot{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}.status{color:var(--muted)}.status .ok{color:var(--ok);font-weight:600}.status .missing{color:var(--warn);font-weight:600}label{display:block;font-weight:600;margin:10px 0 6px}textarea{width:100%;min-height:78px;resize:vertical;border:1px solid #cfcfcf;border-radius:6px;padding:9px 10px}textarea:focus,input:focus,select:focus{outline:2px solid #b8d5ff;border-color:#6aa3e8}.error{min-height:20px;margin-top:8px;color:#b42318;white-space:pre-wrap}.actions{display:flex;align-items:center;gap:10px;position:sticky;bottom:0;background:rgba(245,245,245,.96);backdrop-filter:blur(6px);padding:10px 0 2px}.save-state{font-size:12px}details{margin-top:12px;border-top:1px solid #eee;padding-top:10px}summary{cursor:pointer;color:var(--muted)}pre{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
-@media(max-width:1050px){.app{grid-template-columns:220px minmax(0,1fr)}.task-id{display:none}.images{grid-template-columns:1fr}.viewport{height:480px}}
-@media(max-width:720px){.app{display:block}.sidebar{height:auto;position:relative;border-right:0;border-bottom:1px solid var(--line)}.task-list{max-height:240px}.workspace-top{position:relative}.workspace-top-row{flex-wrap:wrap}main{padding:12px}.viewport{min-height:330px;height:430px}}
+:root {
+  --line: #d9d9d9;
+  --line-soft: #ececec;
+  --muted: #6b7280;
+  --text: #171717;
+  --bg: #f5f5f5;
+  --panel: #fff;
+  --s1: #e53935;
+  --s2: #1e88e5;
+  --ok: #1f7a36;
+  --warn: #a16207;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button, input, select, textarea { font: inherit; }
+button {
+  border: 1px solid #cfcfcf;
+  background: #fff;
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+button:hover { background: #f7f7f7; }
+button:disabled { opacity: .45; cursor: default; }
+.primary { background: #171717; color: #fff; border-color: #171717; }
+.primary:hover { background: #303030; }
+.muted { color: var(--muted); }
+
+/* Shared annotation shell */
+.app {
+  min-height: 100%;
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+}
+.sidebar {
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sidebar-head {
+  padding: 16px 14px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { font-weight: 750; font-size: 15px; }
+.tool-name { margin: 2px 0 8px; font-size: 12px; color: var(--muted); }
+.summary { font-size: 12px; color: var(--muted); margin-bottom: 9px; }
+.progress-track {
+  height: 5px;
+  background: #ededed;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: #252525;
+  transition: width .15s ease;
+}
+.filters {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.status-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.status-tab { padding: 6px 4px; font-size: 12px; }
+.status-tab.active { background: #171717; border-color: #171717; color: #fff; }
+.filter-input,
+.filter-select {
+  width: 100%;
+  border: 1px solid #cfcfcf;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #fff;
+}
+.filter-input { margin-bottom: 7px; }
+.task-list { overflow: auto; padding: 7px; flex: 1; }
+.task-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  border-color: transparent;
+  padding: 8px 7px;
+  margin-bottom: 2px;
+}
+.task-item:hover { border-color: #ddd; }
+.task-item.active { background: #f0f0f0; border-color: #cfcfcf; }
+.task-dot { font-size: 14px; text-align: center; }
+.task-dot.completed { color: var(--ok); font-weight: 700; }
+.task-dot.pending { color: #8b8b8b; }
+.task-number { font-variant-numeric: tabular-nums; font-size: 12px; color: #4b5563; }
+.task-case {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 650;
+}
+.task-empty { padding: 18px 10px; text-align: center; color: var(--muted); font-size: 12px; }
+
+.workspace { min-width: 0; }
+.workspace-top {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: rgba(245, 245, 245, .96);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+  padding: 10px 18px;
+}
+.workspace-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1500px;
+  margin: auto;
+}
+.workspace-top .spacer,
+.actions .spacer { flex: 1; }
+.task-title { font-weight: 700; }
+.task-id {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #fff;
+}
+.badge.completed { color: var(--ok); border-color: #b9d9c1; background: #f5fbf6; }
+.badge.pending { color: #656565; }
+.unsaved { color: var(--warn); font-size: 12px; font-weight: 650; }
+
+main { max-width: 1500px; margin: 0 auto; padding: 16px 18px 24px; }
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: rgba(245, 245, 245, .96);
+  backdrop-filter: blur(6px);
+  padding: 10px 0 2px;
+}
+.save-state { font-size: 12px; }
+
+/* Review task */
+.section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.section h2 {
+  font-size: 12px;
+  letter-spacing: .07em;
+  margin: 0 0 12px;
+  color: #525252;
+}
+.case-row,
+.subject-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.case.active { background: #171717; color: #fff; border-color: #171717; }
+.subject.s1.active { background: var(--s1); border-color: var(--s1); color: #fff; }
+.subject.s2.active { background: var(--s2); border-color: var(--s2); color: #fff; }
+.images { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.image-card { min-width: 0; }
+.image-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.image-head strong { margin-right: auto; }
+.zoom-label {
+  width: 48px;
+  text-align: center;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.viewport {
+  position: relative;
+  height: min(62vh, 620px);
+  min-height: 380px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ececec;
+  cursor: grab;
+}
+.viewport.dragging { cursor: grabbing; }
+.stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+.person-box {
+  position: absolute;
+  border: 2px solid #8a8a8a;
+  background: rgba(255, 255, 255, .04);
+  cursor: pointer;
+  z-index: 2;
+}
+.person-box:hover { border-width: 3px; }
+.person-box.s1 { border: 3px solid var(--s1); }
+.person-box.s2 { border: 3px solid var(--s2); }
+.box-tag {
+  position: absolute;
+  left: -3px;
+  top: -22px;
+  height: 20px;
+  padding: 1px 5px;
+  border-radius: 3px 3px 0 0;
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 18px;
+}
+.person-box.s1 .box-tag { background: var(--s1); }
+.person-box.s2 .box-tag { background: var(--s2); }
+.assignment-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.status { color: var(--muted); }
+.status .ok { color: var(--ok); font-weight: 600; }
+.status .missing { color: var(--warn); font-weight: 600; }
+label { display: block; font-weight: 600; margin: 10px 0 6px; }
+textarea {
+  width: 100%;
+  min-height: 78px;
+  resize: vertical;
+  border: 1px solid #cfcfcf;
+  border-radius: 6px;
+  padding: 9px 10px;
+}
+textarea:focus,
+input:focus,
+select:focus { outline: 2px solid #b8d5ff; border-color: #6aa3e8; }
+.error { min-height: 20px; margin-top: 8px; color: #b42318; white-space: pre-wrap; }
+details { margin-top: 12px; border-top: 1px solid #eee; padding-top: 10px; }
+summary { cursor: pointer; color: var(--muted); }
+pre {
+  white-space: pre-wrap;
+  background: #fafafa;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 10px;
+  overflow: auto;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 1050px) {
+  .app { grid-template-columns: 220px minmax(0, 1fr); }
+  .task-id { display: none; }
+  .images { grid-template-columns: 1fr; }
+  .viewport { height: 480px; }
+}
+@media (max-width: 720px) {
+  .app { display: block; }
+  .sidebar {
+    height: auto;
+    position: relative;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .task-list { max-height: 240px; }
+  .workspace-top { position: relative; padding: 9px 12px; }
+  .workspace-top-row { flex-wrap: wrap; }
+  main { padding: 12px; }
+  .viewport { min-height: 330px; height: 430px; }
+}
 </style>
 </head>
 <body>
 <div class="app">
   <aside class="sidebar">
     <div class="sidebar-head">
-      <div class="brand">RCR Rewrite Review</div>
+      <div class="brand">RCR Annotation</div>
+      <div class="tool-name">Rewrite Review</div>
       <div id="summary" class="summary">Loading tasks…</div>
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
     </div>
+
     <div class="filters">
       <div class="status-tabs">
         <button class="status-tab" data-status="all">All <span id="allCount">0</span></button>
         <button class="status-tab" data-status="pending">Pending <span id="pendingCount">0</span></button>
-        <button class="status-tab" data-status="reviewed">Reviewed <span id="reviewedCount">0</span></button>
+        <button class="status-tab" data-status="completed">Completed <span id="completedCount">0</span></button>
       </div>
       <input id="taskSearch" class="filter-input" type="search" placeholder="Search # or submission ID">
       <select id="caseFilter" class="filter-select" aria-label="Filter by case type">
@@ -42,19 +337,22 @@ main{max-width:1500px;margin:0 auto;padding:16px 18px 24px}.section{background:v
         <option value="RELATIONAL">RELATIONAL</option>
       </select>
     </div>
+
     <div id="taskList" class="task-list"></div>
   </aside>
 
-  <div class="workspace">
+  <section class="workspace">
     <header class="workspace-top">
       <div class="workspace-top-row">
-        <button id="prev">← Prev</button><button id="next">Next →</button>
+        <button id="prev">← Prev</button>
+        <button id="next">Next →</button>
         <span id="taskTitle" class="task-title">No task</span>
         <span id="caseBadge" class="badge"></span>
-        <span id="reviewBadge" class="badge pending">Pending</span>
+        <span id="statusBadge" class="badge pending">Pending</span>
         <span id="dirtyBadge" class="unsaved" hidden>● Unsaved changes</span>
         <span class="spacer"></span>
-        <code id="taskId" class="task-id"></code><button id="copyId" title="Copy submission ID">Copy ID</button>
+        <code id="taskId" class="task-id"></code>
+        <button id="copyId" title="Copy submission ID">Copy ID</button>
       </div>
     </header>
 
@@ -68,138 +366,642 @@ main{max-width:1500px;margin:0 auto;padding:16px 18px 24px}.section{background:v
         <h2>2 · SUBJECT ASSIGNMENT</h2>
         <div class="images">
           <div class="image-card">
-            <div class="image-head"><strong>QUERY</strong><button data-zoom="query" data-delta="-1">−</button><span id="queryZoom" class="zoom-label">100%</span><button data-zoom="query" data-delta="1">+</button><button data-reset="query">Reset</button></div>
-            <div id="queryViewport" class="viewport"><div id="queryStage" class="stage"><img id="queryImage" alt="Query"><div id="queryBoxes"></div></div></div>
+            <div class="image-head">
+              <strong>QUERY</strong>
+              <button data-zoom="query" data-delta="-1">−</button>
+              <span id="queryZoom" class="zoom-label">100%</span>
+              <button data-zoom="query" data-delta="1">+</button>
+              <button data-reset="query">Reset</button>
+            </div>
+            <div id="queryViewport" class="viewport">
+              <div id="queryStage" class="stage">
+                <img id="queryImage" alt="Query">
+                <div id="queryBoxes"></div>
+              </div>
+            </div>
           </div>
+
           <div class="image-card">
-            <div class="image-head"><strong>TARGET</strong><button data-zoom="target" data-delta="-1">−</button><span id="targetZoom" class="zoom-label">100%</span><button data-zoom="target" data-delta="1">+</button><button data-reset="target">Reset</button></div>
-            <div id="targetViewport" class="viewport"><div id="targetStage" class="stage"><img id="targetImage" alt="Target"><div id="targetBoxes"></div></div></div>
+            <div class="image-head">
+              <strong>TARGET</strong>
+              <button data-zoom="target" data-delta="-1">−</button>
+              <span id="targetZoom" class="zoom-label">100%</span>
+              <button data-zoom="target" data-delta="1">+</button>
+              <button data-reset="target">Reset</button>
+            </div>
+            <div id="targetViewport" class="viewport">
+              <div id="targetStage" class="stage">
+                <img id="targetImage" alt="Target">
+                <div id="targetBoxes"></div>
+              </div>
+            </div>
           </div>
         </div>
+
         <div class="assignment-foot">
-          <strong>Active subject</strong><div id="subjects" class="subject-row"></div><span id="subjectStatus" class="status"></span>
+          <strong>Active subject</strong>
+          <div id="subjects" class="subject-row"></div>
+          <span id="subjectStatus" class="status"></span>
         </div>
       </section>
 
       <section class="section">
         <h2>3 · TEXT REVIEW</h2>
-        <label for="finalDesc">SELECT / WHO</label><textarea id="finalDesc"></textarea>
-        <label for="finalChange">CHANGE / WHAT</label><textarea id="finalChange"></textarea>
-        <details><summary>Original annotation</summary><pre id="original"></pre></details>
+        <label for="finalDesc">SELECT / WHO</label>
+        <textarea id="finalDesc"></textarea>
+        <label for="finalChange">CHANGE / WHAT</label>
+        <textarea id="finalChange"></textarea>
+        <details>
+          <summary>Original annotation</summary>
+          <pre id="original"></pre>
+        </details>
         <div id="error" class="error"></div>
       </section>
 
       <div class="actions">
-        <span id="saved" class="muted save-state"></span><span class="spacer"></span>
-        <span class="muted">Ctrl/⌘+Enter: Save & Next Pending</span>
-        <button id="saveOnly">Save</button><button id="saveNext" class="primary">Save & Next Pending</button>
+        <span id="saved" class="muted save-state"></span>
+        <span class="spacer"></span>
+        <span class="muted">Ctrl/⌘+Enter: Save &amp; Next Pending</span>
+        <button id="saveOnly">Save</button>
+        <button id="saveNext" class="primary">Save &amp; Next Pending</button>
       </div>
     </main>
-  </div>
+  </section>
 </div>
+
 <script>
-const CASES=["SINGLE","MULTI","RELATIONAL"];
-const STORAGE={last:"rcr.review.lastTask",status:"rcr.review.statusFilter",case:"rcr.review.caseFilter"};
-const state={tasks:[],task:null,index:-1,reviewed:false,currentId:null,activeSubject:1,assignment:new Map(),dirty:false,statusFilter:localStorage.getItem(STORAGE.status)||"pending",caseFilter:localStorage.getItem(STORAGE.case)||"all",search:"",view:{query:{scale:1,x:0,y:0},target:{scale:1,x:0,y:0}}};
-const $=id=>document.getElementById(id);
+const CASES = ["SINGLE", "MULTI", "RELATIONAL"];
+const STORAGE = {
+  last: "rcr.review.lastTask",
+  status: "rcr.review.statusFilter",
+  case: "rcr.review.caseFilter",
+};
 
-function stats(){const total=state.tasks.length,completed=state.tasks.filter(t=>t.reviewed).length;return{total,completed,pending:total-completed}}
-function requiredSubjects(){return state.task&&state.task.case_type==="SINGLE"?[1]:[1,2]}
-function buildAssignment(subjects){state.assignment=new Map();for(const s of subjects)for(const id of s.identity_ids)state.assignment.set(id,s.subject_id)}
-function subjectsPayload(){return requiredSubjects().map(subject_id=>({subject_id,identity_ids:state.task.candidate_identity_ids.filter(id=>state.assignment.get(id)===subject_id)}))}
-function currentMeta(){return state.tasks.find(t=>t.submission_id===state.currentId)||null}
-function setDirty(value=true){state.dirty=value;$('dirtyBadge').hidden=!value}
+const state = {
+  tasks: [],
+  task: null,
+  currentId: null,
+  index: -1,
+  completed: false,
+  activeSubject: 1,
+  assignment: new Map(),
+  dirty: false,
+  statusFilter: localStorage.getItem(STORAGE.status) || "pending",
+  caseFilter: localStorage.getItem(STORAGE.case) || "all",
+  search: "",
+  view: {
+    query: { scale: 1, x: 0, y: 0 },
+    target: { scale: 1, x: 0, y: 0 },
+  },
+};
 
-function renderSummary(){
-  const {total,completed,pending}=stats(),pct=total?100*completed/total:0;
-  $('summary').textContent=`${completed} / ${total} reviewed · ${pending} remaining`;
-  $('progressFill').style.width=`${pct}%`;$('allCount').textContent=total;$('pendingCount').textContent=pending;$('reviewedCount').textContent=completed;
-  document.querySelectorAll('[data-status]').forEach(b=>b.classList.toggle('active',b.dataset.status===state.statusFilter));
+const $ = id => document.getElementById(id);
+
+function stats() {
+  const total = state.tasks.length;
+  const completed = state.tasks.filter(task => task.reviewed).length;
+  return { total, completed, pending: total - completed };
 }
-function filteredTasks(){
-  const q=state.search.trim().toLowerCase();
-  return state.tasks.filter(t=>{
-    if(state.statusFilter==="pending"&&t.reviewed)return false;if(state.statusFilter==="reviewed"&&!t.reviewed)return false;
-    if(state.caseFilter!=="all"&&t.case_type!==state.caseFilter)return false;
-    if(q&&!t.submission_id.toLowerCase().includes(q)&&!String(t.index+1).includes(q))return false;
+
+function requiredSubjects() {
+  return state.task?.case_type === "SINGLE" ? [1] : [1, 2];
+}
+
+function currentMeta() {
+  return state.tasks.find(task => task.submission_id === state.currentId) || null;
+}
+
+function buildAssignment(subjects) {
+  state.assignment = new Map();
+  for (const subject of subjects) {
+    for (const identityId of subject.identity_ids) {
+      state.assignment.set(identityId, subject.subject_id);
+    }
+  }
+}
+
+function subjectsPayload() {
+  return requiredSubjects().map(subjectId => ({
+    subject_id: subjectId,
+    identity_ids: state.task.candidate_identity_ids.filter(
+      identityId => state.assignment.get(identityId) === subjectId,
+    ),
+  }));
+}
+
+function setDirty(value = true) {
+  state.dirty = value;
+  $("dirtyBadge").hidden = !value;
+}
+
+function renderSummary() {
+  const { total, completed, pending } = stats();
+  $("summary").textContent = `${completed} / ${total} completed · ${pending} pending`;
+  $("progressFill").style.width = total ? `${100 * completed / total}%` : "0%";
+  $("allCount").textContent = total;
+  $("pendingCount").textContent = pending;
+  $("completedCount").textContent = completed;
+
+  document.querySelectorAll("[data-status]").forEach(button => {
+    button.classList.toggle("active", button.dataset.status === state.statusFilter);
+  });
+}
+
+function filteredTasks() {
+  const query = state.search.trim().toLowerCase();
+
+  return state.tasks.filter(task => {
+    if (state.statusFilter === "pending" && task.reviewed) return false;
+    if (state.statusFilter === "completed" && !task.reviewed) return false;
+    if (state.caseFilter !== "all" && task.case_type !== state.caseFilter) return false;
+
+    if (query) {
+      const number = String(task.index + 1);
+      if (!task.submission_id.toLowerCase().includes(query) && !number.includes(query)) {
+        return false;
+      }
+    }
     return true;
   });
 }
-function renderTaskList(){
-  const root=$('taskList');root.innerHTML='';const items=filteredTasks();
-  if(!items.length){const empty=document.createElement('div');empty.className='task-empty';empty.textContent='No tasks match the current filters.';root.appendChild(empty);return}
-  for(const item of items){
-    const b=document.createElement('button');b.className='task-item'+(item.submission_id===state.currentId?' active':'');b.title=item.submission_id;
-    const dot=document.createElement('span');dot.className='task-dot '+(item.reviewed?'reviewed':'pending');dot.textContent=item.reviewed?'✓':'○';
-    const number=document.createElement('span');number.className='task-number';number.textContent=`#${item.index+1}`;
-    const c=document.createElement('span');c.className='task-case';c.textContent=item.case_type;
-    b.append(dot,number,c);b.onclick=()=>requestLoad(item.submission_id);root.appendChild(b);
+
+function renderTaskList() {
+  const root = $("taskList");
+  root.innerHTML = "";
+  const items = filteredTasks();
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "task-empty";
+    empty.textContent = "No tasks match the current filters.";
+    root.appendChild(empty);
+    return;
   }
-  const active=root.querySelector('.task-item.active');if(active)active.scrollIntoView({block:'nearest'});
-}
-function renderHeader(){
-  const meta=currentMeta();if(!meta){$('taskTitle').textContent='No task';return}
-  $('taskTitle').textContent=`Task #${meta.index+1}`;$('taskId').textContent=meta.submission_id;$('caseBadge').textContent=state.task?.case_type||meta.case_type;
-  $('reviewBadge').textContent=state.reviewed?'✓ Reviewed':'○ Pending';$('reviewBadge').className='badge '+(state.reviewed?'reviewed':'pending');
-  $('saveOnly').textContent=state.reviewed?'Update Review':'Save';$('saveNext').textContent=state.reviewed?'Update & Next Pending':'Save & Next Pending';
-  $('prev').disabled=meta.index<=0;$('next').disabled=meta.index>=state.tasks.length-1;
-}
-function setCase(caseType){
-  if(!state.task||state.task.case_type===caseType)return;state.task.case_type=caseType;
-  if(caseType==="SINGLE"){for(const [id,subject] of [...state.assignment])if(subject===2)state.assignment.delete(id);state.activeSubject=1}
-  setDirty();renderCase();renderSubjects();renderBoxes();renderHeader();
-}
-function renderCase(){const root=$('cases');root.innerHTML='';if(!state.task)return;for(const name of CASES){const b=document.createElement('button');b.className='case'+(state.task.case_type===name?' active':'');b.textContent=name;b.onclick=()=>setCase(name);root.appendChild(b)}}
-function renderSubjects(){
-  const root=$('subjects');root.innerHTML='';if(!state.task)return;
-  for(const id of requiredSubjects()){const b=document.createElement('button');b.className=`subject s${id}`+(state.activeSubject===id?' active':'');b.textContent=`S${id}`;b.onclick=()=>{state.activeSubject=id;renderSubjects()};root.appendChild(b)}
-  const parts=requiredSubjects().map(id=>{const ok=[...state.assignment.values()].includes(id);return `<span class="${ok?'ok':'missing'}">S${id} ${ok?'✓':'—'}</span>`});$('subjectStatus').innerHTML=parts.join(' &nbsp; ');
-}
-function toggleIdentity(identityId){const current=state.assignment.get(identityId);if(current===state.activeSubject)state.assignment.delete(identityId);else state.assignment.set(identityId,state.activeSubject);setDirty();renderSubjects();renderBoxes()}
-function renderBoxes(){renderSide('query');renderSide('target')}
-function renderSide(side){
-  const root=$(side+'Boxes');root.innerHTML='';if(!state.task)return;
-  for(const box of state.task[side].boxes){const subject=state.assignment.get(box.identity_id),el=document.createElement('div');el.className='person-box'+(subject?` s${subject}`:'');Object.assign(el.style,{left:box.x+'%',top:box.y+'%',width:box.width+'%',height:box.height+'%'});el.onpointerdown=e=>e.stopPropagation();el.onclick=e=>{e.stopPropagation();toggleIdentity(box.identity_id)};if(subject){const tag=document.createElement('span');tag.className='box-tag';tag.textContent=`S${subject}`;el.appendChild(tag)}root.appendChild(el)}
-}
-function applyView(side){const v=state.view[side];$(side+'Stage').style.transform=`translate(${v.x}px,${v.y}px) scale(${v.scale})`;$(side+'Zoom').textContent=Math.round(v.scale*100)+'%'}
-function zoom(side,factor,cx=null,cy=null){const viewport=$(side+'Viewport'),v=state.view[side],rect=viewport.getBoundingClientRect(),px=cx===null?rect.width/2:cx-rect.left,py=cy===null?rect.height/2:cy-rect.top,old=v.scale,next=Math.min(5,Math.max(.5,old*factor));if(next===old)return;v.x=px-(px-v.x)*(next/old);v.y=py-(py-v.y)*(next/old);v.scale=next;applyView(side)}
-function resetView(side){state.view[side]={scale:1,x:0,y:0};applyView(side)}
-function setupViewport(side){const viewport=$(side+'Viewport');let drag=null;viewport.addEventListener('wheel',e=>{e.preventDefault();zoom(side,e.deltaY<0?1.12:1/1.12,e.clientX,e.clientY)},{passive:false});viewport.addEventListener('pointerdown',e=>{if(e.target.closest('.person-box'))return;drag={x:e.clientX,y:e.clientY,ox:state.view[side].x,oy:state.view[side].y};viewport.setPointerCapture(e.pointerId);viewport.classList.add('dragging')});viewport.addEventListener('pointermove',e=>{if(!drag)return;state.view[side].x=drag.ox+e.clientX-drag.x;state.view[side].y=drag.oy+e.clientY-drag.y;applyView(side)});const stop=()=>{drag=null;viewport.classList.remove('dragging')};viewport.addEventListener('pointerup',stop);viewport.addEventListener('pointercancel',stop)}
 
-async function loadTask(submissionId){
-  $('error').textContent='';$('saved').textContent='Loading…';const res=await fetch(`/api/task?id=${encodeURIComponent(submissionId)}`),data=await res.json();if(!res.ok)throw new Error(data.error||'Failed to load task');
-  state.index=data.index;state.currentId=data.task.submission_id;state.task=data.task;state.reviewed=data.reviewed;state.activeSubject=1;buildAssignment(data.task.subjects);resetView('query');resetView('target');setDirty(false);
-  const meta=currentMeta();if(meta){meta.reviewed=data.reviewed;meta.case_type=data.task.case_type}
-  $('queryImage').src=data.task.query.image_url;$('targetImage').src=data.task.target.image_url;$('finalDesc').value=data.task.final_desc;$('finalChange').value=data.task.final_change;$('original').textContent=JSON.stringify(data.task.original,null,2);$('saved').textContent=data.reviewed?'Loaded reviewed task':'';
-  localStorage.setItem(STORAGE.last,state.currentId);renderSummary();renderTaskList();renderHeader();renderCase();renderSubjects();renderBoxes();
-}
-async function requestLoad(submissionId){if(submissionId===state.currentId)return;if(state.dirty&&!window.confirm('You have unsaved changes. Discard them and open another task?'))return;try{await loadTask(submissionId)}catch(e){$('error').textContent=e.message}}
-function navigate(delta){const meta=currentMeta();if(!meta)return;const next=state.tasks[meta.index+delta];if(next)requestLoad(next.submission_id)}
-function nextPendingAfter(index){const after=state.tasks.slice(index+1).find(t=>!t.reviewed);if(after)return after;return state.tasks.slice(0,index).find(t=>!t.reviewed)||null}
-async function save(goNextPending){
-  if(!state.task)return false;$('error').textContent='';$('saved').textContent='Saving…';$('saveOnly').disabled=true;$('saveNext').disabled=true;
-  const payload={submission_id:state.task.submission_id,case_type:state.task.case_type,subjects:subjectsPayload(),final_desc:$('finalDesc').value.trim(),final_change:$('finalChange').value.trim()};
-  try{
-    const res=await fetch('/api/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),data=await res.json();if(!res.ok)throw new Error(data.error||'Save failed');
-    state.tasks=data.summary.tasks;state.reviewed=true;state.task.case_type=data.review.case_type;setDirty(false);$('saved').textContent='Saved';renderSummary();renderTaskList();renderHeader();
-    if(goNextPending){const next=nextPendingAfter(state.index);if(next)await loadTask(next.submission_id);else $('saved').textContent='Saved · all tasks reviewed'}return true;
-  }catch(e){$('saved').textContent='';$('error').textContent=e.message;return false}finally{$('saveOnly').disabled=false;$('saveNext').disabled=false}
-}
-async function init(){
-  const res=await fetch('/api/tasks'),data=await res.json();if(!res.ok)throw new Error(data.error||'Failed to load task catalog');state.tasks=data.tasks;renderSummary();renderTaskList();
-  if(!state.tasks.length){$('saved').textContent='No review tasks available.';return}
-  const last=localStorage.getItem(STORAGE.last),lastExists=state.tasks.some(t=>t.submission_id===last),firstPending=state.tasks.find(t=>!t.reviewed),initial=lastExists?last:(firstPending||state.tasks[0]).submission_id;await loadTask(initial);
+  for (const task of items) {
+    const button = document.createElement("button");
+    button.className = `task-item${task.submission_id === state.currentId ? " active" : ""}`;
+    button.title = task.submission_id;
+    button.onclick = () => requestLoad(task.submission_id);
+
+    const dot = document.createElement("span");
+    dot.className = `task-dot ${task.reviewed ? "completed" : "pending"}`;
+    dot.textContent = task.reviewed ? "✓" : "○";
+
+    const number = document.createElement("span");
+    number.className = "task-number";
+    number.textContent = `#${task.index + 1}`;
+
+    const caseType = document.createElement("span");
+    caseType.className = "task-case";
+    caseType.textContent = task.case_type;
+
+    button.append(dot, number, caseType);
+    root.appendChild(button);
+  }
+
+  root.querySelector(".task-item.active")?.scrollIntoView({ block: "nearest" });
 }
 
-for(const side of ['query','target'])setupViewport(side);
-document.querySelectorAll('[data-zoom]').forEach(b=>b.onclick=()=>zoom(b.dataset.zoom,b.dataset.delta==='1'?1.2:1/1.2));document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetView(b.dataset.reset));
-document.querySelectorAll('[data-status]').forEach(b=>b.onclick=()=>{state.statusFilter=b.dataset.status;localStorage.setItem(STORAGE.status,state.statusFilter);renderSummary();renderTaskList()});
-$('caseFilter').value=state.caseFilter;$('caseFilter').onchange=e=>{state.caseFilter=e.target.value;localStorage.setItem(STORAGE.case,state.caseFilter);renderTaskList()};$('taskSearch').oninput=e=>{state.search=e.target.value;renderTaskList()};
-$('prev').onclick=()=>navigate(-1);$('next').onclick=()=>navigate(1);$('saveOnly').onclick=()=>save(false);$('saveNext').onclick=()=>save(true);$('copyId').onclick=async()=>{if(!state.currentId)return;try{await navigator.clipboard.writeText(state.currentId);$('saved').textContent='Submission ID copied'}catch{$('saved').textContent='Could not copy ID'}};
-$('finalDesc').addEventListener('input',()=>setDirty());$('finalChange').addEventListener('input',()=>setDirty());
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();save(true);return}if(['TEXTAREA','INPUT','SELECT'].includes(document.activeElement.tagName))return;if(e.key==='1'&&state.task){state.activeSubject=1;renderSubjects()}if(e.key==='2'&&state.task&&requiredSubjects().includes(2)){state.activeSubject=2;renderSubjects()}});
-window.addEventListener('beforeunload',e=>{if(!state.dirty)return;e.preventDefault();e.returnValue=''});
-init().catch(e=>{$('error').textContent=e.message;$('saved').textContent='Failed to initialize review workspace'});
+function renderHeader() {
+  const meta = currentMeta();
+  if (!meta) {
+    $("taskTitle").textContent = "No task";
+    return;
+  }
+
+  $("taskTitle").textContent = `Task #${meta.index + 1}`;
+  $("taskId").textContent = meta.submission_id;
+  $("caseBadge").textContent = state.task?.case_type || meta.case_type;
+
+  const badge = $("statusBadge");
+  badge.textContent = state.completed ? "✓ Completed" : "○ Pending";
+  badge.className = `badge ${state.completed ? "completed" : "pending"}`;
+
+  $("saveOnly").textContent = state.completed ? "Update" : "Save";
+  $("saveNext").textContent = state.completed ? "Update & Next Pending" : "Save & Next Pending";
+  $("prev").disabled = meta.index <= 0;
+  $("next").disabled = meta.index >= state.tasks.length - 1;
+}
+
+function setCase(caseType) {
+  if (!state.task || state.task.case_type === caseType) return;
+
+  state.task.case_type = caseType;
+  if (caseType === "SINGLE") {
+    for (const [identityId, subjectId] of [...state.assignment]) {
+      if (subjectId === 2) state.assignment.delete(identityId);
+    }
+    state.activeSubject = 1;
+  }
+
+  const meta = currentMeta();
+  if (meta) meta.case_type = caseType;
+
+  setDirty();
+  renderCase();
+  renderSubjects();
+  renderBoxes();
+  renderHeader();
+  renderTaskList();
+}
+
+function renderCase() {
+  const root = $("cases");
+  root.innerHTML = "";
+  if (!state.task) return;
+
+  for (const caseType of CASES) {
+    const button = document.createElement("button");
+    button.className = `case${state.task.case_type === caseType ? " active" : ""}`;
+    button.textContent = caseType;
+    button.onclick = () => setCase(caseType);
+    root.appendChild(button);
+  }
+}
+
+function renderSubjects() {
+  const root = $("subjects");
+  root.innerHTML = "";
+  if (!state.task) return;
+
+  for (const subjectId of requiredSubjects()) {
+    const button = document.createElement("button");
+    button.className = `subject s${subjectId}${state.activeSubject === subjectId ? " active" : ""}`;
+    button.textContent = `S${subjectId}`;
+    button.onclick = () => {
+      state.activeSubject = subjectId;
+      renderSubjects();
+    };
+    root.appendChild(button);
+  }
+
+  $("subjectStatus").innerHTML = requiredSubjects()
+    .map(subjectId => {
+      const assigned = [...state.assignment.values()].includes(subjectId);
+      return `<span class="${assigned ? "ok" : "missing"}">S${subjectId} ${assigned ? "✓" : "—"}</span>`;
+    })
+    .join(" &nbsp; ");
+}
+
+function toggleIdentity(identityId) {
+  const current = state.assignment.get(identityId);
+  if (current === state.activeSubject) {
+    state.assignment.delete(identityId);
+  } else {
+    state.assignment.set(identityId, state.activeSubject);
+  }
+
+  setDirty();
+  renderSubjects();
+  renderBoxes();
+}
+
+function renderBoxes() {
+  renderSide("query");
+  renderSide("target");
+}
+
+function renderSide(side) {
+  const root = $(`${side}Boxes`);
+  root.innerHTML = "";
+  if (!state.task) return;
+
+  for (const box of state.task[side].boxes) {
+    const subjectId = state.assignment.get(box.identity_id);
+    const element = document.createElement("div");
+    element.className = `person-box${subjectId ? ` s${subjectId}` : ""}`;
+    Object.assign(element.style, {
+      left: `${box.x}%`,
+      top: `${box.y}%`,
+      width: `${box.width}%`,
+      height: `${box.height}%`,
+    });
+    element.onpointerdown = event => event.stopPropagation();
+    element.onclick = event => {
+      event.stopPropagation();
+      toggleIdentity(box.identity_id);
+    };
+
+    if (subjectId) {
+      const tag = document.createElement("span");
+      tag.className = "box-tag";
+      tag.textContent = `S${subjectId}`;
+      element.appendChild(tag);
+    }
+
+    root.appendChild(element);
+  }
+}
+
+function applyView(side) {
+  const view = state.view[side];
+  $(`${side}Stage`).style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+  $(`${side}Zoom`).textContent = `${Math.round(view.scale * 100)}%`;
+}
+
+function fitImageToViewport(side) {
+  const viewport = $(`${side}Viewport`);
+  const stage = $(`${side}Stage`);
+  const image = $(`${side}Image`);
+  if (!image.naturalWidth || !image.naturalHeight) return;
+
+  const viewportWidth = viewport.clientWidth;
+  const viewportHeight = viewport.clientHeight;
+  if (!viewportWidth || !viewportHeight) return;
+
+  const fit = Math.min(
+    viewportWidth / image.naturalWidth,
+    viewportHeight / image.naturalHeight,
+  );
+  const width = image.naturalWidth * fit;
+  const height = image.naturalHeight * fit;
+
+  stage.style.width = `${width}px`;
+  stage.style.height = `${height}px`;
+  state.view[side] = {
+    scale: 1,
+    x: (viewportWidth - width) / 2,
+    y: (viewportHeight - height) / 2,
+  };
+  applyView(side);
+}
+
+function zoom(side, factor, clientX = null, clientY = null) {
+  const viewport = $(`${side}Viewport`);
+  const view = state.view[side];
+  const rect = viewport.getBoundingClientRect();
+  const pointX = clientX === null ? rect.width / 2 : clientX - rect.left;
+  const pointY = clientY === null ? rect.height / 2 : clientY - rect.top;
+  const previous = view.scale;
+  const next = Math.min(5, Math.max(.5, previous * factor));
+  if (next === previous) return;
+
+  view.x = pointX - (pointX - view.x) * (next / previous);
+  view.y = pointY - (pointY - view.y) * (next / previous);
+  view.scale = next;
+  applyView(side);
+}
+
+function setupViewport(side) {
+  const viewport = $(`${side}Viewport`);
+  let drag = null;
+
+  viewport.addEventListener("wheel", event => {
+    event.preventDefault();
+    zoom(side, event.deltaY < 0 ? 1.12 : 1 / 1.12, event.clientX, event.clientY);
+  }, { passive: false });
+
+  viewport.addEventListener("pointerdown", event => {
+    if (event.target.closest(".person-box")) return;
+    drag = {
+      x: event.clientX,
+      y: event.clientY,
+      originX: state.view[side].x,
+      originY: state.view[side].y,
+    };
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add("dragging");
+  });
+
+  viewport.addEventListener("pointermove", event => {
+    if (!drag) return;
+    state.view[side].x = drag.originX + event.clientX - drag.x;
+    state.view[side].y = drag.originY + event.clientY - drag.y;
+    applyView(side);
+  });
+
+  const stopDrag = () => {
+    drag = null;
+    viewport.classList.remove("dragging");
+  };
+  viewport.addEventListener("pointerup", stopDrag);
+  viewport.addEventListener("pointercancel", stopDrag);
+}
+
+async function requestJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Request failed: ${response.status}`);
+  return data;
+}
+
+async function loadTask(submissionId) {
+  $("error").textContent = "";
+  $("saved").textContent = "Loading…";
+
+  const data = await requestJson(`/api/task?id=${encodeURIComponent(submissionId)}`);
+  state.index = data.index;
+  state.currentId = data.task.submission_id;
+  state.task = data.task;
+  state.completed = data.reviewed;
+  state.activeSubject = 1;
+  buildAssignment(data.task.subjects);
+  setDirty(false);
+
+  const meta = currentMeta();
+  if (meta) {
+    meta.reviewed = data.reviewed;
+    meta.case_type = data.task.case_type;
+  }
+
+  $("queryImage").src = data.task.query.image_url;
+  $("targetImage").src = data.task.target.image_url;
+  $("finalDesc").value = data.task.final_desc;
+  $("finalChange").value = data.task.final_change;
+  $("original").textContent = JSON.stringify(data.task.original, null, 2);
+  $("saved").textContent = data.reviewed ? "Loaded completed task" : "";
+
+  localStorage.setItem(STORAGE.last, state.currentId);
+  renderSummary();
+  renderTaskList();
+  renderHeader();
+  renderCase();
+  renderSubjects();
+  renderBoxes();
+}
+
+async function requestLoad(submissionId) {
+  if (submissionId === state.currentId) return;
+  if (state.dirty && !window.confirm("You have unsaved changes. Discard them and open another task?")) {
+    return;
+  }
+
+  try {
+    await loadTask(submissionId);
+  } catch (error) {
+    $("error").textContent = error.message;
+  }
+}
+
+function navigate(delta) {
+  const meta = currentMeta();
+  if (!meta) return;
+  const next = state.tasks[meta.index + delta];
+  if (next) requestLoad(next.submission_id);
+}
+
+function nextPendingAfter(index) {
+  return state.tasks.slice(index + 1).find(task => !task.reviewed)
+    || state.tasks.slice(0, index).find(task => !task.reviewed)
+    || null;
+}
+
+async function save(goNextPending) {
+  if (!state.task) return false;
+
+  $("error").textContent = "";
+  $("saved").textContent = "Saving…";
+  $("saveOnly").disabled = true;
+  $("saveNext").disabled = true;
+
+  const payload = {
+    submission_id: state.task.submission_id,
+    case_type: state.task.case_type,
+    subjects: subjectsPayload(),
+    final_desc: $("finalDesc").value.trim(),
+    final_change: $("finalChange").value.trim(),
+  };
+
+  try {
+    const data = await requestJson("/api/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    state.tasks = data.summary.tasks;
+    state.completed = true;
+    state.task.case_type = data.review.case_type;
+    setDirty(false);
+    $("saved").textContent = "Saved";
+    renderSummary();
+    renderTaskList();
+    renderHeader();
+
+    if (goNextPending) {
+      const next = nextPendingAfter(state.index);
+      if (next) {
+        await loadTask(next.submission_id);
+      } else {
+        $("saved").textContent = "Saved · all tasks completed";
+      }
+    }
+    return true;
+  } catch (error) {
+    $("saved").textContent = "";
+    $("error").textContent = error.message;
+    return false;
+  } finally {
+    $("saveOnly").disabled = false;
+    $("saveNext").disabled = false;
+  }
+}
+
+async function init() {
+  const data = await requestJson("/api/tasks");
+  state.tasks = data.tasks;
+  renderSummary();
+  renderTaskList();
+
+  if (!state.tasks.length) {
+    $("saved").textContent = "No review tasks available.";
+    return;
+  }
+
+  const last = localStorage.getItem(STORAGE.last);
+  const lastExists = state.tasks.some(task => task.submission_id === last);
+  const firstPending = state.tasks.find(task => !task.reviewed);
+  const initial = lastExists ? last : (firstPending || state.tasks[0]).submission_id;
+  await loadTask(initial);
+}
+
+for (const side of ["query", "target"]) {
+  setupViewport(side);
+  $(`${side}Image`).addEventListener("load", () => fitImageToViewport(side));
+}
+
+window.addEventListener("resize", () => {
+  for (const side of ["query", "target"]) fitImageToViewport(side);
+});
+
+document.querySelectorAll("[data-zoom]").forEach(button => {
+  button.onclick = () => zoom(
+    button.dataset.zoom,
+    button.dataset.delta === "1" ? 1.2 : 1 / 1.2,
+  );
+});
+
+document.querySelectorAll("[data-reset]").forEach(button => {
+  button.onclick = () => fitImageToViewport(button.dataset.reset);
+});
+
+document.querySelectorAll("[data-status]").forEach(button => {
+  button.onclick = () => {
+    state.statusFilter = button.dataset.status;
+    localStorage.setItem(STORAGE.status, state.statusFilter);
+    renderSummary();
+    renderTaskList();
+  };
+});
+
+$("caseFilter").value = state.caseFilter;
+$("caseFilter").onchange = event => {
+  state.caseFilter = event.target.value;
+  localStorage.setItem(STORAGE.case, state.caseFilter);
+  renderTaskList();
+};
+
+$("taskSearch").oninput = event => {
+  state.search = event.target.value;
+  renderTaskList();
+};
+
+$("prev").onclick = () => navigate(-1);
+$("next").onclick = () => navigate(1);
+$("saveOnly").onclick = () => save(false);
+$("saveNext").onclick = () => save(true);
+$("copyId").onclick = async () => {
+  if (!state.currentId) return;
+  try {
+    await navigator.clipboard.writeText(state.currentId);
+    $("saved").textContent = "Submission ID copied";
+  } catch {
+    $("saved").textContent = "Could not copy ID";
+  }
+};
+
+$("finalDesc").addEventListener("input", () => setDirty());
+$("finalChange").addEventListener("input", () => setDirty());
+
+document.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    save(true);
+    return;
+  }
+
+  if (["TEXTAREA", "INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (event.key === "1" && state.task) {
+    state.activeSubject = 1;
+    renderSubjects();
+  }
+  if (event.key === "2" && state.task && requiredSubjects().includes(2)) {
+    state.activeSubject = 2;
+    renderSubjects();
+  }
+});
+
+window.addEventListener("beforeunload", event => {
+  if (!state.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+init().catch(error => {
+  $("error").textContent = error.message;
+  $("saved").textContent = "Failed to initialize review workspace";
+});
 </script>
 </body>
 </html>
