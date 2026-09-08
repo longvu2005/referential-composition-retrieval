@@ -64,7 +64,7 @@ def test_build_final_dataset_preserves_expanded_positives() -> None:
         selected=_selected(),
         reviewed=_reviewed(),
         positive_sets=[
-            {"submission_id": "sample-1", "target_image_ids": ["1_2", "1_3"]}
+            {"submission_id": "sample-1", "positive_image_ids": ["1_2", "1_3"]}
         ],
         pair_data=_pair_data(),
         index_lines=_index(),
@@ -72,7 +72,8 @@ def test_build_final_dataset_preserves_expanded_positives() -> None:
     )
 
     sample = dataset["samples"][0]
-    assert sample["target_image_ids"] == ["1_2", "1_3"]
+    assert sample["target_image_id"] == "1_2"
+    assert sample["positive_image_ids"] == ["1_2", "1_3"]
     assert sample["case_type"] == "SINGLE"
     assert sample["subjects"] == [{"subject_id": 1, "identity_ids": ["7"]}]
     assert sample["final_instruction"] == (
@@ -89,7 +90,7 @@ def test_build_final_dataset_falls_back_to_original_case_when_case_is_missing() 
     dataset = build_final_dataset(
         selected=_selected(),
         reviewed=reviewed,
-        positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+        positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
         pair_data=_pair_data(),
         index_lines=_index(),
         version="test",
@@ -103,7 +104,7 @@ def test_build_final_dataset_requires_seed_positive() -> None:
         build_final_dataset(
             selected=_selected(),
             reviewed=_reviewed(),
-            positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_3"]}],
+            positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_3"]}],
             pair_data=_pair_data(),
             index_lines=_index(),
             version="test",
@@ -117,7 +118,7 @@ def test_build_final_dataset_rejects_duplicate_review_ids() -> None:
         build_final_dataset(
             selected=_selected(),
             reviewed=reviewed,
-            positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+            positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
             pair_data=_pair_data(),
             index_lines=_index(),
             version="test",
@@ -132,7 +133,7 @@ def test_build_final_dataset_rejects_invalid_review_case_type() -> None:
         build_final_dataset(
             selected=_selected(),
             reviewed=reviewed,
-            positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+            positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
             pair_data=_pair_data(),
             index_lines=_index(),
             version="test",
@@ -140,14 +141,14 @@ def test_build_final_dataset_rejects_invalid_review_case_type() -> None:
 
 
 def test_build_final_dataset_rejects_malformed_positive_set() -> None:
-    with pytest.raises(ValueError, match="target_image_ids must be"):
+    with pytest.raises(ValueError, match="positive_image_ids must be"):
         build_final_dataset(
             selected=_selected(),
             reviewed=_reviewed(),
             positive_sets=[
                 {
                     "submission_id": "sample-1",
-                    "target_image_ids": ["1_2", "1_2"],
+                    "positive_image_ids": ["1_2", "1_2"],
                 }
             ],
             pair_data=_pair_data(),
@@ -164,7 +165,7 @@ def test_build_final_dataset_revalidates_reviewed_rewrite() -> None:
         build_final_dataset(
             selected=_selected(),
             reviewed=reviewed,
-            positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+            positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
             pair_data=_pair_data(),
             index_lines=_index(),
             version="test",
@@ -185,7 +186,7 @@ def test_build_final_dataset_uses_reviewed_subject_identities() -> None:
         selected=_selected(),
         reviewed=reviewed,
         positive_sets=[
-            {"submission_id": "sample-1", "target_image_ids": ["1_2", "1_3"]}
+            {"submission_id": "sample-1", "positive_image_ids": ["1_2", "1_3"]}
         ],
         pair_data=_pair_data(),
         index_lines=index_lines,
@@ -207,7 +208,7 @@ def test_build_final_dataset_rejects_reviewed_identity_missing_from_query() -> N
         build_final_dataset(
             selected=_selected(),
             reviewed=reviewed,
-            positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+            positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
             pair_data=_pair_data(),
             index_lines=_index(),
             version="test",
@@ -239,7 +240,7 @@ def test_build_final_dataset_allows_single_to_multi_case_change() -> None:
     dataset = build_final_dataset(
         selected=_selected(),
         reviewed=reviewed,
-        positive_sets=[{"submission_id": "sample-1", "target_image_ids": ["1_2"]}],
+        positive_sets=[{"submission_id": "sample-1", "positive_image_ids": ["1_2"]}],
         pair_data=_pair_data(),
         index_lines=index_lines,
         version="test",

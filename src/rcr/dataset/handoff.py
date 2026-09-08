@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from rcr.dataset.review import normalize_review_subjects
 from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
 
 JsonObject = dict[str, Any]
+CandidateRanker = Callable[[str, list[tuple[str, str]]], list[str]]
 
 
 def _build_metadata(
@@ -201,6 +202,7 @@ def prepare_positive_set_inputs(
     reviewed: list[JsonObject],
     pair_data: JsonObject,
     index_lines: Iterable[str],
+    candidate_ranker: CandidateRanker | None = None,
 ) -> list[JsonObject]:
     """Build identity-compatible candidates for Full Positive labeling."""
 
@@ -266,7 +268,26 @@ def prepare_positive_set_inputs(
         if seed_id not in candidate_ids:
             raise ValueError(f"seed target {seed_id} is not identity-compatible")
 
-        ordered_ids = [seed_id, *sorted(candidate_ids - {seed_id})]
+        non_seed_ids = sorted(candidate_ids - {seed_id})
+        if candidate_ranker is not None:
+            ranked_ids = candidate_ranker(
+                review["final_change"],
+                [
+                    (image_id, image_by_id[image_id]["url"])
+                    for image_id in non_seed_ids
+                ],
+            )
+            if len(ranked_ids) != len(non_seed_ids) or set(ranked_ids) != set(
+                non_seed_ids
+            ):
+                raise ValueError(
+                    f"{submission_id}: candidate reranker must return every "
+                    "non-seed candidate exactly once"
+                )
+        else:
+            ranked_ids = non_seed_ids
+
+        ordered_ids = [seed_id, *ranked_ids]
         candidates = []
         for image_id in ordered_ids:
             subject_boxes = [
@@ -297,7 +318,7 @@ def prepare_positive_set_inputs(
                 "final_desc": review["final_desc"],
                 "final_change": review["final_change"],
                 "candidates": candidates,
-                "target_image_ids": [seed_id],
+                "positive_image_ids": [seed_id],
             }
         )
 

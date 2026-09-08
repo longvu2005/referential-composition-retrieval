@@ -263,7 +263,7 @@ Subject identities, Query Subject boxes, and an identity-compatible `candidates`
 list. Candidate construction uses the reviewed `subjects[].identity_ids`, not the
 original annotation assignment. A candidate is included only when it contains
 every required identity and is not the query image. The seed target is always
-first, and `target_image_ids` starts with that seed.
+first, and `positive_image_ids` starts with that seed.
 
 Human labeling remains file-based under `dataset/data/work/`. Rewrite review uses
 the repo-local UI and writes canonical `reviewed.jsonl` directly. Full Positive
@@ -314,7 +314,8 @@ Each line of `samples.jsonl` is one JSON object:
   "sample_id": "...",
   "case_type": "SINGLE | MULTI | RELATIONAL",
   "query_image_id": "...",
-  "target_image_ids": ["..."],
+  "target_image_id": "...",
+  "positive_image_ids": ["..."],
   "subjects": [
     {
       "subject_id": 1,
@@ -326,6 +327,10 @@ Each line of `samples.jsonl` is one JSON object:
   "final_instruction": "..."
 }
 ```
+
+`target_image_id` is the canonical seed target from the original pair, while
+`positive_image_ids` is the complete reviewed positive set and must contain that
+canonical target.
 
 The final builder composes `final_instruction` as
 `<final_desc>; <final_change>.` and checks only construction invariants that can be

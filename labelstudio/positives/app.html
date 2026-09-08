@@ -627,8 +627,8 @@ function renderTask(payload) {
   state.current = task;
   state.currentIndex = payload.index;
   state.completed = payload.is_completed;
-  state.selected = new Set(task.target_image_ids);
-  state.savedSelection = new Set(task.target_image_ids);
+  state.selected = new Set(task.positive_image_ids);
+  state.savedSelection = new Set(task.positive_image_ids);
   state.selectedOnly = false;
   setDirty(false);
 
@@ -773,7 +773,7 @@ async function save(goNextPending) {
   $("saveOnly").disabled = true;
   $("saveNext").disabled = true;
 
-  const targetImageIds = state.current.candidates
+  const positiveImageIds = state.current.candidates
     .map(candidate => candidate.image_id)
     .filter(imageId => state.selected.has(imageId));
 
@@ -783,14 +783,14 @@ async function save(goNextPending) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         submission_id: state.current.submission_id,
-        target_image_ids: targetImageIds,
+        positive_image_ids: positiveImageIds,
       }),
     });
 
     state.tasks = data.summary.tasks;
     state.completed = true;
-    state.savedSelection = new Set(data.positive.target_image_ids);
-    state.selected = new Set(data.positive.target_image_ids);
+    state.savedSelection = new Set(data.positive.positive_image_ids);
+    state.selected = new Set(data.positive.positive_image_ids);
     setDirty(false);
     $("saved").textContent = "Saved";
 

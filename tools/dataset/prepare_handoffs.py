@@ -56,12 +56,15 @@ def main() -> None:
         outputs = merge_handoff_catalog(load_optional(REVIEW_INPUT), prepared)
         output_path = REVIEW_INPUT
     else:
+        from rcr.dataset.clip_rerank import ClipChangeRanker
+
         completed = load_optional(POSITIVE_SETS)
         prepared = prepare_positive_set_inputs(
             selected=selected,
             reviewed=load_jsonl(REVIEWED),
             pair_data=pair_data,
             index_lines=index_lines,
+            candidate_ranker=ClipChangeRanker(),
         )
         outputs = merge_handoff_catalog(load_optional(POSITIVE_INPUT), prepared)
         output_path = POSITIVE_INPUT

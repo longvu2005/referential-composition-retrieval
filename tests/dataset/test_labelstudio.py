@@ -74,7 +74,7 @@ def _source(submission_id: str = "s1") -> dict:
                 "subject_boxes": [],
             },
         ],
-        "target_image_ids": ["1_2"],
+        "positive_image_ids": ["1_2"],
     }
 
 
@@ -108,7 +108,7 @@ def test_load_box_index_recovers_boxes_missing_from_pair_data(tmp_path) -> None:
 def test_positive_task_payload_keeps_query_and_candidate_boxes_read_only() -> None:
     task = build_task_payload(_source(), BOXES)
 
-    assert task["target_image_ids"] == ["1_2"]
+    assert task["positive_image_ids"] == ["1_2"]
     assert task["query"]["boxes"][0]["subject_id"] == 1
     assert task["query"]["boxes"][0]["x"] == pytest.approx(10.0)
     assert task["candidates"][0]["is_seed"] is True
@@ -121,25 +121,25 @@ def test_positive_submission_requires_seed_and_rejects_unknown_candidates() -> N
     with pytest.raises(ValueError, match="seed target must remain selected"):
         validate_submission(
             source,
-            {"submission_id": "s1", "target_image_ids": ["1_3"]},
+            {"submission_id": "s1", "positive_image_ids": ["1_3"]},
         )
 
-    with pytest.raises(ValueError, match="invalid target_image_id"):
+    with pytest.raises(ValueError, match="invalid positive_image_id"):
         validate_submission(
             source,
-            {"submission_id": "s1", "target_image_ids": ["1_2", "unknown"]},
+            {"submission_id": "s1", "positive_image_ids": ["1_2", "unknown"]},
         )
 
 
 def test_positive_submission_uses_canonical_candidate_order() -> None:
     row = validate_submission(
         _source(),
-        {"submission_id": "s1", "target_image_ids": ["1_3", "1_2"]},
+        {"submission_id": "s1", "positive_image_ids": ["1_3", "1_2"]},
     )
 
     assert row == {
         "submission_id": "s1",
-        "target_image_ids": ["1_2", "1_3"],
+        "positive_image_ids": ["1_2", "1_3"],
     }
 
 
@@ -150,7 +150,7 @@ def test_positive_state_loads_cumulative_catalog(tmp_path, monkeypatch) -> None:
     write_jsonl(input_path, [_source("s1"), _source("s2")])
     write_jsonl(
         output_path,
-        [{"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]}],
+        [{"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]}],
     )
     monkeypatch.setattr(positive_app, "INPUT", input_path)
     monkeypatch.setattr(positive_app, "OUTPUT", output_path)
@@ -160,7 +160,7 @@ def test_positive_state_loads_cumulative_catalog(tmp_path, monkeypatch) -> None:
 
     assert state.tasks()["completed"] == 1
     assert state.task(submission_id="s1")["is_completed"] is True
-    assert state.task(submission_id="s1")["task"]["target_image_ids"] == [
+    assert state.task(submission_id="s1")["task"]["positive_image_ids"] == [
         "1_2",
         "1_3",
     ]
@@ -171,7 +171,7 @@ def test_positive_state_tasks_keeps_completed_tasks_visible() -> None:
     state = PositiveState.__new__(PositiveState)
     state.rows = [first, second]
     state.positives = {
-        "s1": {"submission_id": "s1", "target_image_ids": ["1_2"]}
+        "s1": {"submission_id": "s1", "positive_image_ids": ["1_2"]}
     }
 
     summary = state.tasks()
@@ -194,12 +194,12 @@ def test_positive_state_save_writes_catalog_order(tmp_path, monkeypatch) -> None
     state.lock = threading.Lock()
     monkeypatch.setattr(positive_app, "OUTPUT", output)
 
-    state.save({"submission_id": "s2", "target_image_ids": ["1_2"]})
-    state.save({"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]})
+    state.save({"submission_id": "s2", "positive_image_ids": ["1_2"]})
+    state.save({"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]})
 
     assert load_jsonl(output) == [
-        {"submission_id": "s1", "target_image_ids": ["1_2", "1_3"]},
-        {"submission_id": "s2", "target_image_ids": ["1_2"]},
+        {"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]},
+        {"submission_id": "s2", "positive_image_ids": ["1_2"]},
     ]
 
 

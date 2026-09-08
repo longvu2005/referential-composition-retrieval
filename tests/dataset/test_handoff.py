@@ -116,7 +116,7 @@ def test_prepare_positive_set_inputs_filters_by_all_required_identities() -> Non
     ]
     assert output["candidates"][0]["is_seed"] is True
     assert output["case_type"] == "RELATIONAL"
-    assert output["target_image_ids"] == ["1_2"]
+    assert output["positive_image_ids"] == ["1_2"]
 
 
 

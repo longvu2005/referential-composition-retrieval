@@ -79,11 +79,11 @@ Each canonical record remains:
 ```json
 {
   "submission_id": "sample_000001",
-  "target_image_ids": ["seed_image_id", "additional_positive_id"]
+  "positive_image_ids": ["seed_image_id", "additional_positive_id"]
 }
 ```
 
-Target IDs are stored in canonical candidate order, so repeated saves are
+Positive image IDs are stored in canonical candidate order, so repeated saves are
 deterministic.
 
 ## Incremental behavior

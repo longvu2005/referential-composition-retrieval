@@ -65,10 +65,10 @@ def _validate_handoffs(
             },
         )
 
-        targets = positives_by_id[submission_id]["target_image_ids"]
-        if not targets or len(targets) != len(set(targets)):
+        positive_ids = positives_by_id[submission_id]["positive_image_ids"]
+        if not positive_ids or len(positive_ids) != len(set(positive_ids)):
             raise ValueError(
-                f"{submission_id}: target_image_ids must be non-empty and unique"
+                f"{submission_id}: positive_image_ids must be non-empty and unique"
             )
 
 
@@ -130,12 +130,12 @@ def build_final_dataset(
     for source in selected:
         submission_id = source["submission_id"]
         review = reviewed_by_id[submission_id]
-        targets = positives_by_id[submission_id]["target_image_ids"]
+        positive_ids = positives_by_id[submission_id]["positive_image_ids"]
 
-        if source["target_image_id"] not in targets:
+        if source["target_image_id"] not in positive_ids:
             raise ValueError(f"{submission_id}: missing seed positive")
 
-        if source["query_image_id"] in targets:
+        if source["query_image_id"] in positive_ids:
             raise ValueError(f"{submission_id}: query image is positive")
 
         case_type = review.get(
@@ -159,12 +159,12 @@ def build_final_dataset(
                 f"{submission_id}: reviewed identities must appear in the query image"
             )
 
-        for target in targets:
+        for positive_id in positive_ids:
             if (
-                target not in gallery_ids
-                or not required_ids <= identities_by_image[target]
+                positive_id not in gallery_ids
+                or not required_ids <= identities_by_image[positive_id]
             ):
-                raise ValueError(f"{submission_id}: invalid positive {target}")
+                raise ValueError(f"{submission_id}: invalid positive {positive_id}")
 
         final_desc = review["final_desc"].strip()
         final_change = review["final_change"].strip()
@@ -174,7 +174,8 @@ def build_final_dataset(
                 "sample_id": submission_id,
                 "case_type": case_type,
                 "query_image_id": source["query_image_id"],
-                "target_image_ids": targets,
+                "target_image_id": source["target_image_id"],
+                "positive_image_ids": positive_ids,
                 "subjects": subjects,
                 "final_desc": final_desc,
                 "final_change": final_change,

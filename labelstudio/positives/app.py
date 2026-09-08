@@ -91,28 +91,28 @@ def validate_submission(source: dict, payload: dict) -> dict:
         raise ValueError(f"{submission_id}: submission_id mismatch")
 
     candidate_ids = _candidate_ids(source)
-    target_ids = payload.get("target_image_ids")
-    if not isinstance(target_ids, list) or any(
-        not isinstance(image_id, str) or not image_id for image_id in target_ids
+    positive_ids = payload.get("positive_image_ids")
+    if not isinstance(positive_ids, list) or any(
+        not isinstance(image_id, str) or not image_id for image_id in positive_ids
     ):
-        raise ValueError(f"{submission_id}: target_image_ids must be a string list")
-    if len(set(target_ids)) != len(target_ids):
-        raise ValueError(f"{submission_id}: duplicate target_image_id")
+        raise ValueError(f"{submission_id}: positive_image_ids must be a string list")
+    if len(set(positive_ids)) != len(positive_ids):
+        raise ValueError(f"{submission_id}: duplicate positive_image_id")
 
-    invalid = set(target_ids) - set(candidate_ids)
+    invalid = set(positive_ids) - set(candidate_ids)
     if invalid:
         raise ValueError(
-            f"{submission_id}: invalid target_image_id {sorted(invalid)[0]}"
+            f"{submission_id}: invalid positive_image_id {sorted(invalid)[0]}"
         )
 
     seed_id = source["seed_target_image_id"]
-    if seed_id not in target_ids:
+    if seed_id not in positive_ids:
         raise ValueError(f"{submission_id}: seed target must remain selected")
 
-    selected = set(target_ids)
+    selected = set(positive_ids)
     return {
         "submission_id": submission_id,
-        "target_image_ids": [
+        "positive_image_ids": [
             image_id for image_id in candidate_ids if image_id in selected
         ],
     }
@@ -127,7 +127,7 @@ def build_task_payload(
 
     candidate_ids = _candidate_ids(row)
     selected = (
-        validate_submission(row, positive)["target_image_ids"]
+        validate_submission(row, positive)["positive_image_ids"]
         if positive is not None
         else [row["seed_target_image_id"]]
     )
@@ -167,7 +167,7 @@ def build_task_payload(
         "final_desc": row["final_desc"],
         "final_change": row["final_change"],
         "candidates": candidates,
-        "target_image_ids": selected,
+        "positive_image_ids": selected,
     }
 
 

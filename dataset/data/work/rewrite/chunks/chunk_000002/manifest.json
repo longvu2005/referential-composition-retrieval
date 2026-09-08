@@ -1,6 +1,6 @@
 {
   "chunk_id": "chunk_000002",
-  "state": "LOCAL_READY",
+  "state": "JOB_STATE_SUCCEEDED",
   "model": "gemini-3.6-flash",
   "prompt_sha256": "dec640bf0438009836e1db1fa710aa02101da69a80dbb70e6442693a4395c10c",
   "num_requests": 1000,
@@ -1006,9 +1006,11 @@
     "cmqdybrn30nqi01npi2lf8ypn",
     "cmqauksmj03o001np59qpbuup"
   ],
-  "uploaded_file": null,
-  "batch_name": null,
+  "uploaded_file": "files/swgbvbu5evhg",
+  "batch_name": "batches/mf3iv0g5ya2rch9v371556b13zx17i3gbf15",
   "created_at": "2026-08-25T19:32:03.679971+00:00",
-  "submitted_at": null,
-  "collected_at": null
+  "submitted_at": "2026-09-01T05:12:47.562073+00:00",
+  "collected_at": "2026-09-01T05:21:28.700391+00:00",
+  "num_succeeded": 987,
+  "num_failed": 13
 }
