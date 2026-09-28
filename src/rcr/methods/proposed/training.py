@@ -89,9 +89,27 @@ def compute_loss(
         person_mask &= subject_mask[:, :, None].bool()
 
     loss_ground = grounding_loss(logits, batch["grounding_targets"], person_mask)
+    query_labels = batch["query_identity_labels"]
+    target_labels = batch["target_identity_labels"]
+    query_keep = query_labels >= 0
+    if query_person_mask is not None:
+        query_keep &= query_person_mask.bool()
+    if "query_identity_mask" in batch:
+        query_keep &= batch["query_identity_mask"].bool()
+
+    # Share the query/target label vocabulary and learn from positive images.
+    # Retrieval negatives, padding, unknown IDs and duplicate crops are excluded.
+    target_keep = (target_labels >= 0) & batch["positive_mask"][:, :, None].bool()
+    if "target_mask" in batch:
+        target_keep &= batch["target_mask"].bool()
+    if "candidate_mask" in batch:
+        target_keep &= batch["candidate_mask"][:, :, None].bool()
+    if "target_identity_mask" in batch:
+        target_keep &= batch["target_identity_mask"].bool()
+    target_identity = model.identity_head(batch["target_persons"][target_keep])
     loss_identity = identity_loss(
-        query_identity,
-        batch["query_identity_labels"],
+        torch.cat((query_identity[query_keep], target_identity), dim=0),
+        torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),
         temperature=identity_temperature,
     )
     loss_retrieval = retrieval_loss(

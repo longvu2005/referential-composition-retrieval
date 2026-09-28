@@ -47,8 +47,24 @@ def build_cache(
     gt_heads_by_image: dict[str, list[dict]] | None = None,
     detector_threshold: float = 0.3,
     detector_text_threshold: float = 0.25,
+    storage_dtype: str = "float32",
 ) -> None:
     """Encode gallery images and write a cache compatible with GalleryCache."""
+
+    storage_dtypes = {"float32": torch.float32, "float16": torch.float16}
+    if storage_dtype not in storage_dtypes:
+        raise ValueError("storage_dtype must be float32 or float16")
+    feature_dtype = storage_dtypes[storage_dtype]
+
+    def compact_cpu(value: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        # CLS/patch slices share the backbone output's storage. Even a
+        # contiguous one-person CLS slice needs a copy to own compact storage.
+        return value.detach().to(
+            device="cpu",
+            dtype=dtype,
+            copy=True,
+            memory_format=torch.contiguous_format,
+        )
 
     root = Path(root)
     feature_dir = root / "features"
@@ -119,24 +135,25 @@ def build_cache(
 
         scene_size = (int(scene_pixels.shape[-1]), int(scene_pixels.shape[-2]))
         boxes_scene = boxes_to_scene(persons, image.size, scene_size)
+        cached_persons = compact_cpu(person_features, feature_dtype)
 
         torch.save(
             {
-                "scene": scene[0].cpu(),
-                "persons": person_features.cpu(),
+                "scene": compact_cpu(scene[0], feature_dtype),
+                "persons": cached_persons,
                 "identity_ids": identity_ids,
-                "boxes_scene": boxes_scene.cpu(),
+                "boxes_scene": compact_cpu(boxes_scene, torch.float32),
             },
             feature_dir / f"{index}.pt",
         )
-        all_persons.append(person_features.cpu())
+        all_persons.append(cached_persons)
 
     if patch_hw is None:
         raise ValueError("gallery is empty")
 
     k = max((x.shape[0] for x in all_persons), default=0)
     dim = all_persons[0].shape[-1] if all_persons else 0
-    person_index = torch.zeros(len(all_persons), k, dim)
+    person_index = torch.zeros(len(all_persons), k, dim, dtype=feature_dtype)
     mask = torch.zeros(len(all_persons), k, dtype=torch.bool)
     for i, value in enumerate(all_persons):
         person_index[i, : value.shape[0]] = value
@@ -148,6 +165,7 @@ def build_cache(
             "persons": person_index,
             "mask": mask,
             "patch_hw": patch_hw,
+            "storage_dtype": storage_dtype,
         },
         root / "index.pt",
     )
@@ -227,6 +245,7 @@ def main() -> None:
         gt_heads_by_image=data.gt_head_boxes_by_image,
         detector_threshold=detector_cfg["threshold"],
         detector_text_threshold=detector_cfg["text_threshold"],
+        storage_dtype=cfg.get("cache", {}).get("storage_dtype", "float32"),
     )
 
 

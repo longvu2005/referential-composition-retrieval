@@ -14,4 +14,9 @@ image_encoder:
   scene_size: [512, 512]
   person_size: [384, 192]
 
+cache:
+  # float16 halves feature storage; decoded features are cast to float32.
+  # Keep float32 to preserve the existing numerical baseline.
+  storage_dtype: float32
+
 device: auto

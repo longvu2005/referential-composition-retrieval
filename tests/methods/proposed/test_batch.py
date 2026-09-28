@@ -1,7 +1,11 @@
+import pytest
 import torch
 from torch import nn
 
 from rcr.methods.proposed.batch import build_batch, build_supervision
+from rcr.methods.proposed.cache import GalleryCache
+from rcr.methods.proposed.model import RCRModel
+from rcr.methods.proposed.training import compute_loss
 
 
 class _Tokenizer:
@@ -55,6 +59,10 @@ class _Cache:
                 ids.append(["10", "20", None])
             elif image_id == "q2":
                 ids.append(["10", "30", None])
+            elif image_id == "p1":
+                ids.append(["20", "10", None])
+            elif image_id == "p2":
+                ids.append(["30", "40", None])
             else:
                 ids.append([None, None, None])
         mask = torch.tensor([[True, True, False]] * n)
@@ -195,3 +203,86 @@ def test_build_batch_tracks_repeated_subject_mentions() -> None:
     assert mentions[1].sum() == 2
     assert mentions[0, batch["subject_pos"][0, 0]]
     assert mentions[1, batch["subject_pos"][0, 1]]
+
+
+def test_query_and_target_identities_share_labels() -> None:
+    batch = build_batch(
+        _samples(),
+        [["p1", "n1"], ["n2", "p2"]],
+        _Cache(),
+        _Tokenizer(),
+        _TextEncoder(),
+        "cpu",
+    )
+    assert batch["query_identity_labels"].tolist() == [[0, 1, -1], [0, 2, -1]]
+    assert batch["target_identity_labels"].tolist() == [
+        [[1, 0, -1], [-1, -1, -1]],
+        [[-1, -1, -1], [2, 3, -1]],
+    ]
+    assert batch["query_identity_mask"].tolist() == [[True, True, False]] * 2
+    assert batch["target_identity_mask"].tolist() == [
+        [[True, True, False], [False, False, False]],
+        [[False, False, False], [True, True, False]],
+    ]
+
+
+def test_identity_masks_deduplicate_images_across_queries_and_targets() -> None:
+    sample = {**_samples()[0], "positive_image_ids": ["q1", "p1"]}
+    batch = build_batch(
+        [sample, sample],
+        [["q1", "p1", "p2"], ["p1", "p1", "p2"]],
+        _Cache(),
+        _Tokenizer(),
+        _TextEncoder(),
+        "cpu",
+    )
+    assert batch["query_identity_mask"].tolist() == [
+        [True, True, False],
+        [False, False, False],
+    ]
+    # q1 is already a query; p1 is used once; p2 has known IDs but is negative.
+    assert batch["target_identity_mask"].tolist() == [
+        [[False, False, False], [True, True, False], [False, False, False]],
+        [[False, False, False]] * 3,
+    ]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_cached_precision_supports_batch_training(tmp_path, dtype) -> None:
+    torch.manual_seed(3)
+    (tmp_path / "features").mkdir()
+    persons = torch.randn(3, 2, 4).to(dtype)
+    torch.save(
+        {
+            "image_ids": ["q1", "p1", "n1"],
+            "persons": persons,
+            "mask": torch.ones(3, 2, dtype=torch.bool),
+            "patch_hw": (1, 2),
+        },
+        tmp_path / "index.pt",
+    )
+    for i, ids in enumerate((["10", "20"], ["20", "10"], ["30", None])):
+        torch.save(
+            {
+                "scene": torch.randn(2, 4).to(dtype),
+                "persons": persons[i].clone(),
+                "boxes_scene": torch.tensor(
+                    [[0.0, 0.0, 0.5, 1.0], [0.5, 0.0, 1.0, 1.0]]
+                ),
+                "identity_ids": ids,
+            },
+            tmp_path / "features" / f"{i}.pt",
+        )
+    cache = GalleryCache(tmp_path)
+    batch = build_batch(
+        [_samples()[0]], [["p1", "n1"]], cache, _Tokenizer(), _TextEncoder(), "cpu"
+    )
+    model = RCRModel(dim=4, identity_dim=4, num_heads=2)
+    loss, parts = compute_loss(model, batch, cache.patch_hw)
+    assert torch.isfinite(loss)
+    assert parts["identity"] > 0
+    loss.backward()
+    assert model.identity_head.proj.weight.grad.norm() > 0
+    assert all(
+        torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
+    )

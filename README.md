@@ -249,13 +249,20 @@ L = 1.0 * L_ret + 1.0 * L_ground + 0.1 * L_id
 where:
 
 - `L_ground`: masked BCE-with-logits for independent Subject/person labels;
-- `L_id`: supervised contrastive loss (default temperature `0.1`), ignoring
-  unknown identity `-1` and self-pairs;
+- `L_id`: supervised contrastive loss (default temperature `0.1`) over query
+  persons and persons from valid positive target images, using one shared identity
+  label vocabulary. Unknown identity `-1`, padding, negative target images and
+  self-pairs are excluded. Repeated copies of the same cached image/person crop
+  count once per batch; different images of the same identity remain positives;
 - `L_ret`: mean pairwise `softplus(S_f(q,n) - S_f(q,p))` over valid
   positive/negative pairs.
 
 Candidate sampling picks one reviewed positive and excludes **all** other
 known positives and the query image from that query's negatives.
+Including positive targets supplies cross-image identity pairs even when query
+identities do not repeat within a batch. `L_id` can still be zero when detected
+persons lack known matching identities; target images are not assigned the query's
+labels by assumption. GT-aligned cache labels determine identity matches.
 
 ---
 
@@ -319,12 +326,29 @@ Controls:
 - Grounding DINO model and thresholds;
 - shared DINOv3 model;
 - scene/person letterbox sizes;
+- `cache.storage_dtype`: `float32` (default) or `float16` for saved scene/person
+  features and the gallery person index;
 - device.
 
 The default `scene_size: [512, 512]` produces a 32x32 patch grid for a ViT/16
 backbone and therefore a large disk cache over the full gallery. A smaller
 scene size may be useful for smoke tests, but changing it changes the experiment
 and requires rebuilding the cache.
+
+For limited disk space, set:
+
+```yaml
+cache:
+  storage_dtype: float16
+```
+
+This halves feature payload storage relative to compact FP32, with FP16 rounding.
+Loaded training/fine-scoring features are cast to FP32; coarse gallery features
+are cast to the identity head's dtype before projection. Boxes stay FP32 and
+identity labels are unchanged. For 37,107 images with 1,024 patches and 768
+dimensions, scene features alone need about **108.7 GiB in FP32 / 54.4 GiB in
+FP16**, plus persons, the index and file overhead. This option does not change
+the patch grid, but retrieval quality should be checked when changing precision.
 
 ### `train.yaml`
 
@@ -369,6 +393,11 @@ boxes, plus optional GT-aligned identity labels for supervision. It stores no
 head crop features or fixed `P_id` embeddings. Retrieval does not consume GT
 identity labels as model input.
 
+Each saved tensor owns compact CPU storage. In particular, the person CLS view
+is copied once and that compact tensor is reused for the feature file and the
+gallery-index accumulator, so patch tokens are not retained through the CLS view.
+Scene patches are also copied without unused CLS/register storage.
+
 Cache layout:
 
 ```text
@@ -385,6 +414,13 @@ changes. **Old head-based caches and checkpoints are incompatible with this
 implementation**: rebuild the cache and retrain before retrieval. Retraining
 `P_id` after this migration does not require a cache rebuild because the
 current projection is applied to cached person features at runtime.
+
+Existing person-based FP32 caches remain readable, but their files do not shrink
+automatically. Rebuild them to obtain compact storage or change storage precision;
+building to a separate directory temporarily requires space for both caches.
+The query-plus-positive-target identity loss can use an existing cache with
+GT-aligned `identity_ids` without rebuilding. It takes effect on subsequent
+training steps, not on weights already learned by an old checkpoint.
 
 ### 2. Train
 

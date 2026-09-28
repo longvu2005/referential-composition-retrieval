@@ -34,7 +34,8 @@ class GalleryCache:
             for i in indices.tolist()
         ]
 
-        scene = torch.stack([x["scene"] for x in items])
+        # Storage precision is independent of the FP32 train/inference model.
+        scene = torch.stack([x["scene"] for x in items]).float()
         k = max(x["persons"].shape[0] for x in items)
 
         def pad(name: str, dim: int) -> Tensor:

@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from rcr.methods.proposed.losses import identity_loss
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.training import compute_loss
 
@@ -34,6 +35,12 @@ def _batch() -> dict[str, torch.Tensor]:
         "target_persons": torch.randn(b, c, 4, d),
         "target_boxes": _boxes(b, c, 4),
         "target_mask": torch.ones(b, c, 4, dtype=torch.bool),
+        "target_identity_labels": torch.tensor(
+            [
+                [[0, 1, -1, -1], [4, 5, -1, -1], [0, 1, -1, -1]],
+                [[4, 5, -1, -1], [0, 2, -1, -1], [4, 5, -1, -1]],
+            ]
+        ),
         "positive_mask": torch.tensor(
             [[True, False, True], [False, True, False]], dtype=torch.bool
         ),
@@ -103,7 +110,12 @@ def test_padding_has_no_effect_on_loss_or_gradients() -> None:
 def test_empty_target_detections_have_finite_loss_and_gradients(zero_length):
     batch = _batch()
     if zero_length:
-        for key in ("target_persons", "target_boxes", "target_mask"):
+        for key in (
+            "target_persons",
+            "target_boxes",
+            "target_mask",
+            "target_identity_labels",
+        ):
             batch[key] = batch[key][:, :, :0]
     else:
         batch["target_mask"][0, 0] = False
@@ -122,12 +134,84 @@ def test_zero_query_people_and_all_zero_target_people() -> None:
         batch[key] = batch[key][:, :0]
     for key in ("query_person_mask", "query_identity_labels", "grounding_targets"):
         batch[key] = batch[key][..., :0]
-    for key in ("target_persons", "target_boxes", "target_mask"):
+    for key in (
+        "target_persons",
+        "target_boxes",
+        "target_mask",
+        "target_identity_labels",
+    ):
         batch[key] = batch[key][:, :, :0]
     model = RCRModel(8, 6, 2)
     loss, parts = compute_loss(model, batch, (2, 3))
     assert torch.isfinite(loss)
     assert all(torch.isfinite(x) for x in parts.values())
+    loss.backward()
+    assert all(
+        torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
+    )
+
+
+def test_positive_targets_supply_identity_pairs_and_gradients() -> None:
+    torch.manual_seed(42)
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["query_identity_labels"] = torch.tensor([[0, 1, -1], [2, 3, -1]])
+    batch["target_identity_labels"][1, 1] = torch.tensor([2, 3, -1, -1])
+    # Exclude an extra positive candidate and a known-ID padded person.
+    batch["candidate_mask"][0, 2] = False
+    batch["target_identity_labels"][0, 0, 3] = 0
+    batch["target_mask"][0, 0, 3] = False
+    batch["query_persons"].requires_grad_()
+    batch["target_persons"].requires_grad_()
+    q = model.identity_head(batch["query_persons"])
+    assert identity_loss(q, batch["query_identity_labels"]).item() == 0
+
+    loss, parts = compute_loss(
+        model, batch, (2, 3), grounding_weight=0, identity_weight=1, retrieval_weight=0
+    )
+    # Only four query observations and their four positive target observations.
+    expected_features = torch.cat(
+        (
+            batch["query_persons"][:, :2].reshape(4, 8),
+            batch["target_persons"][0, 0, :2],
+            batch["target_persons"][1, 1, :2],
+        )
+    )
+    expected = identity_loss(
+        model.identity_head(expected_features), torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+    )
+    torch.testing.assert_close(parts["identity"], expected)
+    assert parts["identity"] > 0
+    loss.backward()
+    assert model.identity_head.proj.weight.grad.norm() > 0
+    assert (batch["query_persons"].grad[:, :2].norm(dim=-1) > 0).all()
+    assert batch["query_persons"].grad[:, 2:].count_nonzero() == 0
+    grad = batch["target_persons"].grad
+    assert (grad[0, 0, :2].norm(dim=-1) > 0).all()
+    assert (grad[1, 1, :2].norm(dim=-1) > 0).all()
+    assert grad[~batch["positive_mask"]].count_nonzero() == 0
+    assert grad[0, 2].count_nonzero() == 0
+    assert grad[:, :, 2:].count_nonzero() == 0
+
+
+def test_identity_observation_masks_exclude_duplicate_crops() -> None:
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["query_identity_mask"] = torch.zeros_like(batch["query_person_mask"])
+    batch["query_identity_mask"][0, :2] = True
+    batch["target_identity_mask"] = torch.zeros_like(batch["target_mask"])
+    _, parts = compute_loss(model, batch, (2, 3))
+    # Two distinct query IDs, with all duplicate observations excluded: no pairs.
+    assert parts["identity"].item() == 0
+
+
+def test_all_unknown_identities_have_zero_identity_loss() -> None:
+    model = RCRModel(8, 6, 2)
+    batch = _batch()
+    batch["query_identity_labels"].fill_(-1)
+    batch["target_identity_labels"].fill_(-1)
+    loss, parts = compute_loss(model, batch, (2, 3))
+    assert parts["identity"].item() == 0
     loss.backward()
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None

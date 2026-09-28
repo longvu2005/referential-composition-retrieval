@@ -67,7 +67,9 @@ def main() -> None:
     gallery_identity = []
     identity_batch = cfg["retrieval"]["identity_batch_size"]
     for start in range(0, len(cache.image_ids), identity_batch):
-        persons = cache.persons[start : start + identity_batch].to(device)
+        persons = cache.persons[start : start + identity_batch].to(
+            device=device, dtype=model.identity_head.proj.weight.dtype
+        )
         gallery_identity.append(model.identity_head(persons))
     gallery_identity = torch.cat(gallery_identity)
     gallery_mask = cache.mask.to(device)

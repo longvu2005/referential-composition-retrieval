@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from PIL import Image
 from torch import nn
@@ -16,18 +17,17 @@ class DetectorBatch(dict):
 
 
 class DetectorProcessor:
+    def __init__(self, count=1):
+        self.count = count
+
     def __call__(self, **kwargs):
         return DetectorBatch()
 
     def post_process_grounded_object_detection(self, outputs, **kwargs):
         return [
             {
-                "boxes": torch.tensor(
-                    [
-                        [1.0, 1.0, 7.0, 9.0],
-                    ]
-                ),
-                "text_labels": ["person"],
+                "boxes": torch.tensor([[1.0, 1.0, 7.0, 9.0]]).repeat(self.count, 1),
+                "text_labels": ["person"] * self.count,
             }
         ]
 
@@ -64,7 +64,9 @@ class Backbone(nn.Module):
         return SimpleNamespace(last_hidden_state=torch.cat((cls, patches), dim=1))
 
 
-def test_build_cache_writes_gallery_features(tmp_path) -> None:
+@pytest.mark.parametrize("storage_dtype", [None, "float16"])
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_build_cache_writes_gallery_features(tmp_path, storage_dtype, count) -> None:
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (10, 10)).save(image_path)
 
@@ -75,26 +77,55 @@ def test_build_cache_writes_gallery_features(tmp_path) -> None:
         image_paths=[image_path],
         root=cache_dir,
         detector=Detector(),
-        detector_processor=DetectorProcessor(),
+        detector_processor=DetectorProcessor(count),
         image_encoder=encoder,
         scene_processor=Processor(8, 8),
         person_processor=Processor(8, 4),
         device="cpu",
+        **({"storage_dtype": storage_dtype} if storage_dtype else {}),
     )
 
     cache = GalleryCache(cache_dir)
     assert cache.image_ids == ["image"]
-    assert cache.persons.shape == (1, 1, 8)
-    assert cache.mask.tolist() == [[True]]
+    assert cache.persons.shape == (1, count, 8)
+    assert cache.mask.tolist() == [[True] * count]
     assert cache.patch_hw == (4, 4)
 
     scene, persons, boxes, ids, mask = cache.load(torch.tensor([0]))
     assert scene.shape == (1, 16, 8)
-    assert persons.shape == (1, 1, 8)
-    assert boxes.shape == (1, 1, 4)
-    assert ids == [[None]]
-    assert mask.tolist() == [[True]]
-    torch.testing.assert_close(boxes[0, 0], torch.tensor([0.1, 0.1, 0.7, 0.9]))
+    assert persons.shape == (1, count, 8)
+    assert boxes.shape == (1, count, 4)
+    assert ids == [[None] * count]
+    assert mask.tolist() == [[True] * count]
+    assert scene.dtype == persons.dtype == boxes.dtype == torch.float32
+    if count:
+        torch.testing.assert_close(boxes[0, 0], torch.tensor([0.1, 0.1, 0.7, 0.9]))
+
+    dtype = torch.float16 if storage_dtype == "float16" else torch.float32
+    assert cache.persons.dtype == dtype
+    saved = torch.load(cache_dir / "features/0.pt", weights_only=True)
+    assert saved["scene"].dtype == saved["persons"].dtype == dtype
+    assert saved["boxes_scene"].dtype == torch.float32
+    for key in ("scene", "persons", "boxes_scene"):
+        value = saved[key]
+        # A one-person CLS view can be contiguous while retaining all patches.
+        assert value.is_contiguous()
+        assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
+    torch.testing.assert_close(cache.persons[0], saved["persons"])
+    with torch.inference_mode():
+        expected_scene, _, _ = encoder(torch.ones(1, 3, 8, 8))
+        _, expected_persons, _ = encoder(torch.ones(count, 3, 8, 4))
+    torch.testing.assert_close(scene[0], expected_scene[0].to(dtype).float())
+    torch.testing.assert_close(persons[0], expected_persons.to(dtype).float())
+
+
+def test_invalid_cache_dtype_fails_before_writing(tmp_path) -> None:
+    root = tmp_path / "cache"
+    with pytest.raises(ValueError, match="storage_dtype"):
+        build_cache(
+            [], [], root, None, None, None, None, None, "cpu", storage_dtype="int8"
+        )
+    assert not root.exists()
 
 
 def test_letterbox_boxes_match_patch_coordinate_system() -> None:
