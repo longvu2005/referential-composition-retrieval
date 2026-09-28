@@ -15,6 +15,10 @@ build/
 dist/
 *.egg-info/
 
+# Data files
+dataset/data/work/*
+!dataset/data/work/.gitkeep
+
 # Virtual environments and secrets
 .venv/
 venv/

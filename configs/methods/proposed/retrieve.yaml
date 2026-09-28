@@ -1,0 +1,16 @@
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+  cache: cache/proposed
+
+checkpoint: runs/proposed/last.pt
+split: test
+
+retrieval:
+  top_m: 500
+  fine_batch_size: 64
+  identity_batch_size: 4096
+  device: auto
+
+output:
+  dir: runs/proposed/test

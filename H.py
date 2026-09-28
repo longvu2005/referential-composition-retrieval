@@ -19,11 +19,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 processor = AutoProcessor.from_pretrained(MODEL)
 model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL).to(device).eval()
 
-pairs = [
-    json.loads(line)
-    for line in PAIRS.read_text().splitlines()
-    if line.strip()
-]
+pairs = [json.loads(line) for line in PAIRS.read_text().splitlines() if line.strip()]
 
 metadata = json.loads(PAIR_DATA.read_text())
 images = {x["image_id"]: x["url"] for x in metadata["images"]}
@@ -73,8 +69,7 @@ counts = {
 single_person_triplets = [
     pair
     for pair in pairs
-    if counts[pair["query_image_id"]] == 1
-    and counts[pair["target_image_id"]] == 1
+    if counts[pair["query_image_id"]] == 1 and counts[pair["target_image_id"]] == 1
 ]
 
 print(f"Total triplets: {len(pairs)}")

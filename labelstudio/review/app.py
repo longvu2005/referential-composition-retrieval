@@ -16,9 +16,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from labelstudio.common import load_box_index
-from rcr.dataset.review import normalize_review_subjects
-from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
+from rcr.dataset.cases import CASE_TYPES, EDITABLE_CASE_TYPES, ONE_SUBJECT_CASES
+from rcr.dataset.review import normalize_review_assignment
+from rcr.dataset.rewrite import validate_review_output
+from rcr.utils.images import image_relative_path as _image_relative_path
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
 INPUT = Path("dataset/data/work/review/review_input.jsonl")
@@ -27,40 +28,23 @@ IMAGE_ROOT = Path("dataset/data/raw/images")
 HTML = Path(__file__).with_name("app.html")
 
 
-def _image_relative_path(url: str) -> Path:
-    """Map PIPA/local-files URLs to split-relative image paths."""
-
-    parsed = urlparse(url)
-    value = parse_qs(parsed.query).get("d", [parsed.path])[0]
-    value = unquote(value).replace("\\", "/")
-    for marker in ("/PIPA/images/", "/images/"):
-        if marker in value:
-            value = value.split(marker, 1)[1]
-            break
-    value = value.lstrip("/")
-    path = Path(value)
-    if not value or path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"unsafe image path {url!r}")
-    return path
-
-
 def _candidate_boxes(
     row: dict,
     image_id: str,
-    boxes_by_image: dict[str, list[dict]],
 ) -> list[dict]:
     candidate_ids = row.get("candidate_identity_ids")
     if not isinstance(candidate_ids, list) or not candidate_ids:
-        raise ValueError(f"{row['submission_id']}: candidate_identity_ids are required")
+        raise ValueError(f"{row['sample_id']}: candidate_identity_ids are required")
 
     by_identity: dict[str, dict] = {}
-    for box in boxes_by_image.get(image_id, []):
-        identity_id = box["label"]
+    side = "query" if image_id == row["query_image_id"] else "target"
+    for box in row[f"{side}_boxes"]:
+        identity_id = box["identity_id"]
         if identity_id not in candidate_ids:
             continue
         if identity_id in by_identity:
             raise ValueError(
-                f"{row['submission_id']}: duplicate box for identity {identity_id} "
+                f"{row['sample_id']}: duplicate box for identity {identity_id} "
                 f"in {image_id}"
             )
         by_identity[identity_id] = box
@@ -69,8 +53,7 @@ def _candidate_boxes(
     if missing:
         missing_text = ", ".join(sorted(missing))
         raise ValueError(
-            f"{row['submission_id']}: missing candidate boxes in {image_id}: "
-            f"{missing_text}"
+            f"{row['sample_id']}: missing candidate boxes in {image_id}: {missing_text}"
         )
 
     return [
@@ -85,15 +68,15 @@ def _candidate_boxes(
     ]
 
 
-def _initial_subjects(row: dict, review: dict | None) -> list[dict]:
+def _initial_assignment(row: dict, review: dict | None) -> tuple[str, list[dict]]:
     if review is not None:
-        return normalize_review_subjects(
-            row["submission_id"],
+        return normalize_review_assignment(
+            row["sample_id"],
             review["case_type"],
             review["subjects"],
             row["candidate_identity_ids"],
         )
-    return [
+    return row["case_type"], [
         {
             "subject_id": subject["subject_id"],
             "identity_ids": list(subject["identity_ids"]),
@@ -104,20 +87,18 @@ def _initial_subjects(row: dict, review: dict | None) -> list[dict]:
 
 def build_task_payload(
     row: dict,
-    boxes_by_image: dict[str, list[dict]],
     review: dict | None = None,
 ) -> dict:
-    """Build one browser task from canonical review input and box metadata."""
+    """Build one browser task from canonical normalized head boxes."""
 
-    case_type = review["case_type"] if review is not None else row["case_type"]
-    subjects = _initial_subjects(row, review)
+    case_type, subjects = _initial_assignment(row, review)
     final_desc = review["final_desc"] if review is not None else row.get("final_desc")
     final_change = (
         review["final_change"] if review is not None else row.get("final_change")
     )
 
     return {
-        "submission_id": row["submission_id"],
+        "sample_id": row["sample_id"],
         "case_type": case_type,
         "subjects": subjects,
         "candidate_identity_ids": row["candidate_identity_ids"],
@@ -127,7 +108,7 @@ def build_task_payload(
                 "/api/image?path="
                 f"{_image_relative_path(row['query_image_url']).as_posix()}"
             ),
-            "boxes": _candidate_boxes(row, row["query_image_id"], boxes_by_image),
+            "boxes": _candidate_boxes(row, row["query_image_id"]),
         },
         "target": {
             "image_id": row["target_image_id"],
@@ -135,14 +116,15 @@ def build_task_payload(
                 "/api/image?path="
                 f"{_image_relative_path(row['target_image_url']).as_posix()}"
             ),
-            "boxes": _candidate_boxes(row, row["target_image_id"], boxes_by_image),
+            "boxes": _candidate_boxes(row, row["target_image_id"]),
         },
         "final_desc": final_desc or "",
         "final_change": final_change or "",
         "original": {
             "case_type": row["case_type"],
             "subjects": row["subjects"],
-            "pair_change": row.get("pair_change"),
+            "final_desc": row.get("final_desc"),
+            "final_change": row.get("final_change"),
         },
     }
 
@@ -150,19 +132,15 @@ def build_task_payload(
 def validate_submission(source: dict, payload: dict) -> dict:
     """Validate one browser submission and return the canonical review row."""
 
-    submission_id = source["submission_id"]
-    if payload.get("submission_id") != submission_id:
-        raise ValueError(f"{submission_id}: submission_id mismatch")
+    sample_id = source["sample_id"]
+    if payload.get("sample_id") != sample_id:
+        raise ValueError(f"{sample_id}: sample_id mismatch")
 
-    case_type = payload.get("case_type")
-    if case_type not in CASE_TYPES:
-        raise ValueError(f"{submission_id}: invalid case_type {case_type!r}")
-
-    subjects = normalize_review_subjects(
-        submission_id,
-        case_type,
+    case_type, subjects = normalize_review_assignment(
+        sample_id,
+        payload.get("case_type"),
         payload.get("subjects"),
-        source.get("candidate_identity_ids"),
+        source["candidate_identity_ids"],
     )
     final_desc, final_change = validate_review_output(
         case_type,
@@ -172,7 +150,7 @@ def validate_submission(source: dict, payload: dict) -> dict:
         },
     )
     return {
-        "submission_id": submission_id,
+        "sample_id": sample_id,
         "case_type": case_type,
         "subjects": subjects,
         "final_desc": final_desc,
@@ -183,25 +161,25 @@ def validate_submission(source: dict, payload: dict) -> dict:
 class ReviewState:
     def __init__(self) -> None:
         self.rows = load_jsonl(INPUT)
-        self.rows_by_id = {row["submission_id"]: row for row in self.rows}
-        self.index_by_id = {row["submission_id"]: i for i, row in enumerate(self.rows)}
+        self.rows_by_id = {row["sample_id"]: row for row in self.rows}
+        self.index_by_id = {row["sample_id"]: i for i, row in enumerate(self.rows)}
         if len(self.rows_by_id) != len(self.rows):
-            raise ValueError("review_input.jsonl contains duplicate submission_id")
+            raise ValueError("review_input.jsonl contains duplicate sample_id")
 
         existing = load_jsonl(OUTPUT) if OUTPUT.exists() else []
-        self.reviews = {row["submission_id"]: row for row in existing}
-        self.review_order = [row["submission_id"] for row in existing]
-        if len(self.reviews) != len(self.review_order):
-            raise ValueError("reviewed.jsonl contains duplicate submission_id")
-        self.boxes_by_image = load_box_index()
+        self.reviews = {row["sample_id"]: row for row in existing}
+        if len(self.reviews) != len(existing):
+            raise ValueError("reviewed.jsonl contains duplicate sample_id")
         self.lock = threading.Lock()
 
     def _meta(self, index: int, row: dict) -> dict:
-        review = self.reviews.get(row["submission_id"])
+        review = self.reviews.get(row["sample_id"])
         return {
             "index": index,
-            "submission_id": row["submission_id"],
-            "case_type": review["case_type"] if review is not None else row["case_type"],
+            "sample_id": row["sample_id"],
+            "case_type": (
+                review["case_type"] if review is not None else row["case_type"]
+            ),
             "reviewed": review is not None,
         }
 
@@ -214,24 +192,27 @@ class ReviewState:
             "total": len(tasks),
             "completed": completed,
             "pending": len(tasks) - completed,
+            "case_types": list(CASE_TYPES),
+            "editable_case_types": list(EDITABLE_CASE_TYPES),
+            "one_subject_case_types": sorted(ONE_SUBJECT_CASES),
             "tasks": tasks,
         }
 
-    def task(self, index: int | None = None, submission_id: str | None = None) -> dict:
-        """Load a task by stable submission ID, with index kept for compatibility."""
+    def task(self, index: int | None = None, sample_id: str | None = None) -> dict:
+        """Load a task by its sample ID, with index kept for navigation."""
 
-        if submission_id is not None:
-            row = self.rows_by_id.get(submission_id)
+        if sample_id is not None:
+            row = self.rows_by_id.get(sample_id)
             if row is None:
-                raise ValueError("unknown submission_id")
-            index = self.index_by_id[submission_id]
+                raise ValueError("unknown sample_id")
+            index = self.index_by_id[sample_id]
         else:
             index = 0 if index is None else index
             if index < 0 or index >= len(self.rows):
                 raise ValueError("task index out of range")
             row = self.rows[index]
 
-        review = self.reviews.get(row["submission_id"])
+        review = self.reviews.get(row["sample_id"])
         summary = self.tasks()
         return {
             "index": index,
@@ -239,30 +220,21 @@ class ReviewState:
             "completed": summary["completed"],
             "pending": summary["pending"],
             "reviewed": review is not None,
-            "task": build_task_payload(row, self.boxes_by_image, review),
+            "task": build_task_payload(row, review),
         }
 
     def save(self, payload: dict) -> dict:
-        submission_id = payload.get("submission_id")
-        source = self.rows_by_id.get(submission_id)
+        sample_id = payload.get("sample_id")
+        source = self.rows_by_id.get(sample_id)
         if source is None:
-            raise ValueError("unknown submission_id")
+            raise ValueError("unknown sample_id")
         row = validate_submission(source, payload)
 
         with self.lock:
-            if submission_id not in self.reviews:
-                self.review_order.append(submission_id)
-            self.reviews[submission_id] = row
-            OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+            self.reviews[sample_id] = row
             temporary = OUTPUT.with_name(f".{OUTPUT.name}.tmp")
-            write_jsonl(
-                temporary,
-                [
-                    self.reviews[item_id]
-                    for item_id in self.review_order
-                    if item_id in self.reviews
-                ],
-            )
+            # Dict insertion order preserves saved order when a review is edited.
+            write_jsonl(temporary, self.reviews.values())
             os.replace(temporary, OUTPUT)
         return row
 
@@ -299,11 +271,11 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/task":
                 params = parse_qs(parsed.query)
-                submission_id = params.get("id", [None])[0]
+                sample_id = params.get("id", [None])[0]
                 index = None
-                if submission_id is None:
+                if sample_id is None:
                     index = int(params.get("index", ["0"])[0])
-                self._json(self.state.task(index=index, submission_id=submission_id))
+                self._json(self.state.task(index=index, sample_id=sample_id))
                 return
 
             if parsed.path == "/api/image":

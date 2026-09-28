@@ -1,28 +1,27 @@
-"""Select samples that passed Stage 2 QC."""
+"""Validate and copy the already QC-approved Stage 2 export."""
 
+import json
 from pathlib import Path
 
-from rcr.dataset.selection import split_by_qc
+from rcr.dataset.selection import select_samples
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
 ANNOTATIONS = Path("dataset/data/raw/annotations/export_stage2.jsonl")
+PAIR_DATA = Path("dataset/data/raw/metadata/pair_data.json")
 
 SELECTED_OUTPUT = Path("dataset/data/work/selection/selected.jsonl")
-
-FAILED_OUTPUT = Path("dataset/data/work/selection/failed_qc.jsonl")
 
 
 def main() -> None:
     records = load_jsonl(ANNOTATIONS)
 
-    selected, failed = split_by_qc(records)
+    pair_data = json.loads(PAIR_DATA.read_text(encoding="utf-8"))
+    selected = select_samples(records, pair_data)
 
     write_jsonl(SELECTED_OUTPUT, selected)
-    write_jsonl(FAILED_OUTPUT, failed)
 
     print(f"Total: {len(records)}")
     print(f"Selected: {len(selected)}")
-    print(f"Failed QC: {len(failed)}")
 
 
 if __name__ == "__main__":

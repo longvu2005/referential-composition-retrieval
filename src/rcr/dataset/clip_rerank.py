@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
 import open_clip
 import torch
 from PIL import Image
+
+from rcr.utils.images import image_relative_path as _image_relative_path
 
 IMAGE_ROOT = Path("dataset/data/raw/images")
 CACHE_ROOT = Path("cache/features/clip_vit_b32_openai")
@@ -23,21 +24,6 @@ def _device() -> str:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
-
-
-def _image_relative_path(url: str) -> Path:
-    parsed = urlparse(url)
-    value = parse_qs(parsed.query).get("d", [parsed.path])[0]
-    value = unquote(value).replace("\\", "/")
-    for marker in ("/PIPA/images/", "/images/"):
-        if marker in value:
-            value = value.split(marker, 1)[1]
-            break
-    value = value.lstrip("/")
-    path = Path(value)
-    if not value or path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"unsafe image path {url!r}")
-    return path
 
 
 class ClipChangeRanker:

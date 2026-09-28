@@ -329,12 +329,9 @@ pre {
         <button class="status-tab" data-status="pending">Pending <span id="pendingCount">0</span></button>
         <button class="status-tab" data-status="completed">Completed <span id="completedCount">0</span></button>
       </div>
-      <input id="taskSearch" class="filter-input" type="search" placeholder="Search # or submission ID">
+      <input id="taskSearch" class="filter-input" type="search" placeholder="Search # or sample ID">
       <select id="caseFilter" class="filter-select" aria-label="Filter by case type">
         <option value="all">All case types</option>
-        <option value="SINGLE">SINGLE</option>
-        <option value="MULTI">MULTI</option>
-        <option value="RELATIONAL">RELATIONAL</option>
       </select>
     </div>
 
@@ -352,7 +349,7 @@ pre {
         <span id="dirtyBadge" class="unsaved" hidden>● Unsaved changes</span>
         <span class="spacer"></span>
         <code id="taskId" class="task-id"></code>
-        <button id="copyId" title="Copy submission ID">Copy ID</button>
+        <button id="copyId" title="Copy sample ID">Copy ID</button>
       </div>
     </header>
 
@@ -412,7 +409,7 @@ pre {
         <label for="finalChange">CHANGE / WHAT</label>
         <textarea id="finalChange"></textarea>
         <details>
-          <summary>Original annotation</summary>
+          <summary>Stage 2 source</summary>
           <pre id="original"></pre>
         </details>
         <div id="error" class="error"></div>
@@ -430,7 +427,6 @@ pre {
 </div>
 
 <script>
-const CASES = ["SINGLE", "MULTI", "RELATIONAL"];
 const STORAGE = {
   last: "rcr.review.lastTask",
   status: "rcr.review.statusFilter",
@@ -449,6 +445,9 @@ const state = {
   statusFilter: localStorage.getItem(STORAGE.status) || "pending",
   caseFilter: localStorage.getItem(STORAGE.case) || "all",
   search: "",
+  caseTypes: [],
+  editableCaseTypes: [],
+  oneSubjectCaseTypes: new Set(),
   view: {
     query: { scale: 1, x: 0, y: 0 },
     target: { scale: 1, x: 0, y: 0 },
@@ -463,12 +462,24 @@ function stats() {
   return { total, completed, pending: total - completed };
 }
 
+function isOneSubjectCase(caseType = state.task?.case_type) {
+  return state.oneSubjectCaseTypes.has(caseType);
+}
+
 function requiredSubjects() {
-  return state.task?.case_type === "SINGLE" ? [1] : [1, 2];
+  return isOneSubjectCase() ? [1] : [1, 2];
+}
+
+function syncDerivedCase() {
+  if (!state.task || !isOneSubjectCase()) return;
+  const count = [...state.assignment.values()].filter(subjectId => subjectId === 1).length;
+  state.task.case_type = count >= 2 ? "GROUP" : "INDIVIDUAL";
+  const meta = currentMeta();
+  if (meta) meta.case_type = state.task.case_type;
 }
 
 function currentMeta() {
-  return state.tasks.find(task => task.submission_id === state.currentId) || null;
+  return state.tasks.find(task => task.sample_id === state.currentId) || null;
 }
 
 function buildAssignment(subjects) {
@@ -517,7 +528,7 @@ function filteredTasks() {
 
     if (query) {
       const number = String(task.index + 1);
-      if (!task.submission_id.toLowerCase().includes(query) && !number.includes(query)) {
+      if (!task.sample_id.toLowerCase().includes(query) && !number.includes(query)) {
         return false;
       }
     }
@@ -540,9 +551,9 @@ function renderTaskList() {
 
   for (const task of items) {
     const button = document.createElement("button");
-    button.className = `task-item${task.submission_id === state.currentId ? " active" : ""}`;
-    button.title = task.submission_id;
-    button.onclick = () => requestLoad(task.submission_id);
+    button.className = `task-item${task.sample_id === state.currentId ? " active" : ""}`;
+    button.title = task.sample_id;
+    button.onclick = () => requestLoad(task.sample_id);
 
     const dot = document.createElement("span");
     dot.className = `task-dot ${task.reviewed ? "completed" : "pending"}`;
@@ -571,7 +582,7 @@ function renderHeader() {
   }
 
   $("taskTitle").textContent = `Task #${meta.index + 1}`;
-  $("taskId").textContent = meta.submission_id;
+  $("taskId").textContent = meta.sample_id;
   $("caseBadge").textContent = state.task?.case_type || meta.case_type;
 
   const badge = $("statusBadge");
@@ -585,18 +596,23 @@ function renderHeader() {
 }
 
 function setCase(caseType) {
-  if (!state.task || state.task.case_type === caseType) return;
+  if (!state.task) return;
+  if (caseType === "INDIVIDUAL" && isOneSubjectCase()) return;
+  if (state.task.case_type === caseType) return;
 
-  state.task.case_type = caseType;
-  if (caseType === "SINGLE") {
+  if (caseType === "INDIVIDUAL") {
     for (const [identityId, subjectId] of [...state.assignment]) {
       if (subjectId === 2) state.assignment.delete(identityId);
     }
+    state.task.case_type = "INDIVIDUAL";
     state.activeSubject = 1;
+    syncDerivedCase();
+  } else {
+    state.task.case_type = caseType;
   }
 
   const meta = currentMeta();
-  if (meta) meta.case_type = caseType;
+  if (meta) meta.case_type = state.task.case_type;
 
   setDirty();
   renderCase();
@@ -611,10 +627,15 @@ function renderCase() {
   root.innerHTML = "";
   if (!state.task) return;
 
-  for (const caseType of CASES) {
+  for (const caseType of state.editableCaseTypes) {
     const button = document.createElement("button");
-    button.className = `case${state.task.case_type === caseType ? " active" : ""}`;
-    button.textContent = caseType;
+    const active = caseType === "INDIVIDUAL"
+      ? isOneSubjectCase()
+      : state.task.case_type === caseType;
+    button.className = `case${active ? " active" : ""}`;
+    button.textContent = caseType === "INDIVIDUAL" && isOneSubjectCase()
+      ? state.task.case_type
+      : caseType;
     button.onclick = () => setCase(caseType);
     root.appendChild(button);
   }
@@ -638,8 +659,8 @@ function renderSubjects() {
 
   $("subjectStatus").innerHTML = requiredSubjects()
     .map(subjectId => {
-      const assigned = [...state.assignment.values()].includes(subjectId);
-      return `<span class="${assigned ? "ok" : "missing"}">S${subjectId} ${assigned ? "✓" : "—"}</span>`;
+      const count = [...state.assignment.values()].filter(value => value === subjectId).length;
+      return `<span class="${count ? "ok" : "missing"}">S${subjectId}: ${count} ${count ? "✓" : "—"}</span>`;
     })
     .join(" &nbsp; ");
 }
@@ -652,9 +673,13 @@ function toggleIdentity(identityId) {
     state.assignment.set(identityId, state.activeSubject);
   }
 
+  syncDerivedCase();
   setDirty();
+  renderCase();
   renderSubjects();
   renderBoxes();
+  renderHeader();
+  renderTaskList();
 }
 
 function renderBoxes() {
@@ -786,13 +811,13 @@ async function requestJson(url, options) {
   return data;
 }
 
-async function loadTask(submissionId) {
+async function loadTask(sampleId) {
   $("error").textContent = "";
   $("saved").textContent = "Loading…";
 
-  const data = await requestJson(`/api/task?id=${encodeURIComponent(submissionId)}`);
+  const data = await requestJson(`/api/task?id=${encodeURIComponent(sampleId)}`);
   state.index = data.index;
-  state.currentId = data.task.submission_id;
+  state.currentId = data.task.sample_id;
   state.task = data.task;
   state.completed = data.reviewed;
   state.activeSubject = 1;
@@ -821,14 +846,14 @@ async function loadTask(submissionId) {
   renderBoxes();
 }
 
-async function requestLoad(submissionId) {
-  if (submissionId === state.currentId) return;
+async function requestLoad(sampleId) {
+  if (sampleId === state.currentId) return;
   if (state.dirty && !window.confirm("You have unsaved changes. Discard them and open another task?")) {
     return;
   }
 
   try {
-    await loadTask(submissionId);
+    await loadTask(sampleId);
   } catch (error) {
     $("error").textContent = error.message;
   }
@@ -838,7 +863,7 @@ function navigate(delta) {
   const meta = currentMeta();
   if (!meta) return;
   const next = state.tasks[meta.index + delta];
-  if (next) requestLoad(next.submission_id);
+  if (next) requestLoad(next.sample_id);
 }
 
 function nextPendingAfter(index) {
@@ -856,7 +881,7 @@ async function save(goNextPending) {
   $("saveNext").disabled = true;
 
   const payload = {
-    submission_id: state.task.submission_id,
+    sample_id: state.task.sample_id,
     case_type: state.task.case_type,
     subjects: subjectsPayload(),
     final_desc: $("finalDesc").value.trim(),
@@ -882,7 +907,7 @@ async function save(goNextPending) {
     if (goNextPending) {
       const next = nextPendingAfter(state.index);
       if (next) {
-        await loadTask(next.submission_id);
+        await loadTask(next.sample_id);
       } else {
         $("saved").textContent = "Saved · all tasks completed";
       }
@@ -898,9 +923,26 @@ async function save(goNextPending) {
   }
 }
 
+function configureCaseFilter(caseTypes) {
+  const select = $("caseFilter");
+  select.innerHTML = '<option value="all">All case types</option>';
+  for (const caseType of caseTypes) {
+    const option = document.createElement("option");
+    option.value = caseType;
+    option.textContent = caseType;
+    select.appendChild(option);
+  }
+  if (!["all", ...caseTypes].includes(state.caseFilter)) state.caseFilter = "all";
+  select.value = state.caseFilter;
+}
+
 async function init() {
   const data = await requestJson("/api/tasks");
   state.tasks = data.tasks;
+  state.caseTypes = data.case_types;
+  state.editableCaseTypes = data.editable_case_types;
+  state.oneSubjectCaseTypes = new Set(data.one_subject_case_types);
+  configureCaseFilter(state.caseTypes);
   renderSummary();
   renderTaskList();
 
@@ -910,9 +952,9 @@ async function init() {
   }
 
   const last = localStorage.getItem(STORAGE.last);
-  const lastExists = state.tasks.some(task => task.submission_id === last);
+  const lastExists = state.tasks.some(task => task.sample_id === last);
   const firstPending = state.tasks.find(task => !task.reviewed);
-  const initial = lastExists ? last : (firstPending || state.tasks[0]).submission_id;
+  const initial = lastExists ? last : (firstPending || state.tasks[0]).sample_id;
   await loadTask(initial);
 }
 
@@ -945,7 +987,6 @@ document.querySelectorAll("[data-status]").forEach(button => {
   };
 });
 
-$("caseFilter").value = state.caseFilter;
 $("caseFilter").onchange = event => {
   state.caseFilter = event.target.value;
   localStorage.setItem(STORAGE.case, state.caseFilter);
@@ -965,7 +1006,7 @@ $("copyId").onclick = async () => {
   if (!state.currentId) return;
   try {
     await navigator.clipboard.writeText(state.currentId);
-    $("saved").textContent = "Submission ID copied";
+    $("saved").textContent = "Sample ID copied";
   } catch {
     $("saved").textContent = "Could not copy ID";
   }

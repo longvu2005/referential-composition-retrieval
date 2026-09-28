@@ -1,37 +1,22 @@
-"""Prepare inputs for manual review and Full Positive labeling."""
-
-from __future__ import annotations
+"""Build the two human-labeling handoff catalogs."""
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable
-from typing import Any
 
-from rcr.dataset.review import normalize_review_subjects
-from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
+from rcr.dataset.review import normalize_review_assignment
+from rcr.dataset.rewrite import validate_review_output
 
-JsonObject = dict[str, Any]
 CandidateRanker = Callable[[str, list[tuple[str, str]]], list[str]]
 
 
-def _build_metadata(
-    pair_data: JsonObject,
-    index_lines: Iterable[str],
-) -> tuple[
-    dict[str, JsonObject],
-    dict[str, list[JsonObject]],
-    dict[str, set[str]],
-]:
-    """Build image, box, and identity lookup tables used by both handoffs."""
-
-    image_by_id = {image["image_id"]: image for image in pair_data["images"]}
-    gallery_ids = set(image_by_id)
+def _index_metadata(index_lines: Iterable[str], keep_ids: set[str] | None = None):
     boxes_by_image = defaultdict(list)
     images_by_identity = defaultdict(set)
 
     for line in index_lines:
-        album_id, photo_id, x, y, width, height, identity_id, _ = line.split()
-        image_id = f"{album_id}_{photo_id}"
-        if image_id not in gallery_ids:
+        album, photo, x, y, w, h, identity_id, _ = line.split()
+        image_id = f"{album}_{photo}"
+        if keep_ids is not None and image_id not in keep_ids:
             continue
 
         boxes_by_image[image_id].append(
@@ -39,158 +24,102 @@ def _build_metadata(
                 "identity_id": identity_id,
                 "x": int(x),
                 "y": int(y),
-                "width": int(width),
-                "height": int(height),
+                "width": int(w),
+                "height": int(h),
             }
         )
         images_by_identity[identity_id].add(image_id)
 
-    return image_by_id, boxes_by_image, images_by_identity
+    return boxes_by_image, images_by_identity
 
 
 def select_unfinished_records(
-    records: Iterable[JsonObject],
-    completed_ids: set[str],
-) -> list[JsonObject]:
-    """Keep records that have not completed the target handoff."""
-
-    return [
-        record for record in records if record["submission_id"] not in completed_ids
-    ]
+    records: Iterable[dict], completed_ids: set[str]
+) -> list[dict]:
+    return [row for row in records if row["sample_id"] not in completed_ids]
 
 
 def merge_handoff_catalog(
-    existing: Iterable[JsonObject],
-    prepared: Iterable[JsonObject],
-) -> list[JsonObject]:
-    """Merge task metadata by submission ID while preserving stable task order.
+    existing: Iterable[dict], prepared: Iterable[dict]
+) -> list[dict]:
+    existing = list(existing)
+    prepared = list(prepared)
+    existing_ids = [x["sample_id"] for x in existing]
+    prepared_ids = [x["sample_id"] for x in prepared]
 
-    Existing tasks keep their position, refreshed versions replace their metadata,
-    and newly prepared tasks are appended. This makes a handoff input usable as a
-    cumulative task catalog rather than a transient pending-only queue.
-    """
+    if len(existing_ids) != len(set(existing_ids)):
+        raise ValueError("existing handoff catalog contains duplicate sample_id")
+    if len(prepared_ids) != len(set(prepared_ids)):
+        raise ValueError("prepared handoff rows contain duplicate sample_id")
 
-    existing_rows = list(existing)
-    prepared_rows = list(prepared)
-    existing_ids = [row["submission_id"] for row in existing_rows]
-    prepared_ids = [row["submission_id"] for row in prepared_rows]
-    if len(set(existing_ids)) != len(existing_ids):
-        raise ValueError("existing handoff catalog contains duplicate submission_id")
-    if len(set(prepared_ids)) != len(prepared_ids):
-        raise ValueError("prepared handoff rows contain duplicate submission_id")
-
-    prepared_by_id = {row["submission_id"]: row for row in prepared_rows}
-    merged = [
-        prepared_by_id.get(row["submission_id"], row)
-        for row in existing_rows
-    ]
-    existing_id_set = set(existing_ids)
-    merged.extend(
-        row for row in prepared_rows if row["submission_id"] not in existing_id_set
-    )
+    fresh = {x["sample_id"]: x for x in prepared}
+    merged = [fresh.get(x["sample_id"], x) for x in existing]
+    old_ids = set(existing_ids)
+    merged += [x for x in prepared if x["sample_id"] not in old_ids]
     return merged
 
 
 def prepare_review_inputs(
-    selected: list[JsonObject],
-    rewrite_outputs: list[JsonObject],
-    pair_data: JsonObject,
-    index_lines: Iterable[str],
-) -> list[JsonObject]:
-    """Attach source images and subject boxes to Gemini rewrite outputs."""
-
-    selected_by_id = {row["submission_id"]: row for row in selected}
-    image_by_id, boxes_by_image, _ = _build_metadata(pair_data, index_lines)
+    selected: list[dict],
+    rewrite_outputs: list[dict],
+) -> list[dict]:
+    selected_by_id = {x["sample_id"]: x for x in selected}
+    if len(selected_by_id) != len(selected):
+        raise ValueError("selected contains duplicate sample_id")
+    rewrite_by_id = {x["sample_id"]: x for x in rewrite_outputs}
+    if len(rewrite_by_id) != len(rewrite_outputs):
+        raise ValueError("rewrite_outputs contains duplicate sample_id")
+    if set(rewrite_by_id) != set(selected_by_id):
+        raise ValueError("rewrite outputs do not match selected samples")
     outputs = []
 
     for rewrite in rewrite_outputs:
-        source = selected_by_id[rewrite["submission_id"]]
-        annotation = source["annotation"]
-        query_id = source["query_image_id"]
-        target_id = source["target_image_id"]
-
-        subjects = [
+        sample_id = rewrite["sample_id"]
+        source = selected_by_id[sample_id]
+        final_desc, final_change = validate_review_output(
+            source["case_type"],
             {
-                "subject_id": subject["subjectId"],
-                "identity_ids": subject["desc"]["queryGroupIds"],
-                "description": subject["desc"]["final"],
-                "change": subject["change"]["final"],
-            }
-            for subject in sorted(
-                annotation["subjects"],
-                key=lambda subject: subject["subjectId"],
-            )
-        ]
+                "final_desc": rewrite["final_desc"],
+                "final_change": rewrite["final_change"],
+            },
+        )
+        query_id, target_id = source["query_image_id"], source["target_image_id"]
+        subjects = source["subjects"]
+
         subject_by_identity = {}
         for subject in subjects:
             for identity_id in subject["identity_ids"]:
                 if identity_id in subject_by_identity:
                     raise ValueError(
-                        f"{rewrite['submission_id']}: identity_id {identity_id} is "
-                        "assigned to multiple subjects"
+                        f"{sample_id}: identity_id {identity_id} "
+                        "is assigned to multiple subjects"
                     )
                 subject_by_identity[identity_id] = subject["subject_id"]
 
-        query_identity_ids = {
-            box["identity_id"] for box in boxes_by_image.get(query_id, [])
-        }
-        target_identity_ids = {
-            box["identity_id"] for box in boxes_by_image.get(target_id, [])
-        }
-        candidate_identity_ids = sorted(
-            query_identity_ids & target_identity_ids,
-            key=int,
-        )
-        missing_ids = set(subject_by_identity) - set(candidate_identity_ids)
-        if missing_ids:
-            missing = ", ".join(sorted(missing_ids))
+        query_ids = {x["identity_id"] for x in source["query_boxes"]}
+        target_ids = {x["identity_id"] for x in source["target_boxes"]}
+        candidate_ids = sorted(query_ids & target_ids, key=int)
+        missing = set(subject_by_identity) - set(candidate_ids)
+        if missing:
             raise ValueError(
-                f"{rewrite['submission_id']}: subject identities are not present "
-                f"in both query and seed target: {missing}"
+                f"{sample_id}: subject identities are not present "
+                "in both query and seed target: " + ", ".join(sorted(missing))
             )
-
-        query_boxes = [
-            {
-                "subject_id": subject_by_identity[box["identity_id"]],
-                **box,
-            }
-            for box in boxes_by_image.get(query_id, [])
-            if box["identity_id"] in subject_by_identity
-        ]
-        target_boxes = [
-            {
-                "subject_id": subject_by_identity[box["identity_id"]],
-                **box,
-            }
-            for box in boxes_by_image.get(target_id, [])
-            if box["identity_id"] in subject_by_identity
-        ]
-
-        pair_change = annotation.get("pairChange")
-        if pair_change is not None:
-            pair_change = {
-                "subject_1_id": subjects[0]["subject_id"],
-                "subject_2_id": subjects[1]["subject_id"],
-                "relation": pair_change["final"],
-            }
-
-        legacy_error = set(rewrite) == {"submission_id", "error"}
 
         outputs.append(
             {
-                "submission_id": rewrite["submission_id"],
-                "case_type": annotation["caseType"],
+                "sample_id": sample_id,
+                "case_type": source["case_type"],
                 "query_image_id": query_id,
-                "query_image_url": image_by_id[query_id]["url"],
+                "query_image_url": f"/images/{source['query_image_path']}",
                 "target_image_id": target_id,
-                "target_image_url": image_by_id[target_id]["url"],
+                "target_image_url": f"/images/{source['target_image_path']}",
                 "subjects": subjects,
-                "candidate_identity_ids": candidate_identity_ids,
-                "pair_change": pair_change,
-                "query_boxes": query_boxes,
-                "target_boxes": target_boxes,
-                "final_desc": None if legacy_error else rewrite["final_desc"],
-                "final_change": None if legacy_error else rewrite["final_change"],
+                "candidate_identity_ids": candidate_ids,
+                "query_boxes": source["query_boxes"],
+                "target_boxes": source["target_boxes"],
+                "final_desc": final_desc,
+                "final_change": final_change,
             }
         )
 
@@ -198,43 +127,33 @@ def prepare_review_inputs(
 
 
 def prepare_positive_set_inputs(
-    selected: list[JsonObject],
-    reviewed: list[JsonObject],
-    pair_data: JsonObject,
+    selected: list[dict],
+    reviewed: list[dict],
+    gallery_images: list[dict],
     index_lines: Iterable[str],
     candidate_ranker: CandidateRanker | None = None,
-) -> list[JsonObject]:
-    """Build identity-compatible candidates for Full Positive labeling."""
+) -> list[dict]:
+    selected_by_id = {x["sample_id"]: x for x in selected}
+    if len(selected_by_id) != len(selected):
+        raise ValueError("selected contains duplicate sample_id")
+    image_by_id = {x["image_id"]: x for x in gallery_images}
+    if len(image_by_id) != len(gallery_images):
+        raise ValueError("gallery_images contains duplicate image_id")
 
-    selected_by_id = {row["submission_id"]: row for row in selected}
-    image_by_id, boxes_by_image, images_by_identity = _build_metadata(
-        pair_data,
-        index_lines,
-    )
+    boxes_by_image, images_by_identity = _index_metadata(index_lines)
+    indexed_ids = set(boxes_by_image)
+    missing = indexed_ids - set(image_by_id)
+    if missing:
+        raise ValueError(f"indexed image {min(missing)} is missing from gallery_images")
+
     outputs = []
-
     for review in reviewed:
-        submission_id = review["submission_id"]
-        for field in ("final_desc", "final_change"):
-            value = review.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"{submission_id}: {field} must be completed before "
-                    "positive-set handoff"
-                )
-
-        source = selected_by_id[submission_id]
-        annotation = source["annotation"]
-        case_type = review.get("case_type", annotation["caseType"])
-        if case_type not in CASE_TYPES:
-            raise ValueError(f"{submission_id}: invalid case_type {case_type!r}")
-        query_id = source["query_image_id"]
-        seed_id = source["target_image_id"]
-
-        subjects = normalize_review_subjects(
-            submission_id,
-            case_type,
-            review.get("subjects"),
+        sample_id = review["sample_id"]
+        source = selected_by_id[sample_id]
+        query_id, seed_id = source["query_image_id"], source["target_image_id"]
+        case_type = review.get("case_type", source["case_type"])
+        case_type, subjects = normalize_review_assignment(
+            sample_id, case_type, review.get("subjects")
         )
         validate_review_output(
             case_type,
@@ -251,65 +170,50 @@ def prepare_positive_set_inputs(
         }
 
         for identity_id in subject_by_identity:
-            identity_images = images_by_identity.get(identity_id, set())
-            if query_id not in identity_images or seed_id not in identity_images:
+            if not {query_id, seed_id} <= images_by_identity.get(identity_id, set()):
                 raise ValueError(
-                    f"{submission_id}: reviewed identity_id {identity_id} must appear "
-                    "in both query and seed target"
+                    f"{sample_id}: reviewed identity_id {identity_id} "
+                    "must appear in both query and seed target"
                 )
-        required_ids = list(subject_by_identity)
 
-        candidate_sets = [
-            images_by_identity.get(identity_id, set()) for identity_id in required_ids
-        ]
-        candidate_ids = set.intersection(*candidate_sets) if candidate_sets else set()
+        candidate_ids = set.intersection(
+            *(images_by_identity[x] for x in subject_by_identity)
+        )
         candidate_ids.discard(query_id)
-
         if seed_id not in candidate_ids:
             raise ValueError(f"seed target {seed_id} is not identity-compatible")
 
-        non_seed_ids = sorted(candidate_ids - {seed_id})
+        non_seed = sorted(candidate_ids - {seed_id})
         if candidate_ranker is not None:
-            ranked_ids = candidate_ranker(
+            ranked = candidate_ranker(
                 review["final_change"],
-                [
-                    (image_id, image_by_id[image_id]["url"])
-                    for image_id in non_seed_ids
-                ],
+                [(x, image_by_id[x]["url"]) for x in non_seed],
             )
-            if len(ranked_ids) != len(non_seed_ids) or set(ranked_ids) != set(
-                non_seed_ids
-            ):
+            if len(ranked) != len(non_seed) or set(ranked) != set(non_seed):
                 raise ValueError(
-                    f"{submission_id}: candidate reranker must return every "
-                    "non-seed candidate exactly once"
+                    f"{sample_id}: candidate reranker must return "
+                    "every non-seed candidate exactly once"
                 )
-        else:
-            ranked_ids = non_seed_ids
+            non_seed = ranked
 
-        ordered_ids = [seed_id, *ranked_ids]
         candidates = []
-        for image_id in ordered_ids:
-            subject_boxes = [
-                {
-                    "subject_id": subject_by_identity[box["identity_id"]],
-                    **box,
-                }
-                for box in boxes_by_image.get(image_id, [])
-                if box["identity_id"] in subject_by_identity
-            ]
+        for image_id in [seed_id, *non_seed]:
             candidates.append(
                 {
                     "image_id": image_id,
                     "image_url": image_by_id[image_id]["url"],
                     "is_seed": image_id == seed_id,
-                    "subject_boxes": subject_boxes,
+                    "subject_boxes": [
+                        {"subject_id": subject_by_identity[x["identity_id"]], **x}
+                        for x in boxes_by_image[image_id]
+                        if x["identity_id"] in subject_by_identity
+                    ],
                 }
             )
 
         outputs.append(
             {
-                "submission_id": review["submission_id"],
+                "sample_id": sample_id,
                 "case_type": case_type,
                 "query_image_id": query_id,
                 "query_image_url": image_by_id[query_id]["url"],

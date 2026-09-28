@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "num_samples": 4311,
+  "num_images": 37107,
+  "num_head_boxes": 63188,
+  "splits": {
+    "train": 4033,
+    "val": 264,
+    "test": 14
+  },
+  "partial": false
+}

@@ -48,10 +48,10 @@ BOXES = {
 }
 
 
-def _source(submission_id: str = "s1") -> dict:
+def _source(sample_id: str = "s1") -> dict:
     return {
-        "submission_id": submission_id,
-        "case_type": "SINGLE",
+        "sample_id": sample_id,
+        "case_type": "INDIVIDUAL",
         "query_image_id": "1_1",
         "query_image_url": (
             "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
@@ -65,13 +65,31 @@ def _source(submission_id: str = "s1") -> dict:
                 "image_id": "1_2",
                 "image_url": "/data/local-files/?d=train/1_2.jpg",
                 "is_seed": True,
-                "subject_boxes": [],
+                "subject_boxes": [
+                    {
+                        "subject_id": 1,
+                        "identity_id": "7",
+                        "x": 20,
+                        "y": 10,
+                        "width": 20,
+                        "height": 40,
+                    }
+                ],
             },
             {
                 "image_id": "1_3",
                 "image_url": "/data/local-files/?d=train/1_3.jpg",
                 "is_seed": False,
-                "subject_boxes": [],
+                "subject_boxes": [
+                    {
+                        "subject_id": 1,
+                        "identity_id": "7",
+                        "x": 30,
+                        "y": 20,
+                        "width": 20,
+                        "height": 30,
+                    }
+                ],
             },
         ],
         "positive_image_ids": ["1_2"],
@@ -105,14 +123,20 @@ def test_load_box_index_recovers_boxes_missing_from_pair_data(tmp_path) -> None:
     }
 
 
-def test_positive_task_payload_keeps_query_and_candidate_boxes_read_only() -> None:
-    task = build_task_payload(_source(), BOXES)
+def test_positive_task_payload_uses_handoff_candidate_boxes() -> None:
+    task = build_task_payload(_source())
 
     assert task["positive_image_ids"] == ["1_2"]
-    assert task["query"]["boxes"][0]["subject_id"] == 1
-    assert task["query"]["boxes"][0]["x"] == pytest.approx(10.0)
+    assert task["query"]["boxes"] == []
     assert task["candidates"][0]["is_seed"] is True
-    assert task["candidates"][1]["boxes"][0]["subject_id"] == 1
+    assert task["candidates"][1]["boxes"][0] == {
+        "subject_id": 1,
+        "identity_id": "7",
+        "x": 30,
+        "y": 20,
+        "width": 20,
+        "height": 30,
+    }
 
 
 def test_positive_submission_requires_seed_and_rejects_unknown_candidates() -> None:
@@ -121,27 +145,26 @@ def test_positive_submission_requires_seed_and_rejects_unknown_candidates() -> N
     with pytest.raises(ValueError, match="seed target must remain selected"):
         validate_submission(
             source,
-            {"submission_id": "s1", "positive_image_ids": ["1_3"]},
+            {"sample_id": "s1", "positive_image_ids": ["1_3"]},
         )
 
     with pytest.raises(ValueError, match="invalid positive_image_id"):
         validate_submission(
             source,
-            {"submission_id": "s1", "positive_image_ids": ["1_2", "unknown"]},
+            {"sample_id": "s1", "positive_image_ids": ["1_2", "unknown"]},
         )
 
 
 def test_positive_submission_uses_canonical_candidate_order() -> None:
     row = validate_submission(
         _source(),
-        {"submission_id": "s1", "positive_image_ids": ["1_3", "1_2"]},
+        {"sample_id": "s1", "positive_image_ids": ["1_3", "1_2"]},
     )
 
     assert row == {
-        "submission_id": "s1",
+        "sample_id": "s1",
         "positive_image_ids": ["1_2", "1_3"],
     }
-
 
 
 def test_positive_state_loads_cumulative_catalog(tmp_path, monkeypatch) -> None:
@@ -150,29 +173,48 @@ def test_positive_state_loads_cumulative_catalog(tmp_path, monkeypatch) -> None:
     write_jsonl(input_path, [_source("s1"), _source("s2")])
     write_jsonl(
         output_path,
-        [{"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]}],
+        [{"sample_id": "s1", "positive_image_ids": ["1_2", "1_3"]}],
     )
     monkeypatch.setattr(positive_app, "INPUT", input_path)
     monkeypatch.setattr(positive_app, "OUTPUT", output_path)
-    monkeypatch.setattr(positive_app, "load_box_index", lambda: BOXES)
-
     state = PositiveState()
 
     assert state.tasks()["completed"] == 1
-    assert state.task(submission_id="s1")["is_completed"] is True
-    assert state.task(submission_id="s1")["task"]["positive_image_ids"] == [
+    assert state.task(sample_id="s1")["is_completed"] is True
+    assert state.task(sample_id="s1")["task"]["positive_image_ids"] == [
         "1_2",
         "1_3",
     ]
+
+
+@pytest.mark.parametrize(
+    "problem", ["duplicate", "missing_seed", "extra_seed", "seed_not_first"]
+)
+def test_positive_state_rejects_invalid_catalog(tmp_path, monkeypatch, problem):
+    row = _source()
+    if problem == "duplicate":
+        row["candidates"].append(dict(row["candidates"][1]))
+    elif problem == "missing_seed":
+        row["candidates"][0]["is_seed"] = False
+    elif problem == "extra_seed":
+        row["candidates"][1]["is_seed"] = True
+    else:
+        row["candidates"].reverse()
+
+    input_path = tmp_path / "input.jsonl"
+    write_jsonl(input_path, [row])
+    monkeypatch.setattr(positive_app, "INPUT", input_path)
+    monkeypatch.setattr(positive_app, "OUTPUT", tmp_path / "positive_sets.jsonl")
+    with pytest.raises(ValueError, match="candidates must be unique"):
+        PositiveState()
+
 
 def test_positive_state_tasks_keeps_completed_tasks_visible() -> None:
     first = _source("s1")
     second = _source("s2")
     state = PositiveState.__new__(PositiveState)
     state.rows = [first, second]
-    state.positives = {
-        "s1": {"submission_id": "s1", "positive_image_ids": ["1_2"]}
-    }
+    state.positives = {"s1": {"sample_id": "s1", "positive_image_ids": ["1_2"]}}
 
     summary = state.tasks()
 
@@ -194,19 +236,22 @@ def test_positive_state_save_writes_catalog_order(tmp_path, monkeypatch) -> None
     state.lock = threading.Lock()
     monkeypatch.setattr(positive_app, "OUTPUT", output)
 
-    state.save({"submission_id": "s2", "positive_image_ids": ["1_2"]})
-    state.save({"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]})
+    state.save({"sample_id": "s2", "positive_image_ids": ["1_2"]})
+    state.save({"sample_id": "s1", "positive_image_ids": ["1_2", "1_3"]})
 
     assert load_jsonl(output) == [
-        {"submission_id": "s1", "positive_image_ids": ["1_2", "1_3"]},
-        {"submission_id": "s2", "positive_image_ids": ["1_2"]},
+        {"sample_id": "s1", "positive_image_ids": ["1_2", "1_3"]},
+        {"sample_id": "s2", "positive_image_ids": ["1_2"]},
     ]
 
 
 def test_positive_image_relative_path_is_safe() -> None:
-    assert _image_relative_path(
-        "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
-    ).as_posix() == "train/1_1.jpg"
+    assert (
+        _image_relative_path(
+            "/data/local-files/?d=Amazing/Datasets/PIPA/images/train/1_1.jpg"
+        ).as_posix()
+        == "train/1_1.jpg"
+    )
 
     with pytest.raises(ValueError, match="unsafe image path"):
         _image_relative_path("/images/../secret.jpg")

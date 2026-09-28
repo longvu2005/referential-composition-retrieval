@@ -1,116 +1,94 @@
-"""Final RCR dataset construction."""
-
-from __future__ import annotations
+"""Build the final RCR dataset from completed handoffs."""
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any
 
-from rcr.dataset.review import normalize_review_subjects
-from rcr.dataset.rewrite import CASE_TYPES, validate_review_output
+from rcr.dataset.gallery import indexed_image_ids
+from rcr.dataset.review import normalize_review_assignment
+from rcr.dataset.rewrite import validate_review_output
 
-JsonObject = dict[str, Any]
-
-
-def _index_by_submission_id(
-    records: Iterable[JsonObject],
-    label: str,
-) -> dict[str, JsonObject]:
-    indexed = {}
-
-    for record in records:
-        submission_id = record["submission_id"]
-        if submission_id in indexed:
-            raise ValueError(f"{label}: duplicate submission_id {submission_id}")
-        indexed[submission_id] = record
-
-    return indexed
+PAIR_SPLITS = frozenset({"TRAIN", "VAL", "TEST"})
 
 
+def pair_split_index(pair_data: dict) -> dict[tuple[str, str], str]:
+    """Index ordered query/target pairs by their authoritative PIPA split."""
 
-
-def _validate_handoffs(
-    selected_by_id: dict[str, JsonObject],
-    reviewed_by_id: dict[str, JsonObject],
-    positives_by_id: dict[str, JsonObject],
-) -> None:
-    expected_ids = set(selected_by_id)
-
-    if set(reviewed_by_id) != expected_ids:
-        raise ValueError("reviewed samples do not match selected samples")
-
-    if set(positives_by_id) != expected_ids:
-        raise ValueError("positive sets do not match selected samples")
-
-    for submission_id, source in selected_by_id.items():
-        review = reviewed_by_id[submission_id]
-
-        case_type = review.get("case_type")
-        if case_type is not None and case_type not in CASE_TYPES:
+    output: dict[tuple[str, str], str] = {}
+    for pair in pair_data["pairs"]:
+        query_id, target_id = pair["query_image_id"], pair["target_image_id"]
+        split = pair["split"].upper()
+        if split not in PAIR_SPLITS:
+            raise ValueError(f"pair_data has invalid split {split!r}")
+        key = (query_id, target_id)
+        if key in output:
             raise ValueError(
-                f"{submission_id}: invalid case_type {case_type!r}"
+                "pair_data contains duplicate ordered pair "
+                f"{query_id!r} -> {target_id!r}"
             )
+        output[key] = split
 
-        reviewed_case = case_type or source["annotation"]["caseType"]
-        normalize_review_subjects(
-            submission_id,
-            reviewed_case,
-            review.get("subjects"),
-        )
-        validate_review_output(
-            reviewed_case,
-            {
-                "final_desc": review["final_desc"],
-                "final_change": review["final_change"],
-            },
-        )
+    return output
 
-        positive_ids = positives_by_id[submission_id]["positive_image_ids"]
-        if not positive_ids or len(positive_ids) != len(set(positive_ids)):
-            raise ValueError(
-                f"{submission_id}: positive_image_ids must be non-empty and unique"
-            )
+
+def _index_unique(records: Iterable[dict], label: str) -> dict[str, dict]:
+    output = {}
+    for row in records:
+        sample_id = row["sample_id"]
+        if sample_id in output:
+            raise ValueError(f"{label}: duplicate sample_id {sample_id}")
+        output[sample_id] = row
+    return output
 
 
 def build_final_dataset(
-    selected: list[JsonObject],
-    reviewed: list[JsonObject],
-    positive_sets: list[JsonObject],
-    pair_data: JsonObject,
+    selected: list[dict],
+    reviewed: list[dict],
+    positive_sets: list[dict],
+    gallery_images: list[dict],
     index_lines: Iterable[str],
     version: str,
-) -> JsonObject:
-    """Build the final RCR dataset."""
+    pair_data: dict | None = None,
+    allow_partial: bool = False,
+) -> dict:
+    """Build the final dataset, optionally using only completed handoffs."""
 
-    selected_by_id = _index_by_submission_id(selected, "selected")
-    reviewed_by_id = _index_by_submission_id(reviewed, "reviewed")
-    positives_by_id = _index_by_submission_id(positive_sets, "positive_sets")
+    selected_by_id = _index_unique(selected, "selected")
+    reviewed_by_id = _index_unique(reviewed, "reviewed")
+    positives_by_id = _index_unique(positive_sets, "positive_sets")
+    expected_ids = set(selected_by_id)
+    pair_splits = pair_split_index(pair_data) if pair_data is not None else None
 
-    _validate_handoffs(
-        selected_by_id,
-        reviewed_by_id,
-        positives_by_id,
-    )
+    if allow_partial:
+        selected = [
+            row
+            for row in selected
+            if row["sample_id"] in reviewed_by_id
+            and row["sample_id"] in positives_by_id
+        ]
+    else:
+        if set(reviewed_by_id) != expected_ids:
+            raise ValueError("reviewed samples do not match selected samples")
+        if set(positives_by_id) != expected_ids:
+            raise ValueError("positive sets do not match selected samples")
+
+    index_lines = list(index_lines)
+    index_ids = indexed_image_ids(index_lines)
+    gallery_by_id = {x["image_id"]: x for x in gallery_images}
+    if len(gallery_by_id) != len(gallery_images):
+        raise ValueError("gallery_images contains duplicate image_id")
+    if set(gallery_by_id) != set(index_ids):
+        raise ValueError("gallery_images must match the complete indexed gallery")
 
     images = [
-        {
-            "image_id": image["image_id"],
-            "path": image["url"].split("/PIPA/images/", 1)[1],
-        }
-        for image in pair_data["images"]
+        {"image_id": image_id, "path": gallery_by_id[image_id]["path"]}
+        for image_id in index_ids
     ]
-    gallery_ids = {image["image_id"] for image in images}
-
-    head_boxes = []
     identities_by_image = defaultdict(set)
+    head_boxes = []
 
     for line in index_lines:
-        album_id, photo_id, x, y, width, height, identity_id, _ = line.split()
-        image_id = f"{album_id}_{photo_id}"
-
-        if image_id not in gallery_ids:
-            continue
-
+        album, photo, x, y, w, h, identity_id, _ = line.split()
+        image_id = f"{album}_{photo}"
         identities_by_image[image_id].add(identity_id)
         head_boxes.append(
             {
@@ -119,62 +97,66 @@ def build_final_dataset(
                 "identity_id": identity_id,
                 "x": int(x),
                 "y": int(y),
-                "width": int(width),
-                "height": int(height),
+                "width": int(w),
+                "height": int(h),
             }
         )
 
     samples = []
     splits = {"train": [], "val": [], "test": []}
+    gallery_ids = set(index_ids)
 
     for source in selected:
-        submission_id = source["submission_id"]
-        review = reviewed_by_id[submission_id]
-        positive_ids = positives_by_id[submission_id]["positive_image_ids"]
+        sample_id = source["sample_id"]
+        review = reviewed_by_id[sample_id]
+        positive_ids = positives_by_id[sample_id]["positive_image_ids"]
+        query_id = source["query_image_id"]
+        target_id = source["target_image_id"]
 
-        if source["target_image_id"] not in positive_ids:
-            raise ValueError(f"{submission_id}: missing seed positive")
+        if not positive_ids or len(positive_ids) != len(set(positive_ids)):
+            raise ValueError(
+                f"{sample_id}: positive_image_ids must be non-empty and unique"
+            )
+        if target_id not in positive_ids:
+            raise ValueError(f"{sample_id}: missing seed positive")
+        if query_id in positive_ids:
+            raise ValueError(f"{sample_id}: query image is positive")
 
-        if source["query_image_id"] in positive_ids:
-            raise ValueError(f"{submission_id}: query image is positive")
-
-        case_type = review.get(
-            "case_type",
-            source["annotation"]["caseType"],
-        )
-        subjects = normalize_review_subjects(
-            submission_id,
-            case_type,
+        case_type, subjects = normalize_review_assignment(
+            sample_id,
+            review.get("case_type", source["case_type"]),
             review.get("subjects"),
         )
-
+        final_desc, final_change = validate_review_output(
+            case_type,
+            {
+                "final_desc": review["final_desc"],
+                "final_change": review["final_change"],
+            },
+        )
         required_ids = {
             identity_id
             for subject in subjects
             for identity_id in subject["identity_ids"]
         }
 
-        if not required_ids <= identities_by_image[source["query_image_id"]]:
+        if not required_ids <= identities_by_image[query_id]:
             raise ValueError(
-                f"{submission_id}: reviewed identities must appear in the query image"
+                f"{sample_id}: reviewed identities must appear in the query image"
             )
-
         for positive_id in positive_ids:
             if (
                 positive_id not in gallery_ids
                 or not required_ids <= identities_by_image[positive_id]
             ):
-                raise ValueError(f"{submission_id}: invalid positive {positive_id}")
-
-        final_desc = review["final_desc"].strip()
-        final_change = review["final_change"].strip()
+                raise ValueError(f"{sample_id}: invalid positive {positive_id}")
 
         samples.append(
             {
-                "sample_id": submission_id,
+                "sample_id": sample_id,
                 "case_type": case_type,
-                "query_image_id": source["query_image_id"],
-                "target_image_id": source["target_image_id"],
+                "query_image_id": query_id,
+                "target_image_id": target_id,
                 "positive_image_ids": positive_ids,
                 "subjects": subjects,
                 "final_desc": final_desc,
@@ -182,16 +164,25 @@ def build_final_dataset(
                 "final_instruction": f"{final_desc}; {final_change}.",
             }
         )
-
-        splits[source["split"].lower()].append(submission_id)
+        if pair_splits is None:
+            split = source["split"].upper()
+            if split not in PAIR_SPLITS:
+                raise ValueError(f"{sample_id}: invalid split {split!r}")
+        else:
+            key = (query_id, target_id)
+            try:
+                split = pair_splits[key]
+            except KeyError as exc:
+                raise ValueError(
+                    f"{sample_id}: pair is missing from pair_data "
+                    f"({query_id!r}, {target_id!r})"
+                ) from exc
+        splits[split.lower()].append(sample_id)
 
     return {
         "samples": samples,
         "images": images,
-        "gallery": [
-            {"image_id": image["image_id"]}
-            for image in images
-        ],
+        "gallery": [{"image_id": x["image_id"]} for x in images],
         "head_boxes": head_boxes,
         "splits": splits,
         "manifest": {
@@ -199,9 +190,7 @@ def build_final_dataset(
             "num_samples": len(samples),
             "num_images": len(images),
             "num_head_boxes": len(head_boxes),
-            "splits": {
-                split: len(sample_ids)
-                for split, sample_ids in splits.items()
-            },
+            "splits": {name: len(ids) for name, ids in splits.items()},
+            "partial": allow_partial,
         },
     }

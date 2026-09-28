@@ -46,6 +46,14 @@ Prepare or refresh the cumulative positive catalog after rewrite review:
 python tools/dataset/prepare_handoffs.py positives
 ```
 
+Add `--clip-rerank` to rank only newly reviewed tasks with CLIP. Existing tasks
+are never reranked. With no new task, CLIP is not loaded. Stop this UI before
+running the finalization command because that launcher validates and may
+rewrite the saved positive decisions. For example,
+`bash scripts/phase2_finalize.bash --version 0.2.0` builds a new export after
+the checked-in version `0.1.0`; this command also requires a working local
+image tree.
+
 Run:
 
 ```bash
@@ -78,7 +86,7 @@ Each canonical record remains:
 
 ```json
 {
-  "submission_id": "sample_000001",
+  "sample_id": "train__query_id__target_id",
   "positive_image_ids": ["seed_image_id", "additional_positive_id"]
 }
 ```
@@ -95,8 +103,10 @@ dataset/data/work/review/review_input.jsonl
 dataset/data/work/positives/positive_set_input.jsonl
 ```
 
-Re-running `prepare_handoffs.py` refreshes existing task metadata by
-`submission_id`, keeps stable task order, and appends new tasks. Completion state is
+Re-running review preparation refreshes the review catalog by `sample_id`.
+Positive preparation preserves migrated candidate order and checks that reviewed
+text and Subject identities still match existing tasks; inspect positive labels
+before applying any changed review. Completion state is
 stored separately in `reviewed.jsonl` and `positive_sets.jsonl`. This allows old
 completed tasks to remain visible without re-running model work or creating a
 second annotation format.

@@ -1,212 +1,526 @@
-# Referential Composition Retrieval
+# Referential Composition Retrieval (RCR)
 
-This repository contains the dataset construction pipeline, benchmark methods,
-and shared evaluation protocol for Referential Composition Retrieval (RCR).
+This repository contains the dataset pipeline, proposed retrieval model, and
+shared evaluation protocol for **Referential Composition Retrieval (RCR)**.
 
 ## Task
 
 Given:
 
 1. a query image;
-2. a referential description specifying who must be selected; and
-3. a target condition specifying what must hold in the desired image;
+2. referential text that identifies one or more Subjects in that image; and
+3. a target change/condition;
 
-the goal is to rank gallery images that satisfy both identity preservation and
-the requested target condition.
+the system ranks gallery images that preserve the referenced identities and
+satisfy the requested target condition.
 
-An RCR query may refer to one person, multiple people, or an ordered relation
-between multiple Subjects.
+A **Subject** is a semantic reference and may contain one or more identities.
+The benchmark uses four case types:
 
-## Case types
+- `INDIVIDUAL`: one Subject with exactly one identity;
+- `GROUP`: one Subject with two or more identities;
+- `DUAL`: two Subjects with independent Subject-specific changes;
+- `RELATIONAL`: two Subjects connected by an ordered relation.
 
-* `SINGLE`: exactly one Subject.
-* `MULTI`: two or more Subjects without a primary ordered relation.
-* `RELATIONAL`: two or more Subjects connected by an ordered relation.
-
-A Subject is a semantic identifier and may represent one or multiple people.
-
-## Repository structure
+## Repository layout
 
 ```text
 referential-composition-retrieval/
-├── dataset/              dataset files, prompt, and reports
-├── labelstudio/          local review UI + offline positive handoff
+├── configs/methods/proposed/    proposed-method experiment configs
+├── dataset/                     dataset source, work files, final export
+├── labelstudio/                 local review / positive-set UIs
+├── scripts/                     dataset shell launchers
 ├── src/rcr/
-│   ├── dataset/          dataset construction logic
-│   ├── methods/          retrieval methods
-│   ├── evaluation/       shared benchmark protocol and metrics
-│   └── utils/            shared utilities
-├── tools/                Python command-line entrypoints
-├── scripts/              Bash launchers
-├── configs/              dataset, method, evaluation, and experiment configs
-├── tests/                dataset, method, and evaluation tests
-├── cache/                generated detections and features
-├── checkpoints/          shared and method-specific checkpoints
-├── runs/                 experiment outputs
-├── tables/               aggregated benchmark tables
-└── docs/                 additional documentation
+│   ├── dataset/                 dataset schemas and construction
+│   ├── evaluation/              official ranking protocol and metrics
+│   ├── methods/common/          shared data, detection, anchor matching
+│   └── methods/proposed/        proposed RCR model
+├── tools/dataset/               dataset CLIs
+├── tools/methods/               cache/train/retrieve/evaluate CLIs
+└── tests/                       dataset, method, and evaluation tests
 ```
 
-## Code organization
-
-The repository follows three main layers:
+The supported dependency direction is:
 
 ```text
-scripts/**/*.bash
-    → tools/*.py
-        → src/rcr/*
+scripts/ -> tools/ -> src/rcr/
 ```
 
-* `scripts/` contains shell launchers only.
-* `tools/` parses command-line arguments and invokes repository code.
-* `src/rcr/` contains all reusable Python implementation.
-* Source code must not import from `tools/` or `scripts/`.
+`src/rcr/` never imports from `tools/` or `scripts/`.
 
-The `dataset`, `methods`, and `evaluation` scopes are kept separate throughout
-the repository.
+---
 
-## Dataset
+## Current dataset snapshot
 
-Dataset construction is documented in [`dataset/README.md`](dataset/README.md).
+The checked-in final export is **version 0.1.0** with 4,311 queries and
+37,107 registered gallery images.
 
-The pipeline has two machine phases separated by human annotation:
+| Split | INDIVIDUAL | GROUP | DUAL | RELATIONAL | Total |
+|---|---:|---:|---:|---:|---:|
+| train | 3,472 | 137 | 269 | 155 | 4,033 |
+| val | 194 | 12 | 36 | 22 | 264 |
+| test | 5 | 2 | 3 | 4 | 14 |
+| **all** | **3,671** | **151** | **308** | **181** | **4,311** |
+
+The current test split is intentionally very small and should be treated as a
+pipeline-validation split, not yet as the final publication-scale test set.
+
+Final benchmark files live in `dataset/data/final/`:
 
 ```text
-PHASE 1 — MACHINE / GEMINI
-  audit → select → prepare rewrite input → split chunks
-  → submit → status → collect → next chunk → merge
-  → prepare review labeling input
-
-[HUMAN + HANDOFF PREP]
-  review rewrite → prepare positive-set labeling input → expand positive sets
-
-PHASE 2 — MACHINE
-  validate handoffs → build final dataset
+samples.jsonl
+images.jsonl
+gallery.jsonl
+head_boxes.jsonl
+manifest.json
+splits/{train,val,test}.txt
 ```
 
-Run Phase 1:
+Each final sample contains:
+
+```text
+sample_id
+case_type
+query_image_id
+target_image_id
+positive_image_ids
+subjects[{subject_id, identity_ids[]}]
+final_desc
+final_change
+final_instruction
+```
+
+The local raw image collection is not part of the repository archive and must
+be available under the configured `image_root`.
+
+### Dataset reconstruction
+
+The accepted Stage-2 text is treated as immutable input. The normal rebuild
+sequence is:
 
 ```bash
-export GEMINI_API_KEY="..."
 bash scripts/phase1_rewrite.bash prepare
-bash scripts/phase1_rewrite.bash submit
-bash scripts/phase1_rewrite.bash status
-bash scripts/phase1_rewrite.bash collect
-# repeat submit → status → collect until no ready chunk remains
-bash scripts/phase1_rewrite.bash merge
-```
-
-`prepare` creates fixed chunks (1000 samples by default). Only one chunk may be
-active on Gemini at a time. `merge` creates `rewrite_output.jsonl` and refreshes the
-cumulative `review_input.jsonl` task catalog. Reviewed tasks remain in this catalog so
-the local UI can revisit them; completion state comes from `reviewed.jsonl`. A
-sample-level Gemini failure is preserved as an
-empty rewrite for human review and is treated as processed, so it is never
-resubmitted. Whole failed batch jobs remain retryable. Rewrite review and Full Positive
-selection both run through repo-local file-backed UIs. See
-[`labelstudio/README.md`](labelstudio/README.md).
-After producing `reviewed.jsonl`, prepare the positive-set catalog with:
-
-```bash
 python tools/dataset/prepare_handoffs.py positives
-```
-
-After `positive_sets.jsonl` is complete, run Phase 2:
-
-```bash
 bash scripts/phase2_finalize.bash --version 0.1.0
 ```
 
-`final_instruction` is created only when the final dataset is built.
+`phase2_finalize.bash` validates positive decisions and writes the deterministic
+final export. It does not call Gemini for already accepted Stage-2 samples.
 
-## Methods
+---
 
-Methods are organized under `src/rcr/methods/`:
+## Proposed method
 
-* `common/`: shared adaptations and components;
-* `simple/`: simple and diagnostic baselines;
-* `published/`: adaptations of published retrieval methods;
-* `proposed/`: the proposed RCR method.
+The implemented inference path is:
 
-Shared adaptations such as SetMatch and Predicted Anchor must be implemented
-once under `common/` and reused consistently by every applicable method.
+```text
+person detector -> shared image encoder -> Subject grounding
+-> coarse identity shortlist -> structured identity-set composition
+-> target evidence binding -> fine target-set reasoning -> ranking
+```
 
-A method must not modify the dataset, gallery, positive sets, evaluation
-metrics, or shared localization protocol.
+### 1. Shared visual representation
 
-## Evaluation
+A `person`-prompted detector supplies every detected person candidate; detected
+heads do not gate candidates. A shared image encoder `E_I` produces:
 
-All methods are evaluated using the same gallery and the same final ranking.
+- letterboxed whole-scene patch features `F`;
+- full-person crop features `h_i`.
 
-The benchmark reports:
+A trainable identity head produces normalized identity embeddings:
 
-### Identity retrieval
+```text
+v_i = Normalize(P_id(h_i))
+```
 
-* ID-mAP
-* ID-R@1
-* ID-R@5
-* ID-R@10
+The expensive image encoder is frozen behind the feature cache. `P_id` remains
+inside `RCRModel` and is trained normally; identity embeddings are therefore
+**not** stored permanently in the cache. Scene-box coordinates are transformed
+to the same letterboxed coordinate system as the scene patch grid. GT head
+annotations are used only to align optional identity supervision and compute
+evaluation labels; no head crop enters the model.
 
-### Full RCR retrieval
+### 2. Shared evidence binding
 
-* Full-mAP
-* Full-R@1
-* Full-R@5
-* Full-R@10
+One `EvidenceBinding` module is shared by query grounding and target evidence
+binding. Its order is **Scene → Reference → Person → Conditioned Scene**.
 
-Full-mAP is the primary benchmark metric.
+First, reference tokens condition the scene patches:
 
-For multi-Subject queries, a Full Positive must satisfy all required Subjects
-and conditions. Partial matches do not count as Full Positives.
+```text
+F_bar = LN(F + Attn(F, R, R))
+```
 
-The query image must not be evaluated as one of its own gallery candidates.
+Then each person reads that conditioned scene using a soft geometry bias from
+its box in letterboxed scene coordinates:
 
-Ground-truth boxes are reserved for validation and Oracle analysis. The main
-benchmark uses the shared predicted-anchor protocol whenever localization is
-required.
+```text
+e_i = Attn_geo(h_i, F_bar, F_bar; B_i)
+b_i = FFN_res(h_i + e_i)
+```
+
+The geometry is a soft attention bias, not a hard crop mask, so relational and
+contextual evidence may remain outside the person box.
+
+### 3. Query Subject grounding
+
+For Subject `s`, the shared text encoder `E_R` encodes its selection text. The
+same encoder processes the change text; the shared Binding produces one raw
+grounding logit per query person:
+
+```text
+g_si = Ground(F_q, h_i^q, B_i^q, T_sel^s)
+m_si = sigmoid(g_si)
+```
+
+Membership uses independent sigmoid probabilities, never a softmax across
+persons; a GROUP Subject can therefore select multiple people. Training uses
+masked `BCEWithLogits` on raw finite logits.
+
+### 4. Cheap coarse identity retrieval
+
+Coarse retrieval is deliberately optimistic and is used only to preserve high
+candidate recall.
+
+```text
+c_i(q,t) = max_j dot(v_i^q, v_j^t)
+a_si = sigmoid(g_si)
+omega_si = a_si / (sum_r a_sr + eps)
+S_subject_s(q,t) = sum_i omega_si c_i(q,t)
+S_c(q,t) = average_s S_subject_s(q,t)
+```
+
+Each Subject contributes once to the average, including when one Subject
+contains multiple people. Invalid person/Subject positions are masked. There
+is no learned coarse scorer, threshold, one-to-one assignment, coverage
+heuristic, or coarse loss. Top `M` gallery images proceed to the fine stage.
+
+### 5. Structured identity composition
+
+The change text contains distinct `[S1]` / `[S2]` tokenizer special tokens
+aligned with Subject IDs. Each separate identity token uses the reference-free
+query identity `v_i` plus the embedding for its Subject role.
+
+Independent grounding probabilities are normalized only when a Subject marker
+needs a Subject-level identity summary; the individual identity tokens remain
+available to the fine reasoner. Identity-token keys receive the additive
+`log(sigmoid(g_si))` membership prior in composition attention, target scene
+binding, and fine self-attention. CLS/change keys have neutral prior; padding
+is masked. No hard membership threshold removes a valid identity token.
+
+This gives:
+
+- permutation invariance among identities inside one Subject;
+- explicit role distinction between Subjects; and
+- individual identity tokens for final target matching.
+
+### 6. Target evidence binding and fine reasoning
+
+For each coarse Top-M target, the same `EvidenceBinding` conditions its scene
+with the **composed reference** (change, Subject roles, individual identity
+tokens, and aligned membership prior). Target person tokens combine:
+
+```text
+LN(projected bound evidence + projected target person identity
+   + projected scene-box geometry)
+```
+
+The composed query cross-attends to the whole target person set, then a
+self-attention block scores its CLS token as the raw scalar `S_f(q,t)`.
+
+The final Top-M order is determined only by `S_f`; the coarse score is used only
+for shortlisting. Images outside Top-M retain their coarse order so the saved
+output remains a complete gallery ranking. No coarse, identity, or coverage
+score is manually added to the fine score.
+
+When the query has no detected people, it remains in retrieval and evaluation:
+nonempty gallery person sets tie at zero in coarse identity scoring, while
+empty target sets score `-inf` there. The fine stage can still use change text
+and target evidence. Empty targets and padded persons/Subjects do not crash.
+
+### Training objective
+
+The current objective is:
+
+```text
+L = 1.0 * L_ret + 1.0 * L_ground + 0.1 * L_id
+```
+
+where:
+
+- `L_ground`: masked BCE-with-logits for independent Subject/person labels;
+- `L_id`: supervised contrastive loss (default temperature `0.1`), ignoring
+  unknown identity `-1` and self-pairs;
+- `L_ret`: mean pairwise `softplus(S_f(q,n) - S_f(q,p))` over valid
+  positive/negative pairs.
+
+Candidate sampling picks one reviewed positive and excludes **all** other
+known positives and the query image from that query's negatives.
+
+---
 
 ## Setup
 
-Create and activate the Conda environment:
+Python 3.11 is required.
 
 ```bash
-conda create -n rcr python=3.11 pip -y
-conda activate rcr
-```
-
-Install the project for development:
-
-```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e ".[dev]"
+python -m pip install -e '.[dev]'
 ```
 
-Verify the installation:
+Verify the package:
 
 ```bash
 python -c "import rcr; print(rcr.__file__)"
 ```
 
-## Reproducibility
+The default image config uses Meta's DINOv3 ViT-B/16 checkpoint on Hugging
+Face. That checkpoint is gated, so accept its license and authenticate with
+Hugging Face before building the cache.
 
-The following rules apply to all official experiments:
+Run the test suite and check the proposed implementation's source style:
 
-* raw data is immutable;
-* generated artifacts are separated from source code;
-* intermediate dataset decisions remain traceable;
-* configs used for official runs are preserved;
-* random behavior must be explicitly seeded;
-* gallery and positive definitions are fixed across methods;
-* shared detector settings and caches are fixed across applicable methods;
-* method outputs are written under `runs/`;
-* final tables are built from saved run artifacts;
-* evaluation failures must not be silently ignored.
+```bash
+pytest -q
+ruff check src/rcr/methods/proposed \
+  tools/methods/build_cache.py \
+  tools/methods/train_proposed.py \
+  tools/methods/retrieve_proposed.py
+ruff format --check src/rcr/methods/proposed \
+  tools/methods/build_cache.py \
+  tools/methods/train_proposed.py \
+  tools/methods/retrieve_proposed.py
+```
 
-## Project status
+---
 
-The repository is currently in the dataset reconstruction stage.
+## Proposed-method configs
 
-Dataset, method, and evaluation entrypoints will be added incrementally. A
-component must not be described as runnable until its implementation and tests
-are present.
-# referential-composition-retrieval
+All experiment parameters live under:
+
+```text
+configs/methods/proposed/
+├── build_cache.yaml
+├── train.yaml
+├── retrieve.yaml
+└── evaluate.yaml
+```
+
+Do not hard-code experiment hyperparameters in the CLI scripts.
+
+### `build_cache.yaml`
+
+Controls:
+
+- final dataset and raw-image paths;
+- cache output path;
+- Grounding DINO model and thresholds;
+- shared DINOv3 model;
+- scene/person letterbox sizes;
+- device.
+
+The default `scene_size: [512, 512]` produces a 32x32 patch grid for a ViT/16
+backbone and therefore a large disk cache over the full gallery. A smaller
+scene size may be useful for smoke tests, but changing it changes the experiment
+and requires rebuilding the cache.
+
+### `train.yaml`
+
+Controls model dimensions, optimizer parameters, loss weights, identity
+temperature, training candidate count and negative pool, seed, device, and
+output directory. There is no retrieval temperature or coarse loss.
+
+The current training sampler uses **one reviewed Full Positive plus random
+negatives** per query. Batches are grouped by number of Subjects, so every batch
+has a fixed Subject axis. Candidate count is fixed by `train.candidates`.
+`train.negative_pool: full_gallery` preserves the supplied protocol and may
+sample val/test gallery images as negatives. Choose `train_gallery` when
+held-out image negatives must be excluded; this pool contains images appearing
+as train queries or reviewed train positives. The split/protocol choice is
+independent of the architecture.
+
+### `retrieve.yaml`
+
+Controls checkpoint, split, coarse `top_m`, fine-scoring batch size, identity
+projection batch size, device, and ranking output directory.
+
+### `evaluate.yaml`
+
+Controls evaluation split, saved ranking path, CandidateRecall cutoffs, and
+metrics output path.
+
+---
+
+## End-to-end proposed-method run
+
+Run all commands from the repository root.
+
+### 1. Build the reference-free visual cache
+
+```bash
+python tools/methods/build_cache.py \
+  --config configs/methods/proposed/build_cache.yaml
+```
+
+The cache stores reference-free scene patches, person features and scene-aligned
+boxes, plus optional GT-aligned identity labels for supervision. It stores no
+head crop features or fixed `P_id` embeddings. Retrieval does not consume GT
+identity labels as model input.
+
+Cache layout:
+
+```text
+cache/proposed/
+├── index.pt
+└── features/
+    ├── 0.pt
+    ├── 1.pt
+    └── ...
+```
+
+Rebuild the cache whenever the detector, image backbone, or preprocessing
+changes. **Old head-based caches and checkpoints are incompatible with this
+implementation**: rebuild the cache and retrain before retrieval. Retraining
+`P_id` after this migration does not require a cache rebuild because the
+current projection is applied to cached person features at runtime.
+
+### 2. Train
+
+```bash
+python tools/methods/train_proposed.py \
+  --config configs/methods/proposed/train.yaml
+```
+
+Outputs are written under the configured run directory, by default:
+
+```text
+runs/proposed/
+├── config.yaml
+├── tokenizer/
+└── last.pt
+```
+
+`config.yaml` is copied into the run directory and is also embedded in the
+checkpoint for reproducibility.
+
+### 3. Retrieve / rerank
+
+```bash
+python tools/methods/retrieve_proposed.py \
+  --config configs/methods/proposed/retrieve.yaml
+```
+
+Default output:
+
+```text
+runs/proposed/test/rankings.pt
+```
+
+The file stores:
+
+```text
+sample_ids
+gallery_ids
+rankings       # full gallery ranking, int32 indices
+coarse_topm    # coarse shortlist, int32 indices
+```
+
+`rankings` contains every gallery image except the query image exactly once.
+
+### 4. Evaluate
+
+```bash
+python tools/methods/evaluate_proposed.py \
+  --config configs/methods/proposed/evaluate.yaml
+```
+
+Default output:
+
+```text
+runs/proposed/test/metrics.json
+```
+
+The evaluator reports:
+
+- `ID-mAP`, `ID-R@1/5/10`;
+- `Full-mAP`, `Full-R@1/5/10`;
+- `CandidateRecall@K` for the configured coarse-shortlist cutoffs;
+- aggregate metrics by case type;
+- per-query metrics.
+
+`Full-mAP` is the primary full-task metric.
+
+---
+
+## Cache and supervision rules
+
+The method follows these separation rules:
+
+- raw benchmark data is immutable;
+- detector/image-encoder outputs are reference-free cache artifacts;
+- query/target identity embeddings are produced by the current trainable
+  `P_id`, not permanently cached;
+- GT head identity IDs may supervise training but are not consumed by the
+  retrieval path;
+- the query image is excluded from its own ranking;
+- Full Positive definitions and evaluation code are method-independent;
+- experiment configs live under `configs/methods/proposed/`; a config copy and
+  model checkpoint are saved under the configured `runs/` directory.
+
+The detector retains all detected person candidates, including people with no
+detected head. GT heads can align supervision labels to predicted persons;
+unmatched persons have unknown identity labels. Person-detector recall still
+limits what grounding can select and should be measured before a large run.
+
+---
+
+## Evaluation protocol
+
+The same saved final ranking is scored against two positive sets.
+
+### Identity retrieval
+
+- `ID-mAP`
+- `ID-R@1`
+- `ID-R@5`
+- `ID-R@10`
+
+An ID Positive contains every identity required by all Subjects, regardless of
+the requested target change.
+
+### Full RCR retrieval
+
+- `Full-mAP`
+- `Full-R@1`
+- `Full-R@5`
+- `Full-R@10`
+
+A Full Positive is one of the reviewed `positive_image_ids` for the query.
+
+### Coarse diagnostic
+
+`CandidateRecall@K` measures the fraction of reviewed Full Positives retained
+inside the coarse top-K shortlist. It is a proposed-method diagnostic and does
+not replace the final retrieval metrics.
+
+---
+
+## Current implementation status
+
+The repository contains tested implementations for:
+
+- person detection with optional GT-head-to-person label alignment;
+- reference-free feature caching;
+- query Subject grounding;
+- soft coarse identity retrieval;
+- structured identity-set composition;
+- target evidence binding and fine reasoning;
+- training candidate sampling and losses;
+- config-driven training, retrieval, and evaluation CLIs.
+
+The source-level test suite currently covers these contracts. A successful unit
+test run does not replace a real pretrained-model smoke run on the target
+machine; cache size, detector coverage, GPU memory, and throughput must still
+be verified before launching the full experiment.

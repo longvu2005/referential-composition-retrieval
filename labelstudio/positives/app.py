@@ -12,7 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from labelstudio.common import load_box_index
+from rcr.dataset.cases import CASE_TYPES
+from rcr.dataset.positives import validate_positive_set as validate_submission
+from rcr.utils.images import image_relative_path as _image_relative_path
 from rcr.utils.jsonl import load_jsonl, write_jsonl
 
 INPUT = Path("dataset/data/work/positives/positive_set_input.jsonl")
@@ -21,113 +23,14 @@ IMAGE_ROOT = Path("dataset/data/raw/images")
 HTML = Path(__file__).with_name("app.html")
 
 
-def _image_relative_path(url: str) -> Path:
-    """Map PIPA/local-files URLs to split-relative image paths."""
-
-    parsed = urlparse(url)
-    value = parse_qs(parsed.query).get("d", [parsed.path])[0]
-    value = unquote(value).replace("\\", "/")
-    for marker in ("/PIPA/images/", "/images/"):
-        if marker in value:
-            value = value.split(marker, 1)[1]
-            break
-    value = value.lstrip("/")
-    path = Path(value)
-    if not value or path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"unsafe image path {url!r}")
-    return path
-
-
-def _subject_boxes(
-    row: dict,
-    image_id: str,
-    boxes_by_image: dict[str, list[dict]],
-) -> list[dict]:
-    subject_by_identity = {
-        identity_id: subject["subject_id"]
-        for subject in row["subjects"]
-        for identity_id in subject["identity_ids"]
-    }
-    return [
-        {
-            "subject_id": subject_by_identity[box["label"]],
-            "x": 100 * box["x"],
-            "y": 100 * box["y"],
-            "width": 100 * box["width"],
-            "height": 100 * box["height"],
-        }
-        for box in boxes_by_image.get(image_id, [])
-        if box["label"] in subject_by_identity
-    ]
-
-
-def _candidate_ids(row: dict) -> list[str]:
-    candidates = row.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError(f"{row['submission_id']}: candidates are required")
-
-    candidate_ids = [candidate.get("image_id") for candidate in candidates]
-    if any(not isinstance(image_id, str) or not image_id for image_id in candidate_ids):
-        raise ValueError(f"{row['submission_id']}: invalid candidate image_id")
-    if len(set(candidate_ids)) != len(candidate_ids):
-        raise ValueError(f"{row['submission_id']}: duplicate candidate image_id")
-
-    seed_ids = [
-        candidate["image_id"] for candidate in candidates if candidate.get("is_seed")
-    ]
-    seed_id = row.get("seed_target_image_id")
-    if seed_ids != [seed_id]:
-        raise ValueError(f"{row['submission_id']}: expected exactly one canonical seed")
-    if candidate_ids[0] != seed_id:
-        raise ValueError(f"{row['submission_id']}: seed target must be first")
-    return candidate_ids
-
-
-def validate_submission(source: dict, payload: dict) -> dict:
-    """Validate one browser submission and return the canonical positive row."""
-
-    submission_id = source["submission_id"]
-    if payload.get("submission_id") != submission_id:
-        raise ValueError(f"{submission_id}: submission_id mismatch")
-
-    candidate_ids = _candidate_ids(source)
-    positive_ids = payload.get("positive_image_ids")
-    if not isinstance(positive_ids, list) or any(
-        not isinstance(image_id, str) or not image_id for image_id in positive_ids
-    ):
-        raise ValueError(f"{submission_id}: positive_image_ids must be a string list")
-    if len(set(positive_ids)) != len(positive_ids):
-        raise ValueError(f"{submission_id}: duplicate positive_image_id")
-
-    invalid = set(positive_ids) - set(candidate_ids)
-    if invalid:
-        raise ValueError(
-            f"{submission_id}: invalid positive_image_id {sorted(invalid)[0]}"
-        )
-
-    seed_id = source["seed_target_image_id"]
-    if seed_id not in positive_ids:
-        raise ValueError(f"{submission_id}: seed target must remain selected")
-
-    selected = set(positive_ids)
-    return {
-        "submission_id": submission_id,
-        "positive_image_ids": [
-            image_id for image_id in candidate_ids if image_id in selected
-        ],
-    }
-
-
 def build_task_payload(
     row: dict,
-    boxes_by_image: dict[str, list[dict]],
     positive: dict | None = None,
 ) -> dict:
-    """Build one browser task from canonical positive-set input."""
+    """Build a task; stored positives are validated on load and browser save."""
 
-    candidate_ids = _candidate_ids(row)
     selected = (
-        validate_submission(row, positive)["positive_image_ids"]
+        positive["positive_image_ids"]
         if positive is not None
         else [row["seed_target_image_id"]]
     )
@@ -143,17 +46,12 @@ def build_task_payload(
                     f"{_image_relative_path(candidate['image_url']).as_posix()}"
                 ),
                 "is_seed": candidate.get("is_seed") is True,
-                "boxes": _subject_boxes(row, image_id, boxes_by_image),
+                "boxes": candidate.get("subject_boxes", []),
             }
         )
 
-    if [candidate["image_id"] for candidate in candidates] != candidate_ids:
-        raise ValueError(
-            f"{row['submission_id']}: candidate order changed unexpectedly"
-        )
-
     return {
-        "submission_id": row["submission_id"],
+        "sample_id": row["sample_id"],
         "case_type": row["case_type"],
         "subjects": row["subjects"],
         "query": {
@@ -162,7 +60,7 @@ def build_task_payload(
                 "/api/image?path="
                 f"{_image_relative_path(row['query_image_url']).as_posix()}"
             ),
-            "boxes": _subject_boxes(row, row["query_image_id"], boxes_by_image),
+            "boxes": [],
         },
         "final_desc": row["final_desc"],
         "final_change": row["final_change"],
@@ -174,21 +72,37 @@ def build_task_payload(
 class PositiveState:
     def __init__(self) -> None:
         self.rows = load_jsonl(INPUT)
-        self.rows_by_id = {row["submission_id"]: row for row in self.rows}
-        self.index_by_id = {row["submission_id"]: i for i, row in enumerate(self.rows)}
+        self.rows_by_id = {row["sample_id"]: row for row in self.rows}
+        self.index_by_id = {row["sample_id"]: i for i, row in enumerate(self.rows)}
         if len(self.rows_by_id) != len(self.rows):
-            raise ValueError(
-                "positive_set_input.jsonl contains duplicate submission_id"
-            )
+            raise ValueError("positive_set_input.jsonl contains duplicate sample_id")
+
+        # Validate catalog structure once; task rendering uses these same rows.
+        for row in self.rows:
+            candidate_ids = [item["image_id"] for item in row["candidates"]]
+            seed_ids = [
+                item["image_id"] for item in row["candidates"] if item.get("is_seed")
+            ]
+            seed_id = row["seed_target_image_id"]
+            if (
+                not candidate_ids
+                or len(candidate_ids) != len(set(candidate_ids))
+                or candidate_ids[0] != seed_id
+                or seed_ids != [seed_id]
+            ):
+                raise ValueError(
+                    f"{row['sample_id']}: candidates must be unique "
+                    "with the canonical seed first and marked exactly once"
+                )
 
         existing = load_jsonl(OUTPUT) if OUTPUT.exists() else []
-        if len({row["submission_id"] for row in existing}) != len(existing):
-            raise ValueError("positive_sets.jsonl contains duplicate submission_id")
+        if len({row["sample_id"] for row in existing}) != len(existing):
+            raise ValueError("positive_sets.jsonl contains duplicate sample_id")
 
         unknown = [
-            row["submission_id"]
+            row["sample_id"]
             for row in existing
-            if row["submission_id"] not in self.rows_by_id
+            if row["sample_id"] not in self.rows_by_id
         ]
         if unknown:
             raise ValueError(
@@ -197,20 +111,19 @@ class PositiveState:
             )
 
         self.positives = {
-            row["submission_id"]: validate_submission(
-                self.rows_by_id[row["submission_id"]], row
+            row["sample_id"]: validate_submission(
+                self.rows_by_id[row["sample_id"]], row
             )
             for row in existing
         }
-        self.boxes_by_image = load_box_index()
         self.lock = threading.Lock()
 
     def _meta(self, index: int, row: dict) -> dict:
         return {
             "index": index,
-            "submission_id": row["submission_id"],
+            "sample_id": row["sample_id"],
             "case_type": row["case_type"],
-            "completed": row["submission_id"] in self.positives,
+            "completed": row["sample_id"] in self.positives,
         }
 
     def tasks(self) -> dict:
@@ -222,24 +135,25 @@ class PositiveState:
             "total": len(tasks),
             "completed": completed,
             "pending": len(tasks) - completed,
+            "case_types": list(CASE_TYPES),
             "tasks": tasks,
         }
 
-    def task(self, index: int | None = None, submission_id: str | None = None) -> dict:
-        """Load a task by stable submission ID, with index kept for navigation."""
+    def task(self, index: int | None = None, sample_id: str | None = None) -> dict:
+        """Load a task by its sample ID, with index kept for navigation."""
 
-        if submission_id is not None:
-            row = self.rows_by_id.get(submission_id)
+        if sample_id is not None:
+            row = self.rows_by_id.get(sample_id)
             if row is None:
-                raise ValueError("unknown submission_id")
-            index = self.index_by_id[submission_id]
+                raise ValueError("unknown sample_id")
+            index = self.index_by_id[sample_id]
         else:
             index = 0 if index is None else index
             if index < 0 or index >= len(self.rows):
                 raise ValueError("task index out of range")
             row = self.rows[index]
 
-        positive = self.positives.get(row["submission_id"])
+        positive = self.positives.get(row["sample_id"])
         summary = self.tasks()
         return {
             "index": index,
@@ -247,26 +161,25 @@ class PositiveState:
             "completed": summary["completed"],
             "pending": summary["pending"],
             "is_completed": positive is not None,
-            "task": build_task_payload(row, self.boxes_by_image, positive),
+            "task": build_task_payload(row, positive),
         }
 
     def save(self, payload: dict) -> dict:
-        submission_id = payload.get("submission_id")
-        source = self.rows_by_id.get(submission_id)
+        sample_id = payload.get("sample_id")
+        source = self.rows_by_id.get(sample_id)
         if source is None:
-            raise ValueError("unknown submission_id")
+            raise ValueError("unknown sample_id")
         row = validate_submission(source, payload)
 
         with self.lock:
-            self.positives[submission_id] = row
-            OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+            self.positives[sample_id] = row
             temporary = OUTPUT.with_name(f".{OUTPUT.name}.tmp")
             write_jsonl(
                 temporary,
                 [
-                    self.positives[source_row["submission_id"]]
+                    self.positives[source_row["sample_id"]]
                     for source_row in self.rows
-                    if source_row["submission_id"] in self.positives
+                    if source_row["sample_id"] in self.positives
                 ],
             )
             os.replace(temporary, OUTPUT)
@@ -305,11 +218,11 @@ class PositiveHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/task":
                 params = parse_qs(parsed.query)
-                submission_id = params.get("id", [None])[0]
+                sample_id = params.get("id", [None])[0]
                 index = None
-                if submission_id is None:
+                if sample_id is None:
                     index = int(params.get("index", ["0"])[0])
-                self._json(self.state.task(index=index, submission_id=submission_id))
+                self._json(self.state.task(index=index, sample_id=sample_id))
                 return
 
             if parsed.path == "/api/image":

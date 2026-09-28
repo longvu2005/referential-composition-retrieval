@@ -1,0 +1,8 @@
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+
+split: test
+rankings: runs/proposed/test/rankings.pt
+candidate_ks: [100, 500]
+output: runs/proposed/test/metrics.json

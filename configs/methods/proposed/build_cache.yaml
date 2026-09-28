@@ -1,0 +1,17 @@
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+  cache: cache/proposed
+
+detector:
+  model: IDEA-Research/grounding-dino-tiny
+  threshold: 0.30
+  text_threshold: 0.25
+
+image_encoder:
+  model: facebook/dinov3-vitb16-pretrain-lvd1689m
+  # [height, width], aspect ratio preserved by letterbox padding.
+  scene_size: [512, 512]
+  person_size: [384, 192]
+
+device: auto
