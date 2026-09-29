@@ -1,0 +1,16 @@
+train:
+  epochs: 1
+  batch_size: 2
+  candidates: 4
+  negative_pool: full_gallery
+  seed: 0
+  device: auto
+
+evaluation:
+  enabled: false
+
+wandb:
+  enabled: false
+
+output:
+  dir: runs/smoke
