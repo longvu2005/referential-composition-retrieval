@@ -1,3 +1,15 @@
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+  cache: cache/proposed
+
+model:
+  text_model: google-bert/bert-base-uncased
+  identity_dim: 256
+  num_heads: 8
+  mlp_ratio: 4
+  geo_dim: 32
+
 train:
   epochs: 1
   batch_size: 2
