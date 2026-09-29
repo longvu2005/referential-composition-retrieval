@@ -48,6 +48,30 @@ scripts/ -> tools/ -> src/rcr/
 
 `src/rcr/` never imports from `tools/` or `scripts/`.
 
+### Reading and editing the research code
+
+Start with `tools/methods/train_proposed.py`: setup, batches, loss/backward,
+periodic retrieval evaluation, then checkpoint saving. The loop uses ordinary
+functions and PyTorch modules, with no trainer or callback framework.
+
+| What to inspect or change | Main location |
+| --- | --- |
+| Text tokenization and all Subject mentions | `encoders.py::encode_query_text` |
+| Cached features, identity labels, positive masks | `batch.py::build_batch` |
+| Query grounding and composition | `model.py::RCRModel.encode_query` |
+| Target binding and fine score | `model.py::RCRModel.score_target` |
+| Three losses and their supervision masks | `training.py::compute_loss`, `losses.py` |
+| Coarse shortlist and fine reranking | `retrieval.py::retrieve_rankings` |
+| Optimizer, W&B, evaluation schedule, checkpoints | `tools/methods/train_proposed.py` |
+
+Module filenames in this table are relative to `src/rcr/methods/proposed/`.
+Training and retrieval share text preparation and query encoding; edit these
+once to keep both paths aligned. `RCRModel.forward` scores one query-target pair
+per batch row, while training and retrieval reuse one encoded query for several
+targets. Each mathematical component remains a small module so its tensors and
+equations can be inspected directly. Existing YAML configs, cache files, metric
+names, and model checkpoint parameter names are preserved by this refactor.
+
 ---
 
 ## Current dataset snapshot

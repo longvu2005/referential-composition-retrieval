@@ -59,6 +59,55 @@ class RCRModel(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         """Return grounding logits [B,S,Kq] and fine scores [B]."""
 
+        logits, _, query, query_mask, prior = self.encode_query(
+            query_scene,
+            query_persons,
+            query_boxes,
+            selections,
+            change,
+            subject_pos,
+            patch_hw,
+            selection_mask,
+            change_mask,
+            query_person_mask,
+            subject_mask,
+            subject_token_mask,
+            subject_ids,
+        )
+        score = self.score_target(
+            query,
+            query_mask,
+            prior,
+            target_scene,
+            target_persons,
+            target_boxes,
+            patch_hw,
+            target_mask,
+        )
+        return logits, score
+
+    def encode_query(
+        self,
+        query_scene: Tensor,
+        query_persons: Tensor,
+        query_boxes: Tensor,
+        selections: Tensor,
+        change: Tensor,
+        subject_pos: Tensor,
+        patch_hw: tuple[int, int],
+        selection_mask: Tensor | None = None,
+        change_mask: Tensor | None = None,
+        query_person_mask: Tensor | None = None,
+        subject_mask: Tensor | None = None,
+        subject_token_mask: Tensor | None = None,
+        subject_ids: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Ground and compose once, then reuse for every candidate target.
+
+        Returns raw logits [B,S,K], identities [B,K,Di], composed query
+        [B,1+L+S*K,D], valid-token mask, and additive membership prior.
+        Training, forward(), and retrieval all use this same path.
+        """
         query_identity = self.identity_head(query_persons)
         logits = self.grounding(
             query_scene,
@@ -90,17 +139,7 @@ class RCRModel(nn.Module):
         prior = reference_key_bias(
             change, composition_logits, change_mask, subject_mask
         )
-        score = self.score_target(
-            query,
-            query_mask,
-            prior,
-            target_scene,
-            target_persons,
-            target_boxes,
-            patch_hw,
-            target_mask,
-        )
-        return logits, score
+        return logits, query_identity, query, query_mask, prior
 
     def score_target(
         self,

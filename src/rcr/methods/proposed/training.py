@@ -3,7 +3,6 @@
 import torch
 from torch import Tensor
 
-from rcr.methods.proposed.composition import composed_query_mask, reference_key_bias
 from rcr.methods.proposed.losses import grounding_loss, identity_loss, retrieval_loss
 from rcr.methods.proposed.model import RCRModel
 
@@ -19,65 +18,42 @@ def compute_loss(
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Compute masked grounding, identity and pairwise fine ranking losses."""
 
-    query_identity = model.identity_head(batch["query_persons"])
-
-    logits = model.grounding(
+    query_person_mask = batch.get("query_person_mask")
+    subject_mask = batch.get("subject_mask")
+    logits, query_identity, query, query_mask, prior = model.encode_query(
         batch["query_scene"],
         batch["query_persons"],
         batch["query_boxes"],
         batch["selections"],
-        patch_hw,
-        batch.get("selection_mask"),
-    )
-
-    query_person_mask = batch.get("query_person_mask")
-    composition_logits = logits
-    if query_person_mask is not None:
-        composition_logits = logits.masked_fill(
-            ~query_person_mask[:, None].bool(), -torch.inf
-        )
-
-    subject_mask = batch.get("subject_mask")
-    query = model.composition(
         batch["change"],
-        query_identity,
-        composition_logits,
         batch["subject_pos"],
-        batch.get("change_mask"),
-        subject_mask,
-        batch.get("subject_token_mask"),
-        batch.get("subject_ids"),
+        patch_hw,
+        selection_mask=batch.get("selection_mask"),
+        change_mask=batch.get("change_mask"),
+        query_person_mask=query_person_mask,
+        subject_mask=subject_mask,
+        subject_token_mask=batch.get("subject_token_mask"),
+        subject_ids=batch.get("subject_ids"),
     )
 
+    # Score B queries against C candidates as B*C independent pairs.
     b, c = batch["target_scene"].shape[:2]
 
-    def flat(x: Tensor) -> Tensor:
-        return x.reshape(b * c, *x.shape[2:])
-
-    query_mask = composed_query_mask(
-        batch["change"],
-        composition_logits,
-        batch.get("change_mask"),
-        subject_mask,
-    )
-    prior = reference_key_bias(
-        batch["change"], composition_logits, batch.get("change_mask"), subject_mask
-    )
     query = query[:, None].expand(-1, c, -1, -1).reshape(b * c, *query.shape[1:])
     query_mask = query_mask[:, None].expand(-1, c, -1).reshape(b * c, -1)
     prior = prior[:, None].expand(-1, c, -1).reshape(b * c, -1)
 
     target_mask = batch.get("target_mask")
     if target_mask is not None:
-        target_mask = flat(target_mask)
+        target_mask = target_mask.flatten(0, 1)
 
     scores = model.score_target(
         query,
         query_mask,
         prior,
-        flat(batch["target_scene"]),
-        flat(batch["target_persons"]),
-        flat(batch["target_boxes"]),
+        batch["target_scene"].flatten(0, 1),
+        batch["target_persons"].flatten(0, 1),
+        batch["target_boxes"].flatten(0, 1),
         patch_hw,
         target_mask,
     ).reshape(b, c)

@@ -1,14 +1,10 @@
 """Build training batches from RCR samples and cached visual features."""
 
-import re
-
 import torch
 from torch import Tensor, nn
 
-from rcr.methods.common.data import sample_selection_texts
 from rcr.methods.proposed.cache import GalleryCache
-
-SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
+from rcr.methods.proposed.encoders import encode_query_text
 
 
 def _identity_labels(
@@ -64,7 +60,6 @@ def build_batch(
     """Build one training batch; candidate selection is handled outside."""
 
     b = len(samples)
-    s = len(samples[0]["subjects"])
     c = len(candidate_image_ids[0])
     by_id = {image_id: i for i, image_id in enumerate(cache.image_ids)}
 
@@ -83,46 +78,7 @@ def build_batch(
     )
     target_identity_labels = _identity_labels(t_ids, identity_vocab)
 
-    selection_texts = [
-        text for sample in samples for text in sample_selection_texts(sample)
-    ]
-    selection = tokenizer(selection_texts, padding=True, return_tensors="pt")
-    selection_tokens, selection_mask = text_encoder(
-        selection["input_ids"].to(device),
-        selection["attention_mask"].to(device),
-    )
-    selection_tokens = selection_tokens.reshape(b, s, *selection_tokens.shape[1:])
-    selection_mask = selection_mask.reshape(b, s, -1)
-
-    changes = []
-    for sample in samples:
-        text = sample["final_change"]
-        for subject in sample["subjects"]:
-            subject_id = int(subject["subject_id"])
-            marker = SUBJECT_MARKERS[subject_id]
-            text = re.sub(rf"\bSubject\s+{subject_id}\b", marker, text)
-        changes.append(text)
-
-    encoded_change = tokenizer(changes, padding=True, return_tensors="pt")
-    change_ids = encoded_change["input_ids"].to(device)
-    change, change_mask = text_encoder(
-        change_ids,
-        encoded_change["attention_mask"].to(device),
-    )
-
-    subject_pos = torch.empty(b, s, dtype=torch.long, device=device)
-    subject_token_mask = torch.zeros(
-        b, s, change_ids.shape[1], dtype=torch.bool, device=device
-    )
-    for n, sample in enumerate(samples):
-        for j, subject in enumerate(sample["subjects"]):
-            marker = SUBJECT_MARKERS[int(subject["subject_id"])]
-            marker_id = tokenizer.convert_tokens_to_ids(marker)
-            pos = (change_ids[n] == marker_id).nonzero(as_tuple=False).flatten()
-            if pos.numel() == 0:
-                raise ValueError(f"{marker} must be one tokenizer token and occur")
-            subject_pos[n, j] = pos[0]
-            subject_token_mask[n, j, pos] = True
+    text = encode_query_text(samples, tokenizer, text_encoder, device)
 
     positives = [
         set(sample["positive_image_ids"])
@@ -169,32 +125,21 @@ def build_batch(
                     image_id, t_mask[index] & (target_identity_labels[index] >= 0)
                 )
 
-    def move(x: Tensor) -> Tensor:
-        return x.to(device)
-
     k_t = t_persons.shape[1]
     return {
-        "query_scene": move(q_scene),
-        "query_persons": move(q_persons),
-        "query_boxes": move(q_boxes),
-        "query_person_mask": move(q_mask),
-        "query_identity_labels": move(identity_labels),
-        "query_identity_mask": move(query_identity_mask),
-        "selections": selection_tokens,
-        "selection_mask": selection_mask,
-        "grounding_targets": move(grounding_targets),
-        "change": change,
-        "change_mask": change_mask,
-        "subject_pos": subject_pos,
-        "subject_ids": torch.tensor(
-            [[int(x["subject_id"]) for x in row] for row in subjects], device=device
-        ),
-        "subject_token_mask": subject_token_mask,
-        "target_scene": move(t_scene).reshape(b, c, *t_scene.shape[1:]),
-        "target_persons": move(t_persons).reshape(b, c, k_t, t_persons.shape[-1]),
-        "target_boxes": move(t_boxes).reshape(b, c, k_t, 4),
-        "target_mask": move(t_mask).reshape(b, c, k_t),
-        "target_identity_labels": move(target_identity_labels).reshape(b, c, k_t),
-        "target_identity_mask": move(target_identity_mask).reshape(b, c, k_t),
+        "query_scene": q_scene.to(device),
+        "query_persons": q_persons.to(device),
+        "query_boxes": q_boxes.to(device),
+        "query_person_mask": q_mask.to(device),
+        "query_identity_labels": identity_labels.to(device),
+        "query_identity_mask": query_identity_mask.to(device),
+        "grounding_targets": grounding_targets.to(device),
+        **text,
+        "target_scene": t_scene.to(device).reshape(b, c, *t_scene.shape[1:]),
+        "target_persons": t_persons.to(device).reshape(b, c, k_t, t_persons.shape[-1]),
+        "target_boxes": t_boxes.to(device).reshape(b, c, k_t, 4),
+        "target_mask": t_mask.to(device).reshape(b, c, k_t),
+        "target_identity_labels": target_identity_labels.to(device).reshape(b, c, k_t),
+        "target_identity_mask": target_identity_mask.to(device).reshape(b, c, k_t),
         "positive_mask": positive_mask,
     }

@@ -14,7 +14,7 @@ from tqdm import tqdm
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.proposed.batch import build_batch
 from rcr.methods.proposed.cache import GalleryCache
-from rcr.methods.proposed.encoders import TextEncoder
+from rcr.methods.proposed.encoders import SUBJECT_MARKERS, TextEncoder
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.retrieval import (
     evaluate_retrieval_output,
@@ -43,27 +43,19 @@ def _wandb_run(
     if log_every < 1:
         raise ValueError("wandb.log_every_steps must be at least 1")
 
-    try:
-        import wandb
-    except ImportError as exc:
-        raise RuntimeError(
-            "W&B tracking is enabled; install the project dependencies first"
-        ) from exc
+    import wandb
 
-    tracked_config = {
-        "model": cfg["model"],
-        "train": cfg["train"],
-        "optimizer": cfg["optimizer"],
-        "loss": cfg["loss"],
-        "evaluation": cfg.get("evaluation", {"enabled": False}),
-        "cache": {
+    tracked_config = {key: cfg[key] for key in ("model", "train", "optimizer", "loss")}
+    tracked_config.update(
+        evaluation=cfg.get("evaluation", {"enabled": False}),
+        cache={
             "id": cache.cache_id,
             "patch_hw": list(cache.patch_hw),
             "feature_dim": feature_dim,
         },
-        "num_train_samples": num_train_samples,
-        "num_val_samples": num_val_samples,
-    }
+        num_train_samples=num_train_samples,
+        num_val_samples=num_val_samples,
+    )
     run = wandb.init(
         project=wandb_cfg.get("project", "referential-composition-retrieval"),
         name=wandb_cfg.get("name"),
@@ -74,9 +66,8 @@ def _wandb_run(
     run.define_metric("global_step")
     run.define_metric("train/*", step_metric="global_step")
     run.define_metric("epoch")
-    run.define_metric("epoch/*", step_metric="epoch")
-    run.define_metric("train_eval/*", step_metric="epoch")
-    run.define_metric("val/*", step_metric="epoch")
+    for prefix in ("epoch", "train_eval", "val"):
+        run.define_metric(f"{prefix}/*", step_metric="epoch")
     return run
 
 
@@ -130,30 +121,6 @@ def _fixed_subset(samples: list[dict], maximum: int, seed: int) -> list[dict]:
     return [samples[index] for index in sorted(indices)]
 
 
-def _evaluation_due(epoch: int, total_epochs: int, every_epochs: int) -> bool:
-    """Evaluate at the requested interval and always at the final epoch."""
-
-    return epoch % every_epochs == 0 or epoch == total_epochs
-
-
-def _tracked_metrics(prefix: str, result: dict) -> dict[str, float]:
-    """Flatten official aggregate metrics for W&B without per-query noise."""
-
-    return {
-        f"{prefix}/{name}": float(value)
-        for name, value in result["overall"].items()
-        if name != "num_queries"
-    }
-
-
-def _save_evaluation(path: Path, result: dict) -> None:
-    """Persist compact aggregate metrics; rankings remain in memory only."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    compact = {"overall": result["overall"], "by_case": result["by_case"]}
-    path.write_text(json.dumps(compact, indent=2), encoding="utf-8")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/methods/proposed/train.yaml")
@@ -180,8 +147,11 @@ def main() -> None:
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
 
+    # Data, cache, and the candidate pool.
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
     samples = split_samples(data, "train")
+    if not samples:
+        raise ValueError("training requires a non-empty train split")
     val_samples = split_samples(data, "val")
     if evaluation_cfg.get("enabled", False) and not val_samples:
         raise ValueError("periodic evaluation requires a non-empty val split")
@@ -206,8 +176,11 @@ def main() -> None:
     if dim % model_cfg["num_heads"]:
         raise ValueError("feature dim must be divisible by num_heads")
 
+    # Trainable text encoder and research modules.
     tokenizer = AutoTokenizer.from_pretrained(model_cfg["text_model"])
-    tokenizer.add_special_tokens({"additional_special_tokens": ["[S1]", "[S2]"]})
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
+    )
     text_backbone = AutoModel.from_pretrained(model_cfg["text_model"])
     text_backbone.resize_token_embeddings(len(tokenizer))
     text_encoder = TextEncoder(text_backbone, dim).to(device)
@@ -230,6 +203,7 @@ def main() -> None:
         weight_decay=optim_cfg["weight_decay"],
     )
 
+    # Equal Subject counts keep batch shapes explicit.
     groups: dict[int, list[dict]] = {}
     for sample in samples:
         groups.setdefault(len(sample["subjects"]), []).append(sample)
@@ -296,15 +270,7 @@ def main() -> None:
                 text_encoder,
                 device,
             )
-            loss, parts = compute_loss(
-                model,
-                batch,
-                cache.patch_hw,
-                grounding_weight=loss_cfg["grounding_weight"],
-                identity_weight=loss_cfg["identity_weight"],
-                retrieval_weight=loss_cfg["retrieval_weight"],
-                identity_temperature=loss_cfg["identity_temperature"],
-            )
+            loss, parts = compute_loss(model, batch, cache.patch_hw, **loss_cfg)
             loss.backward()
             global_step += 1
             should_log = run is not None and (
@@ -313,13 +279,11 @@ def main() -> None:
             grad_norm = _gradient_norm((model, text_encoder)) if should_log else None
             optimizer.step()
 
-            totals["loss"] += loss.item()
-            for name, value in parts.items():
-                totals[name] += value.item()
-            identity_active = float(parts["identity"].item() > 0)
-            totals["identity_active"] += identity_active
-
-            progress.set_postfix(loss=f"{loss.item():.4f}")
+            values = {"loss": loss.item(), **{k: v.item() for k, v in parts.items()}}
+            values["identity_active"] = float(values["identity"] > 0)
+            for name, value in values.items():
+                totals[name] += value
+            progress.set_postfix(loss=f"{values['loss']:.4f}")
 
             if should_log:
                 supervised = batch["grounding_targets"].bool().any(dim=-1)
@@ -334,11 +298,11 @@ def main() -> None:
                 run.log(
                     {
                         "global_step": global_step,
-                        "train/loss": loss.item(),
-                        "train/grounding_loss": parts["grounding"].item(),
-                        "train/identity_loss": parts["identity"].item(),
-                        "train/identity_active": identity_active,
-                        "train/retrieval_loss": parts["retrieval"].item(),
+                        "train/loss": values["loss"],
+                        "train/grounding_loss": values["grounding"],
+                        "train/identity_loss": values["identity"],
+                        "train/identity_active": values["identity_active"],
+                        "train/retrieval_loss": values["retrieval"],
                         "train/grounding_supervised_rate": supervised_rate,
                         "train/gradient_norm": grad_norm,
                         "train/model_lr": optimizer.param_groups[0]["lr"],
@@ -366,10 +330,10 @@ def main() -> None:
         }
         is_best = False
 
-        if evaluation_cfg.get("enabled", False) and _evaluation_due(
-            epoch_number,
-            train_cfg["epochs"],
-            int(evaluation_cfg["every_epochs"]),
+        # Reuse one gallery identity pass for both train diagnostics and validation.
+        if evaluation_cfg.get("enabled", False) and (
+            epoch_number % int(evaluation_cfg["every_epochs"]) == 0
+            or epoch_number == train_cfg["epochs"]
         ):
             combined_samples = [*train_eval_samples, *val_samples]
             retrieved = retrieve_rankings(
@@ -385,34 +349,34 @@ def main() -> None:
                 description=f"evaluate epoch {epoch_number}",
             )
             metrics_dir = output / "evaluation" / f"epoch_{epoch_number:03d}"
-            train_count = len(train_eval_samples)
-
-            if train_count:
-                train_output = slice_retrieval_output(retrieved, 0, train_count)
-                train_result = evaluate_retrieval_output(
-                    data,
-                    train_eval_samples,
-                    train_output,
-                    evaluation_cfg["candidate_ks"],
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            offset = 0
+            for split, rows in (("train", train_eval_samples), ("val", val_samples)):
+                if not rows:
+                    continue
+                split_output = slice_retrieval_output(
+                    retrieved, offset, offset + len(rows)
                 )
-                _save_evaluation(metrics_dir / "train_metrics.json", train_result)
-                epoch_log.update(_tracked_metrics("train_eval", train_result))
+                offset += len(rows)
+                result = evaluate_retrieval_output(
+                    data, rows, split_output, evaluation_cfg["candidate_ks"]
+                )
+                compact = {"overall": result["overall"], "by_case": result["by_case"]}
+                (metrics_dir / f"{split}_metrics.json").write_text(
+                    json.dumps(compact, indent=2), encoding="utf-8"
+                )
+                prefix = "train_eval" if split == "train" else "val"
+                epoch_log.update(
+                    {
+                        f"{prefix}/{name}": float(value)
+                        for name, value in result["overall"].items()
+                        if name != "num_queries"
+                    }
+                )
+                if split == "val":
+                    val_metrics = result["overall"]
 
-            val_output = slice_retrieval_output(
-                retrieved,
-                train_count,
-                len(combined_samples),
-            )
-            val_result = evaluate_retrieval_output(
-                data,
-                val_samples,
-                val_output,
-                evaluation_cfg["candidate_ks"],
-            )
-            _save_evaluation(metrics_dir / "val_metrics.json", val_result)
-            epoch_log.update(_tracked_metrics("val", val_result))
-
-            val_full_map = float(val_result["overall"]["full_map"])
+            val_full_map = float(val_metrics["full_map"])
             if best_full_map is None or val_full_map > best_full_map:
                 best_full_map = val_full_map
                 best_epoch = epoch_number
@@ -420,8 +384,8 @@ def main() -> None:
             print(
                 f"validation epoch {epoch_number}: "
                 f"Full-mAP={val_full_map:.4f} "
-                f"Full-R@1={val_result['overall']['full_r1']:.4f} "
-                f"ID-mAP={val_result['overall']['id_map']:.4f}"
+                f"Full-R@1={val_metrics['full_r1']:.4f} "
+                f"ID-mAP={val_metrics['id_map']:.4f}"
             )
 
         if run is not None:
@@ -430,6 +394,7 @@ def main() -> None:
                 run.summary["best_val_full_map"] = best_full_map
                 run.summary["best_epoch"] = best_epoch
 
+        # Always save the latest state; select best.pt only by validation Full-mAP.
         checkpoint = {
             "epoch": epoch_number,
             "model": model.state_dict(),

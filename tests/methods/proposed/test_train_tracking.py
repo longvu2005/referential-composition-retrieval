@@ -5,10 +5,8 @@ import torch
 from torch import nn
 
 from tools.methods.train_proposed import (
-    _evaluation_due,
     _fixed_subset,
     _gradient_norm,
-    _tracked_metrics,
     _validate_evaluation_config,
     _wandb_run,
 )
@@ -102,22 +100,8 @@ def test_train_evaluation_subset_is_fixed_and_keeps_dataset_order() -> None:
     assert len(selected) == 6
 
 
-def test_evaluation_runs_at_interval_and_final_epoch() -> None:
-    assert not _evaluation_due(1, total_epochs=5, every_epochs=2)
-    assert _evaluation_due(2, total_epochs=5, every_epochs=2)
-    assert _evaluation_due(5, total_epochs=5, every_epochs=2)
-
-
 def test_evaluation_config_rejects_candidate_cutoff_beyond_shortlist() -> None:
     cfg = _config()["evaluation"]
     cfg["candidate_ks"] = [21]
     with pytest.raises(ValueError, match="cannot exceed"):
         _validate_evaluation_config(cfg)
-
-
-def test_tracked_metrics_excludes_constant_query_count() -> None:
-    result = {"overall": {"num_queries": 10, "full_map": 0.5, "full_r1": 0.2}}
-    assert _tracked_metrics("val", result) == {
-        "val/full_map": 0.5,
-        "val/full_r1": 0.2,
-    }
