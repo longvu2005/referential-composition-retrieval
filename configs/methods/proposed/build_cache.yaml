@@ -17,6 +17,6 @@ image_encoder:
 cache:
   # float16 halves feature storage; decoded features are cast to float32.
   # Keep float32 to preserve the existing numerical baseline.
-  storage_dtype: float32
+  storage_dtype: float16
 
 device: auto
