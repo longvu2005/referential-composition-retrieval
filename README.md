@@ -249,6 +249,8 @@ L = 1.0 * L_ret + 1.0 * L_ground + 0.1 * L_id
 where:
 
 - `L_ground`: masked BCE-with-logits for independent Subject/person labels;
+  a Subject whose annotated identities have no detected match is excluded from
+  grounding supervision instead of treating every detection as a negative;
 - `L_id`: supervised contrastive loss (default temperature `0.1`) over query
   persons and persons from valid positive target images, using one shared identity
   label vocabulary. Unknown identity `-1`, padding, negative target images and
@@ -408,6 +410,13 @@ cache/proposed/
     ├── 1.pt
     └── ...
 ```
+
+The cache builder marks an in-progress build and records one build ID in the
+index and each feature file. Training and retrieval reject incomplete builds,
+mixed feature files, or a gallery that differs from the finalized dataset.
+New checkpoints require the same cache build at retrieval. Legacy caches and
+checkpoints without build IDs remain readable but cannot be cross-checked this
+way. After an interrupted build, rerun cache building to completion before use.
 
 Rebuild the cache whenever the detector, image backbone, or preprocessing
 changes. **Old head-based caches and checkpoints are incompatible with this

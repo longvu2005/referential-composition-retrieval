@@ -44,6 +44,7 @@ def main() -> None:
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
     samples = split_samples(data, "train")
     cache = GalleryCache(data_cfg["cache"])
+    cache.validate_gallery(data.gallery_ids)
     negative_pool = train_cfg.get("negative_pool", "full_gallery")
     if negative_pool == "train_gallery":
         candidate_ids = split_image_ids(data, "train")
@@ -53,12 +54,8 @@ def main() -> None:
         raise ValueError("negative_pool must be full_gallery or train_gallery")
     print(f"Training negative pool: {negative_pool} ({len(candidate_ids)} images)")
 
-    first = torch.load(
-        Path(data_cfg["cache"]) / "features" / "0.pt",
-        map_location="cpu",
-        weights_only=True,
-    )
-    dim = first["scene"].shape[-1]
+    first_scene, *_ = cache.load(torch.tensor([0]))
+    dim = first_scene.shape[-1]
     if dim % model_cfg["num_heads"]:
         raise ValueError("feature dim must be divisible by num_heads")
 
@@ -174,6 +171,7 @@ def main() -> None:
                 "optimizer": optimizer.state_dict(),
                 "config": cfg,
                 "dim": dim,
+                "cache_id": cache.cache_id,
             },
             output / "last.pt",
         )

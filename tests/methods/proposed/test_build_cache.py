@@ -104,6 +104,9 @@ def test_build_cache_writes_gallery_features(tmp_path, storage_dtype, count) -> 
     dtype = torch.float16 if storage_dtype == "float16" else torch.float32
     assert cache.persons.dtype == dtype
     saved = torch.load(cache_dir / "features/0.pt", weights_only=True)
+    assert saved["cache_id"] == cache.cache_id
+    assert saved["image_id"] == "image"
+    assert not (cache_dir / ".building").exists()
     assert saved["scene"].dtype == saved["persons"].dtype == dtype
     assert saved["boxes_scene"].dtype == torch.float32
     for key in ("scene", "persons", "boxes_scene"):
@@ -126,6 +129,44 @@ def test_invalid_cache_dtype_fails_before_writing(tmp_path) -> None:
             [], [], root, None, None, None, None, None, "cpu", storage_dtype="int8"
         )
     assert not root.exists()
+
+
+def test_interrupted_cache_build_cannot_be_read(tmp_path) -> None:
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (10, 10)).save(image_path)
+
+    class FailedDetector(Detector):
+        def forward(self, **kwargs):
+            raise RuntimeError("detector failed")
+
+    cache_dir = tmp_path / "cache"
+    with pytest.raises(RuntimeError, match="detector failed"):
+        build_cache(
+            ["image"],
+            [image_path],
+            cache_dir,
+            FailedDetector(),
+            DetectorProcessor(),
+            ImageEncoder(Backbone(), 8),
+            Processor(8, 8),
+            Processor(8, 4),
+            "cpu",
+        )
+    with pytest.raises(RuntimeError, match="incomplete"):
+        GalleryCache(cache_dir)
+
+    build_cache(
+        ["image"],
+        [image_path],
+        cache_dir,
+        Detector(),
+        DetectorProcessor(),
+        ImageEncoder(Backbone(), 8),
+        Processor(8, 8),
+        Processor(8, 4),
+        "cpu",
+    )
+    assert GalleryCache(cache_dir).image_ids == ["image"]
 
 
 def test_letterbox_boxes_match_patch_coordinate_system() -> None:

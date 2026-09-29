@@ -1,7 +1,9 @@
 """Build reference-free gallery features for coarse and fine retrieval."""
 
 import argparse
+import os
 from pathlib import Path
+from uuid import uuid4
 
 import torch
 import yaml
@@ -69,6 +71,9 @@ def build_cache(
     root = Path(root)
     feature_dir = root / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)
+    cache_id = uuid4().hex
+    building = root / ".building"
+    building.write_text(cache_id, encoding="utf-8")
 
     detector.eval()
     image_encoder.eval()
@@ -139,6 +144,8 @@ def build_cache(
 
         torch.save(
             {
+                "cache_id": cache_id,
+                "image_id": image_id,
                 "scene": compact_cpu(scene[0], feature_dtype),
                 "persons": cached_persons,
                 "identity_ids": identity_ids,
@@ -159,16 +166,21 @@ def build_cache(
         person_index[i, : value.shape[0]] = value
         mask[i, : value.shape[0]] = True
 
+    index_path = root / "index.pt"
+    temporary_index = root / "index.pt.tmp"
     torch.save(
         {
+            "cache_id": cache_id,
             "image_ids": image_ids,
             "persons": person_index,
             "mask": mask,
             "patch_hw": patch_hw,
             "storage_dtype": storage_dtype,
         },
-        root / "index.pt",
+        temporary_index,
     )
+    os.replace(temporary_index, index_path)
+    building.unlink()
 
 
 class _LetterboxProcessor:

@@ -11,8 +11,8 @@ detector:
 image_encoder:
   model: facebook/dinov3-vitb16-pretrain-lvd1689m
   # [height, width], aspect ratio preserved by letterbox padding.
-  scene_size: [512, 512]
-  person_size: [384, 192]
+  scene_size: [224, 224]
+  person_size: [256, 128]
 
 cache:
   # float16 halves feature storage; decoded features are cast to float32.

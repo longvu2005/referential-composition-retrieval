@@ -62,6 +62,9 @@ def main() -> None:
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
     samples = split_samples(data, cfg["split"])
     cache = GalleryCache(data_cfg["cache"])
+    cache.validate_gallery(data.gallery_ids)
+    if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
+        raise ValueError("retrieval cache differs from the training cache")
     by_id = {image_id: i for i, image_id in enumerate(cache.image_ids)}
 
     gallery_identity = []

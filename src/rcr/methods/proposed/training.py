@@ -87,6 +87,9 @@ def compute_loss(
         person_mask &= query_person_mask[:, None].bool()
     if subject_mask is not None:
         person_mask &= subject_mask[:, :, None].bool()
+    # A missed GT person is unknown, not evidence that every detected person
+    # is a negative for that Subject. Skip its grounding row entirely.
+    person_mask &= batch["grounding_targets"].bool().any(dim=-1, keepdim=True)
 
     loss_ground = grounding_loss(logits, batch["grounding_targets"], person_mask)
     query_labels = batch["query_identity_labels"]

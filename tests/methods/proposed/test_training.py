@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from rcr.methods.proposed.losses import identity_loss
+from rcr.methods.proposed.losses import grounding_loss, identity_loss
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.training import compute_loss
 
@@ -216,3 +216,31 @@ def test_all_unknown_identities_have_zero_identity_loss() -> None:
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
     )
+
+
+def test_grounding_skips_subject_whose_gt_person_was_not_detected() -> None:
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["grounding_targets"][0, 0] = 0
+    batch["selections"].requires_grad_()
+
+    logits = model.grounding(
+        batch["query_scene"],
+        batch["query_persons"],
+        batch["query_boxes"],
+        batch["selections"],
+        (2, 3),
+        batch["selection_mask"],
+    )
+    valid = batch["query_person_mask"][:, None] & batch["grounding_targets"].bool().any(
+        -1, keepdim=True
+    )
+    expected = grounding_loss(logits, batch["grounding_targets"], valid)
+
+    loss, parts = compute_loss(
+        model, batch, (2, 3), identity_weight=0, retrieval_weight=0
+    )
+    torch.testing.assert_close(parts["grounding"], expected)
+    loss.backward()
+    assert batch["selections"].grad[0, 0].count_nonzero() == 0
+    assert batch["selections"].grad[0, 1].count_nonzero() > 0
