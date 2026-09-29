@@ -3,7 +3,7 @@ data:
   image_root: dataset/data/raw/images
   cache: cache/proposed
 
-checkpoint: runs/proposed/last.pt
+checkpoint: runs/proposed/best.pt
 split: test
 
 retrieval:

@@ -31,5 +31,24 @@ loss:
   retrieval_weight: 1.0
   identity_temperature: 0.1
 
+evaluation:
+  enabled: true
+  # Evaluate at this interval and always at the final epoch.
+  every_epochs: 2
+  # Fixed random train subset for an overfitting diagnostic; 0 disables it.
+  train_max_queries: 100
+  # The complete validation split is always evaluated.
+  top_m: 500
+  fine_batch_size: 64
+  identity_batch_size: 4096
+  candidate_ks: [100, 500]
+
+wandb:
+  enabled: true
+  project: referential-composition-retrieval
+  name: null
+  mode: online
+  log_every_steps: 20
+
 output:
   dir: runs/proposed

@@ -332,10 +332,8 @@ Controls:
   features and the gallery person index;
 - device.
 
-The default `scene_size: [512, 512]` produces a 32x32 patch grid for a ViT/16
-backbone and therefore a large disk cache over the full gallery. A smaller
-scene size may be useful for smoke tests, but changing it changes the experiment
-and requires rebuilding the cache.
+The default `scene_size: [224, 224]` produces a 14x14 patch grid for a ViT/16
+backbone. Changing it changes the experiment and requires rebuilding the cache.
 
 For limited disk space, set:
 
@@ -347,8 +345,8 @@ cache:
 This halves feature payload storage relative to compact FP32, with FP16 rounding.
 Loaded training/fine-scoring features are cast to FP32; coarse gallery features
 are cast to the identity head's dtype before projection. Boxes stay FP32 and
-identity labels are unchanged. For 37,107 images with 1,024 patches and 768
-dimensions, scene features alone need about **108.7 GiB in FP32 / 54.4 GiB in
+identity labels are unchanged. For 37,107 images with 196 patches and 768
+dimensions, scene features alone need about **20.8 GiB in FP32 / 10.4 GiB in
 FP16**, plus persons, the index and file overhead. This option does not change
 the patch grid, but retrieval quality should be checked when changing precision.
 
@@ -356,7 +354,18 @@ the patch grid, but retrieval quality should be checked when changing precision.
 
 Controls model dimensions, optimizer parameters, loss weights, identity
 temperature, training candidate count and negative pool, seed, device, and
-output directory. There is no retrieval temperature or coarse loss.
+output directory. There is no retrieval temperature or coarse loss. The
+`evaluation` block controls periodic retrieval evaluation: interval, fixed train
+subset size, coarse shortlist, scoring batch sizes and CandidateRecall cutoffs.
+The complete validation split is evaluated at the interval and at the final
+epoch. `best.pt` is selected by validation `Full-mAP`.
+
+The optional `wandb` block controls experiment tracking: project/run name,
+online/offline mode, and step logging interval. Tracking records only the
+model/train/loss/optimizer/evaluation configuration, cache identity/shape,
+losses, learning rates, gradient norm, identity-loss activity, grounding
+supervision rate, and aggregate train/validation retrieval metrics. It does not
+upload images, cache features, model graphs, rankings, or checkpoints.
 
 The current training sampler uses **one reviewed Full Positive plus random
 negatives** per query. Batches are grouped by number of Subjects, so every batch
@@ -433,6 +442,10 @@ training steps, not on weights already learned by an old checkpoint.
 
 ### 2. Train
 
+When W&B is enabled, authenticate once before training. On Kaggle, store
+`WANDB_API_KEY` as a secret; use `wandb.mode: offline` when the notebook has no
+network access. Set `wandb.enabled: false` to disable tracking entirely.
+
 ```bash
 python tools/methods/train_proposed.py \
   --config configs/methods/proposed/train.yaml
@@ -444,11 +457,21 @@ Outputs are written under the configured run directory, by default:
 runs/proposed/
 ├── config.yaml
 ├── tokenizer/
+├── evaluation/
+│   └── epoch_NNN/
+│       ├── train_metrics.json
+│       └── val_metrics.json
+├── best.pt
 └── last.pt
 ```
 
 `config.yaml` is copied into the run directory and is also embedded in the
-checkpoint for reproducibility.
+checkpoint for reproducibility. `last.pt` is updated after every epoch;
+`best.pt` is updated only when validation `Full-mAP` improves. Periodic train
+metrics use one deterministic subset chosen from `evaluation.train_max_queries`.
+Only aggregate metrics are saved during training, so full rankings do not consume
+additional run storage. If periodic evaluation is disabled, use `last.pt` in the
+retrieval config because no `best.pt` is produced.
 
 ### 3. Retrieve / rerank
 

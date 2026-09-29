@@ -7,8 +7,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from rcr.evaluation.evaluate import evaluate_rankings
 from rcr.methods.common.data import load_rcr_data, split_samples
+from rcr.methods.proposed.retrieval import evaluate_retrieval_output
 
 
 def main() -> None:
@@ -24,37 +24,11 @@ def main() -> None:
     samples = split_samples(data, cfg["split"])
 
     saved = torch.load(cfg["rankings"], map_location="cpu", weights_only=True)
-    gallery_ids = saved["gallery_ids"]
-    sample_ids = saved["sample_ids"]
-
-    if gallery_ids != data.gallery_ids:
-        raise ValueError("saved gallery_ids do not match the current benchmark gallery")
-    if sample_ids != [sample["sample_id"] for sample in samples]:
-        raise ValueError("saved sample_ids do not match the requested split")
-
-    rankings = {
-        sample_id: [gallery_ids[i] for i in row.tolist()]
-        for sample_id, row in zip(sample_ids, saved["rankings"], strict=True)
-    }
-    coarse = {
-        sample_id: [gallery_ids[i] for i in row.tolist()]
-        for sample_id, row in zip(sample_ids, saved["coarse_topm"], strict=True)
-    }
-
-    identities_by_image = {
-        image_id: {
-            box["identity_id"] for box in data.gt_head_boxes_by_image.get(image_id, [])
-        }
-        for image_id in gallery_ids
-    }
-
-    result = evaluate_rankings(
+    result = evaluate_retrieval_output(
+        data,
         samples,
-        gallery_ids,
-        identities_by_image,
-        rankings,
-        coarse_rankings=coarse,
-        candidate_ks=tuple(cfg["candidate_ks"]),
+        saved,
+        cfg["candidate_ks"],
     )
 
     output = Path(cfg["output"])

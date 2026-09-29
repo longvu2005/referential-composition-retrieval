@@ -24,9 +24,17 @@ def test_proposed_configs_are_consistent() -> None:
     assert train["data"]["cache"] == retrieve["data"]["cache"]
 
     train_dir = Path(train["output"]["dir"])
-    assert Path(retrieve["checkpoint"]) == train_dir / "last.pt"
+    assert Path(retrieve["checkpoint"]) == train_dir / "best.pt"
 
     retrieve_dir = Path(retrieve["output"]["dir"])
     assert Path(evaluate["rankings"]) == retrieve_dir / "rankings.pt"
     assert retrieve["split"] == evaluate["split"]
     assert max(evaluate["candidate_ks"]) <= retrieve["retrieval"]["top_m"]
+
+    periodic = train["evaluation"]
+    assert periodic["every_epochs"] > 0
+    assert periodic["train_max_queries"] >= 0
+    assert max(periodic["candidate_ks"]) <= periodic["top_m"]
+
+    assert train["wandb"]["log_every_steps"] > 0
+    assert train["wandb"]["mode"] in {"online", "offline", "disabled"}
