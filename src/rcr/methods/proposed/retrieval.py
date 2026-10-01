@@ -16,6 +16,59 @@ from rcr.methods.proposed.coarse import coarse_scores
 from rcr.methods.proposed.encoders import encode_query_text
 
 
+def _encode_gallery_identity(
+    cache: GalleryCache,
+    model: nn.Module,
+    device: torch.device,
+    batch_size: int,
+) -> list[tuple[Tensor, Tensor]]:
+    """Project once, retaining only CPU batches with useful person columns.
+
+    The cache pads every image to the gallery's maximum person count. Dropping
+    columns masked out for an entire batch saves RAM without removing evidence.
+    Never concatenate these batches on the accelerator (or duplicate them in RAM).
+    """
+
+    batches = []
+    dtype = model.identity_head.proj.weight.dtype
+    for start in range(0, len(cache.image_ids), batch_size):
+        stop = start + batch_size
+        mask = cache.mask[start:stop]
+        columns = mask.any(dim=0)
+        mask = mask[:, columns]
+        persons = cache.persons[start:stop, columns].to(device=device, dtype=dtype)
+        identity = model.identity_head(persons)
+        batches.append((identity.cpu(), mask.cpu()))
+        # Release GPU outputs before allocating the next projection batch.
+        del persons, identity
+    return batches
+
+
+def _coarse_scores_chunked(
+    query_identity: Tensor,
+    logits: Tensor,
+    query_mask: Tensor,
+    gallery_batches: list[tuple[Tensor, Tensor]],
+    batch_size: int,
+) -> Tensor:
+    """Score the entire gallery with bounded accelerator working memory."""
+
+    num_images = sum(len(identity) for identity, _ in gallery_batches)
+    scores = query_identity.new_empty(num_images)
+    offset = 0
+    for identity_cpu, mask_cpu in gallery_batches:
+        for start in range(0, len(identity_cpu), batch_size):
+            stop = min(start + batch_size, len(identity_cpu))
+            identity = identity_cpu[start:stop].to(query_identity.device)
+            mask = mask_cpu[start:stop].to(query_identity.device)
+            scores[offset + start : offset + stop] = coarse_scores(
+                query_identity, logits, identity, mask, query_mask=query_mask
+            )
+            del identity, mask
+        offset += len(identity_cpu)
+    return scores
+
+
 @torch.inference_mode()
 def retrieve_rankings(
     samples: Sequence[dict],
@@ -28,18 +81,22 @@ def retrieve_rankings(
     top_m: int,
     fine_batch_size: int,
     identity_batch_size: int,
+    coarse_batch_size: int = 512,
     description: str = "retrieve",
 ) -> dict[str, Any]:
     """Return full and coarse gallery rankings for an ordered sample sequence.
 
-    Module train/eval modes are restored before returning, so this function is
-    safe to call between training epochs.
+    Gallery identities stay in CPU RAM; only projection/coarse-scoring chunks
+    and Top-M fine batches use the accelerator. Scores still cover every image.
+    Module train/eval modes are restored even if retrieval fails.
     """
 
     if not samples:
         raise ValueError("retrieval requires at least one sample")
-    if top_m < 1 or fine_batch_size < 1 or identity_batch_size < 1:
+    if min(top_m, fine_batch_size, identity_batch_size, coarse_batch_size) < 1:
         raise ValueError("retrieval batch sizes and top_m must be positive")
+    if not cache.image_ids:
+        raise ValueError("retrieval requires a non-empty gallery")
 
     model_was_training = model.training
     text_was_training = text_encoder.training
@@ -47,16 +104,9 @@ def retrieve_rankings(
     text_encoder.eval()
 
     try:
-        gallery_identity = []
-        identity_dtype = model.identity_head.proj.weight.dtype
-        for start in range(0, len(cache.image_ids), identity_batch_size):
-            persons = cache.persons[start : start + identity_batch_size].to(
-                device=device,
-                dtype=identity_dtype,
-            )
-            gallery_identity.append(model.identity_head(persons))
-        gallery_identity = torch.cat(gallery_identity)
-        gallery_mask = cache.mask.to(device)
+        gallery_batches = _encode_gallery_identity(
+            cache, model, device, identity_batch_size
+        )
 
         by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
         sample_ids = []
@@ -82,12 +132,12 @@ def retrieve_rankings(
                 **text,
             )
 
-            coarse = coarse_scores(
+            coarse = _coarse_scores_chunked(
                 query_identity[0],
                 logits[0],
-                gallery_identity,
-                gallery_mask,
-                query_mask=q_mask[0],
+                q_mask[0],
+                gallery_batches,
+                coarse_batch_size,
             )
             coarse[query_index] = -torch.inf
             coarse_order = torch.argsort(coarse, descending=True)

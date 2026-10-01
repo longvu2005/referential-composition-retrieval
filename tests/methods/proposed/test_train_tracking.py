@@ -105,3 +105,11 @@ def test_evaluation_config_rejects_candidate_cutoff_beyond_shortlist() -> None:
     cfg["candidate_ks"] = [21]
     with pytest.raises(ValueError, match="cannot exceed"):
         _validate_evaluation_config(cfg)
+
+
+def test_evaluation_config_accepts_legacy_and_rejects_zero_coarse_batch_size() -> None:
+    cfg = _config()["evaluation"]
+    _validate_evaluation_config(cfg)
+    cfg["coarse_batch_size"] = 0
+    with pytest.raises(ValueError, match="coarse_batch_size"):
+        _validate_evaluation_config(cfg)

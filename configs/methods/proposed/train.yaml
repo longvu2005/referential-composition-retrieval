@@ -12,7 +12,7 @@ model:
 
 train:
   epochs: 10
-  batch_size: 8
+  batch_size: 14
   candidates: 16
   # full_gallery preserves the supplied benchmark protocol; choose
   # train_gallery when held-out images must not supply training negatives.
@@ -40,7 +40,9 @@ evaluation:
   # The complete validation split is always evaluated.
   top_m: 500
   fine_batch_size: 64
-  identity_batch_size: 4096
+  # Identities stay in RAM; these limit GPU projection and coarse scoring.
+  identity_batch_size: 512
+  coarse_batch_size: 512
   candidate_ks: [100, 500]
 
 wandb:

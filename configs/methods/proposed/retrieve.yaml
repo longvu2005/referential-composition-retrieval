@@ -9,7 +9,9 @@ split: test
 retrieval:
   top_m: 500
   fine_batch_size: 64
-  identity_batch_size: 4096
+  # Identities stay in RAM; these limit GPU projection and coarse scoring.
+  identity_batch_size: 512
+  coarse_batch_size: 512
   device: auto
 
 output:

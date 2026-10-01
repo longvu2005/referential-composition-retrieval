@@ -71,6 +71,7 @@ def main() -> None:
         top_m=retrieval_cfg["top_m"],
         fine_batch_size=retrieval_cfg["fine_batch_size"],
         identity_batch_size=retrieval_cfg["identity_batch_size"],
+        coarse_batch_size=int(retrieval_cfg.get("coarse_batch_size", 512)),
         description=cfg["split"],
     )
 

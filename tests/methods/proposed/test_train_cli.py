@@ -59,6 +59,20 @@ def test_train_checkpoints_metrics_and_retrieve(
         monkeypatch.setattr(module, "load_rcr_data", lambda *args: data)
     for module in (train_proposed, retrieve_proposed):
         monkeypatch.setattr(module, "GalleryCache", lambda path: cache)
+    real_retrieve = train_proposed.retrieve_rankings
+    evaluation_calls = []
+
+    def retrieve_after_training(
+        samples, cache, tokenizer, text_encoder, model, *args, **kwargs
+    ):
+        assert all(parameter.grad is None for parameter in model.parameters())
+        assert all(parameter.grad is None for parameter in text_encoder.parameters())
+        evaluation_calls.append(True)
+        return real_retrieve(
+            samples, cache, tokenizer, text_encoder, model, *args, **kwargs
+        )
+
+    monkeypatch.setattr(train_proposed, "retrieve_rankings", retrieve_after_training)
     monkeypatch.setitem(
         sys.modules,
         "transformers",
@@ -112,6 +126,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     config_path.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(sys, "argv", ["train", "--config", str(config_path)])
     train_proposed.main()
+    assert len(evaluation_calls) == (2 if enabled else 0)
 
     output = tmp_path / "run"
     last = torch.load(output / "last.pt", weights_only=True)

@@ -98,6 +98,8 @@ def _validate_evaluation_config(cfg: dict) -> None:
     for key in positive_keys:
         if int(cfg[key]) < 1:
             raise ValueError(f"evaluation.{key} must be at least 1")
+    if int(cfg.get("coarse_batch_size", 512)) < 1:
+        raise ValueError("evaluation.coarse_batch_size must be at least 1")
     if int(cfg["train_max_queries"]) < 0:
         raise ValueError("evaluation.train_max_queries must be non-negative")
     candidate_ks = tuple(int(value) for value in cfg["candidate_ks"])
@@ -310,6 +312,11 @@ def main() -> None:
                     }
                 )
 
+            # Do not retain the last batch/text graph through validation or
+            # while constructing the next batch.
+            del batch, loss, parts
+
+        optimizer.zero_grad(set_to_none=True)
         count = len(batches)
         summary = {name: value / count for name, value in totals.items()}
         print(
@@ -346,6 +353,7 @@ def main() -> None:
                 top_m=int(evaluation_cfg["top_m"]),
                 fine_batch_size=int(evaluation_cfg["fine_batch_size"]),
                 identity_batch_size=int(evaluation_cfg["identity_batch_size"]),
+                coarse_batch_size=int(evaluation_cfg.get("coarse_batch_size", 512)),
                 description=f"evaluate epoch {epoch_number}",
             )
             metrics_dir = output / "evaluation" / f"epoch_{epoch_number:03d}"
