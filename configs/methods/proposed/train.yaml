@@ -12,7 +12,7 @@ model:
 
 train:
   epochs: 10
-  batch_size: 24
+  batch_size: 14
   candidates: 16
   # full_gallery preserves the supplied benchmark protocol; choose
   # train_gallery when held-out images must not supply training negatives.
