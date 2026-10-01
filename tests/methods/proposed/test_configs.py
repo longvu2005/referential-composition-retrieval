@@ -38,3 +38,12 @@ def test_proposed_configs_are_consistent() -> None:
 
     assert train["wandb"]["log_every_steps"] > 0
     assert train["wandb"]["mode"] in {"online", "offline", "disabled"}
+
+
+def test_state_defaults_match_train_and_smoke_configs() -> None:
+    train, smoke = _load("train.yaml"), _load("train_smoke.yaml")
+    for cfg in (train, smoke):
+        assert cfg["model"]["state_dim"] == 256
+        assert cfg["model"]["coarse_beta"] == 0.3
+        assert cfg["loss"]["state_weight"] == 1.0
+        assert cfg["loss"]["state_temperature"] > 0

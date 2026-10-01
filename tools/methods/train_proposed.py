@@ -195,6 +195,8 @@ def main() -> None:
         max_subjects=max_subjects,
         mlp_ratio=model_cfg["mlp_ratio"],
         geo_dim=model_cfg["geo_dim"],
+        state_dim=model_cfg.get("state_dim"),
+        coarse_beta=model_cfg.get("coarse_beta", 0.3),
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -248,6 +250,7 @@ def main() -> None:
             "grounding": 0.0,
             "identity": 0.0,
             "retrieval": 0.0,
+            "state": 0.0,
             "identity_active": 0.0,
         }
 
@@ -305,6 +308,7 @@ def main() -> None:
                         "train/identity_loss": values["identity"],
                         "train/identity_active": values["identity_active"],
                         "train/retrieval_loss": values["retrieval"],
+                        "train/state_loss": values["state"],
                         "train/grounding_supervised_rate": supervised_rate,
                         "train/gradient_norm": grad_norm,
                         "train/model_lr": optimizer.param_groups[0]["lr"],
@@ -324,7 +328,8 @@ def main() -> None:
             f"loss={summary['loss']:.4f} "
             f"ground={summary['grounding']:.4f} "
             f"id={summary['identity']:.4f} "
-            f"retrieval={summary['retrieval']:.4f}"
+            f"retrieval={summary['retrieval']:.4f} "
+            f"state={summary['state']:.4f}"
         )
         epoch_number = epoch + 1
         epoch_log = {
@@ -334,6 +339,7 @@ def main() -> None:
             "epoch/identity_loss": summary["identity"],
             "epoch/identity_active_rate": summary["identity_active"],
             "epoch/retrieval_loss": summary["retrieval"],
+            "epoch/state_loss": summary["state"],
         }
         is_best = False
 

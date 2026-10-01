@@ -6,6 +6,9 @@ data:
 model:
   text_model: google-bert/bert-base-uncased
   identity_dim: 256
+  state_dim: 256
+  # Starting value; tune on validation. Saved in the checkpoint config.
+  coarse_beta: 0.3
   num_heads: 8
   mlp_ratio: 4
   geo_dim: 32
@@ -28,6 +31,8 @@ loss:
   identity_weight: 0.1
   retrieval_weight: 1.0
   identity_temperature: 0.1
+  state_weight: 1.0
+  state_temperature: 0.1
 
 evaluation:
   enabled: false

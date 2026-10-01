@@ -1,5 +1,7 @@
 """Training step for the proposed RCR model."""
 
+import math
+
 import torch
 from torch import Tensor
 
@@ -15,8 +17,15 @@ def compute_loss(
     identity_weight: float = 0.1,
     retrieval_weight: float = 1.0,
     identity_temperature: float = 0.1,
+    state_weight: float = 1.0,
+    state_temperature: float = 0.1,
 ) -> tuple[Tensor, dict[str, Tensor]]:
-    """Compute masked grounding, identity and pairwise fine ranking losses."""
+    """Compute grounding, identity, fine ranking and global state ranking losses."""
+
+    if not math.isfinite(state_temperature) or state_temperature <= 0:
+        raise ValueError("state_temperature must be finite and positive")
+    if not math.isfinite(state_weight) or state_weight < 0:
+        raise ValueError("state_weight must be finite and nonnegative")
 
     query_person_mask = batch.get("query_person_mask")
     subject_mask = batch.get("subject_mask")
@@ -97,13 +106,28 @@ def compute_loss(
         valid_mask=batch.get("candidate_mask"),
     )
 
+    # Separate supervision teaches global text/image alignment without changing
+    # the identity formula or adding coarse scores to the fine reasoner.
+    loss_state = scores.new_zeros(())
+    if state_weight != 0:
+        z_text = model.encode_text_state(batch["change"], batch.get("change_mask"))
+        z_image = model.encode_image_state(batch["target_scene"].mean(dim=-2))
+        state_scores = (z_text[:, None] * z_image).sum(dim=-1)
+        loss_state = retrieval_loss(
+            state_scores / state_temperature,
+            batch["positive_mask"],
+            valid_mask=batch.get("candidate_mask"),
+        )
+
     loss = (
         grounding_weight * loss_ground
         + identity_weight * loss_identity
         + retrieval_weight * loss_retrieval
+        + state_weight * loss_state
     )
     return loss, {
         "grounding": loss_ground.detach(),
         "identity": loss_identity.detach(),
         "retrieval": loss_retrieval.detach(),
+        "state": loss_state.detach(),
     }

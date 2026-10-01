@@ -50,6 +50,10 @@ def _coarse_scores_chunked(
     query_mask: Tensor,
     gallery_batches: list[tuple[Tensor, Tensor]],
     batch_size: int,
+    *,
+    query_state: Tensor | None = None,
+    gallery_state: Tensor | None = None,
+    beta: float = 0.0,
 ) -> Tensor:
     """Score the entire gallery with bounded accelerator working memory."""
 
@@ -62,11 +66,40 @@ def _coarse_scores_chunked(
             identity = identity_cpu[start:stop].to(query_identity.device)
             mask = mask_cpu[start:stop].to(query_identity.device)
             scores[offset + start : offset + stop] = coarse_scores(
-                query_identity, logits, identity, mask, query_mask=query_mask
+                query_identity,
+                logits,
+                identity,
+                mask,
+                query_mask=query_mask,
+                query_state=query_state,
+                gallery_state=(
+                    gallery_state[offset + start : offset + stop].to(
+                        query_identity.device
+                    )
+                    if beta != 0 and gallery_state is not None
+                    else None
+                ),
+                beta=beta,
             )
             del identity, mask
         offset += len(identity_cpu)
     return scores
+
+
+def _encode_gallery_state(
+    cache: GalleryCache, model: nn.Module, device: torch.device, batch_size: int
+) -> Tensor:
+    """Project global image features once per retrieval call, retaining CPU output."""
+    features = cache.global_features
+    projection = model.state_image_proj.weight
+    state = torch.empty(
+        len(cache.image_ids), projection.shape[0], dtype=projection.dtype
+    )
+    for start in range(0, len(cache.image_ids), batch_size):
+        stop = min(start + batch_size, len(cache.image_ids))
+        chunk = features[start:stop].to(device=device, dtype=projection.dtype)
+        state[start:stop] = model.encode_image_state(chunk).cpu()
+    return state
 
 
 @torch.inference_mode()
@@ -107,6 +140,11 @@ def retrieve_rankings(
         gallery_batches = _encode_gallery_identity(
             cache, model, device, identity_batch_size
         )
+        gallery_state = (
+            _encode_gallery_state(cache, model, device, identity_batch_size)
+            if model.coarse_beta != 0
+            else None
+        )
 
         by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
         sample_ids = []
@@ -138,6 +176,13 @@ def retrieve_rankings(
                 q_mask[0],
                 gallery_batches,
                 coarse_batch_size,
+                query_state=(
+                    model.encode_text_state(text["change"], text["change_mask"])[0]
+                    if model.coarse_beta != 0
+                    else None
+                ),
+                gallery_state=gallery_state,
+                beta=model.coarse_beta,
             )
             coarse[query_index] = -torch.inf
             coarse_order = torch.argsort(coarse, descending=True)

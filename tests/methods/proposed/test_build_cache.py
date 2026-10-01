@@ -98,6 +98,8 @@ def test_build_cache_writes_gallery_features(tmp_path, storage_dtype, count) -> 
     assert ids == [[None] * count]
     assert mask.tolist() == [[True] * count]
     assert scene.dtype == persons.dtype == boxes.dtype == torch.float32
+    torch.testing.assert_close(cache.global_features, scene.mean(dim=1))
+    assert cache.global_features.dtype == torch.float32
     if count:
         torch.testing.assert_close(boxes[0, 0], torch.tensor([0.1, 0.1, 0.7, 0.9]))
 

@@ -1,6 +1,9 @@
 """Neural RCR model over precomputed visual and text features."""
 
+import math
+
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from rcr.methods.proposed.binding import EvidenceBinding
@@ -25,8 +28,19 @@ class RCRModel(nn.Module):
         max_subjects: int = 2,
         mlp_ratio: int = 4,
         geo_dim: int = 32,
+        state_dim: int | None = None,
+        coarse_beta: float = 0.3,
     ) -> None:
         super().__init__()
+
+        state_dim = identity_dim if state_dim is None else state_dim
+        if state_dim < 1 or not math.isfinite(coarse_beta) or coarse_beta < 0:
+            raise ValueError(
+                "state_dim must be positive and coarse_beta finite/nonnegative"
+            )
+        self.coarse_beta = float(coarse_beta)
+        self.state_text_proj = nn.Linear(dim, state_dim)
+        self.state_image_proj = nn.Linear(dim, state_dim)
 
         binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim)
         self.grounding = SubjectGrounding(binding, dim)
@@ -36,6 +50,22 @@ class RCRModel(nn.Module):
         )
         self.target_builder = TargetPersonBuilder(dim, identity_dim)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio)
+
+    def encode_text_state(
+        self, change: Tensor, change_mask: Tensor | None = None
+    ) -> Tensor:
+        """Pool final_change tokens only, project, and L2-normalize [B,Ds]."""
+        if change_mask is None:
+            pooled = change.mean(dim=-2)
+        else:
+            mask = change_mask.bool()
+            tokens = change.masked_fill(~mask[..., None], 0)
+            pooled = tokens.sum(dim=-2) / mask.sum(dim=-1, keepdim=True).clamp_min(1)
+        return F.normalize(self.state_text_proj(pooled), dim=-1)
+
+    def encode_image_state(self, global_features: Tensor) -> Tensor:
+        """Project mean whole-image patch features and L2-normalize [...,Ds]."""
+        return F.normalize(self.state_image_proj(global_features), dim=-1)
 
     def forward(
         self,

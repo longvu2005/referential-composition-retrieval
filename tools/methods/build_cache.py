@@ -79,6 +79,7 @@ def build_cache(
     image_encoder.eval()
 
     all_persons = []
+    all_global = []
     patch_hw = None
 
     for index, (image_id, path) in enumerate(
@@ -141,12 +142,15 @@ def build_cache(
         scene_size = (int(scene_pixels.shape[-1]), int(scene_pixels.shape[-2]))
         boxes_scene = boxes_to_scene(persons, image.size, scene_size)
         cached_persons = compact_cpu(person_features, feature_dtype)
+        cached_scene = compact_cpu(scene[0], feature_dtype)
+        # Match training/legacy pooling exactly, including storage rounding.
+        all_global.append(cached_scene.float().mean(dim=0))
 
         torch.save(
             {
                 "cache_id": cache_id,
                 "image_id": image_id,
-                "scene": compact_cpu(scene[0], feature_dtype),
+                "scene": cached_scene,
                 "persons": cached_persons,
                 "identity_ids": identity_ids,
                 "boxes_scene": compact_cpu(boxes_scene, torch.float32),
@@ -176,6 +180,7 @@ def build_cache(
             "mask": mask,
             "patch_hw": patch_hw,
             "storage_dtype": storage_dtype,
+            "global_features": torch.stack(all_global),
         },
         temporary_index,
     )

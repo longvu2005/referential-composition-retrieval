@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 from torch import Tensor
+from tqdm import tqdm
 
 
 class GalleryCache:
@@ -24,6 +25,12 @@ class GalleryCache:
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
         self.patch_hw = tuple(index["patch_hw"])
+        self._global_features = index.get("global_features")
+        if self._global_features is not None and self._global_features.shape != (
+            len(self.image_ids),
+            self.persons.shape[-1],
+        ):
+            raise ValueError("cache global features/gallery shape mismatch")
         if self.persons.shape[:2] != self.mask.shape or self.persons.shape[0] != len(
             self.image_ids
         ):
@@ -34,6 +41,41 @@ class GalleryCache:
         if self.image_ids != image_ids:
             raise ValueError("cache gallery IDs/order differ from finalized data")
 
+    def _load_item(self, index: int) -> dict:
+        item = torch.load(
+            self.root / "features" / f"{index}.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        if item.get("cache_id") != self.cache_id or (
+            "image_id" in item and item["image_id"] != self.image_ids[index]
+        ):
+            raise ValueError(f"cache feature {index} does not match index.pt")
+        if item["scene"].shape != (
+            self.patch_hw[0] * self.patch_hw[1],
+            self.persons.shape[-1],
+        ):
+            raise ValueError("cache scene shape differs from patch_hw/feature dim")
+        return item
+
+    @property
+    def global_features(self) -> Tensor:
+        """Mean scene patches [G,D], kept on CPU and reused across evaluations.
+
+        Legacy caches are read once, one feature file at a time. This supports
+        read-only Kaggle inputs without rebuilding the detector/image cache.
+        New caches store the same FP32 means directly in index.pt.
+        """
+        if self._global_features is None:
+            features = torch.empty(len(self.image_ids), self.persons.shape[-1])
+            for i in tqdm(
+                range(len(self.image_ids)), desc="pool cached global features"
+            ):
+                item = self._load_item(i)
+                features[i] = item["scene"].float().mean(dim=0)
+            self._global_features = features
+        return self._global_features
+
     def load(
         self, indices: Tensor
     ) -> tuple[Tensor, Tensor, Tensor, list[list[str | None]], Tensor]:
@@ -41,16 +83,7 @@ class GalleryCache:
 
         items = []
         for i in indices.tolist():
-            item = torch.load(
-                self.root / "features" / f"{int(i)}.pt",
-                map_location="cpu",
-                weights_only=True,
-            )
-            if item.get("cache_id") != self.cache_id or (
-                "image_id" in item and item["image_id"] != self.image_ids[int(i)]
-            ):
-                raise ValueError(f"cache feature {int(i)} does not match index.pt")
-            items.append(item)
+            items.append(self._load_item(int(i)))
 
         # Storage precision is independent of the FP32 train/inference model.
         scene = torch.stack([x["scene"] for x in items]).float()

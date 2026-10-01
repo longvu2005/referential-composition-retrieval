@@ -7,9 +7,10 @@ checkpoint: runs/proposed/best.pt
 split: test
 
 retrieval:
+  # state_dim and coarse_beta are read from the training checkpoint.
   top_m: 500
   fine_batch_size: 64
-  # Identities stay in RAM; these limit GPU projection and coarse scoring.
+  # Identity/state embeddings stay in RAM; these bound GPU working memory.
   identity_batch_size: 512
   coarse_batch_size: 512
   device: auto

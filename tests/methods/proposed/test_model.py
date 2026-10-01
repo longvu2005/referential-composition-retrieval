@@ -4,6 +4,19 @@ from rcr.methods.proposed.binding import EvidenceBinding
 from rcr.methods.proposed.model import RCRModel
 
 
+def test_state_encoders_normalize_and_ignore_masked_text() -> None:
+    model = RCRModel(8, 6, 2, state_dim=4)
+    change = torch.randn(2, 3, 8)
+    mask = torch.tensor([[True, False, True], [True, True, True]])
+    expected = model.encode_text_state(change, mask)
+    change[0, 1] = 1000
+    torch.testing.assert_close(model.encode_text_state(change, mask), expected)
+    image = model.encode_image_state(torch.randn(2, 8))
+    assert expected.shape == image.shape == (2, 4)
+    torch.testing.assert_close(expected.norm(dim=-1), torch.ones(2))
+    torch.testing.assert_close(image.norm(dim=-1), torch.ones(2))
+
+
 def _boxes(batch: int, people: int) -> torch.Tensor:
     boxes = torch.rand(batch, people, 4)
     boxes[..., 2:] = boxes[..., :2] + boxes[..., 2:] * (1 - boxes[..., :2])

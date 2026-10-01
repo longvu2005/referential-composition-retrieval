@@ -60,7 +60,7 @@ functions and PyTorch modules, with no trainer or callback framework.
 | Cached features, identity labels, positive masks | `batch.py::build_batch` |
 | Query grounding and composition | `model.py::RCRModel.encode_query` |
 | Target binding and fine score | `model.py::RCRModel.score_target` |
-| Three losses and their supervision masks | `training.py::compute_loss`, `losses.py` |
+| Four losses and their supervision masks | `training.py::compute_loss`, `losses.py` |
 | Coarse shortlist and fine reranking | `retrieval.py::retrieve_rankings` |
 | Optimizer, W&B, evaluation schedule, checkpoints | `tools/methods/train_proposed.py` |
 
@@ -139,7 +139,7 @@ The implemented inference path is:
 
 ```text
 person detector -> shared image encoder -> Subject grounding
--> coarse identity shortlist -> structured identity-set composition
+-> coarse identity + state shortlist -> structured identity-set composition
 -> target evidence binding -> fine target-set reasoning -> ranking
 ```
 
@@ -201,7 +201,7 @@ Membership uses independent sigmoid probabilities, never a softmax across
 persons; a GROUP Subject can therefore select multiple people. Training uses
 masked `BCEWithLogits` on raw finite logits.
 
-### 4. Cheap coarse identity retrieval
+### 4. Cheap coarse identity + global state retrieval
 
 Coarse retrieval is deliberately optimistic and is used only to preserve high
 candidate recall.
@@ -211,13 +211,24 @@ c_i(q,t) = max_j dot(v_i^q, v_j^t)
 a_si = sigmoid(g_si)
 omega_si = a_si / (sum_r a_sr + eps)
 S_subject_s(q,t) = sum_i omega_si c_i(q,t)
-S_c(q,t) = average_s S_subject_s(q,t)
+S_id(q,t) = average_s S_subject_s(q,t)
+z_text(q) = Normalize(P_text(masked_mean(E_R(final_change))))
+z_image(t) = Normalize(P_image(mean_patches(F_t)))
+S_state(q,t) = dot(z_text(q), z_image(t))
+S_coarse(q,t) = S_id(q,t) + beta * S_state(q,t)
 ```
 
 Each Subject contributes once to the average, including when one Subject
 contains multiple people. Invalid person/Subject positions are masked. There
-is no learned coarse scorer, threshold, one-to-one assignment, coverage
-heuristic, or coarse loss. Top `M` gallery images proceed to the fine stage.
+is no threshold, one-to-one assignment, or coverage heuristic in `S_id`; its
+soft grounding + max identity similarity formula is unchanged. The state branch
+uses only the existing `final_change` token encoding (including Subject markers),
+with padding excluded from mean pooling, and whole-image patch means. Separate
+trainable text/image projections map both to `model.state_dim`, followed by L2
+normalization. State is a rough global action/context signal; precise identity
+binding is handled by the fine reasoner. `model.coarse_beta: 0.3` is a starting
+value to tune on validation, not a measured optimum. Top `M` gallery images
+proceed to the fine stage. Set beta to zero for identity-only shortlisting.
 
 ### 5. Structured identity composition
 
@@ -258,8 +269,8 @@ output remains a complete gallery ranking. No coarse, identity, or coverage
 score is manually added to the fine score.
 
 When the query has no detected people, it remains in retrieval and evaluation:
-nonempty gallery person sets tie at zero in coarse identity scoring, while
-empty target sets score `-inf` there. The fine stage can still use change text
+`S_id` is zero for nonempty target person sets, so global state can still
+rank them. Empty target sets retain the original `-inf` identity/coarse score. The fine stage can still use change text
 and target evidence. Empty targets and padded persons/Subjects do not crash.
 
 ### Training objective
@@ -267,7 +278,7 @@ and target evidence. Empty targets and padded persons/Subjects do not crash.
 The current objective is:
 
 ```text
-L = 1.0 * L_ret + 1.0 * L_ground + 0.1 * L_id
+L = 1.0 * L_ret + 1.0 * L_ground + 0.1 * L_id + 1.0 * L_state
 ```
 
 where:
@@ -281,7 +292,12 @@ where:
   self-pairs are excluded. Repeated copies of the same cached image/person crop
   count once per batch; different images of the same identity remain positives;
 - `L_ret`: mean pairwise `softplus(S_f(q,n) - S_f(q,p))` over valid
-  positive/negative pairs.
+  positive/negative pairs;
+- `L_state`: the same masked pairwise ranking loss applied to
+  `S_state / state_temperature` (default `0.1`), using the sampled Full Positive
+  and negatives. It trains both state projections and the shared text encoder;
+  there is no in-batch negative assumption. `state_weight` defaults to `1.0`.
+  Fine ranking uses only `S_f`; neither state nor identity is added to its score.
 
 Candidate sampling picks one reviewed positive and excludes **all** other
 known positives and the query image from that query's negatives.
@@ -374,11 +390,23 @@ dimensions, scene features alone need about **20.8 GiB in FP32 / 10.4 GiB in
 FP16**, plus persons, the index and file overhead. This option does not change
 the patch grid, but retrieval quality should be checked when changing precision.
 
+Global image features use mean pooling of the **stored** whole-image patch
+features, cast to FP32 before averaging. New caches include `global_features`
+`[G,D]` in `index.pt`. Existing caches remain usable without rerunning detection
+or image encoding: the first state retrieval reads each feature file once,
+keeps only its mean vector in CPU RAM, and reuses those vectors for subsequent
+evaluations in the same process. This initial disk scan can take time on large
+caches; it does not write to read-only Kaggle input directories. Only projected
+identity/state chunks go to the accelerator. Projected state vectors are
+recomputed after model updates, while frozen raw global vectors are reused.
+
 ### `train.yaml`
 
 Controls model dimensions, optimizer parameters, loss weights, identity
 temperature, training candidate count and negative pool, seed, device, and
-output directory. There is no retrieval temperature or coarse loss. The
+output directory, plus `model.state_dim`, `model.coarse_beta`,
+`loss.state_weight` and `loss.state_temperature`. The state ranking loss trains
+the coarse state branch; the fine loss remains unchanged. The
 `evaluation` block controls periodic retrieval evaluation: interval, fixed train
 subset size, coarse shortlist, scoring batch sizes and CandidateRecall cutoffs.
 The complete validation split is evaluated at the interval and at the final
@@ -403,7 +431,10 @@ independent of the architecture.
 ### `retrieve.yaml`
 
 Controls checkpoint, split, coarse `top_m`, fine-scoring batch size, identity
-projection batch size, device, and ranking output directory.
+projection/coarse batch sizes, device, and ranking output directory. The state
+dimension and beta come from the checkpoint training config, ensuring periodic
+validation and standalone retrieval use the same formula. Old checkpoints lack
+the state projections and require retraining; they are rejected explicitly.
 
 ### `evaluate.yaml`
 
@@ -606,7 +637,7 @@ The repository contains tested implementations for:
 - person detection with optional GT-head-to-person label alignment;
 - reference-free feature caching;
 - query Subject grounding;
-- soft coarse identity retrieval;
+- soft coarse identity + global state retrieval;
 - structured identity-set composition;
 - target evidence binding and fine reasoning;
 - training candidate sampling and losses;

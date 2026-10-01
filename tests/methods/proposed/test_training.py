@@ -56,7 +56,7 @@ def test_compute_loss_and_backward() -> None:
     loss, parts = compute_loss(model, batch, patch_hw=(2, 3))
 
     assert loss.ndim == 0
-    assert set(parts) == {"grounding", "identity", "retrieval"}
+    assert set(parts) == {"grounding", "identity", "retrieval", "state"}
     assert torch.isfinite(loss)
 
     loss.backward()
@@ -64,6 +64,8 @@ def test_compute_loss_and_backward() -> None:
     assert model.identity_head.proj.weight.grad is not None
     assert model.composition.identity_proj.weight.grad is not None
     assert model.reasoner.score[-1].weight.grad is not None
+    assert model.state_text_proj.weight.grad.norm() > 0
+    assert model.state_image_proj.weight.grad.norm() > 0
 
 
 def test_optimizer_step_changes_model() -> None:
@@ -167,7 +169,13 @@ def test_positive_targets_supply_identity_pairs_and_gradients() -> None:
     assert identity_loss(q, batch["query_identity_labels"]).item() == 0
 
     loss, parts = compute_loss(
-        model, batch, (2, 3), grounding_weight=0, identity_weight=1, retrieval_weight=0
+        model,
+        batch,
+        (2, 3),
+        grounding_weight=0,
+        identity_weight=1,
+        retrieval_weight=0,
+        state_weight=0,
     )
     # Only four query observations and their four positive target observations.
     expected_features = torch.cat(
@@ -238,9 +246,43 @@ def test_grounding_skips_subject_whose_gt_person_was_not_detected() -> None:
     expected = grounding_loss(logits, batch["grounding_targets"], valid)
 
     loss, parts = compute_loss(
-        model, batch, (2, 3), identity_weight=0, retrieval_weight=0
+        model, batch, (2, 3), identity_weight=0, retrieval_weight=0, state_weight=0
     )
     torch.testing.assert_close(parts["grounding"], expected)
     loss.backward()
     assert batch["selections"].grad[0, 0].count_nonzero() == 0
     assert batch["selections"].grad[0, 1].count_nonzero() > 0
+
+
+def test_state_loss_trains_text_and_image_but_ignores_candidate_padding() -> None:
+    torch.manual_seed(71)
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["change"].requires_grad_()
+    batch["target_scene"].requires_grad_()
+    batch["change_mask"][0, -1] = False
+    batch["candidate_mask"][0, 2] = False
+    options = dict(grounding_weight=0, identity_weight=0, retrieval_weight=0)
+    loss, parts = compute_loss(model, batch, (2, 3), **options)
+    torch.testing.assert_close(loss.detach(), parts["state"])
+    loss.backward()
+    assert model.state_text_proj.weight.grad.norm() > 0
+    assert model.state_image_proj.weight.grad.norm() > 0
+    assert batch["change"].grad[0, -1].count_nonzero() == 0
+    assert batch["change"].grad[0, :-1].norm() > 0
+    assert batch["target_scene"].grad[0, 2].count_nonzero() == 0
+    assert batch["target_scene"].grad[0, :2].norm() > 0
+    altered = {key: value.detach().clone() for key, value in batch.items()}
+    altered["change"][0, -1] = 1000
+    altered["target_scene"][0, 2] = -1000
+    altered["positive_mask"][0, 2] = False
+    actual, _ = compute_loss(model, altered, (2, 3), **options)
+    torch.testing.assert_close(actual, loss)
+
+
+def test_state_loss_can_be_disabled_and_temperature_must_be_positive() -> None:
+    model = RCRModel(8, 6, 2)
+    _, parts = compute_loss(model, _batch(), (2, 3), state_weight=0)
+    assert parts["state"] == 0
+    with pytest.raises(ValueError, match="state_temperature"):
+        compute_loss(model, _batch(), (2, 3), state_temperature=0)

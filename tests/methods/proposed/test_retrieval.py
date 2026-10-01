@@ -57,6 +57,7 @@ class _Cache:
         self.scenes = torch.randn(3, 1, 8, generator=generator)
         self.mask = torch.ones(3, 1, dtype=torch.bool)
         self.patch_hw = (1, 1)
+        self.global_features = self.scenes.mean(dim=1)
 
     def load(self, indices):
         indices = indices.long()
@@ -114,8 +115,9 @@ def test_retrieve_rankings_excludes_query_and_restores_training_modes() -> None:
     "identity_batch_size,coarse_batch_size", [(1, 1), (3, 2), (20, 20)]
 )
 @pytest.mark.parametrize("empty_query", [False, True])
+@pytest.mark.parametrize("beta", [0.0, 0.3])
 def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
-    identity_batch_size, coarse_batch_size, empty_query
+    identity_batch_size, coarse_batch_size, empty_query, beta
 ) -> None:
     torch.manual_seed(23)
     # The final two images have no detected people. Valid columns need not be
@@ -139,6 +141,11 @@ def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
     query_identity = torch.randn(0 if empty_query else 3, 6)
     logits = torch.randn(2, len(query_identity))
     query_mask = torch.tensor([] if empty_query else [True, False, True]).bool()
+    state = dict(
+        query_state=torch.nn.functional.normalize(torch.randn(4), dim=-1),
+        gallery_state=torch.nn.functional.normalize(torch.randn(7, 4), dim=-1),
+        beta=beta,
+    )
     with torch.inference_mode():
         batches = _encode_gallery_identity(
             cache, model, torch.device("cpu"), identity_batch_size
@@ -149,9 +156,10 @@ def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
             model.identity_head(cache.persons.float()),
             cache.mask,
             query_mask=query_mask,
+            **state,
         )
         actual = _coarse_scores_chunked(
-            query_identity, logits, query_mask, batches, coarse_batch_size
+            query_identity, logits, query_mask, batches, coarse_batch_size, **state
         )
 
     torch.testing.assert_close(actual, expected)
@@ -188,11 +196,11 @@ def test_chunked_full_rankings_match_dense_reference(monkeypatch, coarse_batch_s
         del batch_size
         return [(model.identity_head(cache.persons.to(device)), cache.mask.to(device))]
 
-    def dense_scores(query_identity, logits, query_mask, batches, batch_size):
+    def dense_scores(query_identity, logits, query_mask, batches, batch_size, **state):
         del batch_size
         identity, mask = batches[0]
         return coarse_scores(
-            query_identity, logits, identity, mask, query_mask=query_mask
+            query_identity, logits, identity, mask, query_mask=query_mask, **state
         )
 
     monkeypatch.setattr(retrieval, "_encode_gallery_identity", dense_gallery)

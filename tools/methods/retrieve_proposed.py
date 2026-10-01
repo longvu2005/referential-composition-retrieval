@@ -31,6 +31,11 @@ def main() -> None:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     train_cfg = checkpoint["config"]
     model_cfg = train_cfg["model"]
+    if "state_text_proj.weight" not in checkpoint["model"]:
+        raise ValueError(
+            "checkpoint predates identity+state coarse retrieval; "
+            "train a new checkpoint with the updated train config"
+        )
     dim = checkpoint["dim"]
 
     from transformers import AutoModel, AutoTokenizer
@@ -50,6 +55,8 @@ def main() -> None:
         max_subjects=max_subjects,
         mlp_ratio=model_cfg["mlp_ratio"],
         geo_dim=model_cfg["geo_dim"],
+        state_dim=model_cfg.get("state_dim"),
+        coarse_beta=model_cfg.get("coarse_beta", 0.3),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 

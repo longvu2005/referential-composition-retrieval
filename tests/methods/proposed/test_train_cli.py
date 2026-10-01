@@ -92,6 +92,8 @@ def test_train_checkpoints_metrics_and_retrieve(
         "model": {
             "text_model": "tiny",
             "identity_dim": 6,
+            "state_dim": 4,
+            "coarse_beta": 0.37,
             "num_heads": 2,
             "mlp_ratio": 2,
             "geo_dim": 4,
@@ -109,6 +111,8 @@ def test_train_checkpoints_metrics_and_retrieve(
             "identity_weight": 0.1,
             "retrieval_weight": 1.0,
             "identity_temperature": 0.1,
+            "state_weight": 0.5,
+            "state_temperature": 0.2,
         },
         "evaluation": {
             "enabled": enabled,
@@ -132,11 +136,15 @@ def test_train_checkpoints_metrics_and_retrieve(
     last = torch.load(output / "last.pt", weights_only=True)
     assert last["epoch"] == 3
     assert last["cache_id"] == cache.cache_id
+    assert last["config"]["model"]["coarse_beta"] == 0.37
+    assert last["model"]["state_text_proj.weight"].shape == (4, 8)
+    assert "train/state_loss" in logs[0]
     assert finished == [True]
     assert [row["global_step"] for row in logs if "global_step" in row] == [1, 2]
     assert not (output / "evaluation" / "epoch_001").exists()
     epoch_logs = [row for row in logs if "epoch" in row]
     assert [row["epoch"] for row in epoch_logs] == [1, 2, 3]
+    assert all("epoch/state_loss" in row for row in epoch_logs)
     if enabled:
         assert [row["epoch"] for row in epoch_logs if "val/full_map" in row] == [2, 3]
         values = []
@@ -176,3 +184,22 @@ def test_train_checkpoints_metrics_and_retrieve(
     evaluate_proposed.main()
     metrics = json.loads((output / "metrics.json").read_text())
     assert metrics["overall"]["num_queries"] == 1
+
+
+def test_retrieve_rejects_old_checkpoint_before_loading_backbones(
+    monkeypatch, tmp_path
+) -> None:
+    checkpoint_path = tmp_path / "old.pt"
+    torch.save({"model": {}, "config": {"model": {}}}, checkpoint_path)
+    config_path = tmp_path / "retrieve.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "checkpoint": str(checkpoint_path),
+                "retrieval": {"device": "cpu"},
+            }
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["retrieve", "--config", str(config_path)])
+    with pytest.raises(ValueError, match="train a new checkpoint"):
+        retrieve_proposed.main()

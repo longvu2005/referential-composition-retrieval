@@ -77,3 +77,35 @@ def test_gallery_cache_refuses_incomplete_or_mixed_build(tmp_path) -> None:
     cache = GalleryCache(tmp_path)
     with pytest.raises(ValueError, match="does not match"):
         cache.load(torch.tensor([0]))
+    with pytest.raises(ValueError, match="does not match"):
+        _ = cache.global_features
+
+
+def test_legacy_global_features_pool_once_without_writing(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / "features").mkdir()
+    scenes = torch.randn(2, 6, 4).half()
+    torch.save(
+        {
+            "image_ids": ["a", "b"],
+            "persons": torch.empty(2, 0, 4),
+            "mask": torch.empty(2, 0, dtype=torch.bool),
+            "patch_hw": (2, 3),
+        },
+        tmp_path / "index.pt",
+    )
+    for i, scene in enumerate(scenes):
+        torch.save({"scene": scene}, tmp_path / "features" / f"{i}.pt")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    cache = GalleryCache(tmp_path)
+    actual = cache.global_features
+    torch.testing.assert_close(actual, scenes.float().mean(dim=1))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("global vectors must not reread scene files")
+
+    monkeypatch.setattr(torch, "load", fail)
+    assert cache.global_features is actual
+    after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert before == after
