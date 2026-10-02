@@ -12,7 +12,6 @@ from rcr.methods.proposed.retrieval import (
     _encode_gallery_identity,
     evaluate_retrieval_output,
     retrieve_rankings,
-    slice_retrieval_output,
 )
 
 
@@ -50,12 +49,12 @@ class _TextEncoder(nn.Module):
 
 
 class _Cache:
-    def __init__(self) -> None:
+    def __init__(self, image_ids=None) -> None:
         generator = torch.Generator().manual_seed(3)
-        self.image_ids = ["q", "a", "b"]
-        self.persons = torch.randn(3, 1, 8, generator=generator)
-        self.scenes = torch.randn(3, 1, 8, generator=generator)
-        self.mask = torch.ones(3, 1, dtype=torch.bool)
+        self.image_ids = image_ids or ["q", "a", "b"]
+        self.persons = torch.randn(len(self.image_ids), 1, 8, generator=generator)
+        self.scenes = torch.randn(len(self.image_ids), 1, 8, generator=generator)
+        self.mask = torch.ones(len(self.image_ids), 1, dtype=torch.bool)
         self.patch_hw = (1, 1)
         self.global_features = self.scenes.mean(dim=1)
 
@@ -78,6 +77,7 @@ def _sample(sample_id: str = "s1") -> dict:
         "sample_id": sample_id,
         "case_type": "INDIVIDUAL",
         "query_image_id": "q",
+        "target_image_id": "a",
         "positive_image_ids": ["a"],
         "subjects": [{"subject_id": 1, "identity_ids": ["p1"]}],
         "final_desc": "Identify Subject 1 as the person",
@@ -99,6 +99,7 @@ def test_retrieve_rankings_excludes_query_and_restores_training_modes() -> None:
         text_encoder,
         model,
         torch.device("cpu"),
+        gallery_ids=cache.image_ids,
         top_m=2,
         fine_batch_size=1,
         identity_batch_size=2,
@@ -181,6 +182,7 @@ def test_chunked_full_rankings_match_dense_reference(monkeypatch, coarse_batch_s
     model = RCRModel(8, 6, 2, max_subjects=1).eval()
     samples = [_sample("s1"), {**_sample("s2"), "query_image_id": "a"}]
     kwargs = dict(
+        gallery_ids=cache.image_ids,
         top_m=1,
         fine_batch_size=1,
         identity_batch_size=2,
@@ -192,9 +194,14 @@ def test_chunked_full_rankings_match_dense_reference(monkeypatch, coarse_batch_s
 
     # Recreate the original full-gallery projection and coarse computation;
     # use the same query/fine path to compare both the shortlist and full tail.
-    def dense_gallery(cache, model, device, batch_size):
+    def dense_gallery(cache, model, device, batch_size, image_indices):
         del batch_size
-        return [(model.identity_head(cache.persons.to(device)), cache.mask.to(device))]
+        return [
+            (
+                model.identity_head(cache.persons[image_indices].to(device)),
+                cache.mask[image_indices].to(device),
+            )
+        ]
 
     def dense_scores(query_identity, logits, query_mask, batches, batch_size, **state):
         del batch_size
@@ -233,6 +240,7 @@ def test_retrieval_restores_mixed_modes_on_failure(monkeypatch):
             text_encoder,
             model,
             torch.device("cpu"),
+            gallery_ids=cache.image_ids,
             top_m=2,
             fine_batch_size=1,
             identity_batch_size=2,
@@ -250,6 +258,7 @@ def test_retrieval_rejects_nonpositive_coarse_batch_size():
             _TextEncoder(),
             RCRModel(8, 6, 2),
             torch.device("cpu"),
+            gallery_ids=["q", "a", "b"],
             top_m=2,
             fine_batch_size=1,
             identity_batch_size=2,
@@ -290,7 +299,39 @@ def test_gallery_identity_gpu_memory_is_bounded_by_chunks():
         assert actual.shape == (len(cache.image_ids),)
 
 
-def test_slice_and_evaluate_retrieval_output_use_official_metrics() -> None:
+@pytest.mark.parametrize("beta", [0.0, 0.3])
+@pytest.mark.parametrize("top_m", [1, 20])
+def test_split_retrieval_uses_local_indices_and_only_loads_selected_images(beta, top_m):
+    cache = _Cache()
+    loaded = []
+    load = cache.load
+
+    def record(indices):
+        loaded.extend(indices.tolist())
+        return load(indices)
+
+    cache.load = record
+    output = retrieve_rankings(
+        [{**_sample(), "target_image_id": "b", "positive_image_ids": ["b"]}],
+        cache,
+        _Tokenizer(),
+        _TextEncoder(),
+        RCRModel(8, 6, 2, max_subjects=1, coarse_beta=beta),
+        torch.device("cpu"),
+        gallery_ids=["b", "q"],  # Cache indices 2,0; query is local index 1.
+        top_m=top_m,
+        fine_batch_size=1,
+        identity_batch_size=1,
+        coarse_batch_size=1,
+    )
+
+    assert output["gallery_ids"] == ["b", "q"]
+    assert output["rankings"].tolist() == [[0]]
+    assert output["coarse_topm"].tolist() == [[0]]
+    assert loaded == [0, 2]
+
+
+def test_evaluate_retrieval_output_uses_official_split_metrics() -> None:
     sample = _sample()
     output = {
         "sample_ids": ["s1"],
@@ -298,16 +339,19 @@ def test_slice_and_evaluate_retrieval_output_use_official_metrics() -> None:
         "rankings": torch.tensor([[1, 2]], dtype=torch.int32),
         "coarse_topm": torch.tensor([[1, 2]], dtype=torch.int32),
     }
-    sliced = slice_retrieval_output(output, 0, 1)
     data = SimpleNamespace(
         gallery_ids=["q", "a", "b"],
+        images_by_id={x: {"path": f"test/{x}.jpg"} for x in ["q", "a", "b"]},
+        splits={"test": ["s1"]},
         gt_head_boxes_by_image={
             "q": [{"identity_id": "p1"}],
             "a": [{"identity_id": "p1"}],
         },
     )
 
-    result = evaluate_retrieval_output(data, [sample], sliced, candidate_ks=[1, 2])
+    result = evaluate_retrieval_output(
+        data, [sample], output, candidate_ks=[1, 2], split="test"
+    )
 
     assert result["overall"]["full_map"] == 1.0
     assert result["overall"]["id_map"] == 1.0
@@ -324,8 +368,36 @@ def test_evaluate_retrieval_output_rejects_invalid_tensor_index() -> None:
     }
     data = SimpleNamespace(
         gallery_ids=["q", "a", "b"],
+        images_by_id={x: {"path": f"test/{x}.jpg"} for x in ["q", "a", "b"]},
+        splits={"test": ["s1"]},
         gt_head_boxes_by_image={},
     )
 
     with pytest.raises(ValueError, match="invalid gallery index"):
-        evaluate_retrieval_output(data, [sample], output, candidate_ks=[1])
+        evaluate_retrieval_output(
+            data, [sample], output, candidate_ks=[1], split="test"
+        )
+
+
+def test_evaluation_rejects_rankings_from_the_old_global_gallery():
+    ids = ["q", "a", "b", "train_image", "leftover_image"]
+    data = SimpleNamespace(
+        gallery_ids=ids,
+        images_by_id={
+            image_id: {"path": f"{split}/{image_id}.jpg"}
+            for image_id, split in zip(
+                ids, ["test", "test", "test", "train", "leftover"], strict=True
+            )
+        },
+        splits={"test": ["s1"]},
+        gt_head_boxes_by_image={},
+    )
+    output = {
+        "sample_ids": ["s1"],
+        "gallery_ids": ids,
+        "rankings": torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+        "coarse_topm": torch.tensor([[1, 2]], dtype=torch.int32),
+    }
+
+    with pytest.raises(ValueError, match="do not match the test gallery"):
+        evaluate_retrieval_output(data, [_sample()], output, [1, 2], split="test")

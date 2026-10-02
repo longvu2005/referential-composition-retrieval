@@ -69,7 +69,7 @@ Training and retrieval share text preparation and query encoding; edit these
 once to keep both paths aligned. `RCRModel.forward` scores one query-target pair
 per batch row, while training and retrieval reuse one encoded query for several
 targets. Each mathematical component remains a small module so its tensors and
-equations can be inspected directly. Existing YAML configs, cache files, metric
+equations can be inspected directly. Existing model dimensions, cache files, metric
 names, and model checkpoint parameter names are preserved by this refactor.
 
 ---
@@ -78,6 +78,17 @@ names, and model checkpoint parameter names are preserved by this refactor.
 
 The checked-in final export is **version 0.1.0** with 4,311 queries and
 37,107 registered gallery images.
+
+Each query searches **all images in its own PIPA split**, excluding the query
+image: 17,000 train images, 5,684 val images, or 7,868 test images. The 6,555
+leftover images remain in the image registry/cache but never enter a query's
+gallery. Gallery membership comes from `images.jsonl` paths, not the images
+appearing in annotated query/target pairs. Full Positives and identity-positive
+metrics use the same split gallery.
+
+Stored annotations and final data stay unchanged. The loader intersects reviewed
+`positive_image_ids` with the query split in memory, leaving the original labels
+available for annotation provenance and other retrieval protocols.
 
 | Split | INDIVIDUAL | GROUP | DUAL | RELATIONAL | Total |
 |---|---:|---:|---:|---:|---:|
@@ -265,7 +276,7 @@ self-attention block scores its CLS token as the raw scalar `S_f(q,t)`.
 
 The final Top-M order is determined only by `S_f`; the coarse score is used only
 for shortlisting. Images outside Top-M retain their coarse order so the saved
-output remains a complete gallery ranking. No coarse, identity, or coverage
+output remains a complete split-gallery ranking. No coarse, identity, or coverage
 score is manually added to the fine score.
 
 When the query has no detected people, it remains in retrieval and evaluation:
@@ -403,7 +414,7 @@ recomputed after model updates, while frozen raw global vectors are reused.
 ### `train.yaml`
 
 Controls model dimensions, optimizer parameters, loss weights, identity
-temperature, training candidate count and negative pool, seed, device, and
+temperature, training candidate count, seed, device, and
 output directory, plus `model.state_dim`, `model.coarse_beta`,
 `loss.state_weight` and `loss.state_temperature`. The state ranking loss trains
 the coarse state branch; the fine loss remains unchanged. The
@@ -422,18 +433,19 @@ upload images, cache features, model graphs, rankings, or checkpoints.
 The current training sampler uses **one reviewed Full Positive plus random
 negatives** per query. Batches are grouped by number of Subjects, so every batch
 has a fixed Subject axis. Candidate count is fixed by `train.candidates`.
-`train.negative_pool: full_gallery` preserves the supplied protocol and may
-sample val/test gallery images as negatives. Choose `train_gallery` when
-held-out image negatives must be excluded; this pool contains images appearing
-as train queries or reviewed train positives. The split/protocol choice is
-independent of the architecture.
+Both positives and negatives come only from the complete **train image split**.
+Train diagnostics search the train gallery; validation searches the val gallery.
+There is no configurable cross-split negative pool.
 
 ### `retrieve.yaml`
 
 Controls checkpoint, split, coarse `top_m`, fine-scoring batch size, identity
 projection/coarse batch sizes, device, and ranking output directory. The state
 dimension and beta come from the checkpoint training config, ensuring periodic
-validation and standalone retrieval use the same formula. Old checkpoints lack
+validation and standalone retrieval use the same formula and split protocol.
+The reference-free cache remains shared and can be reused without rebuilding.
+Saved ranking indices are local to their saved `gallery_ids`, so rankings made
+with the old global gallery must be regenerated. Old checkpoints lack
 the state projections and require retraining; they are rejected explicitly.
 
 ### `evaluate.yaml`
@@ -546,11 +558,13 @@ The file stores:
 ```text
 sample_ids
 gallery_ids
-rankings       # full gallery ranking, int32 indices
+rankings       # full split-gallery ranking, int32 indices
 coarse_topm    # coarse shortlist, int32 indices
 ```
 
-`rankings` contains every gallery image except the query image exactly once.
+`gallery_ids` lists the complete requested split in canonical registry order.
+`rankings` contains every image in that gallery except the query exactly once.
+Evaluation rejects saved rankings whose gallery differs from the requested split.
 
 ### 4. Evaluate
 

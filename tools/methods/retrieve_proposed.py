@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from rcr.methods.common.data import load_rcr_data, split_samples
+from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import TextEncoder
 from rcr.methods.proposed.model import RCRModel
@@ -75,6 +75,7 @@ def main() -> None:
         text_encoder,
         model,
         device,
+        gallery_ids=split_image_ids(data, cfg["split"]),
         top_m=retrieval_cfg["top_m"],
         fine_batch_size=retrieval_cfg["fine_batch_size"],
         identity_batch_size=retrieval_cfg["identity_batch_size"],

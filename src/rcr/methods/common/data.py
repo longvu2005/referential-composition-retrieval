@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from rcr.dataset.rewrite import parse_selection_texts
 from rcr.utils.jsonl import load_jsonl
@@ -110,9 +110,28 @@ def load_rcr_data(
 
 
 def split_samples(data: RCRData, split: str) -> list[dict]:
-    """Return samples in the saved split order."""
+    """Return split queries with Full Positives restricted to the same gallery.
 
-    return [data.samples_by_id[sample_id] for sample_id in data.splits[split]]
+    Reviewed annotations may include valid positives outside the query split.
+    Project their labels in memory without changing the stored annotations.
+    """
+    gallery = set(split_image_ids(data, split))
+    samples = []
+    for sample_id in data.splits[split]:
+        sample = data.samples_by_id[sample_id]
+        if not {sample["query_image_id"], sample["target_image_id"]} <= gallery:
+            raise ValueError(f"{sample_id}: query and seed must belong to {split}")
+        samples.append(
+            {
+                **sample,
+                "positive_image_ids": [
+                    image_id
+                    for image_id in sample["positive_image_ids"]
+                    if image_id in gallery
+                ],
+            }
+        )
+    return samples
 
 
 def sample_selection_texts(sample: dict) -> list[str]:
@@ -133,13 +152,11 @@ def required_identity_ids(sample: dict) -> list[str]:
 
 
 def split_image_ids(data: RCRData, split: str) -> list[str]:
-    """Images supervised by a split: queries plus reviewed Full Positives."""
-
-    seen = set()
-    image_ids = []
-    for sample in split_samples(data, split):
-        for image_id in [sample["query_image_id"], *sample["positive_image_ids"]]:
-            if image_id not in seen:
-                seen.add(image_id)
-                image_ids.append(image_id)
-    return image_ids
+    """All registered images in a split, retaining the canonical gallery order."""
+    if split not in SPLIT_NAMES:
+        raise ValueError(f"invalid query split {split!r}")
+    return [
+        image_id
+        for image_id in data.gallery_ids
+        if PurePosixPath(data.images_by_id[image_id]["path"]).parts[0] == split
+    ]

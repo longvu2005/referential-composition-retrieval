@@ -21,15 +21,23 @@ def test_evaluate_proposed_cli(tmp_path: Path) -> None:
             "case_type": "INDIVIDUAL",
             "query_image_id": "q",
             "target_image_id": "a",
-            "positive_image_ids": ["a"],
+            "positive_image_ids": ["a", "left"],
             "subjects": [{"subject_id": 1, "identity_ids": ["p1"]}],
             "final_desc": "Identify Subject 1 as the person",
             "final_change": "then retrieve target images where Subject 1 is standing",
             "final_instruction": "x",
         }
     ]
-    images = [{"image_id": x, "path": f"{x}.jpg"} for x in ["q", "a", "b"]]
-    gallery = [{"image_id": x} for x in ["q", "a", "b"]]
+    images = [
+        {"image_id": x, "path": f"{split}/{x}.jpg"}
+        for x, split in [
+            ("q", "test"),
+            ("a", "test"),
+            ("b", "test"),
+            ("left", "leftover"),
+        ]
+    ]
+    gallery = [{"image_id": x["image_id"]} for x in images]
     heads = [
         {
             "box_id": "q::p1",

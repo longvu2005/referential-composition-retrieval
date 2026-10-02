@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from tqdm import tqdm
 
 from rcr.evaluation.evaluate import evaluate_rankings
-from rcr.methods.common.data import RCRData
+from rcr.methods.common.data import RCRData, split_image_ids
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.coarse import coarse_scores
 from rcr.methods.proposed.encoders import encode_query_text
@@ -21,6 +21,7 @@ def _encode_gallery_identity(
     model: nn.Module,
     device: torch.device,
     batch_size: int,
+    image_indices: Tensor | None = None,
 ) -> list[tuple[Tensor, Tensor]]:
     """Project once, retaining only CPU batches with useful person columns.
 
@@ -29,14 +30,18 @@ def _encode_gallery_identity(
     Never concatenate these batches on the accelerator (or duplicate them in RAM).
     """
 
+    if image_indices is None:
+        image_indices = torch.arange(len(cache.image_ids))
     batches = []
     dtype = model.identity_head.proj.weight.dtype
-    for start in range(0, len(cache.image_ids), batch_size):
-        stop = start + batch_size
-        mask = cache.mask[start:stop]
+    for start in range(0, len(image_indices), batch_size):
+        indices = image_indices[start : start + batch_size]
+        mask = cache.mask[indices]
         columns = mask.any(dim=0)
         mask = mask[:, columns]
-        persons = cache.persons[start:stop, columns].to(device=device, dtype=dtype)
+        persons = cache.persons[indices[:, None], columns.nonzero().flatten()].to(
+            device=device, dtype=dtype
+        )
         identity = model.identity_head(persons)
         batches.append((identity.cpu(), mask.cpu()))
         # Release GPU outputs before allocating the next projection batch.
@@ -87,17 +92,21 @@ def _coarse_scores_chunked(
 
 
 def _encode_gallery_state(
-    cache: GalleryCache, model: nn.Module, device: torch.device, batch_size: int
+    cache: GalleryCache,
+    model: nn.Module,
+    device: torch.device,
+    batch_size: int,
+    image_indices: Tensor,
 ) -> Tensor:
     """Project global image features once per retrieval call, retaining CPU output."""
     features = cache.global_features
     projection = model.state_image_proj.weight
-    state = torch.empty(
-        len(cache.image_ids), projection.shape[0], dtype=projection.dtype
-    )
-    for start in range(0, len(cache.image_ids), batch_size):
-        stop = min(start + batch_size, len(cache.image_ids))
-        chunk = features[start:stop].to(device=device, dtype=projection.dtype)
+    state = torch.empty(len(image_indices), projection.shape[0], dtype=projection.dtype)
+    for start in range(0, len(image_indices), batch_size):
+        stop = min(start + batch_size, len(image_indices))
+        chunk = features[image_indices[start:stop]].to(
+            device=device, dtype=projection.dtype
+        )
         state[start:stop] = model.encode_image_state(chunk).cpu()
     return state
 
@@ -111,6 +120,7 @@ def retrieve_rankings(
     model: nn.Module,
     device: torch.device,
     *,
+    gallery_ids: Sequence[str],
     top_m: int,
     fine_batch_size: int,
     identity_batch_size: int,
@@ -119,6 +129,8 @@ def retrieve_rankings(
 ) -> dict[str, Any]:
     """Return full and coarse gallery rankings for an ordered sample sequence.
 
+    Only the requested split's images are projected and scored. The feature
+    cache remains shared; output indices refer to the saved split gallery.
     Gallery identities stay in CPU RAM; only projection/coarse-scoring chunks
     and Top-M fine batches use the accelerator. Scores still cover every image.
     Module train/eval modes are restored even if retrieval fails.
@@ -128,8 +140,18 @@ def retrieve_rankings(
         raise ValueError("retrieval requires at least one sample")
     if min(top_m, fine_batch_size, identity_batch_size, coarse_batch_size) < 1:
         raise ValueError("retrieval batch sizes and top_m must be positive")
-    if not cache.image_ids:
+    gallery_ids = list(gallery_ids)
+    if not gallery_ids:
         raise ValueError("retrieval requires a non-empty gallery")
+    if len(gallery_ids) != len(set(gallery_ids)):
+        raise ValueError("retrieval gallery_ids must be unique")
+    by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
+    if not set(gallery_ids) <= set(by_id):
+        raise ValueError("retrieval gallery contains images missing from the cache")
+    gallery_by_id = {image_id: index for index, image_id in enumerate(gallery_ids)}
+    if any(sample["query_image_id"] not in gallery_by_id for sample in samples):
+        raise ValueError("query image must belong to the retrieval gallery")
+    image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
 
     model_was_training = model.training
     text_was_training = text_encoder.training
@@ -138,22 +160,23 @@ def retrieve_rankings(
 
     try:
         gallery_batches = _encode_gallery_identity(
-            cache, model, device, identity_batch_size
+            cache, model, device, identity_batch_size, image_indices
         )
         gallery_state = (
-            _encode_gallery_state(cache, model, device, identity_batch_size)
+            _encode_gallery_state(
+                cache, model, device, identity_batch_size, image_indices
+            )
             if model.coarse_beta != 0
             else None
         )
 
-        by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
         sample_ids = []
         rankings = []
         coarse_topm = []
 
         for sample in tqdm(samples, desc=description):
-            query_index = by_id[sample["query_image_id"]]
-            query_idx = torch.tensor([query_index])
+            query_index = gallery_by_id[sample["query_image_id"]]
+            query_idx = torch.tensor([by_id[sample["query_image_id"]]])
             q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
             q_scene = q_scene.to(device)
             q_persons = q_persons.to(device)
@@ -191,7 +214,8 @@ def retrieve_rankings(
 
             fine_scores = []
             for start in range(0, len(top_indices), fine_batch_size):
-                indices = top_indices[start : start + fine_batch_size].cpu()
+                local_indices = top_indices[start : start + fine_batch_size].cpu()
+                indices = image_indices[local_indices]
                 scene, persons, boxes, _, target_mask = cache.load(indices)
                 scene = scene.to(device)
                 persons = persons.to(device)
@@ -221,7 +245,7 @@ def retrieve_rankings(
 
         return {
             "sample_ids": sample_ids,
-            "gallery_ids": cache.image_ids,
+            "gallery_ids": gallery_ids,
             "rankings": torch.stack(rankings),
             "coarse_topm": torch.stack(coarse_topm),
         }
@@ -230,32 +254,23 @@ def retrieve_rankings(
         text_encoder.train(text_was_training)
 
 
-def slice_retrieval_output(
-    output: dict[str, Any], start: int, stop: int
-) -> dict[str, Any]:
-    """Slice query rows while preserving the shared gallery index."""
-
-    return {
-        "sample_ids": output["sample_ids"][start:stop],
-        "gallery_ids": output["gallery_ids"],
-        "rankings": output["rankings"][start:stop],
-        "coarse_topm": output["coarse_topm"][start:stop],
-    }
-
-
 def evaluate_retrieval_output(
     data: RCRData,
     samples: Sequence[dict],
     output: dict[str, Any],
     candidate_ks: Sequence[int],
+    *,
+    split: str,
 ) -> dict:
     """Evaluate index-based retrieval output with the official RCR metrics."""
 
     gallery_ids = output["gallery_ids"]
     sample_ids = output["sample_ids"]
     expected_sample_ids = [sample["sample_id"] for sample in samples]
-    if gallery_ids != data.gallery_ids:
-        raise ValueError("saved gallery_ids do not match the current benchmark gallery")
+    if gallery_ids != split_image_ids(data, split):
+        raise ValueError(f"saved gallery_ids do not match the {split} gallery")
+    if not set(expected_sample_ids) <= set(data.splits[split]):
+        raise ValueError(f"requested samples do not belong to {split}")
     if sample_ids != expected_sample_ids:
         raise ValueError("saved sample_ids do not match the requested samples")
 

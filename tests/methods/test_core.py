@@ -57,9 +57,15 @@ def _write_final_dataset(root: Path) -> None:
     )
     write_jsonl(
         root / "images.jsonl",
-        [{"image_id": f"1_{i}", "path": f"train/1_{i}.jpg"} for i in range(1, 6)],
+        [
+            {"image_id": f"1_{i}", "path": f"{split}/1_{i}.jpg"}
+            for i, split in enumerate(
+                ("train", "train", "train", "val", "val", "train", "test", "leftover"),
+                start=1,
+            )
+        ],
     )
-    write_jsonl(root / "gallery.jsonl", [{"image_id": f"1_{i}"} for i in range(1, 6)])
+    write_jsonl(root / "gallery.jsonl", [{"image_id": f"1_{i}"} for i in range(1, 9)])
     write_jsonl(
         root / "head_boxes.jsonl",
         [
@@ -108,7 +114,9 @@ def test_load_rcr_data_and_training_pool(tmp_path) -> None:
         "the woman in blue",
     ]
     assert required_identity_ids(sample) == ["7", "8", "9"]
-    assert split_image_ids(data, "train") == ["1_1", "1_2", "1_3"]
+    assert split_image_ids(data, "train") == ["1_1", "1_2", "1_3", "1_6"]
+    assert split_image_ids(data, "val") == ["1_4", "1_5"]
+    assert split_image_ids(data, "test") == ["1_7"]
     assert data.image_path("1_2") == image_root / "train/1_2.jpg"
     assert data.gt_head_boxes_by_image["1_1"][0]["identity_id"] == "7"
 
@@ -130,3 +138,26 @@ def test_load_rcr_data_rejects_duplicate_sample_ids(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="duplicate sample_id"):
         load_rcr_data(final_dir, tmp_path / "images")
+
+
+def test_split_samples_scopes_legacy_positives_without_mutating_annotations(tmp_path):
+    final_dir = tmp_path / "final"
+    _write_final_dataset(final_dir)
+    data = load_rcr_data(final_dir, tmp_path / "images")
+    stored = data.samples_by_id["train-1"]
+    stored["positive_image_ids"] += ["1_5", "1_7", "1_8"]
+
+    sample = split_samples(data, "train")[0]
+
+    assert sample["positive_image_ids"] == ["1_2", "1_3"]
+    assert stored["positive_image_ids"] == ["1_2", "1_3", "1_5", "1_7", "1_8"]
+
+
+def test_split_samples_rejects_seed_from_another_split(tmp_path):
+    final_dir = tmp_path / "final"
+    _write_final_dataset(final_dir)
+    data = load_rcr_data(final_dir, tmp_path / "images")
+    data.samples_by_id["train-1"]["target_image_id"] = "1_5"
+
+    with pytest.raises(ValueError, match="query and seed must belong to train"):
+        split_samples(data, "train")

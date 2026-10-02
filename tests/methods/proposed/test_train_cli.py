@@ -41,18 +41,34 @@ class Backbone(nn.Module):
 def test_train_checkpoints_metrics_and_retrieve(
     monkeypatch, tmp_path, enabled, train_queries
 ):
-    samples = [_sample("train1"), _sample("train2"), _sample("val1")]
+    samples = [
+        _sample("train1"),
+        _sample("train2"),
+        {
+            **_sample("val1"),
+            "query_image_id": "val_q",
+            "target_image_id": "val_a",
+            "positive_image_ids": ["val_a", "left"],
+        },
+    ]
+    cache = _Cache(["q", "val_n", "a", "val_q", "left", "b", "val_a"])
+    image_splits = ["train", "val", "train", "val", "leftover", "train", "val"]
     data = SimpleNamespace(
         samples=samples,
         samples_by_id={row["sample_id"]: row for row in samples},
         splits={"train": ["train1", "train2"], "val": ["val1"]},
-        gallery_ids=["q", "a", "b"],
+        gallery_ids=cache.image_ids,
+        images_by_id={
+            image_id: {"path": f"{split}/{image_id}.jpg"}
+            for image_id, split in zip(cache.image_ids, image_splits, strict=True)
+        },
         gt_head_boxes_by_image={
             "q": [{"identity_id": "p1"}],
             "a": [{"identity_id": "p1"}],
+            "val_q": [{"identity_id": "p1"}],
+            "val_a": [{"identity_id": "p1"}],
         },
     )
-    cache = _Cache()
     cache.cache_id = "tiny-cache"
     cache.validate_gallery = lambda ids: None
     for module in (train_proposed, retrieve_proposed, evaluate_proposed):
@@ -61,13 +77,27 @@ def test_train_checkpoints_metrics_and_retrieve(
         monkeypatch.setattr(module, "GalleryCache", lambda path: cache)
     real_retrieve = train_proposed.retrieve_rankings
     evaluation_calls = []
+    real_sample = train_proposed.sample_candidates
+
+    def sample_train_gallery(samples, gallery_ids, *args):
+        assert gallery_ids == ["q", "a", "b"]
+        return real_sample(samples, gallery_ids, *args)
+
+    monkeypatch.setattr(train_proposed, "sample_candidates", sample_train_gallery)
 
     def retrieve_after_training(
         samples, cache, tokenizer, text_encoder, model, *args, **kwargs
     ):
         assert all(parameter.grad is None for parameter in model.parameters())
         assert all(parameter.grad is None for parameter in text_encoder.parameters())
-        evaluation_calls.append(True)
+        expected_gallery = (
+            ["val_n", "val_q", "val_a"]
+            if samples[0]["sample_id"] == "val1"
+            else ["q", "a", "b"]
+        )
+        assert kwargs["gallery_ids"] == expected_gallery
+        assert all("left" not in row["positive_image_ids"] for row in samples)
+        evaluation_calls.append(expected_gallery)
         return real_retrieve(
             samples, cache, tokenizer, text_encoder, model, *args, **kwargs
         )
@@ -130,7 +160,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     config_path.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(sys, "argv", ["train", "--config", str(config_path)])
     train_proposed.main()
-    assert len(evaluation_calls) == (2 if enabled else 0)
+    assert len(evaluation_calls) == (2 * (1 + bool(train_queries)) if enabled else 0)
 
     output = tmp_path / "run"
     last = torch.load(output / "last.pt", weights_only=True)
@@ -175,7 +205,8 @@ def test_train_checkpoints_metrics_and_retrieve(
     retrieve_proposed.main()
     saved = torch.load(output / "rankings.pt", weights_only=True)
     assert saved["sample_ids"] == ["val1"]
-    assert set(saved["rankings"][0].tolist()) == {1, 2}
+    assert saved["gallery_ids"] == ["val_n", "val_q", "val_a"]
+    assert set(saved["rankings"][0].tolist()) == {0, 2}
 
     cfg["rankings"] = str(output / "rankings.pt")
     cfg["candidate_ks"] = [1, 2]

@@ -29,6 +29,7 @@ def main() -> None:
         samples,
         saved,
         cfg["candidate_ks"],
+        split=cfg["split"],
     )
 
     output = Path(cfg["output"])

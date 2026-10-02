@@ -19,7 +19,6 @@ from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.retrieval import (
     evaluate_retrieval_output,
     retrieve_rankings,
-    slice_retrieval_output,
 )
 from rcr.methods.proposed.sampling import sample_candidates
 from rcr.methods.proposed.training import compute_loss
@@ -164,14 +163,8 @@ def main() -> None:
     )
     cache = GalleryCache(data_cfg["cache"])
     cache.validate_gallery(data.gallery_ids)
-    negative_pool = train_cfg.get("negative_pool", "full_gallery")
-    if negative_pool == "train_gallery":
-        candidate_ids = split_image_ids(data, "train")
-    elif negative_pool == "full_gallery":
-        candidate_ids = cache.image_ids
-    else:
-        raise ValueError("negative_pool must be full_gallery or train_gallery")
-    print(f"Training negative pool: {negative_pool} ({len(candidate_ids)} images)")
+    candidate_ids = split_image_ids(data, "train")
+    print(f"Training gallery: train ({len(candidate_ids)} images)")
 
     first_scene, *_ = cache.load(torch.tensor([0]))
     dim = first_scene.shape[-1]
@@ -343,37 +336,36 @@ def main() -> None:
         }
         is_best = False
 
-        # Reuse one gallery identity pass for both train diagnostics and validation.
+        # Train diagnostics and validation use their own complete image galleries.
         if evaluation_cfg.get("enabled", False) and (
             epoch_number % int(evaluation_cfg["every_epochs"]) == 0
             or epoch_number == train_cfg["epochs"]
         ):
-            combined_samples = [*train_eval_samples, *val_samples]
-            retrieved = retrieve_rankings(
-                combined_samples,
-                cache,
-                tokenizer,
-                text_encoder,
-                model,
-                device,
-                top_m=int(evaluation_cfg["top_m"]),
-                fine_batch_size=int(evaluation_cfg["fine_batch_size"]),
-                identity_batch_size=int(evaluation_cfg["identity_batch_size"]),
-                coarse_batch_size=int(evaluation_cfg.get("coarse_batch_size", 512)),
-                description=f"evaluate epoch {epoch_number}",
-            )
             metrics_dir = output / "evaluation" / f"epoch_{epoch_number:03d}"
             metrics_dir.mkdir(parents=True, exist_ok=True)
-            offset = 0
             for split, rows in (("train", train_eval_samples), ("val", val_samples)):
                 if not rows:
                     continue
-                split_output = slice_retrieval_output(
-                    retrieved, offset, offset + len(rows)
+                split_output = retrieve_rankings(
+                    rows,
+                    cache,
+                    tokenizer,
+                    text_encoder,
+                    model,
+                    device,
+                    gallery_ids=split_image_ids(data, split),
+                    top_m=int(evaluation_cfg["top_m"]),
+                    fine_batch_size=int(evaluation_cfg["fine_batch_size"]),
+                    identity_batch_size=int(evaluation_cfg["identity_batch_size"]),
+                    coarse_batch_size=int(evaluation_cfg.get("coarse_batch_size", 512)),
+                    description=f"{split} epoch {epoch_number}",
                 )
-                offset += len(rows)
                 result = evaluate_retrieval_output(
-                    data, rows, split_output, evaluation_cfg["candidate_ks"]
+                    data,
+                    rows,
+                    split_output,
+                    evaluation_cfg["candidate_ks"],
+                    split=split,
                 )
                 compact = {"overall": result["overall"], "by_case": result["by_case"]}
                 (metrics_dir / f"{split}_metrics.json").write_text(

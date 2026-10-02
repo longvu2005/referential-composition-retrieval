@@ -107,11 +107,18 @@ Their roles are:
 
 * `samples.jsonl`: final RCR samples;
 * `images.jsonl`: canonical image registry;
-* `gallery.jsonl`: fixed retrieval candidate gallery;
+* `gallery.jsonl`: complete ordered image registry for the shared feature cache;
 * `head_boxes.jsonl`: ground-truth head annotations for evaluation and optional
   alignment of predicted person candidates to identity training labels;
 * `manifest.json`: dataset version and counts;
 * `splits/*.txt`: sample IDs assigned to each benchmark split.
+
+The method retrieves over all indexed images in the query's PIPA image split,
+identified by `images.jsonl` paths, and excludes the query image. Train/val/test
+galleries contain 17,000/5,684/7,868 images; leftover images are excluded.
+Reviewed Full Positive annotations remain stored as supplied. The method loader
+intersects `positive_image_ids` with the split gallery in memory for training
+and evaluation; it does not rewrite annotation catalogs, labels, or final files.
 
 The proposed method never uses GT head crops or boxes to select detector
 candidates or construct identity features. It detects `person` candidates and
