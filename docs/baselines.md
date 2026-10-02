@@ -67,10 +67,24 @@ loading an already finalized dataset does not need those construction tools.
 workflows. No inference script installs packages.
 
 On Windows, create the environments with `py -3.11 -m venv ...` and replace
-`bin/python` with `Scripts/python.exe`. On Kaggle, call the chosen environment's
-Python through `subprocess.run([...], check=True)`; shell activation does not
-change the notebook kernel. Environments can be rebuilt each session while
-images, checkpoints, feature caches and results are restored separately.
+`bin/python` with `Scripts/python.exe`.
+
+On Kaggle, if `venv` fails at `ensurepip`, create the environment without pip
+and let the notebook's existing pip bootstrap it (pip 22.3 or newer):
+
+```bash
+python3 -m venv --without-pip .venv-clip
+python3 -m pip --python .venv-clip install -r requirements/bootstrap.txt
+```
+
+Repeat with `.venv-fafa` or `.venv-proposed` as needed, then install the solution
+requirements as above. The bootstrap file declares `wrapt` for startup hooks such
+as `sitecustomize`; this is separate from model dependencies.
+Call the chosen environment's Python through `subprocess.run([...], check=True)`
+or activate it and run commands together within one `%%bash` cell. Shell
+activation does not change the notebook kernel. Environments can be rebuilt each
+session while images, checkpoints, feature caches and results are restored
+separately.
 
 ## Data and preparation
 

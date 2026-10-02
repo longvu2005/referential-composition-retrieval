@@ -42,9 +42,9 @@ def download(url: str, path: Path, *, force: bool, expected_hash: str | None = N
 
 
 def prepare_clip(model_name: str, path: str, force: bool):
-    import clip
+    from clip.clip import _MODELS
 
-    url = clip._MODELS[model_name]
+    url = _MODELS[model_name]
     download(url, Path(path), force=force, expected_hash=url.split("/")[-2])
 
 
