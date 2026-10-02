@@ -110,6 +110,10 @@ official model on CPU once to populate its required runtime caches. This phase
 needs internet and sufficient CPU RAM/disk for the official model assets.
 Its runtime marker records the source/model and asset inventory.
 
+Google Drive share URLs are converted to direct `uc?id=...` URLs before calling
+gdown. Preparation does not use the removed `fuzzy` argument and supports the
+declared gdown 5.2–6.x range.
+
 Inference checks the source commit, real tracked edits and asset inventory before
 expensive detection. Official imports disable bytecode writes. The FAFA model
 loads from prepared assets with networking blocked; CLIP and the detector also

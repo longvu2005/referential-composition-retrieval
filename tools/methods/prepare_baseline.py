@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import yaml
@@ -72,10 +73,16 @@ def main() -> None:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             temporary = checkpoint.with_suffix(".part")
             try:
+                source_url = cfg["checkpoint"]["source_url"]
+                parsed = urlparse(source_url)
+                if parsed.hostname == "drive.google.com" and parsed.path.startswith(
+                    "/file/d/"
+                ):
+                    file_id = parsed.path.split("/")[3]
+                    source_url = f"https://drive.google.com/uc?id={file_id}"
                 result = gdown.download(
-                    url=cfg["checkpoint"]["source_url"],
+                    url=source_url,
                     output=str(temporary),
-                    fuzzy=True,
                     quiet=False,
                 )
                 if (
