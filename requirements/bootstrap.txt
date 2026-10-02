@@ -1,0 +1,5 @@
+# Tested tooling for the legacy OpenAI CLIP/FAFA packages.
+# New setuptools removes pkg_resources used by CLIP's setup.py.
+pip==24.3.1
+setuptools==78.1.0
+wheel>=0.43,<1

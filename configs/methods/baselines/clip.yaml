@@ -1,0 +1,30 @@
+method: clip
+mode: late_fusion  # image | text | early_fusion | late_fusion; CLI --mode overrides.
+split: val
+
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+
+model:
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
+
+text_field: final_instruction
+fusion:
+  image_weight: 0.5
+  text_weight: 0.5
+  score_normalization: zscore
+  epsilon: 1.0e-6
+
+runtime:
+  device: auto
+  image_batch_size: 32
+  text_batch_size: 128
+  score_batch_size: 128
+  num_workers: 0
+
+cache:
+  dir: cache/clip
+output:
+  dir: runs/clip/{mode}/{split}

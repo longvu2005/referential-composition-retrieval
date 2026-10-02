@@ -5,14 +5,77 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from statistics import fmean
 
+import torch
+
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.metrics import (
     average_precision,
     candidate_recall_at_k,
     recall_at_k,
 )
+from rcr.methods.common.data import RCRData, split_image_ids
 
 RECALL_KS = (1, 5, 10)
+
+
+def evaluate_retrieval_output(
+    data: RCRData,
+    samples: Sequence[dict],
+    output: dict,
+    candidate_ks: Sequence[int] = (500,),
+    *,
+    split: str,
+) -> dict:
+    """Decode any method's saved rankings and use the official RCR evaluator.
+
+    ``coarse_topm`` is optional. Baselines do not invent a coarse ranking just
+    to satisfy the proposed method's diagnostic interface.
+    """
+    gallery_ids = output["gallery_ids"]
+    sample_ids = output["sample_ids"]
+    expected_sample_ids = [sample["sample_id"] for sample in samples]
+    if gallery_ids != split_image_ids(data, split):
+        raise ValueError(f"saved gallery_ids do not match the {split} gallery")
+    if not set(expected_sample_ids) <= set(data.splits[split]):
+        raise ValueError(f"requested samples do not belong to {split}")
+    if sample_ids != expected_sample_ids:
+        raise ValueError("saved sample_ids do not match the requested samples")
+
+    def decode(rows: torch.Tensor, label: str) -> dict[str, list[str]]:
+        if not isinstance(rows, torch.Tensor) or rows.ndim != 2:
+            raise ValueError(f"{label} must be a two-dimensional tensor")
+        if rows.dtype not in (torch.int32, torch.int64):
+            raise ValueError(f"{label} must contain integer gallery indices")
+        if len(rows) != len(sample_ids):
+            raise ValueError(f"{label} row count does not match sample_ids")
+        decoded = {}
+        for sample_id, row in zip(sample_ids, rows, strict=True):
+            indices = row.tolist()
+            if any(index < 0 or index >= len(gallery_ids) for index in indices):
+                raise ValueError(f"{label} contains an invalid gallery index")
+            decoded[sample_id] = [gallery_ids[index] for index in indices]
+        return decoded
+
+    rankings = decode(output["rankings"], "rankings")
+    coarse = (
+        decode(output["coarse_topm"], "coarse_topm")
+        if "coarse_topm" in output
+        else None
+    )
+    identities_by_image = {
+        image_id: {
+            box["identity_id"] for box in data.gt_head_boxes_by_image.get(image_id, [])
+        }
+        for image_id in gallery_ids
+    }
+    return evaluate_rankings(
+        samples,
+        gallery_ids,
+        identities_by_image,
+        rankings,
+        coarse_rankings=coarse,
+        candidate_ks=tuple(candidate_ks),
+    )
 
 
 def required_identity_ids(sample: dict) -> set[str]:

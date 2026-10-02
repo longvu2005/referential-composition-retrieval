@@ -11,15 +11,13 @@ import yaml
 from torch import nn
 from tqdm import tqdm
 
+from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.proposed.batch import build_batch
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import SUBJECT_MARKERS, TextEncoder
 from rcr.methods.proposed.model import RCRModel
-from rcr.methods.proposed.retrieval import (
-    evaluate_retrieval_output,
-    retrieve_rankings,
-)
+from rcr.methods.proposed.retrieval import retrieve_rankings
 from rcr.methods.proposed.sampling import sample_candidates
 from rcr.methods.proposed.training import compute_loss
 

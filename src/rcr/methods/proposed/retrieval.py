@@ -9,8 +9,9 @@ import torch
 from torch import Tensor, nn
 from tqdm import tqdm
 
-from rcr.evaluation.evaluate import evaluate_rankings
-from rcr.methods.common.data import RCRData, split_image_ids
+from rcr.evaluation.evaluate import (
+    evaluate_retrieval_output as evaluate_retrieval_output,
+)
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.coarse import coarse_scores
 from rcr.methods.proposed.encoders import encode_query_text
@@ -252,50 +253,3 @@ def retrieve_rankings(
     finally:
         model.train(model_was_training)
         text_encoder.train(text_was_training)
-
-
-def evaluate_retrieval_output(
-    data: RCRData,
-    samples: Sequence[dict],
-    output: dict[str, Any],
-    candidate_ks: Sequence[int],
-    *,
-    split: str,
-) -> dict:
-    """Evaluate index-based retrieval output with the official RCR metrics."""
-
-    gallery_ids = output["gallery_ids"]
-    sample_ids = output["sample_ids"]
-    expected_sample_ids = [sample["sample_id"] for sample in samples]
-    if gallery_ids != split_image_ids(data, split):
-        raise ValueError(f"saved gallery_ids do not match the {split} gallery")
-    if not set(expected_sample_ids) <= set(data.splits[split]):
-        raise ValueError(f"requested samples do not belong to {split}")
-    if sample_ids != expected_sample_ids:
-        raise ValueError("saved sample_ids do not match the requested samples")
-
-    def decode(rows: Tensor, label: str) -> dict[str, list[str]]:
-        decoded = {}
-        for sample_id, row in zip(sample_ids, rows, strict=True):
-            indices = row.tolist()
-            if any(index < 0 or index >= len(gallery_ids) for index in indices):
-                raise ValueError(f"{label} contains an invalid gallery index")
-            decoded[sample_id] = [gallery_ids[index] for index in indices]
-        return decoded
-
-    rankings = decode(output["rankings"], "rankings")
-    coarse = decode(output["coarse_topm"], "coarse_topm")
-    identities_by_image = {
-        image_id: {
-            box["identity_id"] for box in data.gt_head_boxes_by_image.get(image_id, [])
-        }
-        for image_id in gallery_ids
-    }
-    return evaluate_rankings(
-        samples,
-        gallery_ids,
-        identities_by_image,
-        rankings,
-        coarse_rankings=coarse,
-        candidate_ks=tuple(candidate_ks),
-    )

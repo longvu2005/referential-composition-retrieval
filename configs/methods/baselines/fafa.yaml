@@ -1,0 +1,60 @@
+method: fafa
+split: val
+
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+
+source:
+  repository: https://github.com/Delong-liu-bupt/Composed_Person_Retrieval.git
+  commit: 0cc16936f031f7ad166be4cce1be33d0b44b728e
+  subdir: FAFA_SynCPR
+  local_checkout: third_party/Composed_Person_Retrieval
+
+checkpoint:
+  path: checkpoints/fafa/tuned_recall_at1_step.pt
+  source_url: https://drive.google.com/file/d/1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y/view
+  status: OFFICIAL_RELEASED
+  model_name: blip2_fafa_cpr
+  model_type: pretrain
+  fda_k: 6
+  fda_alpha: 0.5
+  use_soft: true
+  image_size: 224
+  test_resize_hw: [384, 192]
+  cache_root: checkpoints/fafa/runtime_cache
+  runtime_assets_marker: checkpoints/fafa/runtime_assets_ready.json
+
+localization:
+  detector:
+    backend: torchvision_fasterrcnn_resnet50_fpn_v2
+    checkpoint: checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    source_url: https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    hash_prefix: dd69338a
+    score_threshold: 0.55
+    max_persons_per_image: 10
+    cache_dir: cache/fafa/detection
+  query_selector:
+    model: ViT-B/32
+    checkpoint: checkpoints/clip/ViT-B-32.pt
+    # Initial heuristic settings; not measured optima. Tune only on validation.
+    membership_threshold: 0.20
+    membership_margin: 0.03
+    max_members_per_subject: 5
+
+setmatch:
+  unmatched_score: -1.0
+
+runtime:
+  device: cuda
+  image_batch_size: 4
+  query_batch_size: 4
+  score_person_batch_size: 1024
+  score_query_batch_size: 64
+  num_workers: 0
+  gallery_feature_dtype: float16
+
+cache:
+  dir: cache/fafa/features
+output:
+  dir: runs/fafa/{split}

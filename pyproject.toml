@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=69,<81", "wheel"]
 build-backend = "setuptools.build_meta"
 
 
@@ -11,19 +11,54 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 
 dependencies = [
-    "google-genai>=2.17,<3",
     "numpy>=1.26,<2.0",
-    "open-clip-torch>=3.3,<4",
     "Pillow>=10,<13",
     "PyYAML>=6.0",
     "torch>=2.4,<3",
-    "transformers>=4.56,<5",
     "tqdm>=4.66",
-    "wandb>=0.18,<1",
 ]
 
 
 [project.optional-dependencies]
+proposed = [
+    "transformers>=4.56,<5",
+    "wandb>=0.18,<1",
+]
+clip = [
+    "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
+    "torchvision>=0.19,<1",
+]
+# Official FAFA is imported from the pinned source, not a PyPI LAVIS fork.
+# Keep this extra in its own environment: its Transformers pin conflicts with proposed.
+fafa = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "transformers==4.39.3",
+    "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
+    "scipy>=1.11,<2",
+    "gdown>=5.2,<7",
+    "pandas>=2,<3",
+    "omegaconf>=2.3,<3",
+    "iopath>=0.1.10,<0.2",
+    "timm>=0.9,<1",
+    # Same `decord` import API; fixes the upstream Linux wheel's incorrect cp36 tag.
+    "eva-decord==0.6.1",
+    "opencv-python>=4.8,<4.12",
+    "fairscale>=0.4.13,<0.5",
+    "einops>=0.6,<1",
+    "scikit-image>=0.22,<1",
+    "spacy>=3.7,<3.8",
+    "prettytable>=3,<4",
+    "webdataset>=0.2,<1",
+    "pycocoevalcap>=1.2,<2",
+    "pycocotools>=2,<3",
+    "requests>=2.31,<3",
+    "huggingface-hub>=0.20,<1",
+]
+dataset = [
+    "google-genai>=2.17,<3",
+    "open-clip-torch>=3.3,<4",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

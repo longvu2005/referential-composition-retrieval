@@ -1,0 +1,2 @@
+# Install bootstrap.txt first, then use pip install --no-build-isolation -r this-file.
+-e .[fafa]

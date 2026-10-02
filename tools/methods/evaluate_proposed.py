@@ -7,8 +7,8 @@ from pathlib import Path
 import torch
 import yaml
 
+from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.common.data import load_rcr_data, split_samples
-from rcr.methods.proposed.retrieval import evaluate_retrieval_output
 
 
 def main() -> None:

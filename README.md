@@ -27,6 +27,7 @@ The benchmark uses four case types:
 ```text
 referential-composition-retrieval/
 ├── configs/methods/proposed/    proposed-method experiment configs
+├── configs/methods/baselines/   CLIP and FAFA experiment configs
 ├── dataset/                     dataset source, work files, final export
 ├── labelstudio/                 local review / positive-set UIs
 ├── scripts/                     dataset shell launchers
@@ -34,7 +35,9 @@ referential-composition-retrieval/
 │   ├── dataset/                 dataset schemas and construction
 │   ├── evaluation/              official ranking protocol and metrics
 │   ├── methods/common/          shared data, detection, anchor matching
-│   └── methods/proposed/        proposed RCR model
+│   ├── methods/proposed/        proposed RCR model
+│   └── methods/baselines/       CLIP and FAFA adapters
+├── requirements/               installation selectors per solution
 ├── tools/dataset/               dataset CLIs
 ├── tools/methods/               cache/train/retrieve/evaluate CLIs
 └── tests/                       dataset, method, and evaluation tests
@@ -321,14 +324,22 @@ labels by assumption. GT-aligned cache labels determine identity matches.
 
 ## Setup
 
-Python 3.11 is required.
+Python 3.11 is recommended (package supports 3.11–3.12). Each solution has
+its own environment: `.venv-proposed`, `.venv-clip`, `.venv-fafa`. All three
+use this same checkout, final dataset, saved-ranking format and evaluator.
+
+Proposed setup, from the repository root:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e '.[dev]'
+python3.11 -m venv .venv-proposed
+source .venv-proposed/bin/activate
+python -m pip install -r requirements/bootstrap.txt
+python -m pip install --no-build-isolation -r requirements/proposed.txt
 ```
+
+The complete CLIP/FAFA setup and run commands are in
+[docs/baselines.md](docs/baselines.md). Baseline dependencies are declared in
+`pyproject.toml` extras; install only the extra for the active solution.
 
 Verify the package:
 
@@ -569,7 +580,7 @@ Evaluation rejects saved rankings whose gallery differs from the requested split
 ### 4. Evaluate
 
 ```bash
-python tools/methods/evaluate_proposed.py \
+python tools/methods/evaluate.py \
   --config configs/methods/proposed/evaluate.yaml
 ```
 
@@ -661,3 +672,16 @@ The source-level test suite currently covers these contracts. A successful unit
 test run does not replace a real pretrained-model smoke run on the target
 machine; cache size, detector coverage, GPU memory, and throughput must still
 be verified before launching the full experiment.
+
+## Baselines on RCR
+
+CLIP image/text/early-fusion/late-fusion share one implementation in
+`src/rcr/methods/baselines/clip.py`. FAFA imports the authors' pinned model in
+`fafa.py`; its predicted scene/Subject adapter is in `fafa_adapter.py`.
+`tools/methods/retrieve_baseline.py` saves rankings, and
+`tools/methods/evaluate.py` evaluates proposed and baselines through the same
+`rcr.evaluation.evaluate_retrieval_output`. The older `evaluate_proposed.py`
+entry point still calls that same evaluator for existing commands.
+
+See [docs/baselines.md](docs/baselines.md) for per-solution environments,
+checkpoint preparation, exact input/scoring policies and adaptation limits.
