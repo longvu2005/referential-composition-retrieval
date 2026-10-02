@@ -8,7 +8,7 @@ model:
   identity_dim: 256
   state_dim: 256
   # Starting value; tune on validation. Saved in the checkpoint config.
-  coarse_beta: 0.3
+  coarse_beta: 0.9
   num_heads: 8
   mlp_ratio: 4
   geo_dim: 32
