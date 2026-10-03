@@ -288,6 +288,12 @@ def test_fafa_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch)
     metrics = json.loads((directory / "metrics.json").read_text())
     assert metrics["overall"]["full_map"] == 1
 
+    from rcr.methods.baselines.runner import run_experiment
+
+    cfg["summary"] = str(tmp_path / "fafa_summary.csv")
+    rows = run_experiment(cfg, splits=["test"])
+    assert rows[0]["method"] == "fafa" and rows[0]["full_map"] == 1
+
 
 def test_query_subset_requires_matching_evaluation_selection(
     benchmark, tmp_path, monkeypatch
@@ -368,3 +374,305 @@ def test_native_clip_library_load_and_rankings(benchmark, tmp_path, monkeypatch)
     metrics = evaluate_retrieval_output(data, samples, output, split="test")
     assert 0 <= metrics["overall"]["full_map"] <= 1
     assert details["truncated_text_queries"] >= 0
+
+
+@pytest.fixture
+def fusion_benchmark(benchmark):
+    """Val wants text (green); test wants image (red), so their optima differ."""
+    cfg, _, _ = benchmark
+    final = Path(cfg["data"]["final_dir"])
+    root = Path(cfg["data"]["image_root"])
+    samples = [
+        json.loads(line) for line in (final / "samples.jsonl").read_text().splitlines()
+    ]
+    for sample in samples:
+        sample["positive_image_ids"] = ["a"]
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(root / "test/a.png")
+    Image.new("RGB", (8, 8), (0, 255, 0)).save(root / "test/b.png")
+    (root / "val").mkdir()
+    val_samples = []
+    for i, original in enumerate(samples[:3]):  # Uneven final score batch.
+        row = copy.deepcopy(original)
+        row.update(
+            sample_id=f"v{i}",
+            query_image_id="vq",
+            target_image_id="vb",
+            positive_image_ids=["vb"],
+        )
+        val_samples.append(row)
+    samples += val_samples
+    (final / "samples.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in samples)
+    )
+    (final / "splits/val.txt").write_text(
+        "\n".join(s["sample_id"] for s in val_samples)
+    )
+    for name in ["images", "gallery", "head_boxes"]:
+        rows = [
+            json.loads(line)
+            for line in (final / f"{name}.jsonl").read_text().splitlines()
+        ]
+        if name == "images":
+            rows += [
+                {"image_id": f"v{i}", "path": f"val/v{i}.png"} for i in ["q", "a", "b"]
+            ]
+        elif name == "gallery":
+            rows += [{"image_id": f"v{i}"} for i in ["q", "a", "b"]]
+        else:
+            rows += [
+                {"image_id": i, "identity_id": p}
+                for i in ["b", "vq", "va", "vb"]
+                for p in ["p1", "p2"]
+            ]
+        (final / f"{name}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows)
+        )
+    for i in ["q", "a", "b"]:
+        (root / f"val/v{i}.png").write_bytes((root / f"test/{i}.png").read_bytes())
+    cfg["tuning"].update(
+        image_weights=[0, 0.25, 0.5, 0.75, 1], output=str(final.parent / "tuning.json")
+    )
+    cfg["summary"] = str(final.parent / "summary.csv")
+    return cfg
+
+
+def test_runner_freezes_val_weights_before_test(fusion_benchmark, monkeypatch):
+    from rcr.methods.baselines import runner
+
+    cfg = fusion_benchmark
+    original = clip.load_clip
+    loads = []
+
+    def tracked_load(*args):
+        loads.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(clip, "load_clip", tracked_load)
+    rows = runner.run_experiment(cfg, splits=["test", "val"])
+    assert (
+        len(rows) == 8 and len(loads) == 2
+    )  # One encoder load per split, not per weight.
+    selection = json.loads(Path(cfg["tuning"]["output"]).read_text())
+    assert selection["split"] == "val" and selection["num_queries"] == 3
+    for mode in ["early_fusion", "late_fusion"]:
+        trial = selection["modes"][mode]
+        assert len(trial["trials"]) == 5
+        assert trial["selected"]["image_weight"] == 0.25
+        val = next(r for r in rows if r["method"] == mode and r["split"] == "val")
+        test = next(r for r in rows if r["method"] == mode and r["split"] == "test")
+        assert val["full_r1"] == 1 and test["full_r1"] == 0
+        assert val["image_weight"] == test["image_weight"] == 0.25
+        directory = output_directory({**cfg, "mode": mode, "split": "test"})
+        metadata = json.loads((directory / "run.json").read_text())
+        assert metadata["fusion_selection"]["split"] == "val"
+        assert metadata["config"]["fusion"]["image_weight"] == 0.25
+    assert len(Path(cfg["summary"]).read_text().splitlines()) == 9
+    monkeypatch.setattr(
+        clip, "load_clip", lambda *a: pytest.fail("warm cache loaded model")
+    )
+    monkeypatch.setattr(
+        runner, "tune_fusion", lambda *a: pytest.fail("test retuned weights")
+    )
+    again = runner.run_experiment(cfg, splits=["test"])
+    assert len(again) == 4
+    assert all(r["image_weight"] == 0.25 for r in again if "fusion" in r["method"])
+
+
+def test_test_labels_cannot_change_selection_context(fusion_benchmark):
+    from rcr.methods.baselines.runner import tuning_context
+
+    cfg = fusion_benchmark
+    data = load_rcr_data(**cfg["data"])
+    before = tuning_context(data, cfg, torch.device("cpu"))
+    for sample in data.samples:
+        if sample["sample_id"] in data.splits["test"]:
+            sample["positive_image_ids"] = ["b"]
+            sample["target_image_id"] = "b"
+    assert tuning_context(data, cfg, torch.device("cpu")) == before
+    data.samples_by_id["v0"]["positive_image_ids"] = ["va"]
+    assert tuning_context(data, cfg, torch.device("cpu")) != before
+
+
+@pytest.mark.parametrize("change", ["checkpoint", "text", "val_label", "grid"])
+def test_test_rejects_stale_selection(fusion_benchmark, change):
+    from rcr.methods.baselines.runner import run_experiment
+
+    cfg = fusion_benchmark
+    run_experiment(cfg, splits=["val"])
+    if change == "checkpoint":
+        Path(cfg["model"]["checkpoint"]).write_bytes(b"changed")
+    elif change == "text":
+        cfg["text_field"] = "final_change"
+    elif change == "grid":
+        cfg["tuning"]["image_weights"] = [0, 1]
+    else:
+        path = Path(cfg["data"]["final_dir"]) / "samples.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[-1]["positive_image_ids"] = ["va"]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(ValueError, match="stale"):
+        run_experiment(cfg, splits=["test"])
+
+
+def test_test_requires_selection_and_val_rejects_subset(fusion_benchmark):
+    from rcr.methods.baselines.runner import run_experiment, tune_fusion
+
+    cfg = fusion_benchmark
+    with pytest.raises(FileNotFoundError, match="val first"):
+        run_experiment(cfg, splits=["test"])
+    data = load_rcr_data(**cfg["data"])
+    with pytest.raises(ValueError, match="complete validation"):
+        tune_fusion(
+            data,
+            split_samples(data, "val")[:1],
+            split_image_ids(data, "val"),
+            {},
+            cfg,
+            "early_fusion",
+        )
+
+
+@pytest.mark.parametrize("mode", clip.MODES)
+@pytest.mark.parametrize("iw", [0, 0.25, 0.5, 1])
+def test_cached_scoring_matches_original_formula(mode, iw):
+    torch.manual_seed(31)
+    gallery = F.normalize(torch.randn(11, 8), dim=-1)
+    qi = F.normalize(torch.randn(5, 8), dim=-1)
+    qt = F.normalize(torch.randn(5, 8), dim=-1)
+    inputs = {
+        "image": (qi @ gallery.T).numpy(),
+        "text": (qt @ gallery.T).numpy(),
+        "image_features": qi.numpy(),
+        "text_features": qt.numpy(),
+    }
+    fusion = {"image_weight": iw, "text_weight": 1 - iw}
+    actual = np.concatenate(
+        [x for _, x in clip.iter_clip_scores(inputs, mode, fusion, 2)]
+    )
+    expected = clip.score_features(gallery, qi, qt, mode, fusion).numpy()
+    np.testing.assert_allclose(actual, expected, atol=2e-6)
+
+
+def test_text_cache_reused_and_invalidated_by_text(benchmark, monkeypatch):
+    cfg, _, _ = benchmark
+    data = load_rcr_data(**cfg["data"])
+    samples, ids = split_samples(data, "test"), split_image_ids(data, "test")
+    cfg["mode"] = "clip_text"
+    _, first = clip.prepare_clip_inputs(data, samples, ids, cfg, torch.device("cpu"))
+    encode = clip.encode_texts
+    monkeypatch.setattr(
+        clip, "encode_images", lambda *a: pytest.fail("gallery recomputed")
+    )
+    monkeypatch.setattr(clip, "encode_texts", lambda *a: pytest.fail("text recomputed"))
+    _, second = clip.prepare_clip_inputs(data, samples, ids, cfg, torch.device("cpu"))
+    assert second["text_cache"] == first["text_cache"]
+    monkeypatch.setattr(clip, "encode_texts", encode)
+    samples[0]["final_instruction"] += " changed"
+    _, third = clip.prepare_clip_inputs(data, samples, ids, cfg, torch.device("cpu"))
+    assert third["text_cache"] != first["text_cache"]
+    assert third["gallery_cache"] == first["gallery_cache"]
+
+
+@pytest.mark.parametrize("checkpoint_format", ["raw", "jit"])
+def test_native_checkpoint_loads_without_network(tmp_path, checkpoint_format):
+    pytest.importorskip("clip")
+    from clip.model import CLIP
+
+    model = CLIP(
+        embed_dim=32,
+        image_resolution=32,
+        vision_layers=1,
+        vision_width=64,
+        vision_patch_size=16,
+        context_length=77,
+        vocab_size=49408,
+        transformer_width=64,
+        transformer_heads=1,
+        transformer_layers=1,
+    ).eval()
+    path = tmp_path / "raw.pt"
+    if checkpoint_format == "raw":
+        torch.save(model.state_dict(), path)
+    else:
+        torch.jit.trace(
+            model,
+            (torch.zeros(1, 3, 32, 32), torch.zeros(1, 77, dtype=torch.int64)),
+            check_trace=False,
+        ).save(str(path))
+    _, loaded, _ = clip.load_clip(path, torch.device("cpu"))
+    images = torch.rand(1, 3, 32, 32)
+    with torch.inference_mode():
+        expected = model.encode_image(images)
+        actual = loaded.encode_image(images)
+    # The official builder converts to fp16 before CPU .float(), as clip.load does.
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+def test_runner_cli(fusion_benchmark, tmp_path, monkeypatch):
+    from tools.methods import run_baselines
+
+    config = tmp_path / "runner.yaml"
+    config.write_text(yaml.safe_dump(fusion_benchmark))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run", "--config", str(config), "--modes", "clip_text", "--splits", "test"],
+    )
+    run_baselines.main()
+    directory = output_directory(
+        {**fusion_benchmark, "mode": "clip_text", "split": "test"}
+    )
+    assert (directory / "metrics.json").is_file()
+
+
+def test_shell_runner_with_native_clip(fusion_benchmark, tmp_path):
+    """Real subprocess, native tokenizer/encoders, no monkeypatch in the child."""
+    import os
+    import subprocess
+
+    pytest.importorskip("clip")
+    from clip.model import CLIP
+
+    cfg = fusion_benchmark
+    model = CLIP(
+        embed_dim=32,
+        image_resolution=32,
+        vision_layers=1,
+        vision_width=64,
+        vision_patch_size=16,
+        context_length=77,
+        vocab_size=49408,
+        transformer_width=64,
+        transformer_heads=1,
+        transformer_layers=1,
+    ).eval()
+    torch.save(model.state_dict(), cfg["model"]["checkpoint"])
+    config = tmp_path / "native.yaml"
+    config.write_text(yaml.safe_dump(cfg))
+    env = {
+        **os.environ,
+        "BASELINE_PYTHON": sys.executable,
+        "PYTHONPATH": str(Path("src").resolve()),
+        "OMP_NUM_THREADS": "1",
+    }
+    for splits in (["val", "test"], ["test"]):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_baselines.bash",
+                "clip",
+                "--config",
+                str(config),
+                "--splits",
+                *splits,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    for mode in clip.MODES:
+        for split in ("val", "test"):
+            directory = output_directory({**cfg, "mode": mode, "split": split})
+            metrics = json.loads((directory / "metrics.json").read_text())
+            assert 0 <= metrics["overall"]["full_map"] <= 1

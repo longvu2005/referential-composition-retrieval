@@ -27,9 +27,14 @@ def test_proposed_configs_are_consistent() -> None:
     train_dir = Path(train["output"]["dir"])
     assert Path(retrieve["checkpoint"]) == train_dir / "best.pt"
 
-    retrieve_dir = Path(retrieve["output"]["dir"])
-    assert Path(evaluate["rankings"]) == retrieve_dir / "rankings.pt"
+    retrieve_dir = Path(retrieve["output"]["dir"].format(split=retrieve["split"]))
+    assert (
+        Path(evaluate["rankings"].format(split=evaluate["split"]))
+        == retrieve_dir / "rankings.pt"
+    )
     assert retrieve["split"] == evaluate["split"]
+    assert retrieve["candidate_ks"] == evaluate["candidate_ks"]
+    assert retrieve["output"]["dir"].format(split="val") != str(retrieve_dir)
     assert max(evaluate["candidate_ks"]) <= retrieve["retrieval"]["top_m"]
 
     periodic = train["evaluation"]

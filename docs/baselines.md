@@ -120,39 +120,98 @@ loads from prepared assets with networking blocked; CLIP and the detector also
 load explicit local checkpoints. Use `--force` in preparation only when replacing
 artifacts is intended. Existing local checkpoints and valid caches can be reused.
 
-## Retrieval and evaluation
+## One-command experiments (recommended)
 
-CLIP modes share one gallery cache. Choose the same mode/split for retrieve and
-evaluate; output placeholders resolve identically in both commands.
+```bash
+# Prepare once, run all four CLIP baselines on val and test, and evaluate.
+bash scripts/run_baselines.bash clip --prepare
+# Subsequent runs reuse the checkpoint and caches.
+bash scripts/run_baselines.bash clip
+# FAFA runs the same retrieval + evaluation protocol in its own environment.
+bash scripts/run_baselines.bash fafa --prepare
+```
+
+The wrapper uses `.venv-clip/bin/python` or `.venv-fafa/bin/python`. Override with
+`BASELINE_PYTHON=/path/to/python`; `--config path/to/config.yaml` is forwarded to
+both preparation and the runner. No package installation occurs in the scripts.
+For example, in one Kaggle `%%bash` cell, first `cd` to the repository root, then
+run the same commands. After installing `requirements/clip.txt`, all four CLIP
+baselines need **one local OpenAI CLIP checkpoint**, which contains the pretrained
+image and text encoder weights. Fusion requires no additional model/weights file,
+no detector and no RCR fine-tuning.
+
+```bash
+# Select each fusion's weights on full val and evaluate val.
+bash scripts/run_baselines.bash clip --splits val
+# Reuse exactly that saved selection; this command never tunes on test.
+bash scripts/run_baselines.bash clip --splits test
+# Subsets of methods are also supported.
+bash scripts/run_baselines.bash clip --modes clip_text clip_image
+bash scripts/run_baselines.bash clip --modes early_fusion late_fusion
+```
+
+The direct Python entry point is also supported (including Windows):
+
+```bash
+.venv-clip/bin/python tools/methods/run_baselines.py \
+  --config configs/methods/baselines/clip.yaml --splits val test
+```
+
+`run_baselines.py` defaults to all four modes and val/test. FAFA uses its own YAML
+with the same CLI, without `--modes`. The runner always processes val first,
+regardless of the order passed to `--splits`. Output directories must distinguish
+modes and splits. `summary.csv` reports only the current invocation; per-split
+`metrics.json` files persist until that split is run again.
+
+### Fusion selection
+
+`tuning.image_weights` is the alpha grid (default 0 to 1 in steps of 0.05):
+`image_weight = alpha`, `text_weight = 1 - alpha`. Only the ratio matters, so two
+independently searched weights are unnecessary. Each fusion mode selects its own
+alpha, maximizing `tuning.metric` (default `full_map`) on **all validation queries**
+with the official evaluator. Exact ties prefer the alpha closest to 0.5, then the
+smaller alpha. Endpoints include the image-only and text-only rankings.
+
+`runs/clip/tuning.json` stores every trial, the selected weights, metric, query
+count and validation/config fingerprint. It is saved before test scoring begins.
+Each fusion's `run.json` records the actual selected weights and val provenance.
+The test-only command requires a compatible saved selection; changes to the
+checkpoint, precision, text field, normalization, grid, val labels or val image
+fingerprints require a new val run. Keep the val inputs available for this check.
+Image fingerprints include absolute paths, sizes and mtimes, so relocating or
+restoring images can also require rerunning val. Test labels never enter weight
+selection or its fingerprint. A val run replaces the selection with the requested
+fusion modes; select both if both will later be evaluated on test.
+
+This is a grid optimum on validation, **not a guarantee of the best test score**.
+Decide the metric/grid before evaluating test. Validation results for fusion are
+tuning results; test remains the held-out report. The current checked-in dataset
+contains 264 val queries and only 14 test queries, so test is still small.
+
+### Low-level retrieval / evaluation
+
+The existing single-run commands remain available. `image`/`text` remain legacy
+aliases with their existing directory names; new experiment runs use
+`clip_image`/`clip_text`. Match the mode and split in both commands:
 
 ```bash
 .venv-clip/bin/python tools/methods/retrieve_baseline.py \
-  --config configs/methods/baselines/clip.yaml --mode image --split val
-.venv-proposed/bin/python tools/methods/evaluate.py \
-  --config configs/methods/baselines/clip.yaml --mode image --split val
-```
+  --config configs/methods/baselines/clip.yaml --mode clip_text --split val
+.venv-clip/bin/python tools/methods/evaluate.py \
+  --config configs/methods/baselines/clip.yaml --mode clip_text --split val
 
-Repeat with `--mode text` and `--mode late_fusion`. `early_fusion` is an additional
-ported variant, not a separate implementation or environment.
-
-```bash
 .venv-fafa/bin/python tools/methods/retrieve_baseline.py \
   --config configs/methods/baselines/fafa.yaml --split val
-.venv-proposed/bin/python tools/methods/evaluate.py \
+.venv-fafa/bin/python tools/methods/evaluate.py \
   --config configs/methods/baselines/fafa.yaml --split val
-
-.venv-proposed/bin/python tools/methods/evaluate.py \
-  --config configs/methods/proposed/evaluate.yaml
 ```
 
-For a smoke run, add the same `--max-queries 4` to retrieve and evaluate. This
-selects a query prefix only; the split gallery is still complete. `run.json`
-explicitly marks query subsets. A later full run replaces that output with the
-full query results and removes previous metrics; run evaluation again for the
-new rankings. Baselines have no benchmark training/checkpoint selection
-at this stage. Tune heuristic settings on validation only, then freeze them.
-The checked-in test split has 14 queries and is a pipeline check, not a mature
-publication test set.
+Low-level fusion retrieval uses the explicit `fusion` weights in YAML; it does
+not select or load tuned weights. Use `run_baselines.py` for the val-to-test
+selection protocol. For smoke checks, add matching `--max-queries 4` to low-level
+retrieve/evaluate commands; the gallery remains complete. The experiment runner
+intentionally uses complete splits so smoke subsets cannot become tuned results.
+A new retrieval removes stale metrics before saving its new rankings.
 
 Outputs per method/mode/split:
 
@@ -160,7 +219,7 @@ Outputs per method/mode/split:
 scores.npy      float32 [num_queries, num_split_gallery], higher is better
 rankings.pt     sample_ids, gallery_ids, int32 rankings [Q, G-1]
 run.json        resolved config, versions, checkpoint hash, cache IDs, diagnostics
-metrics.json    official evaluator output (after the separate evaluate command)
+metrics.json    official evaluator output (runner writes this automatically)
 ```
 
 Raw scores include the self-image; shared `scores_to_rankings` removes it before
@@ -179,14 +238,30 @@ not used. All methods load `rcr.methods.common.data` and the same RCR split gall
 
 | CLIP mode | Query | Score |
 |---|---|---|
-| image | Normalized whole-scene image embedding | Image dot gallery image |
-| text | Normalized `final_instruction` embedding | Text dot gallery image |
+| clip_image | Normalized whole-scene image embedding | Image dot gallery image |
+| clip_text | Normalized `final_instruction` embedding | Text dot gallery image |
 | early_fusion | Normalized weighted sum of image/text embeddings | Fused query dot gallery image |
 | late_fusion | Image/text branch scores | Per-query population z-score of each branch, weighted sum |
 
-CLIP uses the pinned OpenAI implementation and `ViT-L/14`. Weights start at
-0.5/0.5, matching the old configs. Alternative `final_change` text is an explicit
-config variant. Truncated text counts are recorded; no LLM rewriting occurs.
+CLIP uses the pinned OpenAI implementation and `ViT-L/14`. The low-level
+fixed-weight config starts at 0.5/0.5; the experiment runner selects on val.
+Alternative `final_change` text is an explicit config variant. Truncated text
+counts are recorded; no LLM rewriting occurs. Late-fusion z-score
+statistics use the full split gallery, including self, as in the existing baseline;
+the shared ranking step then removes self. This policy is identical during tuning
+and final evaluation.
+
+Image features, text features and branch score matrices are reused across modes.
+For normalized embeddings, early fusion computes
+`(wi * image_scores + wt * text_scores) / ||wi * image_query + wt * text_query||`;
+this is algebraically the same as the original fused-embedding dot product.
+Late fusion mixes the two per-query z-scored branches. Small floating-point
+rounding differences from the direct early-fusion matrix product are possible.
+No encoder or query-gallery matrix product is repeated for each alpha.
+Score arrays are memory-mapped and mixed in batches on CPU; CLIP encoding and
+initial branch matrix products use the configured device. Caches may be rebuilt
+once because this patch versions the CLIP cache schema. A warm cache still checks
+the checkpoint hash and inputs but does not load the encoder.
 
 FAFA imports
 [the official source at 0cc16936](https://github.com/Delong-liu-bupt/Composed_Person_Retrieval/tree/0cc16936f031f7ad166be4cce1be33d0b44b728e/FAFA_SynCPR)

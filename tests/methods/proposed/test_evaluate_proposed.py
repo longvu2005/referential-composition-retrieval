@@ -6,11 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 import yaml
 
 
-def test_evaluate_proposed_cli(tmp_path: Path) -> None:
+@pytest.mark.parametrize("entry", ["evaluate_proposed.py", "evaluate.py"])
+@pytest.mark.parametrize("templated", [False, True])
+def test_evaluate_proposed_cli(tmp_path: Path, entry, templated) -> None:
     final_dir = tmp_path / "final"
     split_dir = final_dir / "splits"
     split_dir.mkdir(parents=True)
@@ -74,7 +77,8 @@ def test_evaluate_proposed_cli(tmp_path: Path) -> None:
     (split_dir / "val.txt").write_text("", encoding="utf-8")
     (split_dir / "test.txt").write_text("s1\n", encoding="utf-8")
 
-    rankings_path = tmp_path / "rankings.pt"
+    rankings_path = tmp_path / "test" / "rankings.pt"
+    rankings_path.parent.mkdir()
     torch.save(
         {
             "sample_ids": ["s1"],
@@ -85,7 +89,7 @@ def test_evaluate_proposed_cli(tmp_path: Path) -> None:
         rankings_path,
     )
 
-    output = tmp_path / "metrics.json"
+    output = tmp_path / "test" / "metrics.json"
     config = tmp_path / "evaluate.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -94,10 +98,14 @@ def test_evaluate_proposed_cli(tmp_path: Path) -> None:
                     "final_dir": str(final_dir),
                     "image_root": str(tmp_path),
                 },
-                "split": "test",
-                "rankings": str(rankings_path),
+                "split": "val" if templated else "test",
+                "rankings": str(tmp_path / "{split}/rankings.pt")
+                if templated
+                else str(rankings_path),
                 "candidate_ks": [1, 2],
-                "output": str(output),
+                "output": str(tmp_path / "{split}/metrics.json")
+                if templated
+                else str(output),
             }
         ),
         encoding="utf-8",
@@ -110,7 +118,13 @@ def test_evaluate_proposed_cli(tmp_path: Path) -> None:
         pythonpath += os.pathsep + env["PYTHONPATH"]
     env["PYTHONPATH"] = pythonpath
     subprocess.run(
-        [sys.executable, "tools/methods/evaluate_proposed.py", "--config", str(config)],
+        [
+            sys.executable,
+            f"tools/methods/{entry}",
+            "--config",
+            str(config),
+            *(["--split", "test"] if templated else []),
+        ],
         cwd=repo,
         env=env,
         check=True,

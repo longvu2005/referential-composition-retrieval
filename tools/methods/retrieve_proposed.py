@@ -2,11 +2,13 @@
 
 import argparse
 from pathlib import Path
+from time import perf_counter
 
 import torch
 import yaml
 
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.methods.common.results import output_directory, save_results, sha256_file
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import TextEncoder
 from rcr.methods.proposed.model import RCRModel
@@ -16,10 +18,18 @@ from rcr.methods.proposed.retrieval import retrieve_rankings
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/methods/proposed/retrieve.yaml")
+    parser.add_argument("--split", choices=("train", "val", "test"))
+    parser.add_argument("--checkpoint", help="Override the trained checkpoint")
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
+    cfg["method"] = "proposed"
+    if args.split:
+        cfg["split"] = args.split
+    if args.checkpoint:
+        cfg["checkpoint"] = args.checkpoint
+    started = perf_counter()
 
     retrieval_cfg = cfg["retrieval"]
     device_name = retrieval_cfg["device"]
@@ -37,6 +47,18 @@ def main() -> None:
             "train a new checkpoint with the updated train config"
         )
     dim = checkpoint["dim"]
+    cfg["output"]["dir"] = str(output_directory(cfg))
+
+    # Reject missing/incompatible caches before loading the text backbone.
+    data_cfg = cfg["data"]
+    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
+    samples = split_samples(data, cfg["split"])
+    if not samples:
+        raise ValueError(f"{cfg['split']}: selected query split is empty")
+    cache = GalleryCache(data_cfg["cache"])
+    cache.validate_gallery(data.gallery_ids)
+    if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
+        raise ValueError("retrieval cache differs from the training cache")
 
     from transformers import AutoModel, AutoTokenizer
 
@@ -60,14 +82,6 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
-    data_cfg = cfg["data"]
-    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
-    samples = split_samples(data, cfg["split"])
-    cache = GalleryCache(data_cfg["cache"])
-    cache.validate_gallery(data.gallery_ids)
-    if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
-        raise ValueError("retrieval cache differs from the training cache")
-
     output = retrieve_rankings(
         samples,
         cache,
@@ -83,9 +97,25 @@ def main() -> None:
         description=cfg["split"],
     )
 
-    output_dir = Path(cfg["output"]["dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(output, output_dir / "rankings.pt")
+    save_results(
+        cfg["output"]["dir"],
+        output,
+        {
+            "method": "proposed",
+            "config": cfg,
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_sha256": sha256_file(checkpoint_path),
+            "checkpoint_epoch": checkpoint.get("epoch"),
+            "best_epoch": checkpoint.get("best_epoch"),
+            "best_val_full_map": checkpoint.get("best_full_map"),
+            "cache_id": cache.cache_id,
+            "num_queries": len(samples),
+            "num_gallery": len(output["gallery_ids"]),
+            "query_subset": False,
+            "elapsed_seconds": perf_counter() - started,
+        },
+    )
+    print(f"Saved {cfg['output']['dir']}/rankings.pt", flush=True)
 
 
 if __name__ == "__main__":

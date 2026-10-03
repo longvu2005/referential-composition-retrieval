@@ -18,7 +18,15 @@ def main() -> None:
     parser.add_argument("--rankings", help="Override the saved ranking path")
     parser.add_argument("--output", help="Override the metrics JSON path")
     parser.add_argument(
-        "--mode", choices=("image", "text", "early_fusion", "late_fusion")
+        "--mode",
+        choices=(
+            "clip_image",
+            "clip_text",
+            "image",
+            "text",
+            "early_fusion",
+            "late_fusion",
+        ),
     )
     parser.add_argument("--split", choices=("train", "val", "test"))
     parser.add_argument(
@@ -45,8 +53,8 @@ def main() -> None:
         ranking_path = directory / "rankings.pt"
         output_path = directory / "metrics.json"
     else:
-        ranking_path = Path(cfg["rankings"])
-        output_path = Path(configured_output)
+        ranking_path = Path(cfg["rankings"].format(split=cfg["split"]))
+        output_path = Path(configured_output.format(split=cfg["split"]))
     saved = torch.load(
         args.rankings or ranking_path, map_location="cpu", weights_only=True
     )

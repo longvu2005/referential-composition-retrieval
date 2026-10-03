@@ -3,6 +3,6 @@ data:
   image_root: dataset/data/raw/images
 
 split: test
-rankings: runs/proposed/test/rankings.pt
+rankings: runs/proposed/{split}/rankings.pt
 candidate_ks: [100, 500]
-output: runs/proposed/test/metrics.json
+output: runs/proposed/{split}/metrics.json

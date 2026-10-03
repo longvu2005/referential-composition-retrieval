@@ -381,6 +381,29 @@ configs/methods/proposed/
 
 Do not hard-code experiment hyperparameters in the CLI scripts.
 
+### Short proposed commands
+
+After configuring the image/data/cache paths and installing `.venv-proposed`:
+
+```bash
+# Build the shared visual cache explicitly, once.
+bash scripts/build_cache.bash
+# Train from that cache, select best.pt on val, then retrieve/evaluate val and test.
+bash scripts/run_proposed.bash --train
+# Re-evaluate an existing checkpoint without building or training again.
+bash scripts/run_proposed.bash
+# Or run the entire sequence in one command.
+bash scripts/run_proposed.bash --build-cache --train
+```
+
+Use `--splits val` or `--splits test` for a single final evaluation split.
+`--train` always selects `best.pt` using validation Full-mAP. Both final splits
+use that same checkpoint. `PROPOSED_PYTHON=/path/to/python` overrides the wrapper's
+Python environment. The runner retains resolved stage configs, writes per-split
+`rankings.pt`, `run.json`, `metrics.json`, and produces `runs/proposed/summary.csv`.
+It checks data/cache-path agreement across active configs and aborts on stage
+failure. Detailed commands and Kaggle path overrides: [docs/proposed_runs.md](docs/proposed_runs.md).
+
 ### `build_cache.yaml`
 
 Controls:
@@ -674,6 +697,33 @@ machine; cache size, detector coverage, GPU memory, and throughput must still
 be verified before launching the full experiment.
 
 ## Baselines on RCR
+
+After installing each baseline environment and setting `data.image_root`, run:
+
+```bash
+bash scripts/run_baselines.bash clip --prepare
+bash scripts/run_baselines.bash fafa --prepare
+```
+
+CLIP runs `clip_image`, `clip_text`, `early_fusion`, and `late_fusion` on val/test.
+Each fusion selects `image_weight = alpha`, `text_weight = 1 - alpha` on full
+validation Full-mAP, then freezes the weights for test. Image/text features and
+branch scores are cached together; tuning does not encode the dataset again.
+One CLIP checkpoint supplies both encoders. No detector, LLM, or RCR training is
+needed for these four baselines. Omit `--prepare` after artifacts are downloaded.
+
+```bash
+# Select on val; later evaluate test using the saved, checked selection.
+bash scripts/run_baselines.bash clip --splits val
+bash scripts/run_baselines.bash clip --splits test
+# Run only selected baselines.
+bash scripts/run_baselines.bash clip --modes clip_text clip_image
+```
+
+Results include per-run rankings/metrics, `runs/clip/tuning.json` with every val
+trial, and `runs/clip/summary.csv` (the current invocation). Test is never used to
+select a weight. Selection maximizes the configured val metric over the grid;
+it does not guarantee the best test score.
 
 CLIP image/text/early-fusion/late-fusion share one implementation in
 `src/rcr/methods/baselines/clip.py`. FAFA imports the authors' pinned model in
