@@ -9,7 +9,8 @@ from types import ModuleType
 import pytest
 import yaml
 
-from tools.methods import prepare_baseline
+from rcr.methods.baselines import prepare as prepare_baseline
+from tools.methods import run as cli
 
 
 @pytest.mark.parametrize("name", ["ViT-L/14", "ViT-B/32"])
@@ -50,24 +51,24 @@ def test_prepare_cli_verifies_and_reuses_checkpoint(tmp_path, monkeypatch):
         )
     )
     monkeypatch.setattr(sys, "argv", ["prepare", "--config", str(cfg)])
-    prepare_baseline.main()
+    cli.main(["prepare", *sys.argv[1:]])
     assert target.read_bytes() == contents
     assert not target.with_suffix(".pt.part").exists()
 
     # Cached files are reused only after their checksum is checked.
     source.unlink()
-    prepare_baseline.main()
+    cli.main(["prepare", *sys.argv[1:]])
     assert target.read_bytes() == contents
 
     source.write_bytes(contents)
     target.write_bytes(b"corrupted checkpoint")
-    prepare_baseline.main()
+    cli.main(["prepare", *sys.argv[1:]])
     assert target.read_bytes() == contents
 
 
 @pytest.fixture
 def fafa_preparation(tmp_path, monkeypatch):
-    cfg = yaml.safe_load(Path("configs/methods/baselines/fafa.yaml").read_text())
+    cfg = yaml.safe_load(Path("configs/methods/fafa.yaml").read_text())
     cfg["checkpoint"]["path"] = str(tmp_path / "prepared" / "fafa.pt")
     path = tmp_path / "fafa.yaml"
     api = ModuleType("rcr.methods.baselines.fafa")
@@ -106,11 +107,11 @@ def test_fafa_prepare_uses_supported_gdown_api(fafa_preparation, monkeypatch, ur
         return kwargs["output"]
 
     monkeypatch.setattr(gdown, "download", download)
-    prepare_baseline.main()
+    cli.main(["prepare", *sys.argv[1:]])
     target = Path(cfg["checkpoint"]["path"])
     assert target.read_bytes() == b"checkpoint fixture"
     assert not target.with_suffix(".part").exists()
-    prepare_baseline.main()
+    cli.main(["prepare", *sys.argv[1:]])
     assert len(calls) == 1  # Reuse the prepared checkpoint.
 
 
@@ -134,6 +135,6 @@ def test_fafa_failed_download_preserves_existing_checkpoint(
         sys, "argv", ["prepare", "--config", str(config_path), "--force"]
     )
     with pytest.raises(RuntimeError, match="did not produce a file"):
-        prepare_baseline.main()
+        cli.main(["prepare", *sys.argv[1:]])
     assert target.read_bytes() == b"previous checkpoint"
     assert not target.with_suffix(".part").exists()

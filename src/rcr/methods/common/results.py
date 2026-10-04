@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -12,12 +13,35 @@ import torch
 
 
 def output_directory(cfg: dict) -> Path:
-    """Use one path rule in retrieval and evaluation, including CLI overrides."""
-    return Path(
-        cfg["output"]["dir"].format(
-            method=cfg["method"], mode=cfg.get("mode", ""), split=cfg["split"]
-        )
+    """Each run root owns separate mode/split directories; no path templates."""
+    root = Path(cfg["output"]["dir"])
+    if cfg["method"] == "clip":
+        root /= cfg["mode"]
+    return root / cfg["split"]
+
+
+def write_json(path: str | Path, value) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    temporary.replace(path)
+
+
+def write_summary(root: str | Path, rows: list[dict]) -> None:
+    path = Path(root) / "summary.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        # Ablations can report different candidate K values (e.g. different Top-M).
+        fields = list(dict.fromkeys(key for row in rows for key in row))
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    temporary.replace(path)
+    print(f"Saved summary: {path}", flush=True)
 
 
 def sha256_file(path: str | Path) -> str:

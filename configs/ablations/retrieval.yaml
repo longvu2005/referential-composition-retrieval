@@ -1,0 +1,26 @@
+# Run coarse.yaml first: all variants inherit the SAME val-selected beta.
+base_config: runs/ablations/coarse/selected.yaml
+stage: inference
+output_dir: runs/ablations/retrieval
+overrides: {}
+experiments:
+  - name: coarse_only
+    overrides:
+      retrieval.rerank: false
+      retrieval.top_m: 500
+      candidate_ks: [100, 500]
+  - name: fine_top100
+    overrides:
+      retrieval.rerank: true
+      retrieval.top_m: 100
+      candidate_ks: [100]
+  - name: fine_top500
+    overrides:
+      retrieval.rerank: true
+      retrieval.top_m: 500
+      candidate_ks: [100, 500]
+  - name: fine_top1000
+    overrides:
+      retrieval.rerank: true
+      retrieval.top_m: 1000
+      candidate_ks: [100, 500, 1000]

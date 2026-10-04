@@ -1,0 +1,32 @@
+# Fixed checkpoint; no training or image-cache rebuild. All paths are repo-relative.
+base_config: configs/methods/proposed.yaml
+stage: inference
+output_dir: runs/ablations/coarse
+overrides:
+  retrieval.rerank: false
+  retrieval.coarse_beta: 0.4
+  retrieval.coarse_normalization: zscore
+experiments:
+  - name: identity_only
+    overrides:
+      retrieval.coarse_mode: identity_only
+  - name: state_only
+    overrides:
+      retrieval.coarse_mode: state_only
+  - name: fusion_raw
+    overrides:
+      retrieval.coarse_mode: identity_state
+      retrieval.coarse_normalization: none
+  - name: fusion_zscore
+    overrides:
+      retrieval.coarse_mode: identity_state
+  - name: beta_sweep
+    overrides:
+      retrieval.coarse_mode: identity_state
+    sweep:
+      retrieval.coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
+# Pick the shortlist setting on the complete val split, never on test.
+# Metric and grid should be fixed before examining the results.
+select:
+  group: beta_sweep
+  metric: candidate_recall_100

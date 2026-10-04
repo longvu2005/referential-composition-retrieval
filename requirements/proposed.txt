@@ -1,1 +1,1 @@
--e .[proposed,dataset,dev]
+-e .[proposed]

@@ -68,7 +68,7 @@ def evaluate_retrieval_output(
         }
         for image_id in gallery_ids
     }
-    return evaluate_rankings(
+    result = evaluate_rankings(
         samples,
         gallery_ids,
         identities_by_image,
@@ -76,6 +76,38 @@ def evaluate_retrieval_output(
         coarse_rankings=coarse,
         candidate_ks=tuple(candidate_ks),
     )
+    # New proposed outputs retain a full coarse order as well as the shortlist.
+    # Reuse the exact same protocol so coarse/fine mAP have the same denominator.
+    if "coarse_rankings" in output:
+        coarse_result = evaluate_rankings(
+            samples,
+            gallery_ids,
+            identities_by_image,
+            decode(output["coarse_rankings"], "coarse_rankings"),
+            candidate_ks=(),
+        )
+        for key, value in coarse_result["overall"].items():
+            if key != "num_queries":
+                result["overall"][f"coarse_{key}"] = value
+        for case, metrics in coarse_result["by_case"].items():
+            result["by_case"][case].update(
+                {
+                    f"coarse_{key}": value
+                    for key, value in metrics.items()
+                    if key != "num_queries"
+                }
+            )
+        for row, coarse_row in zip(
+            result["per_query"], coarse_result["per_query"], strict=True
+        ):
+            row.update(
+                {
+                    f"coarse_{key}": value
+                    for key, value in coarse_row.items()
+                    if key.startswith(("id_", "full_"))
+                }
+            )
+    return result
 
 
 def required_identity_ids(sample: dict) -> set[str]:
@@ -132,9 +164,10 @@ def _aggregate_overall(rows: Sequence[dict], candidate_ks: Sequence[int]) -> dic
         "full_r10": _mean(rows, "full_r10"),
     }
     for k in candidate_ks:
-        key = f"candidate_recall_{k}"
-        if key in rows[0]:
-            output[key] = _mean(rows, key)
+        for metric in ("candidate_recall", "candidate_hit"):
+            key = f"{metric}_{k}"
+            if key in rows[0]:
+                output[key] = _mean(rows, key)
     return output
 
 
@@ -231,6 +264,7 @@ def evaluate_rankings(
                 row[f"candidate_recall_{k}"] = candidate_recall_at_k(
                     coarse, full_positives, k
                 )
+                row[f"candidate_hit_{k}"] = recall_at_k(coarse, full_positives, k)
 
         rows.append(row)
 

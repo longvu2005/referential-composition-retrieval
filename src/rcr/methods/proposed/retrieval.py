@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
 from torch import Tensor, nn
 from tqdm import tqdm
 
-from rcr.evaluation.evaluate import (
-    evaluate_retrieval_output as evaluate_retrieval_output,
-)
 from rcr.methods.proposed.cache import GalleryCache
-from rcr.methods.proposed.coarse import coarse_scores
+from rcr.methods.proposed.coarse import coarse_scores, combine_scores
 from rcr.methods.proposed.encoders import encode_query_text
 
 
@@ -112,7 +109,21 @@ def _encode_gallery_state(
     return state
 
 
-@torch.inference_mode()
+def retrieval_settings(cfg: dict, default_beta: float) -> dict:
+    """Resolve runtime overrides; old YAMLs retain raw fusion and checkpoint beta."""
+    settings = {
+        "coarse_batch_size": 512,
+        "coarse_mode": "identity_state",
+        "coarse_beta": default_beta,
+        "coarse_normalization": "none",
+        "rerank": True,
+        **cfg,
+    }
+    if settings["coarse_beta"] is None:
+        settings["coarse_beta"] = default_beta
+    return settings
+
+
 def retrieve_rankings(
     samples: Sequence[dict],
     cache: GalleryCache,
@@ -126,26 +137,75 @@ def retrieve_rankings(
     fine_batch_size: int,
     identity_batch_size: int,
     coarse_batch_size: int = 512,
+    coarse_mode: str = "identity_state",
+    coarse_beta: float | None = None,
+    coarse_normalization: str = "none",
+    rerank: bool = True,
     description: str = "retrieve",
 ) -> dict[str, Any]:
-    """Return full and coarse gallery rankings for an ordered sample sequence.
+    """Single-run interface shared by training validation and standalone use."""
+    settings = dict(
+        top_m=top_m,
+        fine_batch_size=fine_batch_size,
+        identity_batch_size=identity_batch_size,
+        coarse_batch_size=coarse_batch_size,
+        coarse_mode=coarse_mode,
+        coarse_beta=coarse_beta,
+        coarse_normalization=coarse_normalization,
+        rerank=rerank,
+    )
+    return retrieve_variants(
+        samples,
+        cache,
+        tokenizer,
+        text_encoder,
+        model,
+        device,
+        gallery_ids=gallery_ids,
+        variants={"run": settings},
+        description=description,
+    )["run"]
 
-    Only the requested split's images are projected and scored. The feature
-    cache remains shared; output indices refer to the saved split gallery.
-    Gallery identities stay in CPU RAM; only projection/coarse-scoring chunks
-    and Top-M fine batches use the accelerator. Scores still cover every image.
-    Module train/eval modes are restored even if retrieval fails.
+
+@torch.inference_mode()
+def retrieve_variants(
+    samples: Sequence[dict],
+    cache: GalleryCache,
+    tokenizer: Any,
+    text_encoder: nn.Module,
+    model: nn.Module,
+    device: torch.device,
+    *,
+    gallery_ids: Sequence[str],
+    variants: Mapping[str, dict],
+    description: str = "retrieve",
+) -> dict[str, dict]:
+    """Reuse encodings and raw ID/state scores across inference ablations.
+
+    Only the split gallery is projected. CPU gallery projections and GPU scoring
+    chunks bound accelerator memory. Normalization happens after gathering one
+    complete score vector, never per chunk. All outputs retain the full gallery
+    order, including coarse-only experiments; top_m only limits fine reranking.
     """
-
-    if not samples:
-        raise ValueError("retrieval requires at least one sample")
-    if min(top_m, fine_batch_size, identity_batch_size, coarse_batch_size) < 1:
-        raise ValueError("retrieval batch sizes and top_m must be positive")
+    settings = {
+        name: retrieval_settings(cfg, model.coarse_beta)
+        for name, cfg in variants.items()
+    }
+    if not samples or not settings:
+        raise ValueError("retrieval requires samples and at least one variant")
+    first = next(iter(settings.values()))
+    batch_keys = ("fine_batch_size", "identity_batch_size", "coarse_batch_size")
+    for cfg in settings.values():
+        if min(cfg[key] for key in (*batch_keys, "top_m")) < 1:
+            raise ValueError("retrieval batch sizes and top_m must be positive")
+        if any(cfg[key] != first[key] for key in batch_keys):
+            raise ValueError("shared retrieval variants require the same batch sizes")
+    fine_batch_size, identity_batch_size, coarse_batch_size = (
+        first[key] for key in batch_keys
+    )
     gallery_ids = list(gallery_ids)
-    if not gallery_ids:
-        raise ValueError("retrieval requires a non-empty gallery")
-    if len(gallery_ids) != len(set(gallery_ids)):
-        raise ValueError("retrieval gallery_ids must be unique")
+    if not gallery_ids or len(gallery_ids) != len(set(gallery_ids)):
+        raise ValueError("retrieval gallery_ids must be non-empty and unique")
     by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
     if not set(gallery_ids) <= set(by_id):
         raise ValueError("retrieval gallery contains images missing from the cache")
@@ -153,102 +213,124 @@ def retrieve_rankings(
     if any(sample["query_image_id"] not in gallery_by_id for sample in samples):
         raise ValueError("query image must belong to the retrieval gallery")
     image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
-
-    model_was_training = model.training
-    text_was_training = text_encoder.training
+    need_identity = any(c["coarse_mode"] != "state_only" for c in settings.values())
+    need_state = any(
+        c["coarse_mode"] == "state_only"
+        or (c["coarse_mode"] == "identity_state" and c["coarse_beta"] != 0)
+        for c in settings.values()
+    )
+    need_fine = any(c["rerank"] for c in settings.values())
+    model_was_training, text_was_training = model.training, text_encoder.training
     model.eval()
     text_encoder.eval()
-
     try:
-        gallery_batches = _encode_gallery_identity(
-            cache, model, device, identity_batch_size, image_indices
+        gallery_batches = (
+            _encode_gallery_identity(
+                cache, model, device, identity_batch_size, image_indices
+            )
+            if need_identity
+            else None
         )
         gallery_state = (
             _encode_gallery_state(
                 cache, model, device, identity_batch_size, image_indices
             )
-            if model.coarse_beta != 0
+            if need_state
             else None
         )
-
-        sample_ids = []
-        rankings = []
-        coarse_topm = []
-
+        outputs = {
+            name: {"rankings": [], "coarse_rankings": [], "coarse_topm": []}
+            for name in settings
+        }
         for sample in tqdm(samples, desc=description):
             query_index = gallery_by_id[sample["query_image_id"]]
-            query_idx = torch.tensor([by_id[sample["query_image_id"]]])
-            q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
-            q_scene = q_scene.to(device)
-            q_persons = q_persons.to(device)
-            q_boxes = q_boxes.to(device)
-            q_mask = q_mask.to(device)
-
             text = encode_query_text([sample], tokenizer, text_encoder, device)
-            logits, query_identity, query, query_mask, prior = model.encode_query(
-                q_scene,
-                q_persons,
-                q_boxes,
-                patch_hw=cache.patch_hw,
-                query_person_mask=q_mask,
-                **text,
-            )
-
-            coarse = _coarse_scores_chunked(
-                query_identity[0],
-                logits[0],
-                q_mask[0],
-                gallery_batches,
-                coarse_batch_size,
-                query_state=(
-                    model.encode_text_state(text["change"], text["change_mask"])[0]
-                    if model.coarse_beta != 0
-                    else None
-                ),
-                gallery_state=gallery_state,
-                beta=model.coarse_beta,
-            )
-            coarse[query_index] = -torch.inf
-            coarse_order = torch.argsort(coarse, descending=True)
-            coarse_order = coarse_order[coarse_order != query_index]
-            top_indices = coarse_order[: min(top_m, len(coarse_order))]
-
-            fine_scores = []
-            for start in range(0, len(top_indices), fine_batch_size):
-                local_indices = top_indices[start : start + fine_batch_size].cpu()
-                indices = image_indices[local_indices]
-                scene, persons, boxes, _, target_mask = cache.load(indices)
-                scene = scene.to(device)
-                persons = persons.to(device)
-                boxes = boxes.to(device)
-                target_mask = target_mask.to(device)
-
-                count = len(indices)
-                score = model.score_target(
-                    query.expand(count, -1, -1),
-                    query_mask.expand(count, -1),
-                    prior.expand(count, -1),
-                    scene,
-                    persons,
-                    boxes,
-                    cache.patch_hw,
-                    target_mask,
+            if need_identity or need_fine:
+                query_idx = torch.tensor([by_id[sample["query_image_id"]]])
+                q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
+                q_mask = q_mask.to(device)
+                logits, query_identity, query, query_mask, prior = model.encode_query(
+                    q_scene.to(device),
+                    q_persons.to(device),
+                    q_boxes.to(device),
+                    patch_hw=cache.patch_hw,
+                    query_person_mask=q_mask,
+                    **text,
                 )
-                fine_scores.append(score)
-
-            scores = torch.cat(fine_scores) if fine_scores else coarse.new_empty(0)
-            fine_order = top_indices[torch.argsort(scores, descending=True)]
-            final_order = torch.cat((fine_order, coarse_order[len(top_indices) :]))
-
-            sample_ids.append(sample["sample_id"])
-            rankings.append(final_order.to(torch.int32).cpu())
-            coarse_topm.append(top_indices.to(torch.int32).cpu())
-
+            identity = (
+                _coarse_scores_chunked(
+                    query_identity[0],
+                    logits[0],
+                    q_mask[0],
+                    gallery_batches,
+                    coarse_batch_size,
+                )
+                if need_identity
+                else None
+            )
+            state = None
+            if need_state:
+                query_state = model.encode_text_state(
+                    text["change"], text["change_mask"]
+                )[0]
+                state = torch.cat(
+                    [
+                        gallery_state[start : start + coarse_batch_size].to(device)
+                        @ query_state
+                        for start in range(0, len(gallery_ids), coarse_batch_size)
+                    ]
+                )
+            # Fine scores depend on the query/target pair, not on beta or top_m.
+            fine_scores = torch.empty(len(gallery_ids), device=device)
+            fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
+            for name, cfg in settings.items():
+                coarse = combine_scores(
+                    identity,
+                    state,
+                    mode=cfg["coarse_mode"],
+                    beta=cfg["coarse_beta"],
+                    normalization=cfg["coarse_normalization"],
+                    exclude_index=query_index,
+                )
+                order = torch.argsort(coarse, descending=True, stable=True)
+                order = order[order != query_index]
+                top_indices = order[: cfg["top_m"]]
+                final_order = order
+                if cfg["rerank"]:
+                    missing = top_indices[~fine_done[top_indices]]
+                    for start in range(0, len(missing), fine_batch_size):
+                        local = missing[start : start + fine_batch_size]
+                        scene, persons, boxes, _, mask = cache.load(
+                            image_indices[local.cpu()]
+                        )
+                        count = len(local)
+                        fine_scores[local] = model.score_target(
+                            query.expand(count, -1, -1),
+                            query_mask.expand(count, -1),
+                            prior.expand(count, -1),
+                            scene.to(device),
+                            persons.to(device),
+                            boxes.to(device),
+                            cache.patch_hw,
+                            mask.to(device),
+                        )
+                        fine_done[local] = True
+                    fine_order = top_indices[
+                        torch.argsort(
+                            fine_scores[top_indices], descending=True, stable=True
+                        )
+                    ]
+                    final_order = torch.cat((fine_order, order[len(top_indices) :]))
+                outputs[name]["rankings"].append(final_order.to(torch.int32).cpu())
+                outputs[name]["coarse_rankings"].append(order.to(torch.int32).cpu())
+                outputs[name]["coarse_topm"].append(top_indices.to(torch.int32).cpu())
         return {
-            "sample_ids": sample_ids,
-            "gallery_ids": gallery_ids,
-            "rankings": torch.stack(rankings),
-            "coarse_topm": torch.stack(coarse_topm),
+            name: {
+                "sample_ids": [sample["sample_id"] for sample in samples],
+                "gallery_ids": gallery_ids,
+                **{key: torch.stack(rows) for key, rows in output.items()},
+            }
+            for name, output in outputs.items()
         }
     finally:
         model.train(model_was_training)

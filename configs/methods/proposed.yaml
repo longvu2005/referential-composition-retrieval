@@ -1,0 +1,70 @@
+# One source of truth for cache, training, retrieval and evaluation.
+method: proposed
+split: val
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+  cache: cache/proposed
+detector:
+  model: IDEA-Research/grounding-dino-tiny
+  threshold: 0.3
+  text_threshold: 0.25
+image_encoder:
+  model: facebook/dinov3-vitb16-pretrain-lvd1689m
+  # [height, width], letterboxed; changing sizes requires rebuilding the cache.
+  scene_size: [224, 224]
+  person_size: [256, 128]
+cache:
+  storage_dtype: float16
+model:
+  text_model: google-bert/bert-base-uncased
+  identity_dim: 256
+  state_dim: 256
+  # Fallback for old checkpoints/configs; inference overrides live in retrieval.
+  coarse_beta: 0.4
+  num_heads: 8
+  mlp_ratio: 4
+  geo_dim: 32
+train:
+  epochs: 10
+  batch_size: 14
+  candidates: 16
+  seed: 0
+optimizer:
+  lr: 0.0001
+  text_lr: 1.0e-05
+  weight_decay: 0.01
+loss:
+  grounding_weight: 1.0
+  identity_weight: 0.1
+  retrieval_weight: 1.0
+  identity_temperature: 0.1
+  state_weight: 1.0
+  state_temperature: 0.1
+retrieval:
+  # Shared by periodic validation and standalone retrieval.
+  coarse_mode: identity_state   # identity_only | state_only | identity_state
+  coarse_beta: null             # null inherits model/checkpoint; a number overrides it
+  coarse_normalization: zscore  # none reproduces raw ID + beta * state
+  rerank: true                  # false keeps the complete coarse ranking
+  top_m: 500
+  fine_batch_size: 64
+  identity_batch_size: 512
+  coarse_batch_size: 512
+candidate_ks: [100, 500]
+evaluation:
+  enabled: true
+  every_epochs: 2
+  train_max_queries: 100
+wandb:
+  enabled: true
+  project: referential-composition-retrieval
+  name: null
+  mode: online
+  log_every_steps: 20
+runtime:
+  device: auto
+checkpoint: runs/proposed/best.pt
+output:
+  # Root only; the runner appends each split.
+  dir: runs/proposed

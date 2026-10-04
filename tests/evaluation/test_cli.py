@@ -1,4 +1,4 @@
-"""Tests for the proposed-method evaluation CLI."""
+"""Evaluate existing rankings without loading any model dependency."""
 
 import json
 import os
@@ -11,9 +11,8 @@ import torch
 import yaml
 
 
-@pytest.mark.parametrize("entry", ["evaluate_proposed.py", "evaluate.py"])
 @pytest.mark.parametrize("templated", [False, True])
-def test_evaluate_proposed_cli(tmp_path: Path, entry, templated) -> None:
+def test_evaluate_cli(tmp_path: Path, templated) -> None:
     final_dir = tmp_path / "final"
     split_dir = final_dir / "splits"
     split_dir.mkdir(parents=True)
@@ -94,24 +93,20 @@ def test_evaluate_proposed_cli(tmp_path: Path, entry, templated) -> None:
     config.write_text(
         yaml.safe_dump(
             {
+                "method": "proposed",
                 "data": {
                     "final_dir": str(final_dir),
                     "image_root": str(tmp_path),
                 },
                 "split": "val" if templated else "test",
-                "rankings": str(tmp_path / "{split}/rankings.pt")
-                if templated
-                else str(rankings_path),
                 "candidate_ks": [1, 2],
-                "output": str(tmp_path / "{split}/metrics.json")
-                if templated
-                else str(output),
+                "output": {"dir": str(tmp_path)},
             }
         ),
         encoding="utf-8",
     )
 
-    repo = Path(__file__).parents[3]
+    repo = Path(__file__).parents[2]
     env = os.environ.copy()
     pythonpath = str(repo / "src")
     if env.get("PYTHONPATH"):
@@ -120,10 +115,11 @@ def test_evaluate_proposed_cli(tmp_path: Path, entry, templated) -> None:
     subprocess.run(
         [
             sys.executable,
-            f"tools/methods/{entry}",
+            "tools/methods/run.py",
+            "evaluate",
             "--config",
             str(config),
-            *(["--split", "test"] if templated else []),
+            *(["--splits", "test"] if templated else []),
         ],
         cwd=repo,
         env=env,

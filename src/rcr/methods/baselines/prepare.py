@@ -1,13 +1,11 @@
 """Prepare external baseline artifacts explicitly; never install packages."""
 
-import argparse
 import hashlib
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-import yaml
 from tqdm import tqdm
 
 from rcr.methods.common.results import sha256_file
@@ -49,19 +47,9 @@ def prepare_clip(model_name: str, path: str, force: bool):
     download(url, Path(path), force=force, expected_hash=url.split("/")[-2])
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Replace prepared weights and recheck runtime assets",
-    )
-    args = parser.parse_args()
-    with open(args.config, encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
+def prepare(cfg: dict, *, force: bool = False) -> None:
     if cfg["method"] == "clip":
-        prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], args.force)
+        prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], force)
     elif cfg["method"] == "fafa":
         import gdown
 
@@ -69,7 +57,7 @@ def main() -> None:
 
         official_source(cfg, prepare=True)
         checkpoint = Path(cfg["checkpoint"]["path"])
-        if args.force or not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+        if force or not checkpoint.is_file() or checkpoint.stat().st_size == 0:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             temporary = checkpoint.with_suffix(".part")
             try:
@@ -98,19 +86,15 @@ def main() -> None:
                 temporary.unlink(missing_ok=True)
                 raise
         selector = cfg["localization"]["query_selector"]
-        prepare_clip(selector["model"], selector["checkpoint"], args.force)
+        prepare_clip(selector["model"], selector["checkpoint"], force)
         detector = cfg["localization"]["detector"]
         download(
             detector["source_url"],
             Path(detector["checkpoint"]),
-            force=args.force,
+            force=force,
             expected_hash=detector["hash_prefix"],
         )
-        prepare_runtime_assets(cfg, force=args.force)
+        prepare_runtime_assets(cfg, force=force)
     else:
-        parser.error(f"unknown baseline {cfg['method']!r}")
+        raise ValueError(f"unknown baseline {cfg['method']!r}")
     print("Baseline artifacts ready", flush=True)
-
-
-if __name__ == "__main__":
-    main()

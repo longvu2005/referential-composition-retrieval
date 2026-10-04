@@ -43,8 +43,33 @@ def test_same_ranking_has_same_metrics_with_or_without_coarse():
     proposed = evaluate_retrieval_output(data, samples, output, [1], split="test")
     assert "candidate_recall_1" not in baseline["overall"]
     assert proposed["overall"].pop("candidate_recall_1") == 1
+    assert proposed["overall"].pop("candidate_hit_1") == 1
     assert baseline["overall"] == proposed["overall"]
     assert baseline["by_case"] == proposed["by_case"]
+
+
+def test_coarse_metrics_use_full_ranking_and_hit_differs_from_recall():
+    data, samples = inputs()
+    data.images_by_id["d"] = {"path": "test/d.jpg"}
+    data.gallery_ids.append("d")
+    data.gt_head_boxes_by_image["b"] = [{"identity_id": "p"}]
+    samples[0]["positive_image_ids"] = ["a", "b"]
+    output = {
+        "sample_ids": ["s"],
+        "gallery_ids": ["q", "a", "b", "d"],
+        "rankings": torch.tensor([[1, 3, 2]], dtype=torch.int32),
+        "coarse_rankings": torch.tensor([[3, 1, 2]], dtype=torch.int32),
+        "coarse_topm": torch.tensor([[3, 1]], dtype=torch.int32),
+    }
+    result = evaluate_retrieval_output(data, samples, output, [1, 2], split="test")
+    metrics = result["overall"]
+    assert metrics["full_map"] == pytest.approx(5 / 6)
+    assert metrics["coarse_full_map"] == pytest.approx(7 / 12)
+    assert metrics["candidate_recall_2"] == 0.5
+    assert metrics["candidate_hit_2"] == 1.0
+    assert metrics["candidate_hit_1"] == 0.0
+    assert result["by_case"]["INDIVIDUAL"]["coarse_full_r1"] == 0.0
+    assert result["per_query"][0]["coarse_full_ap"] == pytest.approx(7 / 12)
 
 
 @pytest.mark.parametrize(

@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import copy
-import csv
 import hashlib
-import importlib.metadata
 import json
-import sys
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
-import torch
 
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.baselines.clip import (
@@ -23,31 +19,31 @@ from rcr.methods.baselines.clip import (
     write_clip_scores,
 )
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.methods.common.experiment import evaluate_run, resolve_device
 from rcr.methods.common.results import (
     image_signature,
     output_directory,
     save_results,
     scores_to_rankings,
     sha256_file,
+    write_json,
+    write_summary,
 )
 
 
-def run_retrieval(cfg: dict, *, max_queries: int | None = None) -> dict:
+def run_retrieval(cfg: dict, *, max_queries: int | None = None, data=None) -> dict:
     """Shared retrieval entry point for the single-run and experiment CLIs."""
     cfg = copy.deepcopy(cfg)
-    _validate_runtime(cfg)
-    cfg["output"]["dir"] = str(output_directory(cfg))
-    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+    if data is None:
+        data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     samples = split_samples(data, cfg["split"])
     full_num_queries = len(samples)
     if max_queries is not None:
-        if max_queries < 1:
-            raise ValueError("max_queries must be positive")
         samples = samples[:max_queries]
     if not samples:
         raise ValueError("selected query split is empty")
     gallery_ids = split_image_ids(data, cfg["split"])
-    device = _device(cfg)
+    device = resolve_device(cfg)
     print(
         f"{cfg['method']}: {len(samples)} queries / "
         f"{len(gallery_ids)} gallery images / {device}",
@@ -77,23 +73,8 @@ def run_retrieval(cfg: dict, *, max_queries: int | None = None) -> dict:
 
 
 def save_run(cfg, data, output, details, elapsed_seconds, *, query_subset=False):
-    versions = {}
-    for package in (
-        "numpy",
-        "torch",
-        "torchvision",
-        "transformers",
-        "clip",
-        "scipy",
-        "timm",
-        "eva-decord",
-    ):
-        try:
-            versions[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            pass
     save_results(
-        cfg["output"]["dir"],
+        output_directory(cfg),
         output,
         {
             "method": cfg["method"],
@@ -105,38 +86,10 @@ def save_run(cfg, data, output, details, elapsed_seconds, *, query_subset=False)
             "query_subset": query_subset,
             "higher_is_better": True,
             "elapsed_seconds": elapsed_seconds,
-            "python": sys.version,
-            "packages": versions,
             **details,
         },
     )
-    print(f"Saved {cfg['output']['dir']}/rankings.pt", flush=True)
-
-
-def _write_json(path: Path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
-
-
-def _device(cfg):
-    name = cfg["runtime"]["device"]
-    return (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if name == "auto"
-        else torch.device(name)
-    )
-
-
-def _validate_runtime(cfg):
-    for key, value in cfg["runtime"].items():
-        if key.endswith("batch_size") and int(value) < 1:
-            raise ValueError(f"runtime.{key} must be positive")
-    if int(cfg["runtime"].get("num_workers", 0)) < 0:
-        raise ValueError("runtime.num_workers must be non-negative")
+    print(f"Saved {output_directory(cfg)}/rankings.pt", flush=True)
 
 
 def _grid(cfg):
@@ -197,16 +150,6 @@ def tune_fusion(data, samples, gallery_ids, inputs, cfg, mode):
     return {"selected": dict(best), "trials": trials}
 
 
-def _evaluate(data, samples, output, cfg):
-    result = evaluate_retrieval_output(data, samples, output, split=cfg["split"])
-    _write_json(Path(cfg["output"]["dir"]) / "metrics.json", result)
-    print(
-        f"{cfg.get('mode', cfg['method'])}/{cfg['split']}: {result['overall']}",
-        flush=True,
-    )
-    return result
-
-
 def run_experiment(cfg, *, modes=None, splits=("val", "test")):
     """Default: tune val, freeze, then evaluate test. Test-only loads selection."""
     cfg = copy.deepcopy(cfg)
@@ -215,7 +158,6 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
         raise ValueError("experiment splits must be val and/or test")
     # Always val before test, even if the CLI requested test val.
     splits = [s for s in ("val", "test") if s in splits]
-    _validate_runtime(cfg)
     if cfg["method"] == "clip":
         modes = list(dict.fromkeys(canonical_mode(m) for m in (modes or MODES)))
     elif cfg["method"] == "fafa":
@@ -224,22 +166,13 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
         modes = [None]
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
-    directories = [
-        output_directory({**cfg, "mode": m, "split": s}).resolve()
-        for s in ("val", "test")
-        for m in modes
-    ]
-    if len(set(directories)) != len(directories):
-        raise ValueError(
-            "output.dir must distinguish every mode/split; use {mode}/{split}"
-        )
     data = load_rcr_data(**cfg["data"])
     for split in splits:
         if not data.splits[split] or len(split_image_ids(data, split)) < 2:
             raise ValueError(
                 f"{split}: need non-empty queries and at least two gallery images"
             )
-    device = _device(cfg)
+    device = resolve_device(cfg)
     fusion_modes = [m for m in modes if m in ("early_fusion", "late_fusion")]
     selection = None
     tuning_path = None
@@ -247,7 +180,7 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
         if not data.splits["val"]:
             raise ValueError("fusion selection requires a non-empty validation split")
         context = tuning_context(data, cfg, device)
-        tuning_path = Path(cfg["tuning"]["output"])
+        tuning_path = Path(cfg["output"]["dir"]) / "tuning.json"
         if "val" in splits:
             selection = {
                 "split": "val",
@@ -274,6 +207,7 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                 raise ValueError(
                     "Saved selection lacks requested fusion modes; run --splits val"
                 )
+    (Path(cfg["output"]["dir"]) / "summary.csv").unlink(missing_ok=True)
     rows = []
     for split in splits:
         samples = split_samples(data, split)
@@ -291,12 +225,11 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                         data, samples, gallery_ids, inputs, cfg, mode
                     )
                 # Published before touching test inputs.
-                _write_json(tuning_path, selection)
+                write_json(tuning_path, selection)
         for mode in modes:
             run_cfg = copy.deepcopy(split_cfg)
             if mode is not None:
                 run_cfg["mode"] = mode
-            run_cfg["output"]["dir"] = str(output_directory(run_cfg))
             started = perf_counter()
             if cfg["method"] == "clip":
                 run_details = {
@@ -321,8 +254,8 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                 output = scores_to_rankings(samples, gallery_ids, scores)
                 save_run(run_cfg, data, output, run_details, perf_counter() - started)
             else:
-                output = run_retrieval(run_cfg)
-            metrics = _evaluate(data, samples, output, run_cfg)
+                output = run_retrieval(run_cfg, data=data)
+            metrics = evaluate_run(run_cfg, data=data, samples=samples, output=output)
             rows.append(
                 {
                     "method": mode or cfg["method"],
@@ -336,11 +269,5 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                     **metrics["overall"],
                 }
             )
-    summary = Path(cfg.get("summary", f"runs/{cfg['method']}/summary.csv"))
-    summary.parent.mkdir(parents=True, exist_ok=True)
-    with summary.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"Saved summary: {summary}", flush=True)
+    write_summary(cfg["output"]["dir"], rows)
     return rows

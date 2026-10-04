@@ -28,7 +28,7 @@ from rcr.methods.baselines.fafa_adapter import (
     detect_gallery,
     setmatch_score,
 )
-from rcr.methods.common.results import cache_directory, sha256_file
+from rcr.methods.common.results import cache_directory, output_directory, sha256_file
 
 
 def official_source(cfg: dict, *, prepare: bool = False) -> Path:
@@ -37,7 +37,7 @@ def official_source(cfg: dict, *, prepare: bool = False) -> Path:
     if not checkout.exists():
         if not prepare:
             raise FileNotFoundError(
-                "FAFA source missing; run prepare_baseline.py first"
+                "FAFA source missing; run the prepare command first"
             )
         checkout.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -70,7 +70,7 @@ def official_source(cfg: dict, *, prepare: bool = False) -> Path:
             ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
         ).strip()
     if actual != source["commit"]:
-        raise RuntimeError("FAFA source commit mismatch; run prepare_baseline.py")
+        raise RuntimeError("FAFA source commit mismatch; run the prepare command")
     directory = checkout / source.get("subdir", "FAFA_SynCPR")
     if not (directory / "src").is_dir():
         raise FileNotFoundError(directory / "src")
@@ -166,7 +166,7 @@ def offline_model_load():
     connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
 
     def blocked(self, address):
-        raise RuntimeError("Network blocked in FAFA inference; run prepare_baseline.py")
+        raise RuntimeError("Network blocked in FAFA inference; run the prepare command")
 
     socket.socket.connect = blocked
     socket.socket.connect_ex = blocked
@@ -179,7 +179,7 @@ def offline_model_load():
 def load_fafa(cfg: dict, device):
     directory = official_source(cfg)
     if not assets_ready(cfg):
-        raise RuntimeError("FAFA runtime assets missing/stale; run prepare_baseline.py")
+        raise RuntimeError("FAFA runtime assets missing/stale; run the prepare command")
     runtime_cache(cfg, offline=True)
     squarepad, load_model = official_api(directory)
     with offline_model_load():
@@ -349,7 +349,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     official_source(cfg)
     if not assets_ready(cfg):
         raise RuntimeError(
-            "FAFA assets not ready; run prepare_baseline.py before retrieval"
+            "FAFA assets not ready; run the prepare command before retrieval"
         )
     checkpoint_sha = sha256_file(cfg["checkpoint"]["path"])
     selector_sha = sha256_file(cfg["localization"]["query_selector"]["checkpoint"])
@@ -431,7 +431,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         device,
         cfg["checkpoint"],
     )
-    output = Path(cfg["output"]["dir"])
+    output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
     temporary = output / "scores.npy.tmp"
     scores = np.lib.format.open_memmap(

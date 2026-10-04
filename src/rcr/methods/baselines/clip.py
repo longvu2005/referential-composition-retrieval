@@ -15,7 +15,12 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from rcr.methods.common.results import cache_directory, image_signature, sha256_file
+from rcr.methods.common.results import (
+    cache_directory,
+    image_signature,
+    output_directory,
+    sha256_file,
+)
 
 MODES = ("clip_image", "clip_text", "early_fusion", "late_fusion")
 MODE_ALIASES = {"image": "clip_image", "text": "clip_text"}
@@ -68,7 +73,7 @@ def load_clip(checkpoint: str | Path, device: torch.device):
 
     checkpoint = Path(checkpoint)
     if not checkpoint.is_file():
-        raise FileNotFoundError(f"Missing {checkpoint}; run prepare_baseline.py first")
+        raise FileNotFoundError(f"Missing {checkpoint}; run the prepare command first")
     # Load both official JIT archives and raw state dicts. The pinned upstream
     # loader does not rewind after a failed JIT load, breaking raw state dicts.
     from clip.clip import _transform
@@ -115,28 +120,6 @@ def encode_texts(clip_module, model, texts, batch_size: int, device):
         encoded = model.encode_text(tokens.to(device)).float()
         features.append(F.normalize(encoded, dim=-1).cpu().numpy())
     return np.concatenate(features).astype(np.float32, copy=False), truncated
-
-
-def score_features(
-    gallery: torch.Tensor,
-    query_images: torch.Tensor | None,
-    query_text: torch.Tensor | None,
-    mode: str,
-    fusion: dict,
-) -> torch.Tensor:
-    """Higher is better; late fusion z-scores each branch over the full gallery."""
-    mode = canonical_mode(mode)
-    if mode == "clip_image":
-        return query_images @ gallery.T
-    if mode == "clip_text":
-        return query_text @ gallery.T
-    iw, tw = fusion_weights(fusion)
-    if mode == "early_fusion":
-        query = F.normalize(iw * query_images + tw * query_text, dim=-1)
-        return query @ gallery.T
-    return iw * late_normalize(query_images @ gallery.T, fusion) + tw * late_normalize(
-        query_text @ gallery.T, fusion
-    )
 
 
 def _read_array(path: Path, rows: int, columns: int | None = None):
@@ -319,7 +302,7 @@ def iter_clip_scores(inputs, mode, fusion, batch_size):
 
 
 def write_clip_scores(inputs, cfg):
-    output = Path(cfg["output"]["dir"])
+    output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
     mode = canonical_mode(cfg["mode"])
     base = inputs["text"] if mode == "clip_text" else inputs["image"]

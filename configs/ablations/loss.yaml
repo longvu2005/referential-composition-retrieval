@@ -1,0 +1,20 @@
+# Each variant trains from scratch with the same seed and training schedule.
+# Set base_config to a chosen method YAML if you want a different fixed beta.
+base_config: configs/methods/proposed.yaml
+stage: train
+output_dir: runs/ablations/loss
+overrides:
+  train.seed: 0
+  retrieval.rerank: true
+experiments:
+  - name: full
+    overrides: {}
+  - name: without_identity_loss
+    overrides:
+      loss.identity_weight: 0.0
+  - name: without_state_loss
+    overrides:
+      loss.state_weight: 0.0
+  - name: without_grounding_loss
+    overrides:
+      loss.grounding_weight: 0.0

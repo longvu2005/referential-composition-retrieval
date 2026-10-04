@@ -20,7 +20,7 @@ from PIL import Image
 from rcr.methods.baselines import clip, fafa, fafa_adapter
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.common.results import output_directory
-from tools.methods import evaluate, retrieve_baseline
+from tools.methods import run as cli
 
 
 def preprocess(image):
@@ -124,7 +124,7 @@ def benchmark(tmp_path, monkeypatch):
     weights.write_bytes(b"test model identity")
     marker = tmp_path / "marker.json"
     marker.write_text("{}")
-    cfg = yaml.safe_load(Path("configs/methods/baselines/clip.yaml").read_text())
+    cfg = yaml.safe_load(Path("configs/methods/clip.yaml").read_text())
     cfg.update(
         split="test", data={"final_dir": str(final), "image_root": str(images_root)}
     )
@@ -133,7 +133,7 @@ def benchmark(tmp_path, monkeypatch):
         device="cpu", image_batch_size=2, text_batch_size=2, score_batch_size=2
     )
     cfg["cache"]["dir"] = str(tmp_path / "clip_cache")
-    cfg["output"]["dir"] = str(tmp_path / "runs" / "{method}" / "{mode}" / "{split}")
+    cfg["output"]["dir"] = str(tmp_path / "runs" / "clip")
     monkeypatch.setattr(clip, "load_clip", tiny_clip)
     monkeypatch.setattr(fafa_adapter, "load_clip", tiny_clip)
     return cfg, weights, marker
@@ -146,14 +146,14 @@ def test_clip_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch,
     config = tmp_path / "config.yaml"
     config.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(sys, "argv", ["retrieve", "--config", str(config)])
-    retrieve_baseline.main()
+    cli.main(["retrieve", *sys.argv[1:]])
     directory = output_directory(cfg)
     saved = torch.load(directory / "rankings.pt", weights_only=True)
     assert saved["gallery_ids"] == ["q", "a", "b"]
     assert saved["rankings"].tolist() == [[1, 2]] * 4
     assert "coarse_topm" not in saved
     monkeypatch.setattr(sys, "argv", ["evaluate", "--config", str(config)])
-    evaluate.main()
+    cli.main(["evaluate", *sys.argv[1:]])
     metrics = json.loads((directory / "metrics.json").read_text())
     assert metrics["overall"]["full_r1"] == 1
     assert metrics["overall"]["num_queries"] == 4
@@ -164,7 +164,6 @@ def test_clip_cache_shared_across_modes_and_invalidated_by_image(
     benchmark, monkeypatch
 ):
     cfg, _, _ = benchmark
-    cfg["output"]["dir"] = str(output_directory(cfg))
     data = load_rcr_data(**cfg["data"])
     samples, gallery_ids = split_samples(data, "test"), split_image_ids(data, "test")
     _, first = clip.retrieve_clip(data, samples, gallery_ids, cfg, torch.device("cpu"))
@@ -202,9 +201,9 @@ def test_selection_does_not_read_gold_identity_count_or_positives(benchmark):
     cfg, _, _ = benchmark
     data = load_rcr_data(**cfg["data"])
     samples, gallery = split_samples(data, "test"), split_image_ids(data, "test")
-    localization = yaml.safe_load(
-        Path("configs/methods/baselines/fafa.yaml").read_text()
-    )["localization"]
+    localization = yaml.safe_load(Path("configs/methods/fafa.yaml").read_text())[
+        "localization"
+    ]
     candidates = [
         [
             {"box": [0, 0, 4, 8], "score": 0.9, "fallback": False},
@@ -246,9 +245,9 @@ def test_fafa_native_fda_and_setmatch_semantics():
 
 def test_fafa_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch):
     clip_cfg, weights, marker = benchmark
-    cfg = yaml.safe_load(Path("configs/methods/baselines/fafa.yaml").read_text())
+    cfg = yaml.safe_load(Path("configs/methods/fafa.yaml").read_text())
     cfg.update(split="test", data=clip_cfg["data"])
-    cfg["output"] = {"dir": str(tmp_path / "runs" / "fafa" / "{split}")}
+    cfg["output"] = {"dir": str(tmp_path / "runs" / "fafa")}
     cfg["cache"]["dir"] = str(tmp_path / "fafa_cache")
     cfg["checkpoint"].update(path=str(weights), runtime_assets_marker=str(marker))
     cfg["localization"]["query_selector"]["checkpoint"] = str(weights)
@@ -277,20 +276,19 @@ def test_fafa_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch)
     config = tmp_path / "fafa.yaml"
     config.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(sys, "argv", ["retrieve", "--config", str(config)])
-    retrieve_baseline.main()
+    cli.main(["retrieve", *sys.argv[1:]])
     directory = output_directory(cfg)
     saved = torch.load(directory / "rankings.pt", weights_only=True)
     assert saved["rankings"].tolist() == [[1, 2]] * 4
     run = json.loads((directory / "run.json").read_text())
     assert not run["selector"]["uses_gt_boxes_or_identities"]
     monkeypatch.setattr(sys, "argv", ["evaluate", "--config", str(config)])
-    evaluate.main()
+    cli.main(["evaluate", *sys.argv[1:]])
     metrics = json.loads((directory / "metrics.json").read_text())
     assert metrics["overall"]["full_map"] == 1
 
     from rcr.methods.baselines.runner import run_experiment
 
-    cfg["summary"] = str(tmp_path / "fafa_summary.csv")
     rows = run_experiment(cfg, splits=["test"])
     assert rows[0]["method"] == "fafa" and rows[0]["full_map"] == 1
 
@@ -304,18 +302,18 @@ def test_query_subset_requires_matching_evaluation_selection(
     monkeypatch.setattr(
         sys, "argv", ["retrieve", "--config", str(config), "--max-queries", "2"]
     )
-    retrieve_baseline.main()
+    cli.main(["retrieve", *sys.argv[1:]])
     directory = output_directory(cfg)
     run = json.loads((directory / "run.json").read_text())
     assert run["query_subset"] and run["num_queries"] == 2
     assert run["num_gallery"] == 3
     monkeypatch.setattr(sys, "argv", ["evaluate", "--config", str(config)])
     with pytest.raises(ValueError, match="sample_ids"):
-        evaluate.main()
+        cli.main(["evaluate", *sys.argv[1:]])
     monkeypatch.setattr(
         sys, "argv", ["evaluate", "--config", str(config), "--max-queries", "2"]
     )
-    evaluate.main()
+    cli.main(["evaluate", *sys.argv[1:]])
     assert (
         json.loads((directory / "metrics.json").read_text())["overall"]["num_queries"]
         == 2
@@ -360,7 +358,6 @@ def test_native_clip_library_load_and_rankings(benchmark, tmp_path, monkeypatch)
     monkeypatch.setattr(clip, "load_clip", load_native)
     cfg, _, _ = benchmark
     cfg["model"]["checkpoint"] = str(checkpoint)
-    cfg["output"]["dir"] = str(output_directory(cfg))
     data = load_rcr_data(**cfg["data"])
     samples, gallery = split_samples(data, "test"), split_image_ids(data, "test")
     scores, details = clip.retrieve_clip(
@@ -429,10 +426,7 @@ def fusion_benchmark(benchmark):
         )
     for i in ["q", "a", "b"]:
         (root / f"val/v{i}.png").write_bytes((root / f"test/{i}.png").read_bytes())
-    cfg["tuning"].update(
-        image_weights=[0, 0.25, 0.5, 0.75, 1], output=str(final.parent / "tuning.json")
-    )
-    cfg["summary"] = str(final.parent / "summary.csv")
+    cfg["tuning"].update(image_weights=[0, 0.25, 0.5, 0.75, 1])
     return cfg
 
 
@@ -452,7 +446,7 @@ def test_runner_freezes_val_weights_before_test(fusion_benchmark, monkeypatch):
     assert (
         len(rows) == 8 and len(loads) == 2
     )  # One encoder load per split, not per weight.
-    selection = json.loads(Path(cfg["tuning"]["output"]).read_text())
+    selection = json.loads((Path(cfg["output"]["dir"]) / "tuning.json").read_text())
     assert selection["split"] == "val" and selection["num_queries"] == 3
     for mode in ["early_fusion", "late_fusion"]:
         trial = selection["modes"][mode]
@@ -466,7 +460,9 @@ def test_runner_freezes_val_weights_before_test(fusion_benchmark, monkeypatch):
         metadata = json.loads((directory / "run.json").read_text())
         assert metadata["fusion_selection"]["split"] == "val"
         assert metadata["config"]["fusion"]["image_weight"] == 0.25
-    assert len(Path(cfg["summary"]).read_text().splitlines()) == 9
+    assert (
+        len((Path(cfg["output"]["dir"]) / "summary.csv").read_text().splitlines()) == 9
+    )
     monkeypatch.setattr(
         clip, "load_clip", lambda *a: pytest.fail("warm cache loaded model")
     )
@@ -549,7 +545,23 @@ def test_cached_scoring_matches_original_formula(mode, iw):
     actual = np.concatenate(
         [x for _, x in clip.iter_clip_scores(inputs, mode, fusion, 2)]
     )
-    expected = clip.score_features(gallery, qi, qt, mode, fusion).numpy()
+    # Independent dense formula; production mixes cached branch scores.
+    if mode == "clip_image":
+        expected = qi @ gallery.T
+    elif mode == "clip_text":
+        expected = qt @ gallery.T
+    elif mode == "early_fusion":
+        expected = F.normalize(iw * qi + (1 - iw) * qt, dim=-1) @ gallery.T
+    else:
+        a, b = qi @ gallery.T, qt @ gallery.T
+        a = (a - a.mean(-1, keepdim=True)) / a.std(
+            -1, keepdim=True, unbiased=False
+        ).clamp_min(1e-6)
+        b = (b - b.mean(-1, keepdim=True)) / b.std(
+            -1, keepdim=True, unbiased=False
+        ).clamp_min(1e-6)
+        expected = iw * a + (1 - iw) * b
+    expected = expected.numpy()
     np.testing.assert_allclose(actual, expected, atol=2e-6)
 
 
@@ -609,8 +621,6 @@ def test_native_checkpoint_loads_without_network(tmp_path, checkpoint_format):
 
 
 def test_runner_cli(fusion_benchmark, tmp_path, monkeypatch):
-    from tools.methods import run_baselines
-
     config = tmp_path / "runner.yaml"
     config.write_text(yaml.safe_dump(fusion_benchmark))
     monkeypatch.setattr(
@@ -618,14 +628,14 @@ def test_runner_cli(fusion_benchmark, tmp_path, monkeypatch):
         "argv",
         ["run", "--config", str(config), "--modes", "clip_text", "--splits", "test"],
     )
-    run_baselines.main()
+    cli.main(["run", *sys.argv[1:]])
     directory = output_directory(
         {**fusion_benchmark, "mode": "clip_text", "split": "test"}
     )
     assert (directory / "metrics.json").is_file()
 
 
-def test_shell_runner_with_native_clip(fusion_benchmark, tmp_path):
+def test_cli_runner_with_native_clip(fusion_benchmark, tmp_path):
     """Real subprocess, native tokenizer/encoders, no monkeypatch in the child."""
     import os
     import subprocess
@@ -651,16 +661,15 @@ def test_shell_runner_with_native_clip(fusion_benchmark, tmp_path):
     config.write_text(yaml.safe_dump(cfg))
     env = {
         **os.environ,
-        "BASELINE_PYTHON": sys.executable,
         "PYTHONPATH": str(Path("src").resolve()),
         "OMP_NUM_THREADS": "1",
     }
     for splits in (["val", "test"], ["test"]):
         result = subprocess.run(
             [
-                "bash",
-                "scripts/run_baselines.bash",
-                "clip",
+                sys.executable,
+                "tools/methods/run.py",
+                "run",
                 "--config",
                 str(config),
                 "--splits",

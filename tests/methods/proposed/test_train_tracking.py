@@ -1,13 +1,11 @@
 from types import SimpleNamespace
 
-import pytest
 import torch
 from torch import nn
 
-from tools.methods.train_proposed import (
+from rcr.methods.proposed.train import (
     _fixed_subset,
     _gradient_norm,
-    _validate_evaluation_config,
     _wandb_run,
 )
 
@@ -27,6 +25,8 @@ def _config() -> dict:
         "train": {"epochs": 2},
         "optimizer": {"lr": 1e-4},
         "loss": {"identity_weight": 0.1},
+        "retrieval": {"top_m": 20},
+        "candidate_ks": [5, 20],
         "evaluation": {
             "enabled": True,
             "every_epochs": 2,
@@ -66,6 +66,8 @@ def test_wandb_tracks_only_training_essentials(monkeypatch, tmp_path) -> None:
         "optimizer",
         "loss",
         "evaluation",
+        "retrieval",
+        "candidate_ks",
         "cache",
         "num_train_samples",
         "num_val_samples",
@@ -98,18 +100,3 @@ def test_train_evaluation_subset_is_fixed_and_keeps_dataset_order() -> None:
     selected = [int(sample["sample_id"]) for sample in first]
     assert selected == sorted(selected)
     assert len(selected) == 6
-
-
-def test_evaluation_config_rejects_candidate_cutoff_beyond_shortlist() -> None:
-    cfg = _config()["evaluation"]
-    cfg["candidate_ks"] = [21]
-    with pytest.raises(ValueError, match="cannot exceed"):
-        _validate_evaluation_config(cfg)
-
-
-def test_evaluation_config_accepts_legacy_and_rejects_zero_coarse_batch_size() -> None:
-    cfg = _config()["evaluation"]
-    _validate_evaluation_config(cfg)
-    cfg["coarse_batch_size"] = 0
-    with pytest.raises(ValueError, match="coarse_batch_size"):
-        _validate_evaluation_config(cfg)

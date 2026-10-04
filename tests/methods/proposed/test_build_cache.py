@@ -5,9 +5,9 @@ import torch
 from PIL import Image
 from torch import nn
 
+from rcr.methods.proposed.build_cache import boxes_to_scene, build_cache
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import ImageEncoder
-from tools.methods.build_cache import boxes_to_scene, build_cache
 
 
 class DetectorBatch(dict):

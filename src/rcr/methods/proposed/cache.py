@@ -87,8 +87,6 @@ class GalleryCache:
 
         # Storage precision is independent of the FP32 train/inference model.
         scene = torch.stack([x["scene"] for x in items]).float()
-        if scene.shape[1] != self.patch_hw[0] * self.patch_hw[1]:
-            raise ValueError("cache scene patch count differs from patch_hw")
         k = max(x["persons"].shape[0] for x in items)
 
         def pad(name: str, dim: int) -> Tensor:

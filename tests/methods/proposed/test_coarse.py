@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from rcr.methods.proposed.coarse import coarse_scores
+from rcr.methods.proposed.coarse import coarse_scores, combine_scores
 
 
 def test_coarse_scores_match_formula() -> None:
@@ -116,3 +116,48 @@ def test_empty_query_uses_state_and_missing_embeddings_fail() -> None:
     torch.testing.assert_close(score, torch.tensor([-0.5, 0.5]))
     with pytest.raises(ValueError, match="requires both"):
         coarse_scores(*args, beta=0.3)
+
+
+def test_zscore_uses_common_gallery_support_and_excludes_self():
+    identity = torch.tensor([10000.0, 2, 4, 6, -torch.inf])
+    state = torch.tensor([-10000.0, 0.1, 0.2, 0.7, 10000.0])
+    result = combine_scores(identity, state, beta=0.5, exclude_index=0)
+    i, s = identity[1:4], state[1:4]
+    expected = (i - i.mean()) / i.std(unbiased=False)
+    expected += 0.5 * (s - s.mean()) / s.std(unbiased=False)
+    torch.testing.assert_close(result[1:4], expected)
+    assert result[[0, 4]].isneginf().all()
+    # Shifting or positively rescaling either branch must not change fusion.
+    shifted = combine_scores(
+        3 * identity + 10, 7 * state - 3, beta=0.5, exclude_index=0
+    )
+    torch.testing.assert_close(result, shifted)
+
+
+def test_state_only_ignores_identity_mask_and_beta():
+    identity = torch.full((4,), -torch.inf)
+    state = torch.tensor([100.0, -0.2, 0.4, 0.1])
+    result = combine_scores(identity, state, mode="state_only", beta=0, exclude_index=0)
+    torch.testing.assert_close(
+        result, combine_scores(None, state, mode="state_only", beta=99, exclude_index=0)
+    )
+    assert result[1:].isfinite().all()
+    assert result.argsort(descending=True).tolist() == [2, 3, 1, 0]
+
+
+@pytest.mark.parametrize("identity", [[-torch.inf] * 3, [2, 2, 2], [2, -torch.inf, 2]])
+def test_zscore_empty_constant_and_singleton_support(identity):
+    values = torch.tensor(identity, dtype=torch.float32)
+    result = combine_scores(values, None, beta=0, exclude_index=0)
+    assert not result.isnan().any()
+    assert (result[result.isfinite()] == 0).all()
+    assert result[0].isneginf()
+
+
+def test_raw_fusion_and_zero_beta_are_backward_compatible():
+    identity = torch.tensor([0.1, 0.5, -torch.inf])
+    state = torch.tensor([0.4, -0.2, 1.0])
+    result = combine_scores(identity, state, beta=0.4, normalization="none")
+    torch.testing.assert_close(result, identity + 0.4 * state)
+    result = combine_scores(identity, None, beta=0, normalization="none")
+    assert torch.equal(result, identity)

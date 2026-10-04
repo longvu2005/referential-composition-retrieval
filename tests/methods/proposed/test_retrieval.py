@@ -4,14 +4,15 @@ import pytest
 import torch
 from torch import nn
 
+from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.proposed import retrieval
 from rcr.methods.proposed.coarse import coarse_scores
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.retrieval import (
     _coarse_scores_chunked,
     _encode_gallery_identity,
-    evaluate_retrieval_output,
     retrieve_rankings,
+    retrieve_variants,
 )
 
 
@@ -401,3 +402,139 @@ def test_evaluation_rejects_rankings_from_the_old_global_gallery():
 
     with pytest.raises(ValueError, match="do not match the test gallery"):
         evaluate_retrieval_output(data, [_sample()], output, [1, 2], split="test")
+
+
+def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch):
+    torch.manual_seed(42)
+    cache = _Cache(["q", "a", "b", "c", "d"])
+    cache.mask[-1] = False
+    model, encoder = RCRModel(8, 6, 2, max_subjects=1), _TextEncoder()
+    args = ([_sample()], cache, _Tokenizer(), encoder, model, torch.device("cpu"))
+    base = dict(
+        top_m=3,
+        fine_batch_size=2,
+        identity_batch_size=2,
+        coarse_batch_size=2,
+        coarse_normalization="zscore",
+        rerank=False,
+    )
+    variants = {
+        "id": {**base, "coarse_mode": "identity_only"},
+        "state": {**base, "coarse_mode": "state_only"},
+        "beta0": {**base, "coarse_beta": 0.0},
+        "beta1": {**base, "coarse_beta": 1.0},
+        "fine": {**base, "coarse_beta": 1.0, "rerank": True},
+        "fine_small": {**base, "coarse_beta": 1.0, "rerank": True, "top_m": 1},
+    }
+    calls, loads = [], []
+    score_identity, load = retrieval._coarse_scores_chunked, cache.load
+
+    def count_scores(*args, **kwargs):
+        calls.append(1)
+        return score_identity(*args, **kwargs)
+
+    def count_loads(indices):
+        loads.extend(indices.tolist())
+        return load(indices)
+
+    monkeypatch.setattr(retrieval, "_coarse_scores_chunked", count_scores)
+    monkeypatch.setattr(cache, "load", count_loads)
+    actual = retrieve_variants(*args, gallery_ids=cache.image_ids, variants=variants)
+    assert len(calls) == 1  # One ID score vector for all beta/mode variants.
+    assert loads[0] == 0 and len(loads[1:]) == len(set(loads[1:])) == 3
+    for name, cfg in variants.items():
+        # Change chunk sizes to catch normalization accidentally performed per chunk.
+        for batch_size in (1, 20):
+            expected = retrieve_rankings(
+                *args,
+                gallery_ids=cache.image_ids,
+                **{
+                    **cfg,
+                    "identity_batch_size": batch_size,
+                    "coarse_batch_size": batch_size,
+                },
+            )
+            for key in ("rankings", "coarse_topm", "coarse_rankings"):
+                assert torch.equal(actual[name][key], expected[key])
+        assert actual[name]["rankings"].shape == (1, 4)
+        assert set(actual[name]["rankings"][0].tolist()) == {1, 2, 3, 4}
+    assert torch.equal(actual["id"]["rankings"], actual["beta0"]["rankings"])
+    assert torch.equal(actual["beta1"]["rankings"], actual["beta1"]["coarse_rankings"])
+
+
+def test_state_only_coarse_never_evaluates_identity_or_fine(monkeypatch):
+    cache = _Cache(["q", "a", "b", "c"])
+    cache.mask[:] = False
+    model = RCRModel(8, 6, 2, max_subjects=1, state_dim=2)
+
+    def fail(*args, **kwargs):
+        pytest.fail("state-only coarse used the ID/fine branch")
+
+    monkeypatch.setattr(model, "encode_query", fail)
+    monkeypatch.setattr(model, "score_target", fail)
+    monkeypatch.setattr(retrieval, "_encode_gallery_identity", fail)
+    monkeypatch.setattr(retrieval, "_coarse_scores_chunked", fail)
+    monkeypatch.setattr(
+        model, "encode_text_state", lambda *args: torch.tensor([[1.0, 0]])
+    )
+    monkeypatch.setattr(
+        retrieval,
+        "_encode_gallery_state",
+        lambda *args: torch.tensor([[0.0, 1], [0.1, 0], [1.0, 0], [0.5, 0]]),
+    )
+    output = retrieve_rankings(
+        [_sample()],
+        cache,
+        _Tokenizer(),
+        _TextEncoder(),
+        model,
+        torch.device("cpu"),
+        gallery_ids=cache.image_ids,
+        top_m=1,
+        fine_batch_size=1,
+        identity_batch_size=2,
+        coarse_mode="state_only",
+        coarse_beta=0,
+        coarse_normalization="zscore",
+        rerank=False,
+    )
+    assert output["rankings"].tolist() == [[2, 3, 1]]
+    assert output["coarse_topm"].tolist() == [[2]]
+
+
+def test_runtime_beta_changes_ranking_without_mutating_checkpoint_beta(monkeypatch):
+    cache = _Cache()
+    model = RCRModel(8, 6, 2, max_subjects=1, state_dim=2, coarse_beta=0.0)
+    monkeypatch.setattr(
+        retrieval,
+        "_coarse_scores_chunked",
+        lambda *args: torch.tensor([0.0, 1.0, -1.0]),
+    )
+    monkeypatch.setattr(
+        model, "encode_text_state", lambda *args: torch.tensor([[1.0, 0.0]])
+    )
+    monkeypatch.setattr(
+        retrieval,
+        "_encode_gallery_state",
+        lambda *args: torch.tensor([[0.0, 0], [-1.0, 0], [1.0, 0]]),
+    )
+    settings = dict(
+        top_m=1,
+        fine_batch_size=1,
+        identity_batch_size=2,
+        rerank=False,
+        coarse_normalization="zscore",
+    )
+    results = retrieve_variants(
+        [_sample()],
+        cache,
+        _Tokenizer(),
+        _TextEncoder(),
+        model,
+        torch.device("cpu"),
+        gallery_ids=cache.image_ids,
+        variants={"inherited": settings, "override": {**settings, "coarse_beta": 2.0}},
+    )
+    assert results["inherited"]["rankings"].tolist() == [[1, 2]]
+    assert results["override"]["rankings"].tolist() == [[2, 1]]
+    assert model.coarse_beta == 0.0

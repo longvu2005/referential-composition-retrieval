@@ -1,5 +1,7 @@
 """Cheap identity plus global state retrieval for gallery shortlisting."""
 
+import math
+
 import torch
 from torch import Tensor
 
@@ -93,3 +95,54 @@ def coarse_scores(
     ):
         raise ValueError("state embedding shapes must be [Ds] and [G,Ds]")
     return scores + beta * (gallery_state @ query_state)
+
+
+def combine_scores(
+    identity: Tensor | None,
+    state: Tensor | None,
+    *,
+    mode: str = "identity_state",
+    beta: float = 0.4,
+    normalization: str = "zscore",
+    exclude_index: int | None = None,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Combine raw scores AFTER scoring the complete split gallery for one query.
+
+    Z-scores use population standard deviation on the same eligible images for
+    both branches. Self and non-finite scores do not enter the statistics.
+    Identity modes retain the missing-target-person policy (-inf); state_only
+    ignores identity entirely, including that mask. Constant branches become 0.
+    """
+    if mode not in ("identity_only", "state_only", "identity_state"):
+        raise ValueError(f"unknown coarse mode: {mode}")
+    if normalization not in ("none", "zscore"):
+        raise ValueError(f"unknown coarse normalization: {normalization}")
+    if not math.isfinite(beta) or beta < 0:
+        raise ValueError("coarse_beta must be finite and nonnegative")
+    branches = (
+        [(state, 1.0)]
+        if mode == "state_only"
+        else [(identity, 1.0)]
+        + ([(state, beta)] if mode == "identity_state" and beta != 0 else [])
+    )
+    if any(scores is None for scores, _ in branches):
+        raise ValueError(f"{mode} requires its active score branches")
+    first = branches[0][0]
+    valid = torch.ones_like(first, dtype=torch.bool)
+    for scores, _ in branches:
+        valid &= torch.isfinite(scores)
+    if exclude_index is not None:
+        valid[exclude_index] = False
+    result = torch.full_like(first, -torch.inf, dtype=torch.float32)
+    if not valid.any():
+        return result
+    result[valid] = 0
+    for scores, weight in branches:
+        values = scores[valid].float()
+        if normalization == "zscore":
+            values = (values - values.mean()) / values.std(unbiased=False).clamp_min(
+                eps
+            )
+        result[valid] += weight * values
+    return result

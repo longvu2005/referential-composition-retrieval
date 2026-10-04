@@ -1,12 +1,10 @@
 """Build reference-free gallery features for coarse and fine retrieval."""
 
-import argparse
 import os
 from pathlib import Path
 from uuid import uuid4
 
 import torch
-import yaml
 from PIL import Image, ImageOps
 from torch import nn
 from tqdm import tqdm
@@ -14,6 +12,7 @@ from tqdm import tqdm
 from rcr.methods.common.anchors import match_heads_to_persons
 from rcr.methods.common.data import load_rcr_data
 from rcr.methods.common.detector import detect
+from rcr.methods.common.experiment import resolve_device
 from rcr.methods.proposed.encoders import ImageEncoder
 
 
@@ -215,18 +214,8 @@ class _LetterboxProcessor:
         )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/methods/proposed/build_cache.yaml")
-    args = parser.parse_args()
-
-    with open(args.config, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    device_name = cfg["device"]
-    if device_name == "auto":
-        device_name = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device_name)
+def prepare_cache(cfg: dict) -> None:
+    device = resolve_device(cfg)
 
     from transformers import (
         AutoImageProcessor,
@@ -264,7 +253,3 @@ def main() -> None:
         detector_text_threshold=detector_cfg["text_threshold"],
         storage_dtype=cfg.get("cache", {}).get("storage_dtype", "float32"),
     )
-
-
-if __name__ == "__main__":
-    main()

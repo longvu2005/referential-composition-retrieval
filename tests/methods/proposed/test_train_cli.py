@@ -9,8 +9,11 @@ import torch
 import yaml
 from torch import nn
 
+from rcr.methods.common import experiment as evaluate_proposed
+from rcr.methods.proposed import inference as retrieve_proposed
+from rcr.methods.proposed import train as train_proposed
 from tests.methods.proposed.test_retrieval import _Cache, _sample, _Tokenizer
-from tools.methods import evaluate_proposed, retrieve_proposed, train_proposed
+from tools.methods import run as cli
 
 
 class Tokenizer(_Tokenizer):
@@ -118,6 +121,15 @@ def test_train_checkpoints_metrics_and_retrieve(
     monkeypatch.setattr(train_proposed, "_wandb_run", lambda *args: run)
 
     cfg = {
+        "method": "proposed",
+        "runtime": {"device": "cpu"},
+        "retrieval": {
+            "top_m": 2,
+            "fine_batch_size": 1,
+            "identity_batch_size": 2,
+            "coarse_batch_size": 2,
+        },
+        "candidate_ks": [1, 2],
         "data": {"final_dir": "unused", "image_root": "unused", "cache": "unused"},
         "model": {
             "text_model": "tiny",
@@ -133,7 +145,6 @@ def test_train_checkpoints_metrics_and_retrieve(
             "batch_size": 2,
             "candidates": 2,
             "seed": 0,
-            "device": "cpu",
         },
         "optimizer": {"lr": 1e-4, "text_lr": 1e-5, "weight_decay": 0.01},
         "loss": {
@@ -159,7 +170,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     config_path = tmp_path / "train.yaml"
     config_path.write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(sys, "argv", ["train", "--config", str(config_path)])
-    train_proposed.main()
+    cli.main(["train", *sys.argv[1:]])
     assert len(evaluation_calls) == (2 * (1 + bool(train_queries)) if enabled else 0)
 
     output = tmp_path / "run"
@@ -200,20 +211,17 @@ def test_train_checkpoints_metrics_and_retrieve(
     # Reload the saved checkpoint through the public retrieval and evaluation CLIs.
     cfg["checkpoint"] = str(output / ("best.pt" if enabled else "last.pt"))
     cfg["split"] = "val"
-    cfg["retrieval"] = {**cfg["evaluation"], "device": "cpu"}
     config_path.write_text(yaml.safe_dump(cfg))
-    retrieve_proposed.main()
-    saved = torch.load(output / "rankings.pt", weights_only=True)
+    cli.main(["retrieve", *sys.argv[1:]])
+    saved = torch.load(output / "val/rankings.pt", weights_only=True)
     assert saved["sample_ids"] == ["val1"]
     assert saved["gallery_ids"] == ["val_n", "val_q", "val_a"]
     assert set(saved["rankings"][0].tolist()) == {0, 2}
 
-    cfg["rankings"] = str(output / "rankings.pt")
     cfg["candidate_ks"] = [1, 2]
-    cfg["output"] = str(output / "metrics.json")
     config_path.write_text(yaml.safe_dump(cfg))
-    evaluate_proposed.main()
-    metrics = json.loads((output / "metrics.json").read_text())
+    cli.main(["evaluate", *sys.argv[1:]])
+    metrics = json.loads((output / "val/metrics.json").read_text())
     assert metrics["overall"]["num_queries"] == 1
 
 
@@ -222,15 +230,11 @@ def test_retrieve_rejects_old_checkpoint_before_loading_backbones(
 ) -> None:
     checkpoint_path = tmp_path / "old.pt"
     torch.save({"model": {}, "config": {"model": {}}}, checkpoint_path)
-    config_path = tmp_path / "retrieve.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
+    with pytest.raises(ValueError, match="train a new checkpoint"):
+        retrieve_proposed.retrieve(
             {
                 "checkpoint": str(checkpoint_path),
-                "retrieval": {"device": "cpu"},
+                "runtime": {"device": "cpu"},
+                "retrieval": {},
             }
         )
-    )
-    monkeypatch.setattr(sys, "argv", ["retrieve", "--config", str(config_path)])
-    with pytest.raises(ValueError, match="train a new checkpoint"):
-        retrieve_proposed.main()
