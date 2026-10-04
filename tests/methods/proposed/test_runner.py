@@ -12,6 +12,7 @@ import yaml
 from PIL import Image
 
 from rcr.methods.proposed import runner
+from rcr.methods.proposed import train as training_cli
 from tests.methods.proposed.test_build_cache import (
     Backbone as ImageBackbone,
 )
@@ -42,7 +43,8 @@ def experiment(tmp_path):
             heads.append(
                 {
                     "image_id": image_id,
-                    "identity_id": "p1" if name != "n" else "p2",
+                    # Same ID, different condition: meaningful state supervision.
+                    "identity_id": "p1",
                     "x": 2,
                     "y": 2,
                     "width": 2,
@@ -257,3 +259,79 @@ def test_rebuilt_cache_is_rejected_before_model_load(
     )
     with pytest.raises(ValueError, match="differs from the training cache"):
         cli.main(["retrieve", "--config", str(path), "--splits", "test"])
+
+
+def test_training_mining_schedule_and_train_only_pool(
+    experiment, local_stages, monkeypatch
+):
+    cfg, path = experiment
+    cfg["train"]["epochs"] = 4
+    cfg["train"]["sampling"].update(
+        identity_fraction=0.0,
+        hard_fraction=1.0,
+        warmup_epochs=1,
+        refresh_every_epochs=2,
+        pool_size=2,
+    )
+    path.write_text(yaml.safe_dump(cfg))
+    calls = []
+    original = training_cli.mine_hard_negatives
+
+    def mine(samples, *args, **kwargs):
+        assert [row["sample_id"] for row in samples] == ["train"]
+        assert kwargs["gallery_ids"] == ["train_q", "train_a", "train_n"]
+        pools = original(samples, *args, **kwargs)
+        assert pools == {"train": ["train_n"]}
+        calls.append(pools)
+        return pools
+
+    monkeypatch.setattr(training_cli, "mine_hard_negatives", mine)
+    cli.main(["run", "--config", str(path), "--build-cache", "--train"])
+    assert len(calls) == 2
+    output = Path(cfg["output"]["dir"])
+    pools = json.loads((output / "hard_negatives.json").read_text())
+    assert pools["model_epoch"] == 3 and pools["split"] == "train"
+    history = [
+        json.loads(line) for line in (output / "history.jsonl").read_text().splitlines()
+    ]
+    assert [row["epoch/sampled_hard_fraction"] for row in history] == [0, 1, 1, 1]
+    assert all(row["epoch/state_pairs"] == 1 for row in history)
+    checkpoint = torch.load(output / "last.pt", weights_only=True)
+    assert checkpoint["state_supervised_pairs"] == 4
+
+
+def test_training_rejects_using_state_without_its_loss(experiment, local_stages):
+    cfg, _ = experiment
+    cfg["loss"]["state_weight"] = 0
+    with pytest.raises(ValueError, match="state_weight=0"):
+        training_cli.train(cfg)
+
+
+def test_validation_fingerprint_never_depends_on_test_labels(experiment):
+    from rcr.methods.common.data import load_rcr_data, split_fingerprint
+
+    cfg, _ = experiment
+    data = load_rcr_data(cfg["data"]["final_dir"])
+    before = split_fingerprint(data, "val")
+    data.samples_by_id["test"]["positive_image_ids"] = ["test_n"]
+    data.samples_by_id["test"]["final_change"] = "changed test"
+    assert split_fingerprint(data, "val") == before
+    data.samples_by_id["val"]["final_change"] += " outdoors"
+    assert split_fingerprint(data, "val") != before
+
+
+def test_inference_rejects_checkpoint_with_untrained_state(
+    experiment, local_stages, monkeypatch
+):
+    cfg, path = experiment
+    cli.main(["run", "--config", str(path), "--build-cache", "--train"])
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["state_supervised_pairs"] = 0
+    torch.save(checkpoint, cfg["checkpoint"])
+    monkeypatch.setattr(
+        sys.modules["transformers"].AutoModel,
+        "from_pretrained",
+        lambda *args: pytest.fail("loaded untrained state model"),
+    )
+    with pytest.raises(ValueError, match="state branch is untrained"):
+        cli.main(["retrieve", "--config", str(path)])

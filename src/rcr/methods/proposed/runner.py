@@ -26,6 +26,7 @@ def run_experiment(
     if train:
         cfg["checkpoint"] = str(root / "best.pt")
         cfg.pop("selected_checkpoint_sha256", None)
+        cfg.pop("selected_validation_sha256", None)
     path = root / "run_config.yaml"
     path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     (root / "summary.csv").unlink(missing_ok=True)

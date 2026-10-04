@@ -4,6 +4,12 @@ stage: inference
 output_dir: runs/ablations/retrieval
 overrides: {}
 experiments:
+  - name: fine_identity_only
+    overrides:
+      retrieval.coarse_mode: identity_only
+      retrieval.rerank: true
+      retrieval.top_m: 500
+      candidate_ks: [100, 500]
   - name: coarse_only
     overrides:
       retrieval.rerank: false

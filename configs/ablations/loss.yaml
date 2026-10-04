@@ -6,6 +6,9 @@ output_dir: runs/ablations/loss
 overrides:
   train.seed: 0
   retrieval.rerank: true
+  # Hold the shortlist policy fixed, including when state projections are untrained.
+  # full vs without_state_loss isolates auxiliary supervision, not score fusion.
+  retrieval.coarse_mode: identity_only
 experiments:
   - name: full
     overrides: {}

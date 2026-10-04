@@ -29,4 +29,4 @@ experiments:
 # Metric and grid should be fixed before examining the results.
 select:
   group: beta_sweep
-  metric: candidate_recall_100
+  metric: candidate_recall_500

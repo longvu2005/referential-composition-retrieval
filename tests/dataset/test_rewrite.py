@@ -83,7 +83,9 @@ def test_validate_review_output_rejects_wrong_subject_order_or_relation() -> Non
         validate_review_output(
             "RELATIONAL",
             {
-                "final_desc": "Identify Subject 2 as the woman and Subject 1 as the man",
+                "final_desc": (
+                    "Identify Subject 2 as the woman and Subject 1 as the man"
+                ),
                 "final_change": record["final_change"],
             },
         )
@@ -92,7 +94,9 @@ def test_validate_review_output_rejects_wrong_subject_order_or_relation() -> Non
             "RELATIONAL",
             {
                 "final_desc": record["final_desc"],
-                "final_change": "then retrieve target images where Subject 1 is smiling",
+                "final_change": (
+                    "then retrieve target images where Subject 1 is smiling"
+                ),
             },
         )
 

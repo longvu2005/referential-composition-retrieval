@@ -72,6 +72,7 @@ def test_coarse_suite_selects_on_val_reuses_encoder_and_freezes_test(
     assert selection["split"] == "val" and selection["value"] == 1
     assert selected["retrieval"]["coarse_beta"] == 0.5
     assert selected["selected_checkpoint_sha256"] == selection["checkpoint_sha256"]
+    assert selected["selected_validation_sha256"] == selection["validation_sha256"]
     with (root / "summary.csv").open() as handle:
         assert len(list(csv.DictReader(handle))) == 13
     assert path.read_bytes() == original_config
@@ -90,13 +91,31 @@ def test_coarse_suite_selects_on_val_reuses_encoder_and_freezes_test(
         base_config=str(root / "selected.yaml"), output_dir=str(tmp_path / "retrieval")
     )
     retrieval_rows = ablation.run_ablation(retrieval_suite, Path(cli.__file__))
-    assert len(retrieval_rows) == 4
+    assert len(retrieval_rows) == 5
     assert {row["coarse_beta"] for row in retrieval_rows} == {0.5}
-    assert len({row["coarse_full_map"] for row in retrieval_rows}) == 1
+    assert (
+        len(
+            {
+                row["coarse_full_map"]
+                for row in retrieval_rows
+                if row["coarse_mode"] == "identity_state"
+            }
+        )
+        == 1
+    )
     with (tmp_path / "retrieval/summary.csv").open() as handle:
         table = list(csv.DictReader(handle))
     assert table[0]["candidate_recall_1000"] == ""
     assert table[-1]["candidate_recall_1000"] != ""
+    # Changing val annotations invalidates selection even with the same checkpoint.
+    samples_path = Path(cfg["data"]["final_dir"]) / "samples.jsonl"
+    original_samples = samples_path.read_bytes()
+    samples = [json.loads(line) for line in original_samples.splitlines()]
+    next(s for s in samples if s["sample_id"] == "val")["final_change"] += " outdoors"
+    samples_path.write_text("".join(json.dumps(s) + "\n" for s in samples))
+    with pytest.raises(ValueError, match="validation data changed"):
+        inference.retrieve({**selected, "split": "test"})
+    samples_path.write_bytes(original_samples)
     # A later checkpoint overwrite must not silently reuse a stale beta selection.
     checkpoint.write_bytes(original_checkpoint + b"changed")
     monkeypatch.setattr(

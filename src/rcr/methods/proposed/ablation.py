@@ -76,6 +76,7 @@ def expand_experiments(suite: dict) -> list[dict]:
                     )
                 cfg["checkpoint"] = str(root / "best.pt")
                 cfg.pop("selected_checkpoint_sha256", None)
+                cfg.pop("selected_validation_sha256", None)
                 cfg["wandb"]["name"] = name
             experiments.append(
                 {"name": name, "group": group, "sweep": swept, "config": cfg}
@@ -102,6 +103,7 @@ def _result_row(experiment: dict, cfg: dict, overall: dict, stage: str) -> dict:
         "split": cfg["split"],
         "checkpoint": cfg["checkpoint"],
         "checkpoint_sha256": metadata["checkpoint_sha256"],
+        "validation_sha256": metadata["validation_sha256"],
         "seed": metadata["checkpoint_seed"],
         "sweep": json.dumps(experiment["sweep"], sort_keys=True),
         **{
@@ -194,6 +196,7 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                 },
             )
             cfg["selected_checkpoint_sha256"] = best["checkpoint_sha256"]
+            cfg["selected_validation_sha256"] = best["validation_sha256"]
             if "test" in splits:
                 infer([{**chosen, "config": cfg}], "test")
             _write_config(root / "selected.yaml", cfg)
@@ -208,6 +211,7 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                     "coarse_beta": best["coarse_beta"],
                     "checkpoint": best["checkpoint"],
                     "checkpoint_sha256": best["checkpoint_sha256"],
+                    "validation_sha256": best["validation_sha256"],
                     "tie_break": "first in YAML sweep order",
                     "config": str(root / "selected.yaml"),
                 },

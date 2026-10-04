@@ -72,6 +72,8 @@ def compute_loss(
         person_mask &= query_person_mask[:, None].bool()
     if subject_mask is not None:
         person_mask &= subject_mask[:, :, None].bool()
+    # Unmatched detections are unknown, not annotated negative people.
+    person_mask &= batch["query_identity_labels"][:, None] >= 0
     # A missed GT person is unknown, not evidence that every detected person
     # is a negative for that Subject. Skip its grounding row entirely.
     person_mask &= batch["grounding_targets"].bool().any(dim=-1, keepdim=True)
@@ -106,18 +108,32 @@ def compute_loss(
         valid_mask=batch.get("candidate_mask"),
     )
 
-    # Separate supervision teaches global text/image alignment without changing
-    # the identity formula or adding coarse scores to the fine reasoner.
+    # State sees only the condition. Compare positive/negative images that both
+    # contain all required identities; wrong-ID images have unknown state labels.
     loss_state = scores.new_zeros(())
+    state_pairs = scores.new_zeros((), dtype=torch.long)
+    state_queries = scores.new_zeros((), dtype=torch.long)
     if state_weight != 0:
-        z_text = model.encode_text_state(batch["change"], batch.get("change_mask"))
-        z_image = model.encode_image_state(batch["target_scene"].mean(dim=-2))
-        state_scores = (z_text[:, None] * z_image).sum(dim=-1)
-        loss_state = retrieval_loss(
-            state_scores / state_temperature,
-            batch["positive_mask"],
-            valid_mask=batch.get("candidate_mask"),
-        )
+        if "state_mask" not in batch:
+            raise ValueError("state loss requires a GT identity-based state_mask")
+        state_mask = batch["state_mask"].bool()
+        if state_mask.shape != batch["positive_mask"].shape:
+            raise ValueError("state_mask must match candidate/positive shape")
+        if "candidate_mask" in batch:
+            state_mask = state_mask & batch["candidate_mask"].bool()
+        positives = (batch["positive_mask"] & state_mask).sum(dim=-1)
+        negatives = (~batch["positive_mask"] & state_mask).sum(dim=-1)
+        state_pairs = (positives * negatives).sum()
+        state_queries = ((positives > 0) & (negatives > 0)).sum()
+        if state_pairs > 0:
+            z_text = model.encode_text_state(batch["change"], batch.get("change_mask"))
+            z_image = model.encode_image_state(batch["target_scene"].mean(dim=-2))
+            state_scores = (z_text[:, None] * z_image).sum(dim=-1)
+            loss_state = retrieval_loss(
+                state_scores / state_temperature,
+                batch["positive_mask"],
+                valid_mask=state_mask,
+            )
 
     loss = (
         grounding_weight * loss_ground
@@ -125,9 +141,28 @@ def compute_loss(
         + retrieval_weight * loss_retrieval
         + state_weight * loss_state
     )
+    predicted = (logits.detach() >= 0) & person_mask
+    expected = batch["grounding_targets"].bool() & person_mask
+    active_subjects = (
+        torch.ones(logits.shape[:2], dtype=torch.bool, device=logits.device)
+        if subject_mask is None
+        else subject_mask.bool()
+    )
     return loss, {
         "grounding": loss_ground.detach(),
         "identity": loss_identity.detach(),
         "retrieval": loss_retrieval.detach(),
         "state": loss_state.detach(),
+        "grounding_tp": (predicted & expected).sum(),
+        "grounding_fp": (predicted & ~expected).sum(),
+        "grounding_fn": (~predicted & expected).sum(),
+        "grounding_subjects": active_subjects.sum(),
+        "grounding_supervised_subjects": person_mask.any(dim=-1).sum(),
+        "grounding_complete_subjects": (
+            batch.get("grounding_complete", torch.zeros_like(active_subjects))
+            & active_subjects
+        ).sum(),
+        "state_pairs": state_pairs,
+        "state_active_queries": state_queries,
+        "queries": scores.new_tensor(b, dtype=torch.long),
     }

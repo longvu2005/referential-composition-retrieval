@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass
@@ -160,3 +161,16 @@ def split_image_ids(data: RCRData, split: str) -> list[str]:
         for image_id in data.gallery_ids
         if PurePosixPath(data.images_by_id[image_id]["path"]).parts[0] == split
     ]
+
+
+def split_fingerprint(data: RCRData, split: str) -> str:
+    """Fingerprint the exact split text/labels/gallery used for model selection."""
+    images = split_image_ids(data, split)
+    payload = {
+        "samples": split_samples(data, split),
+        "images": [data.images_by_id[image_id] for image_id in images],
+        "heads": [data.gt_head_boxes_by_image.get(image_id, []) for image_id in images],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

@@ -163,7 +163,8 @@ where:
 
 - `L_ground`: masked BCE-with-logits for independent Subject/person labels;
   a Subject whose annotated identities have no detected match is excluded from
-  grounding supervision instead of treating every detection as a negative;
+  grounding supervision instead of treating every detection as a negative.
+  Unmatched detections with unknown identity are also excluded from this loss;
 - `L_id`: supervised contrastive loss (default temperature `0.1`) over query
   persons and persons from valid positive target images, using one shared identity
   label vocabulary. Unknown identity `-1`, padding, negative target images and
@@ -172,14 +173,36 @@ where:
 - `L_ret`: mean pairwise `softplus(S_f(q,n) - S_f(q,p))` over valid
   positive/negative pairs;
 - `L_state`: the same masked pairwise ranking loss applied to
-  `S_state / state_temperature` (default `0.1`), using the sampled Full Positive
-  and negatives. It trains both state projections and the shared text encoder;
-  there is no in-batch negative assumption. `state_weight` defaults to `1.0`.
+  `S_state / state_temperature` (default `0.1`). Only sampled images containing
+  **all required identities** are eligible: Full Positives versus same-identity
+  negatives. Eligibility comes from train image-level GT, not detected identity
+  labels, so detector misses do not change state supervision. Wrong-identity
+  images have unknown state labels and are excluded. Queries without an eligible
+  positive-negative pair contribute no state loss. It trains both state
+  projections and the shared text encoder; there is no in-batch negative
+  assumption. `state_weight` defaults to `1.0`.
   Fine ranking uses only `S_f`; neither state nor identity is added to its score.
 
 Candidate sampling picks one reviewed positive and excludes **all** other
-known positives and the query image from that query's negatives.
+known positives and the query image from that query's negatives. For equivalent
+train instructions (same ordered identities, case and exact change text), an image
+marked positive by one query is not used as a negative by another. Original
+positive labels are retained, never merged or rewritten; val/test are untouched.
+Default C=16 sampling draws 7 same-identity negatives, then 8 random negatives.
+Optional mining (`train.sampling.hard_fraction=0.3`) changes this to 7 identity,
+4 mined and 4 random negatives after warmup. Quotas are floored fractions of C-1;
+missing slots fall back to random. Candidates are unique. Mining uses only the
+train split, shared coarse scoring in eval/no-grad mode and a bounded top-ranked
+pool; it does not retain a train-query by full-gallery ranking matrix.
+
 Including positive targets supplies cross-image identity pairs even when query
 identities do not repeat within a batch. `L_id` can still be zero when detected
 persons lack known matching identities; target images are not assigned the query's
 labels by assumption. GT-aligned cache labels determine identity matches.
+
+Loss ablations hold retrieval at identity-only for every variant, isolating
+auxiliary supervision. Inference ablations compare identity-only and combined
+shortlists using the same fully trained checkpoint. State projections from runs
+with `state_weight=0`, or new checkpoints with zero supervised state pairs, cannot
+be used for state-based retrieval. Existing checkpoints/cache formats remain
+readable; benefiting from the new supervision requires retraining.

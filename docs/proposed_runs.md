@@ -63,17 +63,36 @@ branch still require retraining, as before.
 - `best.pt`: best full-val Full-mAP checkpoint, written atomically.
 - `history.jsonl`: epoch losses and evaluation metrics, also saved with W&B off.
 - `evaluation/epoch_NNN/{train,val}_metrics.json`: aggregate/by-case metrics.
+- `training_data.json`: resolved sampling settings and conflicting train labels.
+- `hard_negatives.json`: latest train-only mined ID lists, when mining is enabled.
 
 A new `train` invocation starts from scratch and clears a previous best selection
 and history in that output directory. Use a different `output.dir` for each
-experiment. There is no resume flag. Training still samples one reviewed positive
-and train-gallery negatives, groups batches by Subject count, and keeps the same
-four losses. W&B records loss components, learning rates, gradient norm, identity
-activity, grounding supervision and train/val metrics. It closes on exceptions.
+experiment. There is no resume flag. Training samples one reviewed positive,
+mixes same-identity and random train-gallery negatives, groups batches by Subject
+count, and keeps the four losses. Optional mining is enabled with
+`--set train.sampling.hard_fraction=0.3`; default is 0 to start with a cheaper
+identity/random experiment. Mining starts after one completed epoch and refreshes
+every two epochs. The pool is rebuilt for each new training run.
+
+W&B and local epoch history record losses, identity activity, grounding
+precision/recall on known aligned detections, any-match and complete-Subject
+coverage, state supervised pair counts/active-query rate, and actual negative
+source fractions. W&B additionally records learning rates and gradient norm.
+Grounding recall is conditional on valid detected/annotated people; use the cache
+audit for missing-identity coverage. Loss summaries are weighted by query batch
+size; count-derived rates use summed counts. W&B closes on exceptions.
 Set `wandb.enabled=false` or `wandb.mode=offline` as needed.
 
 `evaluation.enabled=false` produces `last.pt` only. Use standalone `train` for
 this case; the `run --train` pipeline requires val to select best.pt.
+
+State loss requires an explicit image-level identity mask. There is no fallback
+that treats every candidate as a state negative. State-based validation fails
+clearly if no supervised state pair has ever been seen. Use more identity
+negatives or `retrieval.coarse_mode=identity_only` for an intentionally tiny
+smoke run. When disabling `loss.state_weight`, also select identity-only
+retrieval (or beta=0); the loss suite already does this.
 
 ## Small smoke run
 
@@ -105,13 +124,18 @@ coarse order. Equal scores now retain a stable canonical order.
 python tools/methods/run.py ablate --config configs/ablations/coarse.yaml
 python tools/methods/run.py ablate --config configs/ablations/retrieval.yaml
 python tools/methods/run.py ablate --config configs/ablations/loss.yaml
+python tools/methods/run.py ablate --config configs/ablations/sampling.yaml
 ```
 
 The default split is **val**. Coarse experiments reuse one checkpoint and raw
-score computation across beta values. The sweep writes `selected.yaml` and
+score computation across beta values. Beta is selected by CandidateRecall@500
+for the main Top-500 shortlist. The sweep writes `selected.yaml` and
 `selection.json`; retrieval ablations inherit that selection. Loss ablations
-train separate checkpoints using the same schedule and seed. Existing frozen
-caches are reused throughout.
+train separate checkpoints using the same schedule, seed and identity-only
+retrieval, so untrained state projections never influence the comparison.
+Sampling ablations compare random, identity/random and identity/mined/random.
+Existing frozen caches are reused throughout. New selections fingerprint val
+text/labels/gallery as well as the checkpoint; changing val requires a new sweep.
 
 Use the complete [ablation guide](ablations_vi.md) for test commands, metric
 definitions, output paths and adding future experiments.

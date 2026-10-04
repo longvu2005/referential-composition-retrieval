@@ -26,7 +26,7 @@ The benchmark uses four case types:
 
 - `tools/methods/run.py`: the single experiment CLI.
 - `configs/methods/{proposed,clip,fafa}.yaml`: one config per method.
-- `configs/ablations/{coarse,retrieval,loss}.yaml`: suites of explicit experiments.
+- `configs/ablations/{coarse,retrieval,loss,sampling}.yaml`: explicit experiments.
 - `src/rcr/methods/proposed/`: cache, train loop, model, loss and retrieval.
 - `src/rcr/methods/baselines/`: CLIP, official FAFA adapter and val tuning.
 - `src/rcr/methods/common/`: shared loader, device, result paths and evaluation I/O.
@@ -119,14 +119,27 @@ Detailed usage: [proposed](docs/proposed_runs.md), [baselines](docs/baselines.md
 Coarse normalization, beta sweep and extensible ablations:
 [Vietnamese guide](docs/ablations_vi.md).
 Model equations: [proposed method](docs/proposed_method.md).
-Migration and exact file lists: [refactor notes](docs/refactor_vi.md).
+Training fixes and data review: [research notes](docs/research_fix_vi.md).
+
+Training uses same-identity negatives mixed with random negatives. Optional
+coarse mining runs only on train after warmup. The state loss compares images
+containing all required identities; wrong-identity images are ignored by that
+loss. Conflicting negatives from equivalent train instructions are excluded
+without editing the reviewed labels or the evaluation protocol.
+
+Read-only label and optional cache coverage audit:
+
+```bash
+python tools/dataset/audit.py --output runs/data_audit.json
+python tools/dataset/audit.py --cache cache/proposed --output runs/cache_audit.json
+```
 
 ## Tests
 
 ```bash
 python -m pip install -e '.[dev]'
 python -m pytest -q
-ruff check src/rcr/methods src/rcr/evaluation tools/methods tests/methods tests/evaluation
+ruff check src tools tests labelstudio
 ```
 
 Core tests use small local encoders and cache fixtures. CLIP's native checkpoint

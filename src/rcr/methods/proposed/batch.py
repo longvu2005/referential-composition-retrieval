@@ -56,6 +56,8 @@ def build_batch(
     tokenizer,
     text_encoder: nn.Module,
     device: torch.device | str,
+    *,
+    state_image_ids: list[set[str]] | None = None,
 ) -> dict[str, Tensor]:
     """Build one training batch; candidate selection is handled outside."""
 
@@ -126,7 +128,7 @@ def build_batch(
                 )
 
     k_t = t_persons.shape[1]
-    return {
+    batch = {
         "query_scene": q_scene.to(device),
         "query_persons": q_persons.to(device),
         "query_boxes": q_boxes.to(device),
@@ -142,4 +144,32 @@ def build_batch(
         "target_identity_labels": target_identity_labels.to(device).reshape(b, c, k_t),
         "target_identity_mask": target_identity_mask.to(device).reshape(b, c, k_t),
         "positive_mask": positive_mask,
+        "grounding_complete": torch.tensor(
+            [
+                [
+                    set(map(str, subject["identity_ids"]))
+                    <= {str(identity) for identity in ids if identity is not None}
+                    for subject in sample["subjects"]
+                ]
+                for sample, ids in zip(samples, q_ids, strict=True)
+            ],
+            dtype=torch.bool,
+            device=device,
+        ),
     }
+    if state_image_ids is not None:
+        # Full GT image identities, not detector-aligned labels: a missed person
+        # must not change which target conditions supervise the global state.
+        batch["state_mask"] = torch.tensor(
+            [
+                [image_id in eligible for image_id in rows]
+                for rows, eligible in zip(
+                    candidate_image_ids, state_image_ids, strict=True
+                )
+            ],
+            dtype=torch.bool,
+            device=device,
+        )
+        if (positive_mask & ~batch["state_mask"]).any():
+            raise ValueError("every Full Positive must contain all required IDs")
+    return batch

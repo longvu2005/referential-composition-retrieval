@@ -45,6 +45,8 @@ def _batch() -> dict[str, torch.Tensor]:
             [[True, False, True], [False, True, False]], dtype=torch.bool
         ),
         "candidate_mask": torch.ones(b, c, dtype=torch.bool),
+        # Image-level GT can contain identities missed by detector-aligned labels.
+        "state_mask": torch.ones(b, c, dtype=torch.bool),
     }
 
 
@@ -56,7 +58,7 @@ def test_compute_loss_and_backward() -> None:
     loss, parts = compute_loss(model, batch, patch_hw=(2, 3))
 
     assert loss.ndim == 0
-    assert set(parts) == {"grounding", "identity", "retrieval", "state"}
+    assert {"grounding", "identity", "retrieval", "state"} <= set(parts)
     assert torch.isfinite(loss)
 
     loss.backward()
@@ -286,3 +288,59 @@ def test_state_loss_can_be_disabled_and_temperature_must_be_positive() -> None:
     assert parts["state"] == 0
     with pytest.raises(ValueError, match="state_temperature"):
         compute_loss(model, _batch(), (2, 3), state_temperature=0)
+
+
+def test_state_excludes_wrong_identity_images_and_counts_only_valid_pairs():
+    torch.manual_seed(91)
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["state_mask"] = torch.tensor([[True, True, True], [False, True, False]])
+    batch["target_scene"].requires_grad_()
+    batch["change"].requires_grad_()
+    options = dict(grounding_weight=0, identity_weight=0, retrieval_weight=0)
+    loss, parts = compute_loss(model, batch, (2, 3), **options)
+    assert parts["state_pairs"] == 2
+    assert parts["state_active_queries"] == 1
+    loss.backward()
+    assert batch["target_scene"].grad[1].count_nonzero() == 0
+    assert batch["change"].grad[1].count_nonzero() == 0
+    altered = {k: v.detach().clone() for k, v in batch.items()}
+    altered["target_scene"][1, (0, 2)] = 1000
+    actual, _ = compute_loss(model, altered, (2, 3), **options)
+    torch.testing.assert_close(actual, loss)
+
+
+def test_state_never_assumes_all_candidates_are_valid_negatives():
+    model = RCRModel(8, 6, 2)
+    batch = _batch()
+    del batch["state_mask"]
+    with pytest.raises(ValueError, match="state_mask"):
+        compute_loss(model, batch, (2, 3))
+    batch["state_mask"] = batch["positive_mask"].clone()
+    _, parts = compute_loss(model, batch, (2, 3))
+    assert parts["state"] == parts["state_pairs"] == parts["state_active_queries"] == 0
+
+
+def test_disabled_state_projections_receive_no_updates():
+    model = RCRModel(8, 6, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    before = model.state_text_proj.weight.detach().clone()
+    loss, _ = compute_loss(model, _batch(), (2, 3), state_weight=0)
+    loss.backward()
+    assert model.state_text_proj.weight.grad is None
+    assert model.state_image_proj.weight.grad is None
+    optimizer.step()
+    torch.testing.assert_close(model.state_text_proj.weight, before)
+
+
+def test_unknown_detected_people_do_not_supervise_grounding():
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["query_person_mask"][:, 2] = True
+    batch["query_persons"].requires_grad_()
+    loss, parts = compute_loss(
+        model, batch, (2, 3), identity_weight=0, retrieval_weight=0, state_weight=0
+    )
+    loss.backward()
+    assert batch["query_persons"].grad[:, 2].count_nonzero() == 0
+    assert parts["grounding_subjects"] == parts["grounding_supervised_subjects"] == 4

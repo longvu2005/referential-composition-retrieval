@@ -11,9 +11,68 @@ from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.retrieval import (
     _coarse_scores_chunked,
     _encode_gallery_identity,
+    mine_hard_negatives,
     retrieve_rankings,
     retrieve_variants,
 )
+
+
+def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
+    torch.manual_seed(15)
+    cache = _Cache(["q", "val", "a", "b", "disputed", "n1", "n2", "n3"])
+    gallery = [x for x in cache.image_ids if x != "val"]
+    model, text_encoder = RCRModel(8, 6, 2).train(), _TextEncoder().train()
+    settings = dict(
+        top_m=2,
+        fine_batch_size=1,
+        identity_batch_size=2,
+        coarse_batch_size=2,
+        coarse_beta=0.4,
+        rerank=False,
+    )
+    sample = {**_sample(), "positive_image_ids": ["a", "b"]}
+    monkeypatch.setattr(model, "score_target", lambda *a: pytest.fail("fine mining"))
+    full = retrieve_variants(
+        [sample],
+        cache,
+        _Tokenizer(),
+        text_encoder,
+        model,
+        torch.device("cpu"),
+        gallery_ids=gallery,
+        variants={"run": settings},
+    )["run"]
+    forbidden = {"q", "a", "b", "disputed"}
+    expected = [gallery[i] for i in full["rankings"][0] if gallery[i] not in forbidden][
+        :2
+    ]
+    pools = mine_hard_negatives(
+        [sample],
+        cache,
+        _Tokenizer(),
+        text_encoder,
+        model,
+        torch.device("cpu"),
+        gallery_ids=gallery,
+        retrieval=settings,
+        pool_size=2,
+        excluded={"s1": {"disputed"}},
+    )
+    assert pools == {"s1": expected}
+    assert model.training and text_encoder.training
+    limited = retrieve_variants(
+        [sample],
+        cache,
+        _Tokenizer(),
+        text_encoder,
+        model,
+        torch.device("cpu"),
+        gallery_ids=gallery,
+        variants={"run": settings},
+        ranking_limit=2,
+    )["run"]
+    assert limited["rankings"].shape == limited["coarse_rankings"].shape == (1, 2)
+    torch.testing.assert_close(limited["rankings"], full["rankings"][:, :2])
 
 
 class _Tokenizer:

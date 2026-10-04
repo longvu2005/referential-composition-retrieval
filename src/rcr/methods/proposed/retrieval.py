@@ -124,6 +124,13 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
     return settings
 
 
+def uses_state(cfg: dict, default_beta: float) -> bool:
+    settings = retrieval_settings(cfg, default_beta)
+    return settings["coarse_mode"] == "state_only" or (
+        settings["coarse_mode"] == "identity_state" and settings["coarse_beta"] != 0
+    )
+
+
 def retrieve_rankings(
     samples: Sequence[dict],
     cache: GalleryCache,
@@ -179,6 +186,7 @@ def retrieve_variants(
     gallery_ids: Sequence[str],
     variants: Mapping[str, dict],
     description: str = "retrieve",
+    ranking_limit: int | None = None,
 ) -> dict[str, dict]:
     """Reuse encodings and raw ID/state scores across inference ablations.
 
@@ -186,6 +194,8 @@ def retrieve_variants(
     chunks bound accelerator memory. Normalization happens after gathering one
     complete score vector, never per chunk. All outputs retain the full gallery
     order, including coarse-only experiments; top_m only limits fine reranking.
+    Training mining may retain only ranking_limit entries to bound CPU output
+    memory. Such outputs are never accepted by the official full-rank evaluator.
     """
     settings = {
         name: retrieval_settings(cfg, model.coarse_beta)
@@ -193,6 +203,8 @@ def retrieve_variants(
     }
     if not samples or not settings:
         raise ValueError("retrieval requires samples and at least one variant")
+    if ranking_limit is not None and ranking_limit < 1:
+        raise ValueError("ranking_limit must be positive")
     first = next(iter(settings.values()))
     batch_keys = ("fine_batch_size", "identity_batch_size", "coarse_batch_size")
     for cfg in settings.values():
@@ -321,9 +333,15 @@ def retrieve_variants(
                         )
                     ]
                     final_order = torch.cat((fine_order, order[len(top_indices) :]))
-                outputs[name]["rankings"].append(final_order.to(torch.int32).cpu())
-                outputs[name]["coarse_rankings"].append(order.to(torch.int32).cpu())
-                outputs[name]["coarse_topm"].append(top_indices.to(torch.int32).cpu())
+                outputs[name]["rankings"].append(
+                    final_order[:ranking_limit].to(torch.int32).cpu()
+                )
+                outputs[name]["coarse_rankings"].append(
+                    order[:ranking_limit].to(torch.int32).cpu()
+                )
+                outputs[name]["coarse_topm"].append(
+                    top_indices[:ranking_limit].to(torch.int32).cpu()
+                )
         return {
             name: {
                 "sample_ids": [sample["sample_id"] for sample in samples],
@@ -335,3 +353,51 @@ def retrieve_variants(
     finally:
         model.train(model_was_training)
         text_encoder.train(text_was_training)
+
+
+def mine_hard_negatives(
+    samples,
+    cache,
+    tokenizer,
+    text_encoder,
+    model,
+    device,
+    *,
+    gallery_ids,
+    retrieval,
+    pool_size,
+    excluded=None,
+):
+    """Coarse-only train mining, without retaining full-gallery ranking matrices.
+
+    Caller supplies TRAIN queries/gallery exclusively. No labels enter scoring;
+    train labels only remove positives and disputed negatives from the pool.
+    """
+    excluded = excluded or {}
+    forbidden = {
+        sample["sample_id"]: set(sample["positive_image_ids"])
+        | {sample["query_image_id"]}
+        | set(excluded.get(sample["sample_id"], ()))
+        for sample in samples
+    }
+    limit = pool_size + max(map(len, forbidden.values()))
+    result = retrieve_variants(
+        samples,
+        cache,
+        tokenizer,
+        text_encoder,
+        model,
+        device,
+        gallery_ids=gallery_ids,
+        variants={"mining": {**retrieval, "rerank": False, "top_m": limit}},
+        ranking_limit=limit,
+        description="mine train negatives",
+    )["mining"]
+    return {
+        sample_id: [
+            gallery_ids[i]
+            for i in row.tolist()
+            if gallery_ids[i] not in forbidden[sample_id]
+        ][:pool_size]
+        for sample_id, row in zip(result["sample_ids"], result["rankings"], strict=True)
+    }

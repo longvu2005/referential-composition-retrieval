@@ -275,7 +275,13 @@ def test_cached_precision_supports_batch_training(tmp_path, dtype) -> None:
         )
     cache = GalleryCache(tmp_path)
     batch = build_batch(
-        [_samples()[0]], [["p1", "n1"]], cache, _Tokenizer(), _TextEncoder(), "cpu"
+        [_samples()[0]],
+        [["p1", "n1"]],
+        cache,
+        _Tokenizer(),
+        _TextEncoder(),
+        "cpu",
+        state_image_ids=[{"p1"}],
     )
     model = RCRModel(dim=4, identity_dim=4, num_heads=2)
     loss, parts = compute_loss(model, batch, cache.patch_hw)
@@ -286,3 +292,29 @@ def test_cached_precision_supports_batch_training(tmp_path, dtype) -> None:
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
     )
+
+
+def test_state_mask_uses_gt_image_pool_not_detected_person_labels():
+    batch = build_batch(
+        _samples(),
+        [["p1", "n1"], ["n2", "p2"]],
+        _Cache(),
+        _Tokenizer(),
+        _TextEncoder(),
+        "cpu",
+        state_image_ids=[{"p1", "n1"}, {"p2"}],
+    )
+    # n1's detector labels are unknown, but its image-level GT has the required IDs.
+    assert (batch["target_identity_labels"][0, 1] == -1).all()
+    assert batch["state_mask"].tolist() == [[True, True], [False, True]]
+    assert batch["grounding_complete"].tolist() == [[True, True], [True, True]]
+    with pytest.raises(ValueError, match="Full Positive"):
+        build_batch(
+            [_samples()[0]],
+            [["p1", "n1"]],
+            _Cache(),
+            _Tokenizer(),
+            _TextEncoder(),
+            "cpu",
+            state_image_ids=[{"n1"}],
+        )

@@ -68,6 +68,7 @@ def test_train_checkpoints_metrics_and_retrieve(
         gt_head_boxes_by_image={
             "q": [{"identity_id": "p1"}],
             "a": [{"identity_id": "p1"}],
+            "b": [{"identity_id": "p1"}],
             "val_q": [{"identity_id": "p1"}],
             "val_a": [{"identity_id": "p1"}],
         },
@@ -82,9 +83,9 @@ def test_train_checkpoints_metrics_and_retrieve(
     evaluation_calls = []
     real_sample = train_proposed.sample_candidates
 
-    def sample_train_gallery(samples, gallery_ids, *args):
+    def sample_train_gallery(samples, gallery_ids, *args, **kwargs):
         assert gallery_ids == ["q", "a", "b"]
-        return real_sample(samples, gallery_ids, *args)
+        return real_sample(samples, gallery_ids, *args, **kwargs)
 
     monkeypatch.setattr(train_proposed, "sample_candidates", sample_train_gallery)
 

@@ -10,6 +10,7 @@ import yaml
 from torch import nn
 from tqdm import tqdm
 
+from rcr.dataset.audit import negative_exclusions, positive_conflicts
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.common.experiment import resolve_device
@@ -18,8 +19,16 @@ from rcr.methods.proposed.batch import build_batch
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import SUBJECT_MARKERS, TextEncoder
 from rcr.methods.proposed.model import RCRModel
-from rcr.methods.proposed.retrieval import retrieve_rankings
-from rcr.methods.proposed.sampling import sample_candidates
+from rcr.methods.proposed.retrieval import (
+    mine_hard_negatives,
+    retrieve_rankings,
+    uses_state,
+)
+from rcr.methods.proposed.sampling import (
+    identity_candidate_pools,
+    sample_candidates,
+    sampling_settings,
+)
 from rcr.methods.proposed.training import compute_loss
 
 
@@ -99,6 +108,30 @@ def _fixed_subset(samples: list[dict], maximum: int, seed: int) -> list[dict]:
     return [samples[index] for index in sorted(indices)]
 
 
+def _diagnostics(counts: dict) -> dict:
+    """Ratios from summed counts, so short batches do not get extra weight."""
+    tp, fp, fn = (counts.get(f"grounding_{key}", 0) for key in ("tp", "fp", "fn"))
+    subjects = max(counts.get("grounding_subjects", 0), 1)
+    negatives = max(
+        sum(counts.get(f"sampled_{k}", 0) for k in ("identity", "hard", "random")), 1
+    )
+    return {
+        "grounding_precision": tp / max(tp + fp, 1),
+        "grounding_recall": tp / max(tp + fn, 1),
+        "grounding_supervised_rate": counts.get("grounding_supervised_subjects", 0)
+        / subjects,
+        "grounding_complete_rate": counts.get("grounding_complete_subjects", 0)
+        / subjects,
+        "state_pairs": counts.get("state_pairs", 0),
+        "state_active_query_rate": counts.get("state_active_queries", 0)
+        / max(counts.get("queries", 0), 1),
+        **{
+            f"sampled_{key}_fraction": counts.get(f"sampled_{key}", 0) / negatives
+            for key in ("identity", "hard", "random")
+        },
+    }
+
+
 def train(cfg: dict) -> Path:
     """Train from scratch; select best.pt using validation Full-mAP only."""
     data_cfg = cfg["data"]
@@ -108,6 +141,10 @@ def train(cfg: dict) -> Path:
     loss_cfg = cfg["loss"]
     evaluation_cfg = cfg.get("evaluation", {"enabled": False})
     output_cfg = cfg["output"]
+    sampling_cfg = sampling_settings(train_cfg.get("sampling", {}))
+    use_state = uses_state(cfg["retrieval"], model_cfg.get("coarse_beta", 0.3))
+    if loss_cfg.get("state_weight", 1.0) == 0 and use_state:
+        raise ValueError("state_weight=0 requires identity_only or coarse_beta=0")
 
     from transformers import AutoModel, AutoTokenizer
 
@@ -131,6 +168,10 @@ def train(cfg: dict) -> Path:
     cache = GalleryCache(data_cfg["cache"])
     cache.validate_gallery(data.gallery_ids)
     candidate_ids = split_image_ids(data, "train")
+    identity_pools = identity_candidate_pools(data, samples, candidate_ids)
+    state_images = {key: set(ids) for key, ids in identity_pools.items()}
+    excluded = negative_exclusions(samples)
+    hard_pools = None
     print(f"Training gallery: train ({len(candidate_ids)} images)")
 
     first_scene, *_ = cache.load(torch.tensor([0]))
@@ -179,6 +220,17 @@ def train(cfg: dict) -> Path:
     )
     (output / "best.pt").unlink(missing_ok=True)
     (output / "history.jsonl").write_text("", encoding="utf-8")
+    (output / "hard_negatives.json").unlink(missing_ok=True)
+    write_json(
+        output / "training_data.json",
+        {
+            "num_queries": len(samples),
+            "sampling": sampling_cfg,
+            "excluded_negative_pairs": sum(map(len, excluded.values())),
+            "conflicts": positive_conflicts(samples),
+            "policy": "retain reviewed positives; ignore disputed negative pairs",
+        },
+    )
     tokenizer.save_pretrained(output / "tokenizer")
     wandb_cfg = cfg.get("wandb", {})
     log_every = int(wandb_cfg.get("log_every_steps", 20))
@@ -193,9 +245,38 @@ def train(cfg: dict) -> Path:
     global_step = 0
     best_full_map: float | None = None
     best_epoch: int | None = None
+    state_pairs_seen = 0
 
     try:
         for epoch in range(train_cfg["epochs"]):
+            if (
+                int((train_cfg["candidates"] - 1) * sampling_cfg["hard_fraction"]) > 0
+                and epoch >= sampling_cfg["warmup_epochs"]
+                and (epoch - sampling_cfg["warmup_epochs"])
+                % sampling_cfg["refresh_every_epochs"]
+                == 0
+            ):
+                hard_pools = mine_hard_negatives(
+                    samples,
+                    cache,
+                    tokenizer,
+                    text_encoder,
+                    model,
+                    device,
+                    gallery_ids=candidate_ids,
+                    retrieval=cfg["retrieval"],
+                    pool_size=sampling_cfg["pool_size"],
+                    excluded=excluded,
+                )
+                write_json(
+                    output / "hard_negatives.json",
+                    {
+                        "model_epoch": epoch,
+                        "cache_id": cache.cache_id,
+                        "split": "train",
+                        "pools": hard_pools,
+                    },
+                )
             generator = torch.Generator().manual_seed(seed + epoch)
             batches = []
             for rows in groups.values():
@@ -218,17 +299,25 @@ def train(cfg: dict) -> Path:
                 "state": 0.0,
                 "identity_active": 0.0,
             }
+            counts = {}
 
             progress = tqdm(
                 batches,
                 desc=f"epoch {epoch + 1}/{train_cfg['epochs']}",
             )
             for rows in progress:
+                sampling_counts = {}
                 candidates = sample_candidates(
                     rows,
                     candidate_ids,
                     train_cfg["candidates"],
                     generator,
+                    identity_pools=identity_pools,
+                    hard_pools=hard_pools,
+                    excluded=excluded,
+                    identity_fraction=sampling_cfg["identity_fraction"],
+                    hard_fraction=sampling_cfg["hard_fraction"],
+                    stats=sampling_counts,
                 )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -239,6 +328,7 @@ def train(cfg: dict) -> Path:
                     tokenizer,
                     text_encoder,
                     device,
+                    state_image_ids=[state_images[row["sample_id"]] for row in rows],
                 )
                 loss, parts = compute_loss(model, batch, cache.patch_hw, **loss_cfg)
                 loss.backward()
@@ -253,23 +343,24 @@ def train(cfg: dict) -> Path:
 
                 values = {
                     "loss": loss.item(),
-                    **{k: v.item() for k, v in parts.items()},
+                    **{
+                        k: parts[k].item()
+                        for k in ("grounding", "identity", "retrieval", "state")
+                    },
                 }
                 values["identity_active"] = float(values["identity"] > 0)
                 for name, value in values.items():
-                    totals[name] += value
+                    totals[name] += value * len(rows)
+                batch_counts = {
+                    **{k: v.item() for k, v in parts.items() if k not in values},
+                    **sampling_counts,
+                }
+                state_pairs_seen += batch_counts["state_pairs"]
+                for name, value in batch_counts.items():
+                    counts[name] = counts.get(name, 0) + value
                 progress.set_postfix(loss=f"{values['loss']:.4f}")
 
                 if should_log:
-                    supervised = batch["grounding_targets"].bool().any(dim=-1)
-                    if "subject_mask" in batch:
-                        valid_subjects = batch["subject_mask"].bool()
-                        denominator = valid_subjects.sum().clamp_min(1)
-                        supervised_rate = (
-                            (supervised & valid_subjects).sum() / denominator
-                        ).item()
-                    else:
-                        supervised_rate = supervised.float().mean().item()
                     run.log(
                         {
                             "global_step": global_step,
@@ -279,7 +370,10 @@ def train(cfg: dict) -> Path:
                             "train/identity_active": values["identity_active"],
                             "train/retrieval_loss": values["retrieval"],
                             "train/state_loss": values["state"],
-                            "train/grounding_supervised_rate": supervised_rate,
+                            **{
+                                f"train/{k}": v
+                                for k, v in _diagnostics(batch_counts).items()
+                            },
                             "train/gradient_norm": grad_norm,
                             "train/model_lr": optimizer.param_groups[0]["lr"],
                             "train/text_lr": optimizer.param_groups[1]["lr"],
@@ -291,7 +385,7 @@ def train(cfg: dict) -> Path:
                 del batch, loss, parts
 
             optimizer.zero_grad(set_to_none=True)
-            count = len(batches)
+            count = len(samples)
             summary = {name: value / count for name, value in totals.items()}
             print(
                 f"epoch {epoch + 1}: "
@@ -310,6 +404,7 @@ def train(cfg: dict) -> Path:
                 "epoch/identity_active_rate": summary["identity_active"],
                 "epoch/retrieval_loss": summary["retrieval"],
                 "epoch/state_loss": summary["state"],
+                **{f"epoch/{k}": v for k, v in _diagnostics(counts).items()},
             }
             is_best = False
 
@@ -318,6 +413,11 @@ def train(cfg: dict) -> Path:
                 epoch_number % int(evaluation_cfg["every_epochs"]) == 0
                 or epoch_number == train_cfg["epochs"]
             ):
+                if use_state and state_pairs_seen == 0:
+                    raise ValueError(
+                        "no supervised state pairs; increase identity sampling or "
+                        "evaluate with coarse_mode=identity_only"
+                    )
                 metrics_dir = output / "evaluation" / f"epoch_{epoch_number:03d}"
                 metrics_dir.mkdir(parents=True, exist_ok=True)
                 for split, rows in (
@@ -392,6 +492,7 @@ def train(cfg: dict) -> Path:
                 "cache_id": cache.cache_id,
                 "best_full_map": best_full_map,
                 "best_epoch": best_epoch,
+                "state_supervised_pairs": state_pairs_seen,
             }
             last_path = output / "last.pt"
             temporary = output / "last.pt.tmp"

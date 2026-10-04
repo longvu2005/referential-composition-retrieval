@@ -5,13 +5,22 @@ from time import perf_counter
 
 import torch
 
-from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.methods.common.data import (
+    load_rcr_data,
+    split_fingerprint,
+    split_image_ids,
+    split_samples,
+)
 from rcr.methods.common.experiment import resolve_device
 from rcr.methods.common.results import output_directory, save_results, sha256_file
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import TextEncoder
 from rcr.methods.proposed.model import RCRModel
-from rcr.methods.proposed.retrieval import retrieval_settings, retrieve_variants
+from rcr.methods.proposed.retrieval import (
+    retrieval_settings,
+    retrieve_variants,
+    uses_state,
+)
 
 
 def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
@@ -49,10 +58,29 @@ def retrieve_experiments(
             "train a new checkpoint with the updated train config"
         )
     dim = checkpoint["dim"]
+    state_untrained = (
+        train_cfg.get("loss", {}).get("state_weight", 1.0) == 0
+        or checkpoint.get("state_supervised_pairs", 1) == 0
+    )
+    if state_untrained and any(
+        uses_state(run_cfg["retrieval"], model_cfg.get("coarse_beta", 0.3))
+        for run_cfg in configs.values()
+    ):
+        raise ValueError(
+            "checkpoint state branch is untrained; use identity_only or coarse_beta=0"
+        )
 
     # Reject missing/incompatible caches before loading the text backbone.
     data_cfg = cfg["data"]
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
+    validation_sha256 = split_fingerprint(data, "val")
+    if any(
+        other.get("selected_validation_sha256", validation_sha256) != validation_sha256
+        for other in configs.values()
+    ):
+        raise ValueError(
+            "validation data changed since beta selection; rerun the sweep"
+        )
     samples = split_samples(data, cfg["split"])
     if not samples:
         raise ValueError(f"{cfg['split']}: selected query split is empty")
@@ -113,6 +141,7 @@ def retrieve_experiments(
                 "retrieval": settings[name],
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha256,
+                "validation_sha256": validation_sha256,
                 "checkpoint_epoch": checkpoint.get("epoch"),
                 "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
                 "best_epoch": checkpoint.get("best_epoch"),
