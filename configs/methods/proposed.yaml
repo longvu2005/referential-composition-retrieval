@@ -28,13 +28,13 @@ model:
 train:
   epochs: 10
   batch_size: 14
-  candidates: 16
+  candidates: 64
   seed: 0
   sampling:
     # Fractions of the C-1 negatives; remaining/unused slots are random.
     identity_fraction: 0.5
     # Start with identity + random; 0.3 enables coarse mining (7 ID / 4 hard / 4 random).
-    hard_fraction: 0.0
+    hard_fraction: 0.3
     warmup_epochs: 1
     refresh_every_epochs: 2
     pool_size: 100
