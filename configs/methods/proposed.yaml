@@ -20,6 +20,11 @@ cache:
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
+  identity_balance:
+    mode: none                 # none | pre_scale | layernorm | l2
+    scale: 1.0                 # B: multiply identity BEFORE the existing projection
+    alpha: 1.0                 # D: target norm = alpha * fixed initial radius
+    calibration_queries: 128   # canonical train pairs; never val/test
   identity_dim: 256
   state_dim: 256
   # Fallback for old checkpoints/configs; inference overrides live in retrieval.
@@ -56,12 +61,11 @@ loss:
 retrieval:
   # Shared by periodic validation and standalone retrieval.
   coarse_mode: identity_state   # identity_only | state_only | identity_state
-  coarse_beta: null             # null inherits model/checkpoint; a number overrides it
+  coarse_beta: 0.4              # fixed validation-selected coefficient
   coarse_normalization: zscore  # none reproduces raw ID + beta * state
   rerank: true                  # false keeps the complete coarse ranking
-  # Final Top-M score = z(fine) + lambda * z(coarse). 0.0 exactly reproduces
-  # the historical fine-only reranker. Select lambda on validation with
-  # configs/ablations/fine_coarse.yaml before reporting test results.
+  # Final Top-M score = z(fine) + 0.4 * z(coarse), selected on validation.
+  # Keep both fusion coefficients fixed during identity ablations.
   fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64
@@ -69,6 +73,8 @@ retrieval:
   coarse_batch_size: 512
 candidate_ks: [100, 500]
 evaluation:
+  fixed_coarse: null  # suite fills immutable val/test reference artifacts
+  branch_norms: false
   enabled: true
   every_epochs: 2
   train_max_queries: 100

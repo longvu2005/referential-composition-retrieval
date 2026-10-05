@@ -17,6 +17,7 @@ from rcr.methods.proposed.coarse import (
     identity_scores_batched,
 )
 from rcr.methods.proposed.encoders import QueryTextCache, encode_query_text
+from rcr.methods.proposed.shortlist import validate_fixed_coarse
 
 
 def _encode_gallery_identity(
@@ -198,6 +199,7 @@ def retrieve_rankings(
     rerank: bool = True,
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
+    fixed_coarse: dict | None = None,
 ) -> dict[str, Any]:
     """Single-run interface shared by training validation and standalone use."""
     settings = dict(
@@ -222,6 +224,7 @@ def retrieve_rankings(
         variants={"run": settings},
         description=description,
         text_cache=text_cache,
+        fixed_coarse=fixed_coarse,
     )["run"]
 
 
@@ -239,6 +242,8 @@ def retrieve_variants(
     description: str = "retrieve",
     ranking_limit: int | None = None,
     text_cache: QueryTextCache | None = None,
+    fixed_coarse: dict | None = None,
+    save_coarse_scores: bool = False,
 ) -> dict[str, dict]:
     """Reuse encodings and raw ID/state/fine scores across inference ablations.
 
@@ -291,6 +296,10 @@ def retrieve_variants(
         or (c["coarse_mode"] == "identity_state" and c["coarse_beta"] != 0)
         for c in settings.values()
     )
+    frozen_rows = None
+    if fixed_coarse is not None:
+        frozen_rows = validate_fixed_coarse(fixed_coarse, samples, gallery_ids)
+        need_identity = need_state = False
     need_fine = any(c["rerank"] for c in settings.values())
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
@@ -316,6 +325,11 @@ def retrieve_variants(
             name: {"rankings": [], "coarse_rankings": [], "coarse_topm": []}
             for name in settings
         }
+        for name, cfg in settings.items():
+            if cfg["rerank"]:
+                outputs[name]["fine_rankings"] = []
+            if save_coarse_scores:
+                outputs[name]["coarse_scores"] = []
         for sample in tqdm(samples, desc=description):
             query_index = gallery_by_id[sample["query_image_id"]]
             text = encode_query_text(
@@ -361,16 +375,21 @@ def retrieve_variants(
             fine_scores = torch.empty(len(gallery_ids), device=device)
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             for name, cfg in settings.items():
-                coarse = combine_scores(
-                    identity,
-                    state,
-                    mode=cfg["coarse_mode"],
-                    beta=cfg["coarse_beta"],
-                    normalization=cfg["coarse_normalization"],
-                    exclude_index=query_index,
-                )
-                order = torch.argsort(coarse, descending=True, stable=True)
-                order = order[order != query_index]
+                if fixed_coarse is None:
+                    coarse = combine_scores(
+                        identity,
+                        state,
+                        mode=cfg["coarse_mode"],
+                        beta=cfg["coarse_beta"],
+                        normalization=cfg["coarse_normalization"],
+                        exclude_index=query_index,
+                    )
+                    order = torch.argsort(coarse, descending=True, stable=True)
+                    order = order[order != query_index]
+                else:
+                    row = frozen_rows[sample["sample_id"]]
+                    coarse = fixed_coarse["coarse_scores"][row].to(device)
+                    order = fixed_coarse["coarse_rankings"][row].to(device).long()
                 top_indices = order[: cfg["top_m"]]
                 final_order = order
                 if cfg["rerank"]:
@@ -392,6 +411,18 @@ def retrieve_variants(
                             mask.to(device),
                         )
                         fine_done[local] = True
+                    fine_only = top_indices[
+                        torch.argsort(
+                            fine_scores[top_indices], descending=True, stable=True
+                        )
+                    ]
+                    outputs[name]["fine_rankings"].append(
+                        torch.cat((fine_only, order[len(top_indices) :]))[
+                            :ranking_limit
+                        ]
+                        .to(torch.int32)
+                        .cpu()
+                    )
                     rerank_scores = fuse_fine_coarse_scores(
                         fine_scores[top_indices],
                         coarse[top_indices],
@@ -401,6 +432,8 @@ def retrieve_variants(
                         torch.argsort(rerank_scores, descending=True, stable=True)
                     ]
                     final_order = torch.cat((fine_order, order[len(top_indices) :]))
+                if save_coarse_scores:
+                    outputs[name]["coarse_scores"].append(coarse.float().cpu())
                 outputs[name]["rankings"].append(
                     final_order[:ranking_limit].to(torch.int32).cpu()
                 )

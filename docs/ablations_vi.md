@@ -1,5 +1,9 @@
 # Running Ablations
 
+The fixed-weight identity A–D suite is documented in
+[Identity balance ablations](identity_balance_ablation.md). It uses the selected
+coarse/fine fusion weights 0.4/0.4 and does not rerun the older sweeps below.
+
 First, update the paths in `configs/methods/proposed.yaml`. Run all commands from
 the repository root in the proposed environment. All suites reuse the existing
 visual cache.

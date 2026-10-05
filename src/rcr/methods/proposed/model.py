@@ -30,6 +30,7 @@ class RCRModel(nn.Module):
         geo_dim: int = 32,
         state_dim: int | None = None,
         coarse_beta: float = 0.3,
+        identity_balance: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -46,9 +47,9 @@ class RCRModel(nn.Module):
         self.grounding = SubjectGrounding(binding, dim)
         self.identity_head = IdentityHead(dim, identity_dim)
         self.composition = StructuredComposition(
-            dim, identity_dim, num_heads, max_subjects, mlp_ratio
+            dim, identity_dim, num_heads, max_subjects, mlp_ratio, identity_balance
         )
-        self.target_builder = TargetPersonBuilder(dim, identity_dim)
+        self.target_builder = TargetPersonBuilder(dim, identity_dim, identity_balance)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio)
 
     def encode_text_state(
@@ -208,7 +209,7 @@ class RCRModel(nn.Module):
             reference_mask,
             reference_key_bias,
         )
-        target = self.target_builder(evidence, target_identity, boxes)
+        target = self.target_builder(evidence, target_identity, boxes, person_mask)
         return self.reasoner(
             reference, target, person_mask, reference_mask, reference_key_bias
         )

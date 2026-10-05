@@ -26,7 +26,7 @@ The benchmark uses four case types:
 
 - `tools/methods/run.py`: the single experiment CLI.
 - `configs/methods/{proposed,clip,fafa}.yaml`: one config per method.
-- `configs/ablations/{coarse,retrieval,loss,sampling}.yaml`: explicit experiments.
+- `configs/ablations/*.yaml`: explicit experiments.
 - `src/rcr/methods/proposed/`: cache, train loop, model, loss and retrieval.
 - `src/rcr/methods/baselines/`: CLIP, official FAFA adapter and val tuning.
 - `src/rcr/methods/common/`: shared loader, device, result paths and evaluation I/O.
@@ -118,6 +118,8 @@ Each split saves `rankings.pt`, `run.json`, `metrics.json`. Baselines also save
 Detailed usage: [proposed](docs/proposed_runs.md), [baselines](docs/baselines.md).
 Coarse normalization, beta sweep and extensible ablations:
 [Vietnamese guide](docs/ablations_vi.md).
+Identity amplitude A–D, fixed shortlist, and validation/seed confirmation:
+[identity balance guide](docs/identity_balance_ablation.md).
 Model equations: [proposed method](docs/proposed_method.md).
 Training fixes and data review: [research notes](docs/research_fix_vi.md).
 

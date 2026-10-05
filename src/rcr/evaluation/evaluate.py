@@ -78,32 +78,34 @@ def evaluate_retrieval_output(
     )
     # New proposed outputs retain a full coarse order as well as the shortlist.
     # Reuse the exact same protocol so coarse/fine mAP have the same denominator.
-    if "coarse_rankings" in output:
-        coarse_result = evaluate_rankings(
+    for field, prefix in (("coarse_rankings", "coarse"), ("fine_rankings", "fine")):
+        if field not in output:
+            continue
+        branch_result = evaluate_rankings(
             samples,
             gallery_ids,
             identities_by_image,
-            decode(output["coarse_rankings"], "coarse_rankings"),
+            decode(output[field], field),
             candidate_ks=(),
         )
-        for key, value in coarse_result["overall"].items():
+        for key, value in branch_result["overall"].items():
             if key != "num_queries":
-                result["overall"][f"coarse_{key}"] = value
-        for case, metrics in coarse_result["by_case"].items():
+                result["overall"][f"{prefix}_{key}"] = value
+        for case, metrics in branch_result["by_case"].items():
             result["by_case"][case].update(
                 {
-                    f"coarse_{key}": value
+                    f"{prefix}_{key}": value
                     for key, value in metrics.items()
                     if key != "num_queries"
                 }
             )
-        for row, coarse_row in zip(
-            result["per_query"], coarse_result["per_query"], strict=True
+        for row, branch_row in zip(
+            result["per_query"], branch_result["per_query"], strict=True
         ):
             row.update(
                 {
-                    f"coarse_{key}": value
-                    for key, value in coarse_row.items()
+                    f"{prefix}_{key}": value
+                    for key, value in branch_row.items()
                     if key.startswith(("id_", "full_"))
                 }
             )
@@ -179,6 +181,8 @@ def _aggregate_cases(rows: Sequence[dict]) -> dict[str, dict]:
             continue
         output[case_type] = {
             "num_queries": len(case_rows),
+            "id_map": _mean(case_rows, "id_ap"),
+            "id_r1": _mean(case_rows, "id_r1"),
             "full_map": _mean(case_rows, "full_ap"),
             "full_r1": _mean(case_rows, "full_r1"),
         }

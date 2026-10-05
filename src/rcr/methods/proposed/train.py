@@ -22,6 +22,11 @@ from rcr.methods.proposed.batch import (
 )
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
+from rcr.methods.proposed.identity_balance import (
+    calibrate_identity,
+    collect_branch_norms,
+    parameter_fingerprint,
+)
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.objective import compute_loss
 from rcr.methods.proposed.retrieval import (
@@ -35,6 +40,7 @@ from rcr.methods.proposed.sampling import (
     sample_candidates,
     sampling_settings,
 )
+from rcr.methods.proposed.shortlist import load_fixed_coarse
 
 
 def _wandb_run(
@@ -213,7 +219,26 @@ def train(cfg: dict) -> Path:
         geo_dim=model_cfg["geo_dim"],
         state_dim=model_cfg.get("state_dim"),
         coarse_beta=model_cfg.get("coarse_beta", 0.3),
+        identity_balance=model_cfg.get("identity_balance"),
     ).to(device)
+
+    initialization_sha256 = parameter_fingerprint(model, text_encoder)
+    balance_cfg = model_cfg.get("identity_balance")
+    calibration = None
+    if balance_cfg and (
+        balance_cfg["mode"] != "none" or evaluation_cfg.get("branch_norms", False)
+    ):
+        calibration = calibrate_identity(
+            model,
+            samples,
+            cache,
+            tokenizer,
+            text_encoder,
+            device,
+            max_queries=balance_cfg.get("calibration_queries", 128),
+            text_cache=text_cache,
+        )
+    fixed_val = load_fixed_coarse(cfg, data, cache.cache_id, "val")
 
     optimizer = torch.optim.AdamW(
         [
@@ -261,6 +286,14 @@ def train(cfg: dict) -> Path:
             "excluded_negative_pairs": sum(map(len, excluded.values())),
             "conflicts": positive_conflicts(samples),
             "policy": "retain reviewed positives; ignore disputed negative pairs",
+        },
+    )
+    write_json(
+        output / "initialization.json",
+        {
+            "seed": seed,
+            "initialization_sha256": initialization_sha256,
+            "identity_calibration": calibration,
         },
     )
     tokenizer.save_pretrained(output / "tokenizer")
@@ -466,18 +499,26 @@ def train(cfg: dict) -> Path:
                 ):
                     if not rows:
                         continue
-                    split_output = retrieve_rankings(
-                        rows,
-                        cache,
-                        tokenizer,
-                        text_encoder,
-                        model,
-                        device,
-                        gallery_ids=split_image_ids(data, split),
-                        **cfg["retrieval"],
-                        text_cache=text_cache,
-                        description=f"{split} epoch {epoch_number}",
-                    )
+                    with collect_branch_norms(
+                        model, evaluation_cfg.get("branch_norms", False)
+                    ) as norms:
+                        split_output = retrieve_rankings(
+                            rows,
+                            cache,
+                            tokenizer,
+                            text_encoder,
+                            model,
+                            device,
+                            gallery_ids=split_image_ids(data, split),
+                            fixed_coarse=fixed_val if split == "val" else None,
+                            **cfg["retrieval"],
+                            text_cache=text_cache,
+                            description=f"{split} epoch {epoch_number}",
+                        )
+                    if norms is not None:
+                        write_json(
+                            metrics_dir / f"{split}_branch_norms.json", norms.report()
+                        )
                     result = evaluate_retrieval_output(
                         data,
                         rows,
@@ -532,6 +573,8 @@ def train(cfg: dict) -> Path:
                 "config": cfg,
                 "dim": dim,
                 "cache_id": cache.cache_id,
+                "initialization_sha256": initialization_sha256,
+                "identity_calibration": calibration,
                 "best_full_map": best_full_map,
                 "best_epoch": best_epoch,
                 "state_supervised_pairs": state_pairs_seen,

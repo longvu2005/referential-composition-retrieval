@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from rcr.methods.proposed.identity_balance import IdentityBalance
+
 
 def composed_query_mask(
     change: Tensor,
@@ -55,9 +57,12 @@ class StructuredComposition(nn.Module):
         num_heads: int,
         max_subjects: int = 2,
         mlp_ratio: int = 4,
+        identity_balance: dict | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
+        self.identity_balance = IdentityBalance(identity_balance)
+        self.norm_observer = None
 
         self.identity_proj = nn.Linear(identity_dim, dim)
         self.role = nn.Embedding(max_subjects, dim)
@@ -104,7 +109,18 @@ class StructuredComposition(nn.Module):
                 b, -1
             )
         role = self.role(subject_ids.long().clamp_min(1) - 1)
-        ids = self.identity_proj(identity)[:, None] + role[:, :, None]
+        projected = self.identity_balance(identity, self.identity_proj)
+        ids = projected[:, None] + role[:, :, None]
+        if self.norm_observer is not None:
+            valid = torch.isfinite(grounding_logits) & active[:, :, None]
+            person_mask = valid.any(dim=1)
+            self.norm_observer.add("query.identity_input", identity, person_mask)
+            self.norm_observer.add(
+                "query.identity_projected", self.identity_proj(identity), person_mask
+            )
+            self.norm_observer.add("query.identity_added", projected, person_mask)
+            self.norm_observer.add("query.role", role, active)
+            self.norm_observer.add("query.identity_role", ids, valid)
 
         grounded = torch.sum(weight[..., None] * ids, dim=2)
         if subject_token_mask is None:
