@@ -112,6 +112,7 @@ def _result_row(experiment: dict, cfg: dict, overall: dict, stage: str) -> dict:
                 "coarse_mode",
                 "coarse_beta",
                 "coarse_normalization",
+                "fine_coarse_weight",
                 "rerank",
                 "top_m",
             )
@@ -209,6 +210,7 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                     "experiment": best["experiment"],
                     "group": best["group"],
                     "coarse_beta": best["coarse_beta"],
+                    "fine_coarse_weight": best["fine_coarse_weight"],
                     "checkpoint": best["checkpoint"],
                     "checkpoint_sha256": best["checkpoint_sha256"],
                     "validation_sha256": best["validation_sha256"],

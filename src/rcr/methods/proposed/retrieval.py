@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -109,13 +110,55 @@ def _encode_gallery_state(
     return state
 
 
+def _zscore_1d(values: Tensor, eps: float = 1e-6) -> Tensor:
+    """Population z-score for one finite score vector; constants become zero."""
+    values = values.float()
+    if values.numel() == 0:
+        return values
+    return (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
+
+
+def fuse_fine_coarse_scores(
+    fine: Tensor,
+    coarse: Tensor,
+    weight: float,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Fuse fine and coarse evidence inside the same Top-M shortlist.
+
+    ``weight=0`` returns the raw fine scores exactly, preserving the historical
+    reranker. For positive weights, both branches are population-z-scored over
+    the same candidates with finite coarse support, then combined as
+    ``z(fine) + weight * z(coarse)``. Non-finite coarse candidates stay last
+    instead of being rescued by a fine score despite having no coarse support.
+    """
+    if fine.ndim != 1 or coarse.ndim != 1 or fine.shape != coarse.shape:
+        raise ValueError("fine and coarse scores must be matching 1D tensors")
+    if not math.isfinite(weight) or weight < 0:
+        raise ValueError("fine_coarse_weight must be finite and nonnegative")
+    if weight == 0:
+        return fine
+
+    valid = torch.isfinite(coarse)
+    if not torch.isfinite(fine[valid]).all():
+        raise ValueError("fine scores must be finite on coarse-supported candidates")
+
+    fused = torch.full_like(fine, -torch.inf, dtype=torch.float32)
+    if valid.any():
+        fused[valid] = _zscore_1d(fine[valid], eps) + weight * _zscore_1d(
+            coarse[valid], eps
+        )
+    return fused
+
+
 def retrieval_settings(cfg: dict, default_beta: float) -> dict:
-    """Resolve runtime overrides; old YAMLs retain raw fusion and checkpoint beta."""
+    """Resolve runtime overrides while preserving old checkpoint behavior."""
     settings = {
         "coarse_batch_size": 512,
         "coarse_mode": "identity_state",
         "coarse_beta": default_beta,
         "coarse_normalization": "none",
+        "fine_coarse_weight": 0.0,
         "rerank": True,
         **cfg,
     }
@@ -147,6 +190,7 @@ def retrieve_rankings(
     coarse_mode: str = "identity_state",
     coarse_beta: float | None = None,
     coarse_normalization: str = "none",
+    fine_coarse_weight: float = 0.0,
     rerank: bool = True,
     description: str = "retrieve",
 ) -> dict[str, Any]:
@@ -159,6 +203,7 @@ def retrieve_rankings(
         coarse_mode=coarse_mode,
         coarse_beta=coarse_beta,
         coarse_normalization=coarse_normalization,
+        fine_coarse_weight=fine_coarse_weight,
         rerank=rerank,
     )
     return retrieve_variants(
@@ -188,14 +233,15 @@ def retrieve_variants(
     description: str = "retrieve",
     ranking_limit: int | None = None,
 ) -> dict[str, dict]:
-    """Reuse encodings and raw ID/state scores across inference ablations.
+    """Reuse encodings and raw ID/state/fine scores across inference ablations.
 
     Only the split gallery is projected. CPU gallery projections and GPU scoring
-    chunks bound accelerator memory. Normalization happens after gathering one
-    complete score vector, never per chunk. All outputs retain the full gallery
-    order, including coarse-only experiments; top_m only limits fine reranking.
-    Training mining may retain only ranking_limit entries to bound CPU output
-    memory. Such outputs are never accepted by the official full-rank evaluator.
+    chunks bound accelerator memory. Coarse normalization happens after gathering
+    one complete score vector, never per chunk. Fine/coarse final fusion is
+    normalized only inside each variant's Top-M shortlist. All outputs retain the
+    full gallery order; top_m only limits fine reranking. Training mining may
+    retain only ranking_limit entries to bound CPU output memory. Such outputs
+    are never accepted by the official full-rank evaluator.
     """
     settings = {
         name: retrieval_settings(cfg, model.coarse_beta)
@@ -212,6 +258,13 @@ def retrieve_variants(
             raise ValueError("retrieval batch sizes and top_m must be positive")
         if any(cfg[key] != first[key] for key in batch_keys):
             raise ValueError("shared retrieval variants require the same batch sizes")
+        weight = cfg["fine_coarse_weight"]
+        if (
+            not isinstance(weight, (int, float))
+            or not math.isfinite(weight)
+            or weight < 0
+        ):
+            raise ValueError("fine_coarse_weight must be finite and nonnegative")
     fine_batch_size, identity_batch_size, coarse_batch_size = (
         first[key] for key in batch_keys
     )
@@ -292,7 +345,8 @@ def retrieve_variants(
                         for start in range(0, len(gallery_ids), coarse_batch_size)
                     ]
                 )
-            # Fine scores depend on the query/target pair, not on beta or top_m.
+            # Fine scores depend on the query/target pair, not on beta, Top-M,
+            # or the final fine/coarse fusion weight, so variants can share them.
             fine_scores = torch.empty(len(gallery_ids), device=device)
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             for name, cfg in settings.items():
@@ -327,10 +381,13 @@ def retrieve_variants(
                             mask.to(device),
                         )
                         fine_done[local] = True
+                    rerank_scores = fuse_fine_coarse_scores(
+                        fine_scores[top_indices],
+                        coarse[top_indices],
+                        float(cfg["fine_coarse_weight"]),
+                    )
                     fine_order = top_indices[
-                        torch.argsort(
-                            fine_scores[top_indices], descending=True, stable=True
-                        )
+                        torch.argsort(rerank_scores, descending=True, stable=True)
                     ]
                     final_order = torch.cat((fine_order, order[len(top_indices) :]))
                 outputs[name]["rankings"].append(

@@ -1,0 +1,18 @@
+# Run coarse.yaml first so this sweep inherits the SAME val-selected coarse beta.
+# This is inference-only: the existing checkpoint is reused; no retraining needed.
+base_config: runs/ablations/coarse/selected.yaml
+stage: inference
+output_dir: runs/ablations/fine_coarse
+overrides:
+  retrieval.rerank: true
+  retrieval.top_m: 500
+  candidate_ks: [100, 500]
+experiments:
+  - name: fine_coarse_weight
+    sweep:
+      retrieval.fine_coarse_weight: [0.0, 0.1, 0.25, 0.5, 1.0, 2.0]
+# Choose final-reranking calibration by the official target metric on validation.
+# The grid contains 0.0, so selection can keep the old fine-only reranker.
+select:
+  group: fine_coarse_weight
+  metric: full_map

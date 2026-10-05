@@ -33,7 +33,7 @@ train:
   sampling:
     # Fractions of the C-1 negatives; remaining/unused slots are random.
     identity_fraction: 0.5
-    # Start with identity + random; 0.3 enables coarse mining (7 ID / 4 hard / 4 random).
+    # 0.3 enables coarse hard-negative mining after warmup.
     hard_fraction: 0.3
     warmup_epochs: 1
     refresh_every_epochs: 2
@@ -55,6 +55,10 @@ retrieval:
   coarse_beta: null             # null inherits model/checkpoint; a number overrides it
   coarse_normalization: zscore  # none reproduces raw ID + beta * state
   rerank: true                  # false keeps the complete coarse ranking
+  # Final Top-M score = z(fine) + lambda * z(coarse). 0.0 exactly reproduces
+  # the historical fine-only reranker. Select lambda on validation with
+  # configs/ablations/fine_coarse.yaml before reporting test results.
+  fine_coarse_weight: 0.0
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
