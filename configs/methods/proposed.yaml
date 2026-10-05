@@ -28,7 +28,7 @@ model:
 train:
   epochs: 10
   batch_size: 14
-  candidates: 64
+  candidates: 32
   seed: 0
   sampling:
     # Fractions of the C-1 negatives; remaining/unused slots are random.
