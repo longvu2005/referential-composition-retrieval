@@ -24,7 +24,7 @@ model:
   coarse_beta: 0.4
   num_heads: 8
   mlp_ratio: 4
-  geo_dim: 24
+  geo_dim: 18
 train:
   epochs: 10
   batch_size: 14
