@@ -19,6 +19,7 @@ from rcr.methods.proposed.batch import build_batch
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import SUBJECT_MARKERS, TextEncoder
 from rcr.methods.proposed.model import RCRModel
+from rcr.methods.proposed.objective import compute_loss
 from rcr.methods.proposed.retrieval import (
     mine_hard_negatives,
     retrieve_rankings,
@@ -29,7 +30,6 @@ from rcr.methods.proposed.sampling import (
     sample_candidates,
     sampling_settings,
 )
-from rcr.methods.proposed.training import compute_loss
 
 
 def _wandb_run(

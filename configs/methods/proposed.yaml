@@ -24,11 +24,11 @@ model:
   coarse_beta: 0.4
   num_heads: 8
   mlp_ratio: 4
-  geo_dim: 18
+  geo_dim: 32
 train:
   epochs: 10
   batch_size: 14
-  candidates: 32
+  candidates: 24
   seed: 0
   sampling:
     # Fractions of the C-1 negatives; remaining/unused slots are random.

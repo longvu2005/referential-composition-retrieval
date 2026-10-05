@@ -5,7 +5,7 @@ from torch import nn
 from rcr.methods.proposed.batch import build_batch, build_supervision
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.model import RCRModel
-from rcr.methods.proposed.training import compute_loss
+from rcr.methods.proposed.objective import compute_loss
 
 
 class _Tokenizer:

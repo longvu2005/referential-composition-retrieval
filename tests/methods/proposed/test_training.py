@@ -3,7 +3,7 @@ import torch
 
 from rcr.methods.proposed.losses import grounding_loss, identity_loss
 from rcr.methods.proposed.model import RCRModel
-from rcr.methods.proposed.training import compute_loss
+from rcr.methods.proposed.objective import compute_loss
 
 
 def _boxes(*shape: int) -> torch.Tensor:
