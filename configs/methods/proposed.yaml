@@ -58,7 +58,7 @@ retrieval:
   # Final Top-M score = z(fine) + lambda * z(coarse). 0.0 exactly reproduces
   # the historical fine-only reranker. Select lambda on validation with
   # configs/ablations/fine_coarse.yaml before reporting test results.
-  fine_coarse_weight: 0.0
+  fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
