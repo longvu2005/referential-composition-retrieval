@@ -2,6 +2,7 @@
 
 import json
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -40,9 +41,10 @@ class Backbone(nn.Module):
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
 
 
+@pytest.mark.parametrize("prefetch", [0, 1])
 @pytest.mark.parametrize("enabled,train_queries", [(True, 1), (True, 0), (False, 0)])
 def test_train_checkpoints_metrics_and_retrieve(
-    monkeypatch, tmp_path, enabled, train_queries
+    monkeypatch, tmp_path, enabled, train_queries, prefetch
 ):
     samples = [
         _sample("train1"),
@@ -78,12 +80,14 @@ def test_train_checkpoints_metrics_and_retrieve(
     for module in (train_proposed, retrieve_proposed, evaluate_proposed):
         monkeypatch.setattr(module, "load_rcr_data", lambda *args: data)
     for module in (train_proposed, retrieve_proposed):
-        monkeypatch.setattr(module, "GalleryCache", lambda path: cache)
+        monkeypatch.setattr(module, "GalleryCache", lambda path, **kwargs: cache)
     real_retrieve = train_proposed.retrieve_rankings
     evaluation_calls = []
     real_sample = train_proposed.sample_candidates
+    main_thread = threading.get_ident()
 
     def sample_train_gallery(samples, gallery_ids, *args, **kwargs):
+        assert threading.get_ident() == main_thread
         assert gallery_ids == ["q", "a", "b"]
         return real_sample(samples, gallery_ids, *args, **kwargs)
 
@@ -141,11 +145,21 @@ def test_train_checkpoints_metrics_and_retrieve(
             "mlp_ratio": 2,
             "geo_dim": 4,
         },
+        "cache": {"prefetch_batches": prefetch, "lru_mib": 1},
         "train": {
             "epochs": 3,
             "batch_size": 2,
             "candidates": 2,
             "seed": 0,
+            "amp": True,  # CPU runtime must fall back to FP32.
+            "mining_batch_size": 2,
+            "sampling": {
+                "identity_fraction": 0.0,
+                "hard_fraction": 1.0,
+                "warmup_epochs": 1,
+                "refresh_every_epochs": 2,
+                "pool_size": 1,
+            },
         },
         "optimizer": {"lr": 1e-4, "text_lr": 1e-5, "weight_decay": 0.01},
         "loss": {
@@ -177,6 +191,11 @@ def test_train_checkpoints_metrics_and_retrieve(
     output = tmp_path / "run"
     last = torch.load(output / "last.pt", weights_only=True)
     assert last["epoch"] == 3
+    assert last["scaler"] == {}  # Disabled on CPU.
+    mined = json.loads((output / "hard_negatives.json").read_text())
+    assert mined["model_epoch"] == 1 and mined["split"] == "train"
+    assert mined["pools"] == {"train1": ["b"], "train2": ["b"]}
+    assert not any(t.name.startswith("rcr-cache") for t in threading.enumerate())
     assert last["cache_id"] == cache.cache_id
     assert last["config"]["model"]["coarse_beta"] == 0.37
     assert last["model"]["state_text_proj.weight"].shape == (4, 8)

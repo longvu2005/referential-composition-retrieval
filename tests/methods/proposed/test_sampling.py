@@ -154,3 +154,43 @@ def test_identity_pool_requires_every_subject_identity_and_only_given_gallery():
 def test_invalid_sampling_settings_fail(options):
     with pytest.raises(ValueError):
         sampling_settings(options)
+
+
+@pytest.mark.parametrize("gallery_size,excluded_count", [(1000, 10), (80, 61)])
+def test_reusable_sampler_index_preserves_exclusions_and_fills_dense_gallery(
+    gallery_size, excluded_count
+):
+    from rcr.methods.proposed.sampling import CandidateIndex
+
+    sample = _samples()[0]
+    gallery = ["q1", "p1", "p2", *map(str, range(gallery_size))]
+    excluded = {"s1": set(map(str, range(excluded_count))) | {"outside"}}
+    # Include duplicates and ineligible IDs in both specialized pools.
+    options = dict(
+        identity_pools={"s1": ["q1", "p1", "0", str(excluded_count)] * 2},
+        hard_pools={"s1": [str(excluded_count), str(excluded_count + 1), "outside"]},
+        excluded=excluded,
+        identity_fraction=0.5,
+        hard_fraction=0.3,
+    )
+    index = CandidateIndex([sample], gallery, options["identity_pools"], excluded)
+    saved_forbidden = set(index.rows["s1"][1])
+    for seed in range(5):
+        first = sample_candidates(
+            [sample], gallery, 16, torch.Generator().manual_seed(seed), **options
+        )[0]
+        stats = {}
+        second = sample_candidates(
+            [sample],
+            gallery,
+            16,
+            torch.Generator().manual_seed(seed),
+            index=index,
+            stats=stats,
+            **options,
+        )[0]
+        assert first == second and len(set(second)) == 16
+        assert len(set(second) & {"p1", "p2"}) == 1
+        assert not set(second) & (excluded["s1"] | {"q1", "outside"})
+        assert stats == {"sampled_identity": 1, "sampled_hard": 1, "sampled_random": 13}
+        assert index.rows["s1"][1] == saved_forbidden

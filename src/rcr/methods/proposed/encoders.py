@@ -11,65 +11,148 @@ from rcr.methods.common.data import sample_selection_texts
 SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
 
 
+class QueryTextCache:
+    """CPU token IDs only; language-model outputs always keep their gradients."""
+
+    def __init__(self, tokenizer) -> None:
+        self.tokenizer = tokenizer
+        self.rows: dict[tuple, dict] = {}
+
+    @staticmethod
+    def _key(sample: dict) -> tuple:
+        return (
+            sample["final_desc"],
+            sample["final_change"],
+            tuple(int(x["subject_id"]) for x in sample["subjects"]),
+        )
+
+    def prepare(self, samples: list[dict]) -> None:
+        missing = {
+            self._key(sample): sample
+            for sample in samples
+            if self._key(sample) not in self.rows
+        }
+        entries = list(missing.items())
+        for start in range(0, len(entries), 64):
+            chunk = entries[start : start + 64]
+            selections, changes = [], []
+            for _, sample in chunk:
+                selections.extend(sample_selection_texts(sample))
+                change = sample["final_change"]
+                for subject in sample["subjects"]:
+                    sid = int(subject["subject_id"])
+                    change = re.sub(
+                        rf"\bSubject\s+{sid}\b", SUBJECT_MARKERS[sid], change
+                    )
+                changes.append(change)
+
+            def tokenize(texts):
+                encoded = self.tokenizer(texts, padding=True, return_tensors="pt")
+                return [
+                    ids[mask.bool()].clone()
+                    for ids, mask in zip(
+                        encoded["input_ids"], encoded["attention_mask"], strict=True
+                    )
+                ]
+
+            selected, changed = tokenize(selections), tokenize(changes)
+            offset = 0
+            for (key, sample), ids in zip(chunk, changed, strict=True):
+                subject_ids = [int(x["subject_id"]) for x in sample["subjects"]]
+                positions = []
+                for sid in subject_ids:
+                    marker = SUBJECT_MARKERS[sid]
+                    marker_id = self.tokenizer.convert_tokens_to_ids(marker)
+                    found = (ids == marker_id).nonzero(as_tuple=True)[0]
+                    if not len(found):
+                        raise ValueError(
+                            f"{marker} must be one tokenizer token and occur"
+                        )
+                    positions.append(found)
+                count = len(subject_ids)
+                self.rows[key] = {
+                    "selections": selected[offset : offset + count],
+                    "change": ids,
+                    "positions": positions,
+                    "subject_ids": subject_ids,
+                }
+                offset += count
+
+    def batch(self, samples: list[dict]) -> dict[str, Tensor]:
+        self.prepare(samples)
+        rows = [self.rows[self._key(sample)] for sample in samples]
+        b, subjects = len(rows), len(rows[0]["subject_ids"])
+        if any(len(row["subject_ids"]) != subjects for row in rows):
+            raise ValueError("text batches require equal Subject counts")
+        left = getattr(self.tokenizer, "padding_side", "right") == "left"
+        pad = getattr(self.tokenizer, "pad_token_id", 0)
+
+        def padded(sequences):
+            length = max(map(len, sequences))
+            ids = torch.full((len(sequences), length), pad, dtype=torch.long)
+            mask = torch.zeros_like(ids)
+            offsets = []
+            for i, sequence in enumerate(sequences):
+                offset = length - len(sequence) if left else 0
+                ids[i, offset : offset + len(sequence)] = sequence
+                mask[i, offset : offset + len(sequence)] = 1
+                offsets.append(offset)
+            return ids, mask, offsets
+
+        selection_ids, selection_mask, _ = padded(
+            [tokens for row in rows for tokens in row["selections"]]
+        )
+        change_ids, change_mask, offsets = padded([row["change"] for row in rows])
+        subject_pos = torch.empty(b, subjects, dtype=torch.long)
+        mentions = torch.zeros(b, subjects, change_ids.shape[1], dtype=torch.bool)
+        for n, row in enumerate(rows):
+            for j, positions in enumerate(row["positions"]):
+                positions = positions + offsets[n]
+                subject_pos[n, j] = positions[0]
+                mentions[n, j, positions] = True
+        return {
+            "selection_ids": selection_ids,
+            "selection_mask": selection_mask,
+            "change_ids": change_ids,
+            "change_mask": change_mask,
+            "subject_pos": subject_pos,
+            "subject_token_mask": mentions,
+            "subject_ids": torch.tensor([row["subject_ids"] for row in rows]),
+        }
+
+
+def encode_tokenized_text(
+    tokens: dict[str, Tensor], text_encoder: nn.Module, device: torch.device | str
+) -> dict[str, Tensor]:
+    """Run both differentiable BERT passes after CPU batch preparation."""
+    tokens = {key: value.to(device, non_blocking=True) for key, value in tokens.items()}
+    b, subjects = tokens["subject_ids"].shape
+    selections, selection_mask = text_encoder(
+        tokens["selection_ids"], tokens["selection_mask"]
+    )
+    change, change_mask = text_encoder(tokens["change_ids"], tokens["change_mask"])
+    return {
+        "selections": selections.reshape(b, subjects, *selections.shape[1:]),
+        "selection_mask": selection_mask.reshape(b, subjects, -1),
+        "change": change,
+        "change_mask": change_mask,
+        **{
+            key: tokens[key]
+            for key in ("subject_pos", "subject_token_mask", "subject_ids")
+        },
+    }
+
+
 def encode_query_text(
     samples: list[dict],
     tokenizer,
     text_encoder: nn.Module,
     device: torch.device | str,
+    *,
+    text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor]:
-    """Encode a batch with equal Subject counts (one query during retrieval).
-
-    Return selection tokens [B,S,L,D], change tokens [B,L,D], their masks,
-    Subject IDs, and every Subject-marker position. Text gradients stay enabled.
-    """
-    b, s = len(samples), len(samples[0]["subjects"])
-    selection_texts = [
-        text for sample in samples for text in sample_selection_texts(sample)
-    ]
-    selection = tokenizer(selection_texts, padding=True, return_tensors="pt")
-    selections, selection_mask = text_encoder(
-        selection["input_ids"].to(device), selection["attention_mask"].to(device)
-    )
-
-    changes = []
-    for sample in samples:
-        text = sample["final_change"]
-        for subject in sample["subjects"]:
-            subject_id = int(subject["subject_id"])
-            text = re.sub(
-                rf"\bSubject\s+{subject_id}\b", SUBJECT_MARKERS[subject_id], text
-            )
-        changes.append(text)
-    encoded = tokenizer(changes, padding=True, return_tensors="pt")
-    change_ids = encoded["input_ids"].to(device)
-    change, change_mask = text_encoder(change_ids, encoded["attention_mask"].to(device))
-
-    subject_pos = torch.empty(b, s, dtype=torch.long, device=device)
-    subject_token_mask = torch.zeros(
-        b, s, change_ids.shape[1], dtype=torch.bool, device=device
-    )
-    for n, sample in enumerate(samples):
-        for j, subject in enumerate(sample["subjects"]):
-            marker = SUBJECT_MARKERS[int(subject["subject_id"])]
-            marker_id = tokenizer.convert_tokens_to_ids(marker)
-            positions = (change_ids[n] == marker_id).nonzero(as_tuple=True)[0]
-            if positions.numel() == 0:
-                raise ValueError(f"{marker} must be one tokenizer token and occur")
-            subject_pos[n, j] = positions[0]
-            subject_token_mask[n, j, positions] = True
-
-    return {
-        "selections": selections.reshape(b, s, *selections.shape[1:]),
-        "selection_mask": selection_mask.reshape(b, s, -1),
-        "change": change,
-        "change_mask": change_mask,
-        "subject_pos": subject_pos,
-        "subject_token_mask": subject_token_mask,
-        "subject_ids": torch.tensor(
-            [[int(row["subject_id"]) for row in x["subjects"]] for x in samples],
-            device=device,
-        ),
-    }
+    cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
+    return encode_tokenized_text(cache.batch(samples), text_encoder, device)
 
 
 class ImageEncoder(nn.Module):
@@ -126,4 +209,4 @@ class IdentityHead(nn.Module):
         self.proj = nn.Linear(dim, identity_dim)
 
     def forward(self, person: Tensor) -> Tensor:
-        return F.normalize(self.proj(person), dim=-1)
+        return F.normalize(self.proj(person).float(), dim=-1)

@@ -34,7 +34,7 @@ def reference_key_bias(
 ) -> Tensor:
     """Soft membership prior aligned with [CLS, change, Subject identities]."""
     b, length = change.shape[:2]
-    prior = F.logsigmoid(grounding_logits)
+    prior = F.logsigmoid(grounding_logits.float())
     if subject_mask is not None:
         prior = prior.masked_fill(~subject_mask[:, :, None], -torch.inf)
     neutral = change.new_zeros(b, 1 + length)
@@ -95,7 +95,7 @@ class StructuredComposition(nn.Module):
             if subject_mask is None
             else subject_mask.bool()
         )
-        membership = grounding_logits.sigmoid()
+        membership = grounding_logits.float().sigmoid()
         membership = membership.masked_fill(~active[:, :, None], 0)
         weight = membership / membership.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 

@@ -45,6 +45,13 @@ class _Cache:
         self.image_ids = ["q1", "q2", "p1", "n1", "p2", "n2"]
         self.patch_hw = (1, 2)
 
+    @property
+    def by_id(self):
+        return {image_id: i for i, image_id in enumerate(self.image_ids)}
+
+    def load_groups(self, *groups):
+        return tuple(self.load(indices) for indices in groups)
+
     def load(self, indices):
         n = len(indices)
         scene = torch.randn(n, 2, 4)

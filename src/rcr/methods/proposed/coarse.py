@@ -23,35 +23,53 @@ def identity_scores(
     gallery_mask: [G, Kt], True for valid target persons
     """
 
-    # Empty query policy: no identity evidence, so every gallery item ties at
-    # zero except images with no detected target people (ranked last).
+    return identity_scores_batched(
+        query_identity[None],
+        grounding_logits[None],
+        gallery_identity,
+        gallery_mask,
+        None if query_mask is None else query_mask[None],
+        None if subject_mask is None else subject_mask[None],
+        eps,
+    )[0]
+
+
+def identity_scores_batched(
+    query_identity: Tensor,
+    grounding_logits: Tensor,
+    gallery_identity: Tensor,
+    gallery_mask: Tensor | None = None,
+    query_mask: Tensor | None = None,
+    subject_mask: Tensor | None = None,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Score [B,Kq,D] queries against one [G,Kt,D] gallery chunk, returning [B,G]."""
+    b, g = query_identity.shape[0], gallery_identity.shape[0]
     if gallery_identity.shape[1] == 0:
-        return gallery_identity.new_full((gallery_identity.shape[0],), -torch.inf)
-    if query_identity.shape[0] == 0:
-        scores = gallery_identity.new_zeros(gallery_identity.shape[0])
+        return gallery_identity.new_full((b, g), -torch.inf)
+    if query_identity.shape[1] == 0:
+        scores = gallery_identity.new_zeros(b, g)
         return (
-            scores.masked_fill(~gallery_mask.any(-1), -torch.inf)
+            scores.masked_fill(~gallery_mask.any(-1)[None], -torch.inf)
             if gallery_mask is not None
             else scores
         )
     weight = grounding_logits.sigmoid()
     if query_mask is not None:
-        weight = weight * query_mask[None].to(weight.dtype)
+        weight = weight * query_mask[:, None].to(weight.dtype)
     if subject_mask is not None:
-        weight = weight * subject_mask[:, None].to(weight.dtype)
-    similarity = torch.einsum("qd,gkd->gqk", query_identity, gallery_identity)
-
+        weight = weight * subject_mask[:, :, None].to(weight.dtype)
+    similarity = torch.einsum("bqd,gkd->bgqk", query_identity, gallery_identity)
     if gallery_mask is not None:
-        similarity = similarity.masked_fill(~gallery_mask[:, None, :], -torch.inf)
-
+        similarity = similarity.masked_fill(~gallery_mask[None, :, None, :], -torch.inf)
     best = similarity.amax(dim=-1)
     empty = ~torch.isfinite(best).any(dim=-1)
-    best = best.masked_fill(empty[:, None], 0)
-    per_subject = (best[:, None, :] * weight[None]).sum(dim=-1) / weight.sum(
-        dim=-1
-    ).clamp_min(eps)[None]
+    best = best.masked_fill(empty[..., None], 0)
+    per_subject = (best[:, :, None, :] * weight[:, None]).sum(-1) / weight.sum(
+        -1
+    ).clamp_min(eps)[:, None]
     if subject_mask is not None:
-        scores = per_subject.sum(-1) / subject_mask.sum().clamp_min(1)
+        scores = per_subject.sum(-1) / subject_mask.sum(-1).clamp_min(1)[:, None]
     else:
         scores = per_subject.mean(-1)
     return scores.masked_fill(empty, -torch.inf)

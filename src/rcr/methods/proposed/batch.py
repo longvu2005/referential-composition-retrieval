@@ -1,10 +1,13 @@
 """Build training batches from RCR samples and cached visual features."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+
 import torch
 from torch import Tensor, nn
 
 from rcr.methods.proposed.cache import GalleryCache
-from rcr.methods.proposed.encoders import encode_query_text
+from rcr.methods.proposed.encoders import QueryTextCache, encode_tokenized_text
 
 
 def _identity_labels(
@@ -49,29 +52,27 @@ def build_supervision(
     return targets, labels
 
 
-def build_batch(
+def prepare_visual_batch(
     samples: list[dict],
     candidate_image_ids: list[list[str]],
     cache: GalleryCache,
-    tokenizer,
-    text_encoder: nn.Module,
-    device: torch.device | str,
     *,
     state_image_ids: list[set[str]] | None = None,
 ) -> dict[str, Tensor]:
-    """Build one training batch; candidate selection is handled outside."""
+    """Read and collate CPU features/supervision without running a model."""
 
     b = len(samples)
     c = len(candidate_image_ids[0])
-    by_id = {image_id: i for i, image_id in enumerate(cache.image_ids)}
+    by_id = cache.by_id
 
     query_idx = torch.tensor([by_id[x["query_image_id"]] for x in samples])
     target_idx = torch.tensor(
         [by_id[image_id] for rows in candidate_image_ids for image_id in rows]
     )
 
-    q_scene, q_persons, q_boxes, q_ids, q_mask = cache.load(query_idx)
-    t_scene, t_persons, t_boxes, t_ids, t_mask = cache.load(target_idx)
+    query, target = cache.load_groups(query_idx, target_idx)
+    q_scene, q_persons, q_boxes, q_ids, q_mask = query
+    t_scene, t_persons, t_boxes, t_ids, t_mask = target
 
     subjects = [sample["subjects"] for sample in samples]
     identity_vocab: dict[str, int] = {}
@@ -79,8 +80,6 @@ def build_batch(
         q_ids, subjects, identity_vocab
     )
     target_identity_labels = _identity_labels(t_ids, identity_vocab)
-
-    text = encode_query_text(samples, tokenizer, text_encoder, device)
 
     positives = [
         set(sample["positive_image_ids"])
@@ -94,7 +93,6 @@ def build_batch(
             for positive, rows in zip(positives, candidate_image_ids, strict=True)
         ],
         dtype=torch.bool,
-        device=device,
     )
 
     # A cached crop is one observation even when its image occurs in multiple
@@ -129,20 +127,19 @@ def build_batch(
 
     k_t = t_persons.shape[1]
     batch = {
-        "query_scene": q_scene.to(device),
-        "query_persons": q_persons.to(device),
-        "query_boxes": q_boxes.to(device),
-        "query_person_mask": q_mask.to(device),
-        "query_identity_labels": identity_labels.to(device),
-        "query_identity_mask": query_identity_mask.to(device),
-        "grounding_targets": grounding_targets.to(device),
-        **text,
-        "target_scene": t_scene.to(device).reshape(b, c, *t_scene.shape[1:]),
-        "target_persons": t_persons.to(device).reshape(b, c, k_t, t_persons.shape[-1]),
-        "target_boxes": t_boxes.to(device).reshape(b, c, k_t, 4),
-        "target_mask": t_mask.to(device).reshape(b, c, k_t),
-        "target_identity_labels": target_identity_labels.to(device).reshape(b, c, k_t),
-        "target_identity_mask": target_identity_mask.to(device).reshape(b, c, k_t),
+        "query_scene": q_scene,
+        "query_persons": q_persons,
+        "query_boxes": q_boxes,
+        "query_person_mask": q_mask,
+        "query_identity_labels": identity_labels,
+        "query_identity_mask": query_identity_mask,
+        "grounding_targets": grounding_targets,
+        "target_scene": t_scene.reshape(b, c, *t_scene.shape[1:]),
+        "target_persons": t_persons.reshape(b, c, k_t, t_persons.shape[-1]),
+        "target_boxes": t_boxes.reshape(b, c, k_t, 4),
+        "target_mask": t_mask.reshape(b, c, k_t),
+        "target_identity_labels": target_identity_labels.reshape(b, c, k_t),
+        "target_identity_mask": target_identity_mask.reshape(b, c, k_t),
         "positive_mask": positive_mask,
         "grounding_complete": torch.tensor(
             [
@@ -154,7 +151,6 @@ def build_batch(
                 for sample, ids in zip(samples, q_ids, strict=True)
             ],
             dtype=torch.bool,
-            device=device,
         ),
     }
     if state_image_ids is not None:
@@ -168,8 +164,69 @@ def build_batch(
                 )
             ],
             dtype=torch.bool,
-            device=device,
         )
         if (positive_mask & ~batch["state_mask"]).any():
             raise ValueError("every Full Positive must contain all required IDs")
     return batch
+
+
+def finish_batch(visual, tokens, text_encoder, device):
+    """Transfer a prepared batch and encode text in the training process."""
+    return {
+        **{key: value.to(device, non_blocking=True) for key, value in visual.items()},
+        **encode_tokenized_text(tokens, text_encoder, device),
+    }
+
+
+def build_batch(
+    samples: list[dict],
+    candidate_image_ids: list[list[str]],
+    cache: GalleryCache,
+    tokenizer,
+    text_encoder: nn.Module,
+    device: torch.device | str,
+    *,
+    state_image_ids: list[set[str]] | None = None,
+    text_cache: QueryTextCache | None = None,
+) -> dict[str, Tensor]:
+    """Synchronous interface, also used to check the prefetched path."""
+    text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
+    visual = prepare_visual_batch(
+        samples, candidate_image_ids, cache, state_image_ids=state_image_ids
+    )
+    return finish_batch(visual, text_cache.batch(samples), text_encoder, device)
+
+
+@contextmanager
+def prefetch_batches(jobs, prepare, depth: int = 0):
+    """One CPU batch ahead; job generation (and its RNG) stays in the caller."""
+    if depth not in (0, 1):
+        raise ValueError("cache.prefetch_batches must be 0 or 1")
+    if depth == 0:
+        yield map(prepare, jobs)
+        return
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rcr-cache") as executor:
+
+        def batches():
+            iterator = iter(jobs)
+            pending = None
+            try:
+                first = next(iterator, None)
+                if first is None:
+                    return
+                pending = executor.submit(prepare, first)
+                for job in iterator:
+                    batch = pending.result()
+                    pending = executor.submit(prepare, job)
+                    yield batch
+                yield pending.result()
+            finally:
+                if pending is not None:
+                    pending.cancel()
+
+        iterator = batches()
+        try:
+            yield iterator
+        finally:
+            iterator.close()

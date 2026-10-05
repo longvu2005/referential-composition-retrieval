@@ -87,7 +87,9 @@ def retrieve_experiments(
     full_num_queries = len(samples)
     if max_queries is not None:
         samples = samples[:max_queries]
-    cache = GalleryCache(data_cfg["cache"])
+    cache = GalleryCache(
+        data_cfg["cache"], lru_mib=cfg.get("cache", {}).get("lru_mib", 0)
+    )
     cache.validate_gallery(data.gallery_ids)
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")

@@ -15,9 +15,13 @@ from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.methods.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.methods.common.experiment import resolve_device
 from rcr.methods.common.results import write_json
-from rcr.methods.proposed.batch import build_batch
+from rcr.methods.proposed.batch import (
+    finish_batch,
+    prefetch_batches,
+    prepare_visual_batch,
+)
 from rcr.methods.proposed.cache import GalleryCache
-from rcr.methods.proposed.encoders import SUBJECT_MARKERS, TextEncoder
+from rcr.methods.proposed.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.objective import compute_loss
 from rcr.methods.proposed.retrieval import (
@@ -26,6 +30,7 @@ from rcr.methods.proposed.retrieval import (
     uses_state,
 )
 from rcr.methods.proposed.sampling import (
+    CandidateIndex,
     identity_candidate_pools,
     sample_candidates,
     sampling_settings,
@@ -142,6 +147,13 @@ def train(cfg: dict) -> Path:
     evaluation_cfg = cfg.get("evaluation", {"enabled": False})
     output_cfg = cfg["output"]
     sampling_cfg = sampling_settings(train_cfg.get("sampling", {}))
+    cache_cfg = cfg.get("cache", {})
+    prefetch = cache_cfg.get("prefetch_batches", 0)
+    if prefetch not in (0, 1):
+        raise ValueError("cache.prefetch_batches must be 0 or 1")
+    mining_batch_size = train_cfg.get("mining_batch_size", 1)
+    if not isinstance(mining_batch_size, int) or mining_batch_size < 1:
+        raise ValueError("train.mining_batch_size must be a positive integer")
     use_state = uses_state(cfg["retrieval"], model_cfg.get("coarse_beta", 0.3))
     if loss_cfg.get("state_weight", 1.0) == 0 and use_state:
         raise ValueError("state_weight=0 requires identity_only or coarse_beta=0")
@@ -165,12 +177,13 @@ def train(cfg: dict) -> Path:
         int(evaluation_cfg.get("train_max_queries", 0)),
         seed,
     )
-    cache = GalleryCache(data_cfg["cache"])
+    cache = GalleryCache(data_cfg["cache"], lru_mib=cache_cfg.get("lru_mib", 0))
     cache.validate_gallery(data.gallery_ids)
     candidate_ids = split_image_ids(data, "train")
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
     excluded = negative_exclusions(samples)
+    candidate_index = CandidateIndex(samples, candidate_ids, identity_pools, excluded)
     hard_pools = None
     print(f"Training gallery: train ({len(candidate_ids)} images)")
 
@@ -184,6 +197,8 @@ def train(cfg: dict) -> Path:
     tokenizer.add_special_tokens(
         {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
     )
+    text_cache = QueryTextCache(tokenizer)
+    text_cache.prepare([*samples, *val_samples])
     text_backbone = AutoModel.from_pretrained(model_cfg["text_model"])
     text_backbone.resize_token_embeddings(len(tokenizer))
     text_encoder = TextEncoder(text_backbone, dim).to(device)
@@ -207,6 +222,23 @@ def train(cfg: dict) -> Path:
         ],
         weight_decay=optim_cfg["weight_decay"],
     )
+
+    amp_enabled = bool(train_cfg.get("amp", False)) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+    def prepare(job):
+        rows, candidates, stats = job
+        visual = prepare_visual_batch(
+            rows,
+            candidates,
+            cache,
+            state_image_ids=[state_images[row["sample_id"]] for row in rows],
+        )
+        tokens = text_cache.batch(rows)
+        if device.type == "cuda":
+            visual = {key: value.pin_memory() for key, value in visual.items()}
+            tokens = {key: value.pin_memory() for key, value in tokens.items()}
+        return rows, stats, visual, tokens
 
     # Equal Subject counts keep batch shapes explicit.
     groups: dict[int, list[dict]] = {}
@@ -266,6 +298,8 @@ def train(cfg: dict) -> Path:
                     gallery_ids=candidate_ids,
                     retrieval=cfg["retrieval"],
                     pool_size=sampling_cfg["pool_size"],
+                    query_batch_size=mining_batch_size,
+                    text_cache=text_cache,
                     excluded=excluded,
                 )
                 write_json(
@@ -301,88 +335,94 @@ def train(cfg: dict) -> Path:
             }
             counts = {}
 
-            progress = tqdm(
-                batches,
-                desc=f"epoch {epoch + 1}/{train_cfg['epochs']}",
-            )
-            for rows in progress:
-                sampling_counts = {}
-                candidates = sample_candidates(
-                    rows,
-                    candidate_ids,
-                    train_cfg["candidates"],
-                    generator,
-                    identity_pools=identity_pools,
-                    hard_pools=hard_pools,
-                    excluded=excluded,
-                    identity_fraction=sampling_cfg["identity_fraction"],
-                    hard_fraction=sampling_cfg["hard_fraction"],
-                    stats=sampling_counts,
-                )
-
-                optimizer.zero_grad(set_to_none=True)
-                batch = build_batch(
-                    rows,
-                    candidates,
-                    cache,
-                    tokenizer,
-                    text_encoder,
-                    device,
-                    state_image_ids=[state_images[row["sample_id"]] for row in rows],
-                )
-                loss, parts = compute_loss(model, batch, cache.patch_hw, **loss_cfg)
-                loss.backward()
-                global_step += 1
-                should_log = run is not None and (
-                    global_step == 1 or global_step % log_every == 0
-                )
-                grad_norm = (
-                    _gradient_norm((model, text_encoder)) if should_log else None
-                )
-                optimizer.step()
-
-                values = {
-                    "loss": loss.item(),
-                    **{
-                        k: parts[k].item()
-                        for k in ("grounding", "identity", "retrieval", "state")
-                    },
-                }
-                values["identity_active"] = float(values["identity"] > 0)
-                for name, value in values.items():
-                    totals[name] += value * len(rows)
-                batch_counts = {
-                    **{k: v.item() for k, v in parts.items() if k not in values},
-                    **sampling_counts,
-                }
-                state_pairs_seen += batch_counts["state_pairs"]
-                for name, value in batch_counts.items():
-                    counts[name] = counts.get(name, 0) + value
-                progress.set_postfix(loss=f"{values['loss']:.4f}")
-
-                if should_log:
-                    run.log(
-                        {
-                            "global_step": global_step,
-                            "train/loss": values["loss"],
-                            "train/grounding_loss": values["grounding"],
-                            "train/identity_loss": values["identity"],
-                            "train/identity_active": values["identity_active"],
-                            "train/retrieval_loss": values["retrieval"],
-                            "train/state_loss": values["state"],
-                            **{
-                                f"train/{k}": v
-                                for k, v in _diagnostics(batch_counts).items()
-                            },
-                            "train/gradient_norm": grad_norm,
-                            "train/model_lr": optimizer.param_groups[0]["lr"],
-                            "train/text_lr": optimizer.param_groups[1]["lr"],
-                        }
+            def jobs(batches=batches, generator=generator, hard_pools=hard_pools):
+                for rows in batches:
+                    stats = {}
+                    candidates = sample_candidates(
+                        rows,
+                        candidate_ids,
+                        train_cfg["candidates"],
+                        generator,
+                        identity_pools=identity_pools,
+                        hard_pools=hard_pools,
+                        excluded=excluded,
+                        identity_fraction=sampling_cfg["identity_fraction"],
+                        hard_fraction=sampling_cfg["hard_fraction"],
+                        stats=stats,
+                        index=candidate_index,
                     )
+                    yield rows, candidates, stats
 
-                # Do not retain the last batch/text graph through validation or
-                # while constructing the next batch.
-                del batch, loss, parts
+            with prefetch_batches(jobs(), prepare, prefetch) as prepared:
+                progress = tqdm(
+                    prepared,
+                    total=len(batches),
+                    desc=f"epoch {epoch + 1}/{train_cfg['epochs']}",
+                )
+                for rows, sampling_counts, visual, tokens in progress:
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.autocast(
+                        "cuda", dtype=torch.float16, enabled=amp_enabled
+                    ):
+                        batch = finish_batch(visual, tokens, text_encoder, device)
+                        loss, parts = compute_loss(
+                            model, batch, cache.patch_hw, **loss_cfg
+                        )
+                    scaler.scale(loss).backward()
+                    global_step += 1
+                    should_log = run is not None and (
+                        global_step == 1 or global_step % log_every == 0
+                    )
+                    if should_log:
+                        scaler.unscale_(optimizer)
+                    grad_norm = (
+                        _gradient_norm((model, text_encoder)) if should_log else None
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    values = {
+                        "loss": loss.item(),
+                        **{
+                            k: parts[k].item()
+                            for k in ("grounding", "identity", "retrieval", "state")
+                        },
+                    }
+                    values["identity_active"] = float(values["identity"] > 0)
+                    for name, value in values.items():
+                        totals[name] += value * len(rows)
+                    batch_counts = {
+                        **{k: v.item() for k, v in parts.items() if k not in values},
+                        **sampling_counts,
+                    }
+                    state_pairs_seen += batch_counts["state_pairs"]
+                    for name, value in batch_counts.items():
+                        counts[name] = counts.get(name, 0) + value
+                    progress.set_postfix(loss=f"{values['loss']:.4f}")
+
+                    if should_log:
+                        run.log(
+                            {
+                                "global_step": global_step,
+                                "train/loss": values["loss"],
+                                "train/grounding_loss": values["grounding"],
+                                "train/identity_loss": values["identity"],
+                                "train/identity_active": values["identity_active"],
+                                "train/retrieval_loss": values["retrieval"],
+                                "train/state_loss": values["state"],
+                                **{
+                                    f"train/{k}": v
+                                    for k, v in _diagnostics(batch_counts).items()
+                                },
+                                "train/gradient_norm": grad_norm,
+                                "train/model_lr": optimizer.param_groups[0]["lr"],
+                                "train/text_lr": optimizer.param_groups[1]["lr"],
+                            }
+                        )
+
+                    # Do not retain the last batch/text graph through validation or
+                    # while constructing the next batch.
+                    del batch, loss, parts, visual, tokens
 
             optimizer.zero_grad(set_to_none=True)
             count = len(samples)
@@ -435,6 +475,7 @@ def train(cfg: dict) -> Path:
                         device,
                         gallery_ids=split_image_ids(data, split),
                         **cfg["retrieval"],
+                        text_cache=text_cache,
                         description=f"{split} epoch {epoch_number}",
                     )
                     result = evaluate_retrieval_output(
@@ -487,6 +528,7 @@ def train(cfg: dict) -> Path:
                 "model": model.state_dict(),
                 "text_encoder": text_encoder.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),
                 "config": cfg,
                 "dim": dim,
                 "cache_id": cache.cache_id,

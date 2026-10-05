@@ -88,26 +88,30 @@ class EvidenceBinding(nn.Module):
     def _geo_bias(self, boxes: Tensor, patch_hw: tuple[int, int]) -> Tensor:
         """Return additive geometry bias [B*H, K, P] for normalized xyxy boxes."""
 
-        hp, wp = patch_hw
-        assert hp * wp > 0
+        # Zero-width padded boxes produce offsets above FP16's finite range.
+        # Keep geometry and its MLP in FP32, including the additive attention bias.
+        with torch.autocast(boxes.device.type, enabled=False):
+            boxes = boxes.float()
+            hp, wp = patch_hw
+            assert hp * wp > 0
 
-        y = (torch.arange(hp, device=boxes.device, dtype=boxes.dtype) + 0.5) / hp
-        x = (torch.arange(wp, device=boxes.device, dtype=boxes.dtype) + 0.5) / wp
-        yy, xx = torch.meshgrid(y, x, indexing="ij")
-        patches = torch.stack((xx, yy), dim=-1).reshape(-1, 2)
+            y = (torch.arange(hp, device=boxes.device, dtype=boxes.dtype) + 0.5) / hp
+            x = (torch.arange(wp, device=boxes.device, dtype=boxes.dtype) + 0.5) / wp
+            yy, xx = torch.meshgrid(y, x, indexing="ij")
+            patches = torch.stack((xx, yy), dim=-1).reshape(-1, 2)
 
-        x1, y1, x2, y2 = boxes.unbind(-1)
-        w = (x2 - x1).clamp_min(1e-6)
-        h = (y2 - y1).clamp_min(1e-6)
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
+            x1, y1, x2, y2 = boxes.unbind(-1)
+            w = (x2 - x1).clamp_min(1e-6)
+            h = (y2 - y1).clamp_min(1e-6)
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
 
-        dx = (patches[:, 0] - cx[..., None]) / w[..., None]
-        dy = (patches[:, 1] - cy[..., None]) / h[..., None]
-        dw = torch.log(w)[..., None].expand_as(dx)
-        dh = torch.log(h)[..., None].expand_as(dy)
+            dx = (patches[:, 0] - cx[..., None]) / w[..., None]
+            dy = (patches[:, 1] - cy[..., None]) / h[..., None]
+            dw = torch.log(w)[..., None].expand_as(dx)
+            dh = torch.log(h)[..., None].expand_as(dy)
 
-        bias = self.geo(torch.stack((dx, dy, dw, dh), dim=-1))
-        bias = bias.permute(0, 3, 1, 2)
-        b, h, k, p = bias.shape
-        return bias.reshape(b * h, k, p)
+            bias = self.geo(torch.stack((dx, dy, dw, dh), dim=-1))
+            bias = bias.permute(0, 3, 1, 2)
+            b, h, k, p = bias.shape
+            return bias.reshape(b * h, k, p)

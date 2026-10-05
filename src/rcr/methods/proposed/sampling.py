@@ -56,6 +56,72 @@ def sampling_settings(cfg: dict) -> dict:
     return settings
 
 
+class CandidateIndex:
+    """Static gallery, positives and exclusions reused by every training batch."""
+
+    def __init__(self, samples, gallery_image_ids, identity_pools=None, excluded=None):
+        self.gallery = list(dict.fromkeys(gallery_image_ids))
+        self.gallery_set = set(self.gallery)
+        self.rows = {}
+        for sample in samples:
+            sample_id = sample["sample_id"]
+            positives = sample.get("positive_image_ids")
+            if positives is None:
+                positives = [sample["target_image_id"]]
+            positives = list(
+                dict.fromkeys(
+                    x
+                    for x in positives
+                    if x in self.gallery_set and x != sample["query_image_id"]
+                )
+            )
+            if not positives:
+                raise ValueError(f"no positive target in gallery for {sample_id}")
+            forbidden = (
+                set(positives)
+                | {sample["query_image_id"]}
+                | set((excluded or {}).get(sample_id, ()))
+            ) & self.gallery_set
+            identity = list(
+                dict.fromkeys(
+                    x
+                    for x in (identity_pools or {}).get(sample_id, ())
+                    if x in self.gallery_set and x not in forbidden
+                )
+            )
+            self.rows[sample_id] = (positives, forbidden, identity)
+
+
+def _random_negatives(gallery, forbidden, count, generator):
+    """Uniform draws without replacement, with a bounded dense fallback."""
+    selected = []
+    # Rejection is cheap when C is small compared with the eligible gallery.
+    # Accepted draws remain uniform; dense fallback samples the remaining set.
+    for _ in range(8):
+        remaining = count - len(selected)
+        if remaining == 0:
+            return selected
+        if len(gallery) - len(forbidden) < max(2 * remaining, len(gallery) // 4):
+            break
+        draws = torch.randint(
+            len(gallery), (max(16, 2 * remaining),), generator=generator
+        )
+        for index in draws.tolist():
+            image_id = gallery[index]
+            if image_id not in forbidden:
+                selected.append(image_id)
+                forbidden.add(image_id)
+                if len(selected) == count:
+                    return selected
+    available = [x for x in gallery if x not in forbidden]
+    indices = torch.randperm(len(available), generator=generator)[
+        : count - len(selected)
+    ]
+    tail = [available[i] for i in indices.tolist()]
+    forbidden.update(tail)
+    return selected + tail
+
+
 def sample_candidates(
     samples: list[dict],
     gallery_image_ids: list[str],
@@ -68,14 +134,13 @@ def sample_candidates(
     identity_fraction: float = 0.0,
     hard_fraction: float = 0.0,
     stats: dict | None = None,
+    index: CandidateIndex | None = None,
 ) -> list[list[str]]:
-    """One reviewed positive, identity negatives, mined negatives, then random.
+    """One positive, identity/mined negatives, then uniform random negatives.
 
-    Quotas are floor(fraction * (C-1)); unused slots fall back to random. Every
-    stage excludes self, ALL known positives, disputed negatives and prior picks.
-    The hard pool is sampled uniformly, not always taking its highest ranks.
+    Quotas and exclusions match the original sampler. The new random draws are
+    reproducible, but need not match the old randperm sequence for the same seed.
     """
-
     if num_candidates < 2:
         raise ValueError("num_candidates must be at least 2")
     sampling_settings(
@@ -83,74 +148,50 @@ def sample_candidates(
     )
     if identity_fraction and identity_pools is None:
         raise ValueError("identity sampling requires identity_pools")
-
-    gallery = list(dict.fromkeys(gallery_image_ids))
-    gallery_set = set(gallery)
-    rows: list[list[str]] = []
-
+    if index is None:
+        index = CandidateIndex(samples, gallery_image_ids, identity_pools, excluded)
+    rows = []
+    need = num_candidates - 1
     for sample in samples:
-        positives = sample.get("positive_image_ids")
-        if positives is None:
-            positives = [sample["target_image_id"]]
-
-        positives = list(
-            dict.fromkeys(
-                x
-                for x in positives
-                if x in gallery_set and x != sample["query_image_id"]
-            )
-        )
-        if not positives:
-            raise ValueError(f"no positive target in gallery for {sample['sample_id']}")
-
+        sample_id = sample["sample_id"]
+        positives, base_forbidden, identity = index.rows[sample_id]
+        if len(index.gallery) - len(base_forbidden) < need:
+            raise ValueError("not enough negative gallery images")
         positive = positives[
             torch.randint(len(positives), (), generator=generator).item()
         ]
-
-        forbidden = set(positives)
-        forbidden.add(sample["query_image_id"])
-        forbidden.update((excluded or {}).get(sample["sample_id"], ()))
-        negatives = [x for x in gallery if x not in forbidden]
-
-        need = num_candidates - 1
-        if len(negatives) < need:
-            raise ValueError("not enough negative gallery images")
-
+        forbidden = set(base_forbidden)
         row = [positive]
-
-        sample_id = sample["sample_id"]
-        pools = (
-            (
-                (identity_pools or {}).get(sample_id, ()),
-                int(need * identity_fraction),
-                "sampled_identity",
-            ),
-            (
-                (hard_pools or {}).get(sample_id, ()),
-                int(need * hard_fraction),
-                "sampled_hard",
-            ),
-            (negatives, None, "sampled_random"),
-        )
-        for pool, count, kind in pools:
-            available = list(
-                dict.fromkeys(
-                    image_id
-                    for image_id in pool
-                    if image_id in gallery_set and image_id not in forbidden
+        for pool, fraction, kind in (
+            (identity, identity_fraction, "sampled_identity"),
+            ((hard_pools or {}).get(sample_id, ()), hard_fraction, "sampled_hard"),
+        ):
+            quota = int(need * fraction)
+            if not quota:
+                available = []
+            elif kind == "sampled_identity":
+                available = identity  # Already filtered by the static index.
+            else:
+                available = list(
+                    dict.fromkeys(
+                        x for x in pool if x in index.gallery_set and x not in forbidden
+                    )
                 )
+            count = min(quota, len(available))
+            indices = (
+                torch.randperm(len(available), generator=generator)[:count].tolist()
+                if count
+                else []
             )
-            count = min(
-                num_candidates - len(row) if count is None else count, len(available)
-            )
-            indices = torch.randperm(len(available), generator=generator)[:count]
-            selected = [available[i] for i in indices.tolist()]
-            row.extend(selected)
-            forbidden.update(selected)
+            chosen = [available[i] for i in indices]
+            row.extend(chosen)
+            forbidden.update(chosen)
             if stats is not None:
                 stats[kind] = stats.get(kind, 0) + count
-
-        order = torch.randperm(num_candidates, generator=generator)
-        rows.append([row[i] for i in order.tolist()])
-
+        count = num_candidates - len(row)
+        row.extend(_random_negatives(index.gallery, forbidden, count, generator))
+        if stats is not None:
+            stats["sampled_random"] = stats.get("sampled_random", 0) + count
+        order = torch.randperm(num_candidates, generator=generator).tolist()
+        rows.append([row[i] for i in order])
     return rows

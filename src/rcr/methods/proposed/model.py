@@ -56,16 +56,16 @@ class RCRModel(nn.Module):
     ) -> Tensor:
         """Pool final_change tokens only, project, and L2-normalize [B,Ds]."""
         if change_mask is None:
-            pooled = change.mean(dim=-2)
+            pooled = change.float().mean(dim=-2)
         else:
             mask = change_mask.bool()
-            tokens = change.masked_fill(~mask[..., None], 0)
+            tokens = change.float().masked_fill(~mask[..., None], 0)
             pooled = tokens.sum(dim=-2) / mask.sum(dim=-1, keepdim=True).clamp_min(1)
-        return F.normalize(self.state_text_proj(pooled), dim=-1)
+        return F.normalize(self.state_text_proj(pooled).float(), dim=-1)
 
     def encode_image_state(self, global_features: Tensor) -> Tensor:
         """Project mean whole-image patch features and L2-normalize [...,Ds]."""
-        return F.normalize(self.state_image_proj(global_features), dim=-1)
+        return F.normalize(self.state_image_proj(global_features).float(), dim=-1)
 
     def forward(
         self,
@@ -138,8 +138,7 @@ class RCRModel(nn.Module):
         [B,1+L+S*K,D], valid-token mask, and additive membership prior.
         Training, forward(), and retrieval all use this same path.
         """
-        query_identity = self.identity_head(query_persons)
-        logits = self.grounding(
+        logits, query_identity = self.encode_grounded_identity(
             query_scene,
             query_persons,
             query_boxes,
@@ -170,6 +169,22 @@ class RCRModel(nn.Module):
             change, composition_logits, change_mask, subject_mask
         )
         return logits, query_identity, query, query_mask, prior
+
+    def encode_grounded_identity(
+        self,
+        scene: Tensor,
+        persons: Tensor,
+        boxes: Tensor,
+        selections: Tensor,
+        patch_hw: tuple[int, int],
+        selection_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Shared coarse evidence, without composing tokens for fine retrieval."""
+        identity = self.identity_head(persons)
+        logits = self.grounding(
+            scene, persons, boxes, selections, patch_hw, selection_mask
+        )
+        return logits, identity
 
     def score_target(
         self,

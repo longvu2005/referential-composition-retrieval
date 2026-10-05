@@ -16,6 +16,8 @@ image_encoder:
   person_size: [256, 128]
 cache:
   storage_dtype: float16
+  lru_mib: 1024
+  prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
   identity_dim: 256
@@ -30,6 +32,8 @@ train:
   batch_size: 14
   candidates: 16
   seed: 0
+  amp: true           # CUDA training only; mining/evaluation remain FP32
+  mining_batch_size: 8
   sampling:
     # Fractions of the C-1 negatives; remaining/unused slots are random.
     identity_fraction: 0.5

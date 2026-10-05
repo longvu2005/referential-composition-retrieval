@@ -1,6 +1,8 @@
 """Reference-free gallery feature cache."""
 
+from collections import OrderedDict
 from pathlib import Path
+from threading import Lock
 
 import torch
 from torch import Tensor
@@ -8,9 +10,15 @@ from tqdm import tqdm
 
 
 class GalleryCache:
-    """Keep reference-free person features in memory and load full Top-M features."""
+    """CPU person index plus a bounded LRU for immutable on-disk image features."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, lru_mib: int = 0) -> None:
+        if not isinstance(lru_mib, int) or lru_mib < 0:
+            raise ValueError("cache.lru_mib must be a nonnegative integer")
+        self._limit = lru_mib * 1024**2
+        self._items: OrderedDict[int, tuple[dict, int]] = OrderedDict()
+        self._bytes = 0
+        self._lock = Lock()
         self.root = Path(root)
         if (self.root / ".building").exists():
             raise RuntimeError(
@@ -21,6 +29,7 @@ class GalleryCache:
         )
 
         self.image_ids = index["image_ids"]
+        self.by_id = {image_id: i for i, image_id in enumerate(self.image_ids)}
         self.cache_id = index.get("cache_id")
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
@@ -58,6 +67,31 @@ class GalleryCache:
             raise ValueError("cache scene shape differs from patch_hw/feature dim")
         return item
 
+    def _get_item(self, index: int) -> dict:
+        # A single reader thread shares this cache with the main process.
+        # Cached tensors are immutable; collation creates independent batches.
+        with self._lock:
+            if index in self._items:
+                item, size = self._items.pop(index)
+                self._items[index] = (item, size)
+                return item
+            item = self._load_item(index)
+            if not self._limit:
+                return item
+            storages = {
+                value.untyped_storage().data_ptr(): value.untyped_storage().nbytes()
+                for value in item.values()
+                if isinstance(value, torch.Tensor)
+            }
+            size = sum(storages.values())
+            if size <= self._limit:
+                while self._items and self._bytes + size > self._limit:
+                    _, (_, removed) = self._items.popitem(last=False)
+                    self._bytes -= removed
+                self._items[index] = (item, size)
+                self._bytes += size
+            return item
+
     @property
     def global_features(self) -> Tensor:
         """Mean scene patches [G,D], kept on CPU and reused across evaluations.
@@ -81,10 +115,19 @@ class GalleryCache:
     ) -> tuple[Tensor, Tensor, Tensor, list[list[str | None]], Tensor]:
         """Load and pad full features for selected gallery images."""
 
-        items = []
-        for i in indices.tolist():
-            items.append(self._load_item(int(i)))
+        return self.load_groups(indices)[0]
 
+    def load_groups(self, *groups: Tensor) -> tuple:
+        """Read unique images once across groups, padding each group separately."""
+        rows = [indices.tolist() for indices in groups]
+        unique = dict.fromkeys(i for row in rows for i in row)
+        items = {i: self._get_item(int(i)) for i in unique}
+        return tuple(self._collate([items[i] for i in row]) for row in rows)
+
+    @staticmethod
+    def _collate(items: list[dict]) -> tuple:
+        if not items:
+            raise ValueError("cannot collate an empty cache group")
         # Storage precision is independent of the FP32 train/inference model.
         scene = torch.stack([x["scene"] for x in items]).float()
         k = max(x["persons"].shape[0] for x in items)

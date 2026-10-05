@@ -118,6 +118,13 @@ class _Cache:
         self.patch_hw = (1, 1)
         self.global_features = self.scenes.mean(dim=1)
 
+    @property
+    def by_id(self):
+        return {image_id: i for i, image_id in enumerate(self.image_ids)}
+
+    def load_groups(self, *groups):
+        return tuple(self.load(indices) for indices in groups)
+
     def load(self, indices):
         indices = indices.long()
         count = len(indices)
@@ -597,3 +604,140 @@ def test_runtime_beta_changes_ranking_without_mutating_checkpoint_beta(monkeypat
     assert results["inherited"]["rankings"].tolist() == [[1, 2]]
     assert results["override"]["rankings"].tolist() == [[2, 1]]
     assert model.coarse_beta == 0.0
+
+
+@pytest.mark.parametrize("query_batch_size", [1, 2, 8])
+@pytest.mark.parametrize(
+    "mode,beta",
+    [
+        ("identity_only", 0.4),
+        ("state_only", 0.4),
+        ("identity_state", 0.0),
+        ("identity_state", 0.4),
+    ],
+)
+@pytest.mark.parametrize("normalization", ["none", "zscore"])
+def test_batched_mining_matches_single_query_rankings_without_composition(
+    tmp_path, monkeypatch, query_batch_size, mode, beta, normalization
+):
+    from rcr.methods.proposed.cache import GalleryCache
+    from tests.methods.proposed.test_batch import _TextEncoder as VariableTextEncoder
+    from tests.methods.proposed.test_batch import _Tokenizer as TwoSubjectTokenizer
+    from tests.methods.proposed.test_pipeline import write_cache
+
+    torch.manual_seed(31)
+    ids = write_cache(tmp_path, counts=(0, 3, 1, 2, 4, 0, 2, 3, 2))
+    cache = GalleryCache(tmp_path, lru_mib=1)
+    # Non-contiguous/reordered train gallery: exclude a simulated validation image.
+    gallery = [ids[i] for i in (4, 1, 0, 6, 2, 3, 5, 7)]
+    samples = []
+    for i in range(4):
+        sample = {
+            **_sample(f"s{i}"),
+            "query_image_id": ids[i],
+            "positive_image_ids": [ids[4], ids[6]],
+        }
+        if i % 2:
+            sample["subjects"] = [
+                {"subject_id": 1, "identity_ids": ["0"]},
+                {"subject_id": 2, "identity_ids": ["1"]},
+            ]
+            sample["final_desc"] = (
+                "Identify Subject 1 as the man and Subject 2 as the woman"
+            )
+            sample["final_change"] = (
+                "Subject 2 stands beside Subject 1 and Subject 2 smiles"
+            )
+        samples.append(sample)
+    tokenizer = TwoSubjectTokenizer()
+    encoder = VariableTextEncoder(8).eval()
+    model = RCRModel(8, 6, 2, state_dim=4).train()
+    settings = dict(
+        top_m=2,
+        fine_batch_size=1,
+        identity_batch_size=3,
+        coarse_batch_size=2,
+        coarse_mode=mode,
+        coarse_beta=beta,
+        coarse_normalization=normalization,
+        rerank=False,
+    )
+    excluded = {row["sample_id"]: {ids[7]} for row in samples}
+    expected = retrieve_rankings(
+        samples,
+        cache,
+        tokenizer,
+        encoder,
+        model,
+        torch.device("cpu"),
+        gallery_ids=gallery,
+        **settings,
+    )
+    pools = {}
+    for row, ranking in zip(samples, expected["rankings"], strict=True):
+        forbidden = {
+            row["query_image_id"],
+            *row["positive_image_ids"],
+            *excluded[row["sample_id"]],
+        }
+        pools[row["sample_id"]] = [
+            gallery[i] for i in ranking if gallery[i] not in forbidden
+        ][:3]
+
+    def fail(*args, **kwargs):
+        pytest.fail("coarse mining must not compose or run fine scoring")
+
+    monkeypatch.setattr(model.composition, "forward", fail)
+    monkeypatch.setattr(model, "score_target", fail)
+    if mode == "state_only":
+        monkeypatch.setattr(model, "encode_grounded_identity", fail)
+    calls = []
+    handle = encoder.register_forward_hook(lambda *args: calls.append(1))
+    actual = mine_hard_negatives(
+        samples,
+        cache,
+        tokenizer,
+        encoder,
+        model,
+        torch.device("cpu"),
+        gallery_ids=gallery,
+        retrieval=settings,
+        pool_size=3,
+        excluded=excluded,
+        query_batch_size=query_batch_size,
+    )
+    handle.remove()
+    assert actual == pools and list(actual) == [row["sample_id"] for row in samples]
+    assert len(calls) == 4 * ((2 + query_batch_size - 1) // query_batch_size)
+    assert model.training and not encoder.training
+
+
+def test_batched_mining_retains_canonical_ties_and_restores_modes_on_failure(
+    monkeypatch,
+):
+    torch.manual_seed(21)
+    cache = _Cache(["q", "a", "b", "c", "d"])
+    cache.mask[0] = False  # No query identity evidence: all nonempty images tie.
+    model, encoder = RCRModel(8, 6, 2).train(), _TextEncoder().eval()
+    samples = [_sample("s1"), _sample("s2")]
+    settings = dict(
+        identity_batch_size=2,
+        coarse_mode="identity_only",
+        coarse_normalization="zscore",
+    )
+    kwargs = dict(
+        gallery_ids=cache.image_ids, retrieval=settings, pool_size=2, query_batch_size=2
+    )
+    assert mine_hard_negatives(
+        samples, cache, _Tokenizer(), encoder, model, torch.device("cpu"), **kwargs
+    ) == {"s1": ["b", "c"], "s2": ["b", "c"]}
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("mining failed")
+
+    monkeypatch.setattr(model, "encode_grounded_identity", fail)
+    with pytest.raises(RuntimeError, match="mining failed"):
+        mine_hard_negatives(
+            samples, cache, _Tokenizer(), encoder, model, torch.device("cpu"), **kwargs
+        )
+    assert model.training and not encoder.training

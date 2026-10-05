@@ -21,7 +21,8 @@ inference. The resolved config is saved as `run_config.yaml`.
 | --- | --- |
 | `data` | All stages, including the one shared cache path |
 | `detector`, `image_encoder`, `cache.storage_dtype` | Cache building |
-| `model`, `train`, `optimizer`, `loss` | Training |
+| `model`, `train`, `optimizer`, `loss`, `cache.prefetch_batches` | Training |
+| `cache.lru_mib` | Training and inference feature reads |
 | `retrieval`, `candidate_ks` | Periodic and standalone retrieval/evaluation |
 | `evaluation` | Validation interval and fixed train subset size |
 | `wandb` | Optional experiment tracking |
@@ -42,8 +43,7 @@ All new training runs use the two Subject roles defined by the benchmark schema.
 The detector is Grounding DINO; the frozen image encoder is DINOv3. Authenticate
 with Hugging Face and accept the image checkpoint's license before the first
 cache build. Defaults remain scene `[224,224]`, person `[256,128]` and FP16
-storage; tensors are copied into compact CPU storage. Model computation loads
-cached features as FP32. Cache format and learned parameter names are unchanged.
+storage; tensors are copied into compact CPU storage. Batch collation loads cached features as FP32; training may then use CUDA AMP. Cache format and learned parameter names are unchanged.
 
 An existing person-based cache from the source commit can be reused. Keep
 `index.pt` and `features/` together; the cache/gallery/build-ID checks remain.
@@ -70,9 +70,10 @@ A new `train` invocation starts from scratch and clears a previous best selectio
 and history in that output directory. Use a different `output.dir` for each
 experiment. There is no resume flag. Training samples one reviewed positive,
 mixes same-identity and random train-gallery negatives, groups batches by Subject
-count, and keeps the four losses. Optional mining is enabled with
-`--set train.sampling.hard_fraction=0.3`; default is 0 to start with a cheaper
-identity/random experiment. Mining starts after one completed epoch and refreshes
+count, and keeps the four losses. The method YAML keeps
+`train.sampling.identity_fraction=0.5` and `hard_fraction=0.3` (7 identity,
+4 mined and 4 random slots among 15 negatives, with shortages filled randomly).
+Mining starts after one completed epoch and refreshes
 every two epochs. The pool is rebuilt for each new training run.
 
 W&B and local epoch history record losses, identity activity, grounding
@@ -93,6 +94,58 @@ clearly if no supervised state pair has ever been seen. Use more identity
 negatives or `retrieval.coarse_mode=identity_only` for an intentionally tiny
 smoke run. When disabling `loss.state_weight`, also select identity-only
 retrieval (or beta=0); the loss suite already does this.
+
+## Training throughput options
+
+The default YAML enables these options without changing the evaluation schedule,
+Top-500 reranking, scoring/metrics, losses, optimizer settings or sampling quotas.
+Validation still runs every two epochs and at the final epoch, with 100 fixed
+train queries and the full val split, on each split's complete image gallery.
+
+| Option | Default YAML | Behavior |
+| --- | --- | --- |
+| `train.mining_batch_size` | `8` | Group coarse mining queries by Subject count; omit unused fine composition. |
+| `cache.lru_mib` | `1024` | Bound retained feature tensor storage in CPU RAM; `0` disables the LRU. |
+| `cache.prefetch_batches` | `1` | Prepare one next CPU batch on a reader thread; `0` uses synchronous preparation. |
+| `train.amp` | `true` | CUDA FP16 autocast and GradScaler during training; CPU falls back to FP32. |
+
+Repeated image files are read once across query and candidate groups within a
+batch. Their order, masks, supervision and separate query/target padding remain
+intact. The LRU retains the cache's original storage precision, not expanded FP32
+batches. Its budget covers cached tensor storage, not total process memory:
+the person index, current/prefetched batches and Python objects also consume RAM.
+Sampling and its RNG remain on the main thread; the worker only loads/pads CPU
+data and pins batch memory on CUDA runs. BERT and GPU operations remain on the
+main thread, and the worker is closed before mining or evaluation.
+
+Only token IDs and Subject positions are cached, with dynamic batch padding.
+Selection and change text still pass through the trainable BERT every step;
+all occurrences of each Subject marker remain available to composition.
+
+Mining preserves per-query normalization over the complete training gallery,
+stable tie order and exclusion of queries, positives and disputed pairs. Gallery
+projection is reused within each mining refresh, never across optimizer updates.
+The sampler retains uniform sampling without replacement and the same fallback
+quotas. Fixed seeds remain reproducible, but its new random-draw algorithm does
+not reproduce the old `randperm` sample sequence bit for bit.
+
+AMP keeps model parameters, optimizer state, geometry bias, normalization and
+losses in FP32. Mining and evaluation run outside autocast in FP32. Logged
+gradient norms are unscaled, and checkpoints include the scaler state (training
+still starts from scratch; this does not add resume support). AMP can change the
+numerical training trajectory, so retrieval quality still needs a real run.
+
+Existing YAML files that omit these options retain conservative defaults:
+mining batch 1, LRU 0, prefetch 0 and AMP off. To use them without replacing local
+paths, add the four options above or pass them with `--set`. Reuse the existing
+feature cache and the same training command; no cache rebuild is required.
+For a synchronous FP32 comparison:
+
+```bash
+python tools/methods/run.py train --config configs/methods/proposed.yaml \
+  --set train.amp=false train.mining_batch_size=1 \
+        cache.lru_mib=0 cache.prefetch_batches=0 output.dir=runs/proposed_fp32
+```
 
 ## Small smoke run
 
@@ -115,8 +168,10 @@ python tools/methods/run.py evaluate --config configs/methods/proposed.yaml \
 Use the same `--max-queries` for retrieval and evaluation. Normal `run` always
 uses the complete requested query splits. Train diagnostics search only train
 images; val/test each search their own complete image split, excluding self.
-Fine ranking uses only the fine score within Top-M; remaining images retain
-coarse order. Equal scores now retain a stable canonical order.
+Within Top-M, ranking uses the configured fine/coarse fusion
+(`retrieval.fine_coarse_weight=0.4` in the method YAML); setting it to 0 restores
+fine-only ranking. Remaining images retain coarse order. Equal scores retain
+stable canonical gallery order.
 
 ## Ablations and beta selection
 
