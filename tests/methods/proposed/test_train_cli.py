@@ -84,6 +84,8 @@ def test_train_checkpoints_metrics_and_retrieve(
     real_retrieve = train_proposed.retrieve_rankings
     evaluation_calls = []
     real_sample = train_proposed.sample_candidates
+    real_evaluate = train_proposed.evaluate_retrieval_output
+    val_calls = []
     main_thread = threading.get_ident()
 
     def sample_train_gallery(samples, gallery_ids, *args, **kwargs):
@@ -93,11 +95,30 @@ def test_train_checkpoints_metrics_and_retrieve(
 
     monkeypatch.setattr(train_proposed, "sample_candidates", sample_train_gallery)
 
+    def evaluate_with_controlled_validation(*args, **kwargs):
+        result = real_evaluate(*args, **kwargs)
+        if kwargs["split"] == "val":
+            # A lower overall score can win when the minority case improves.
+            individual, group = (0.9, 0.1) if not val_calls else (0.78, 0.78)
+            val_calls.append(True)
+            result["overall"]["full_map"] = 0.9 * individual + 0.1 * group
+            result["by_case"] = {
+                "INDIVIDUAL": {"num_queries": 90, "full_map": individual},
+                "GROUP": {"num_queries": 10, "full_map": group},
+            }
+        return result
+
+    monkeypatch.setattr(
+        train_proposed, "evaluate_retrieval_output", evaluate_with_controlled_validation
+    )
+
     def retrieve_after_training(
         samples, cache, tokenizer, text_encoder, model, *args, **kwargs
     ):
         assert all(parameter.grad is None for parameter in model.parameters())
         assert all(parameter.grad is None for parameter in text_encoder.parameters())
+        assert not text_encoder.backbone.training
+        assert not any(p.requires_grad for p in text_encoder.backbone.parameters())
         expected_gallery = (
             ["val_n", "val_q", "val_a"]
             if samples[0]["sample_id"] == "val1"
@@ -138,6 +159,8 @@ def test_train_checkpoints_metrics_and_retrieve(
         "data": {"final_dir": "unused", "image_root": "unused", "cache": "unused"},
         "model": {
             "text_model": "tiny",
+            "dim": 6,
+            "dropout": 0.1,
             "identity_dim": 6,
             "state_dim": 4,
             "coarse_beta": 0.37,
@@ -198,7 +221,11 @@ def test_train_checkpoints_metrics_and_retrieve(
     assert not any(t.name.startswith("rcr-cache") for t in threading.enumerate())
     assert last["cache_id"] == cache.cache_id
     assert last["config"]["model"]["coarse_beta"] == 0.37
-    assert last["model"]["state_text_proj.weight"].shape == (4, 8)
+    assert last["model"]["state_text_proj.weight"].shape == (4, 6)
+    assert last["model"]["visual_proj.weight"].shape == (6, 8)
+    assert last["text_encoder"]["proj.weight"].shape == (6, 8)
+    assert last["dim"] == 6 and last["input_dim"] == 8
+    assert len(last["optimizer"]["param_groups"][1]["params"]) == 2
     assert "train/state_loss" in logs[0]
     assert finished == [True]
     assert [row["global_step"] for row in logs if "global_step" in row] == [1, 2]
@@ -209,19 +236,24 @@ def test_train_checkpoints_metrics_and_retrieve(
     if enabled:
         assert [row["epoch"] for row in epoch_logs if "val/full_map" in row] == [2, 3]
         values = []
+        scores = []
         for epoch in (2, 3):
             folder = output / "evaluation" / f"epoch_{epoch:03d}"
             val = json.loads((folder / "val_metrics.json").read_text())
             assert set(val) == {"overall", "by_case"}
             values.append(val["overall"]["full_map"])
+            scores.append(val["overall"]["checkpoint_score"])
             assert (folder / "train_metrics.json").exists() == bool(train_queries)
             assert ("train_eval/full_map" in epoch_logs[epoch - 1]) == bool(
                 train_queries
             )
             assert "val/num_queries" not in epoch_logs[epoch - 1]
         best = torch.load(output / "best.pt", weights_only=True)
-        assert best["best_full_map"] == max(values)
-        assert best["epoch"] == (2, 3)[values.index(max(values))]
+        assert values[1] < values[0] and scores[1] > scores[0]
+        assert best["best_score"] == max(scores)
+        assert best["best_full_map"] == values[1]
+        assert best["best_macro_full_map"] == pytest.approx(0.78)
+        assert best["epoch"] == 3
         assert run.summary["best_epoch"] == best["epoch"]
     else:
         assert not (output / "best.pt").exists()

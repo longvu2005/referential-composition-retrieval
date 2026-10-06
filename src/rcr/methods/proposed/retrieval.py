@@ -46,7 +46,7 @@ def _encode_gallery_identity(
         persons = cache.persons[indices[:, None], columns.nonzero().flatten()].to(
             device=device, dtype=dtype
         )
-        identity = model.identity_head(persons)
+        identity = model.encode_identity(persons)
         batches.append((identity.cpu(), mask.cpu()))
         # Release GPU outputs before allocating the next projection batch.
         del persons, identity

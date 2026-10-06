@@ -52,18 +52,26 @@ class TargetPersonBuilder(nn.Module):
 class FineReasoner(nn.Module):
     """Reason from composed query tokens over a target person set."""
 
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: int = 4) -> None:
+    def __init__(
+        self, dim: int, num_heads: int, mlp_ratio: int = 2, dropout: float = 0.0
+    ) -> None:
         super().__init__()
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.self_attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.dropout = nn.Dropout(dropout)
 
         self.norm_cross = nn.LayerNorm(dim)
         self.norm_self = nn.LayerNorm(dim)
         self.norm_out = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio),
-            nn.GELU(),
+            nn.Sequential(nn.GELU(), nn.Dropout(dropout)),
             nn.Linear(dim * mlp_ratio, dim),
+            nn.Dropout(dropout),
         )
         self.score = nn.Sequential(
             nn.Linear(dim, dim),
@@ -106,7 +114,7 @@ class FineReasoner(nn.Module):
             )
             if empty is not None:
                 update = update.masked_fill(empty[:, None, None], 0)
-        query = self.norm_cross(query + update)
+        query = self.norm_cross(query + self.dropout(update))
 
         attn_mask = None
         if query_key_bias is not None:
@@ -124,6 +132,6 @@ class FineReasoner(nn.Module):
             attn_mask=attn_mask,
             need_weights=False,
         )
-        query = self.norm_self(query + update)
+        query = self.norm_self(query + self.dropout(update))
         query = self.norm_out(query + self.ffn(query))
         return self.score(query[:, 0]).squeeze(-1)

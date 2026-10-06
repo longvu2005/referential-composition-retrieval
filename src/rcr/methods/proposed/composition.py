@@ -56,8 +56,9 @@ class StructuredComposition(nn.Module):
         identity_dim: int,
         num_heads: int,
         max_subjects: int = 2,
-        mlp_ratio: int = 4,
+        mlp_ratio: int = 2,
         identity_balance: dict | None = None,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -70,13 +71,17 @@ class StructuredComposition(nn.Module):
 
         self.bind_norm = nn.LayerNorm(dim)
 
-        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio),
-            nn.GELU(),
+            nn.Sequential(nn.GELU(), nn.Dropout(dropout)),
             nn.Linear(dim * mlp_ratio, dim),
+            nn.Dropout(dropout),
         )
 
     def forward(
@@ -149,5 +154,5 @@ class StructuredComposition(nn.Module):
             attn_mask=attn_mask,
             need_weights=False,
         )
-        tokens = self.norm1(tokens + update)
+        tokens = self.norm1(tokens + self.dropout(update))
         return self.norm2(tokens + self.ffn(tokens))

@@ -26,14 +26,20 @@ class RCRModel(nn.Module):
         identity_dim: int,
         num_heads: int,
         max_subjects: int = 2,
-        mlp_ratio: int = 4,
+        mlp_ratio: int = 2,
         geo_dim: int = 32,
         state_dim: int | None = None,
         coarse_beta: float = 0.3,
         identity_balance: dict | None = None,
+        input_dim: int | None = None,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
 
+        input_dim = dim if input_dim is None else input_dim
+        self.visual_proj = (
+            nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
+        )
         state_dim = identity_dim if state_dim is None else state_dim
         if state_dim < 1 or not math.isfinite(coarse_beta) or coarse_beta < 0:
             raise ValueError(
@@ -43,14 +49,24 @@ class RCRModel(nn.Module):
         self.state_text_proj = nn.Linear(dim, state_dim)
         self.state_image_proj = nn.Linear(dim, state_dim)
 
-        binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim)
+        binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim, dropout)
         self.grounding = SubjectGrounding(binding, dim)
         self.identity_head = IdentityHead(dim, identity_dim)
         self.composition = StructuredComposition(
-            dim, identity_dim, num_heads, max_subjects, mlp_ratio, identity_balance
+            dim,
+            identity_dim,
+            num_heads,
+            max_subjects,
+            mlp_ratio,
+            identity_balance,
+            dropout,
         )
         self.target_builder = TargetPersonBuilder(dim, identity_dim, identity_balance)
-        self.reasoner = FineReasoner(dim, num_heads, mlp_ratio)
+        self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
+
+    def encode_identity(self, persons: Tensor) -> Tensor:
+        """Project raw cached person features, then normalize identity vectors."""
+        return self.identity_head(self.visual_proj(persons))
 
     def encode_text_state(
         self, change: Tensor, change_mask: Tensor | None = None
@@ -66,7 +82,8 @@ class RCRModel(nn.Module):
 
     def encode_image_state(self, global_features: Tensor) -> Tensor:
         """Project mean whole-image patch features and L2-normalize [...,Ds]."""
-        return F.normalize(self.state_image_proj(global_features).float(), dim=-1)
+        features = self.visual_proj(global_features)
+        return F.normalize(self.state_image_proj(features).float(), dim=-1)
 
     def forward(
         self,
@@ -181,6 +198,8 @@ class RCRModel(nn.Module):
         selection_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Shared coarse evidence, without composing tokens for fine retrieval."""
+        scene = self.visual_proj(scene)
+        persons = self.visual_proj(persons)
         identity = self.identity_head(persons)
         logits = self.grounding(
             scene, persons, boxes, selections, patch_hw, selection_mask
@@ -199,6 +218,8 @@ class RCRModel(nn.Module):
         person_mask: Tensor | None = None,
     ) -> Tensor:
         """Score independent query-target pairs using shared target binding."""
+        scene = self.visual_proj(scene)
+        persons = self.visual_proj(persons)
         target_identity = self.identity_head(persons)
         evidence = self.grounding.binding(
             scene,

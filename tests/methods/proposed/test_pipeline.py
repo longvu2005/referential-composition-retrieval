@@ -321,7 +321,7 @@ def test_amp_training_finite_with_empty_images_and_padded_boxes(
     assert not torch.equal(before, model.reasoner.score[-1].weight)
 
 
-def test_text_cache_keeps_real_bert_trainable_across_steps(tmp_path):
+def test_text_cache_trains_projection_with_real_bert_frozen_across_steps(tmp_path):
     transformers = pytest.importorskip("transformers")
     tokenizer = local_tokenizer(tmp_path)
     backbone = transformers.BertModel(
@@ -333,12 +333,13 @@ def test_text_cache_keeps_real_bert_trainable_across_steps(tmp_path):
             intermediate_size=16,
         )
     )
-    encoder = TextEncoder(backbone, 8).train()
+    encoder = TextEncoder(backbone, 6).train()
     text_cache = QueryTextCache(tokenizer)
     text_cache.prepare(_samples())
     tokens = text_cache.batch(_samples())
     optimizer = torch.optim.SGD(encoder.parameters(), lr=0.1)
     before = backbone.embeddings.word_embeddings.weight.detach().clone()
+    projection = encoder.proj.weight.detach().clone()
     from rcr.methods.proposed.encoders import encode_tokenized_text
 
     for _ in range(2):
@@ -348,6 +349,9 @@ def test_text_cache_keeps_real_bert_trainable_across_steps(tmp_path):
             encoded["change"][..., 0].mean() + encoded["selections"][..., 1].mean()
         ).backward()
         grad = backbone.embeddings.word_embeddings.weight.grad
+        assert grad is None and not backbone.training
+        grad = encoder.proj.weight.grad
         assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
         optimizer.step()
-    assert not torch.equal(before, backbone.embeddings.word_embeddings.weight)
+    torch.testing.assert_close(before, backbone.embeddings.word_embeddings.weight)
+    assert not torch.equal(projection, encoder.proj.weight)

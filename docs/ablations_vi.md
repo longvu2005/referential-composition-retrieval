@@ -14,8 +14,9 @@ visual cache.
 python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
 ```
 
-With C=16 and `train.sampling.hard_fraction=0`, each query receives 1 positive, 7 negatives containing all
-required identities, and 8 random negatives. If a pool contains too few images,
+With `C=24`, two available positives and `train.sampling.hard_fraction=0`, each
+query receives 2 positives, 11 negatives containing all required identities,
+and 11 random negatives. If a pool contains too few images,
 random sampling fills the remaining slots. Candidates are unique. The query
 image and all other Full Positives are excluded from the negative pool. Negatives
 that conflict with positive labels from equivalent training queries are also
@@ -30,12 +31,19 @@ python tools/methods/run.py run --config configs/methods/proposed.yaml --train -
   --set train.sampling.hard_fraction=0.3 output.dir=runs/proposed_mined
 ```
 
-After 1 warmup epoch, sampling uses 1 positive, 7 identity negatives, 4 coarse-mined
-negatives, and 4 random negatives. Each mined pool contains up to 100 highly ranked
+After 1 warmup epoch, sampling uses 2 positives, 11 identity negatives, 6 coarse-mined
+negatives, and 5 random negatives. Queries with only one positive use 11 identity,
+6 mined and 6 random negatives. Each mined pool contains up to 100 highly ranked
 negatives, sampled uniformly. Pools are refreshed after epochs 1, 3, 5, ... for
 use in the following epoch. Mining runs only on train, skips fine reranking, and
 retains only the required portion of each ranking. Actual sampling sources are
 logged; random sampling may also happen to select images with the required identities.
+
+Each epoch draws `N_train` queries with replacement, with case probability
+proportional to `sqrt(N_case)`. All suites inherit the frozen BERT, 384-dimensional
+model and dropout 0.1. Epoch checkpoints use
+`0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP` on validation; macro averages
+the nonempty cases. These changes require retraining while reusing the visual cache.
 
 ## 2. Coarse retrieval and beta selection
 
@@ -90,8 +98,11 @@ Here, `full` means the complete set of losses. Comparing it with
 `without_state_loss` measures the contribution of auxiliary supervision to shared
 components. Scores from untrained state projections are not used.
 
-`sampling.yaml` compares random, identity/random, and identity/mined/random
-sampling, all with C=16 and the new state mask. This is a sampler ablation within
+`sampling.yaml` compares natural versus balanced case draws, one versus up to two
+positives, and random, identity/random, and identity/mined/random negatives.
+`identity_mined_random` is the full new sampler. `natural_cases` and `one_positive`
+each change one setting; the negative-source variants hold both those settings
+fixed. All runs use `C=24` and the same state mask. This is a sampler ablation within
 the updated pipeline; it does not reproduce the old state loss. The random
 variant may produce fewer state pairs, so inspect the diagnostics as well.
 

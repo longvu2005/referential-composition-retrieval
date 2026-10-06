@@ -65,6 +65,13 @@ Edit data/checkpoint/cache paths in the method YAML first. All relative paths
 are relative to the working directory, which should be the repository root.
 The scripts never install packages automatically.
 
+The proposed model freezes BERT and DINO. Trainable projections map their
+768-dimensional features to `model.dim=384`; identity/state dimensions are 128,
+with 6 attention heads, FFN ratio 2 and dropout 0.1. Training uses case-balanced
+draws and up to 2 positives among 24 candidates. `best.pt` maximizes
+`0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP` on validation.
+The existing DINO cache can be reused; these model settings require a new train run.
+
 ```bash
 # Proposed: build cache, train, select best.pt on val, evaluate val and test.
 python tools/methods/run.py run --config configs/methods/proposed.yaml --build-cache --train

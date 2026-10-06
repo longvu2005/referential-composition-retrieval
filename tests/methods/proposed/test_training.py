@@ -1,9 +1,12 @@
 import pytest
 import torch
+from torch import nn
 
+from rcr.methods.proposed.encoders import TextEncoder
 from rcr.methods.proposed.losses import grounding_loss, identity_loss
 from rcr.methods.proposed.model import RCRModel
 from rcr.methods.proposed.objective import compute_loss
+from tests.methods.proposed.test_encoders import TextBackbone
 
 
 def _boxes(*shape: int) -> torch.Tensor:
@@ -68,6 +71,49 @@ def test_compute_loss_and_backward() -> None:
     assert model.reasoner.score[-1].weight.grad is not None
     assert model.state_text_proj.weight.grad.norm() > 0
     assert model.state_image_proj.weight.grad.norm() > 0
+
+
+def test_384_model_trains_from_raw_768_features_with_frozen_text():
+    torch.manual_seed(10)
+    batch = _batch()
+    for key in ("query_scene", "query_persons", "target_scene", "target_persons"):
+        batch[key] = torch.randn(*batch[key].shape[:-1], 768)
+    backbone = TextBackbone()
+    backbone.config.hidden_size = 768
+    backbone.embedding = nn.Embedding(16, 768)
+    encoder = TextEncoder(backbone, 384).train()
+    selections, _ = encoder(torch.ones(4, 4, dtype=torch.long), torch.ones(4, 4))
+    batch["selections"] = selections.reshape(2, 2, 4, 384)
+    batch["change"], _ = encoder(torch.ones(2, 5, dtype=torch.long), torch.ones(2, 5))
+    model = RCRModel(
+        dim=384,
+        input_dim=768,
+        identity_dim=128,
+        state_dim=128,
+        num_heads=6,
+        mlp_ratio=2,
+        dropout=0.1,
+    )
+    attentions = [m for m in model.modules() if isinstance(m, nn.MultiheadAttention)]
+    assert attentions and all(m.dropout == 0.1 for m in attentions)
+    assert all(m.embed_dim == 384 and m.num_heads == 6 for m in attentions)
+    assert all(m.p == 0.1 for m in model.modules() if isinstance(m, nn.Dropout))
+    assert model.identity_head.proj.weight.shape == (128, 384)
+    assert model.state_image_proj.weight.shape == (128, 384)
+    assert model.composition.ffn[0].out_features == 768
+
+    model.eval()
+    with torch.no_grad():
+        first, _ = compute_loss(model, batch, (2, 3))
+        second, _ = compute_loss(model, batch, (2, 3))
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    model.train()
+    loss, _ = compute_loss(model, batch, (2, 3))
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert model.visual_proj.weight.grad.norm() > 0
+    assert encoder.proj.weight.grad.norm() > 0
+    assert all(p.grad is None for p in backbone.parameters())
 
 
 def test_optimizer_step_changes_model() -> None:

@@ -96,7 +96,7 @@ def compute_loss(
         target_keep &= batch["candidate_mask"][:, :, None].bool()
     if "target_identity_mask" in batch:
         target_keep &= batch["target_identity_mask"].bool()
-    target_identity = model.identity_head(batch["target_persons"][target_keep])
+    target_identity = model.encode_identity(batch["target_persons"][target_keep])
     loss_identity = identity_loss(
         torch.cat((query_identity[query_keep], target_identity), dim=0),
         torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),

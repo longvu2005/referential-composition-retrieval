@@ -11,14 +11,20 @@ class EvidenceBinding(nn.Module):
         self,
         dim: int,
         num_heads: int,
-        mlp_ratio: int = 4,
+        mlp_ratio: int = 2,
         geo_dim: int = 32,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
 
-        self.ref_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.person_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.ref_attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.person_attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.dropout = nn.Dropout(dropout)
 
         self.norm_f = nn.LayerNorm(dim)
         self.norm_p = nn.LayerNorm(dim)
@@ -26,8 +32,9 @@ class EvidenceBinding(nn.Module):
 
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio),
-            nn.GELU(),
+            nn.Sequential(nn.GELU(), nn.Dropout(dropout)),
             nn.Linear(dim * mlp_ratio, dim),
+            nn.Dropout(dropout),
         )
         self.geo = nn.Sequential(
             nn.Linear(4, geo_dim),
@@ -70,7 +77,7 @@ class EvidenceBinding(nn.Module):
             attn_mask=attn_mask,
             need_weights=False,
         )
-        scene = self.norm_f(scene + update)
+        scene = self.norm_f(scene + self.dropout(update))
 
         if persons.shape[1] == 0:
             return persons
@@ -86,7 +93,7 @@ class EvidenceBinding(nn.Module):
                 attn_mask=self._geo_bias(boxes, patch_hw),
                 need_weights=False,
             )
-        persons = self.norm_p(persons + update)
+        persons = self.norm_p(persons + self.dropout(update))
         return self.norm_out(persons + self.ffn(persons))
 
     def _geo_bias(self, boxes: Tensor, patch_hw: tuple[int, int]) -> Tensor:

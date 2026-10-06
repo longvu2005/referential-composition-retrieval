@@ -72,6 +72,31 @@ def test_text_encoder_returns_tokens_and_mask() -> None:
     torch.testing.assert_close(mask, attention_mask.bool())
 
 
+def test_text_backbone_is_frozen_in_eval_while_projection_trains() -> None:
+    backbone = TextBackbone()
+    backbone.embedding = nn.Sequential(backbone.embedding, nn.Dropout(0.9))
+    encoder = TextEncoder(backbone, dim=8).train()
+    ids = torch.tensor([[1, 2, 3]])
+    mask = torch.ones_like(ids)
+    before = {key: value.clone() for key, value in backbone.state_dict().items()}
+    projection = encoder.proj.weight.detach().clone()
+    optimizer = torch.optim.AdamW(encoder.parameters(), lr=0.01)
+    assert encoder.training and encoder.proj.training and not backbone.training
+    assert not any(parameter.requires_grad for parameter in backbone.parameters())
+    first, _ = encoder(ids, mask)
+    second, _ = encoder(ids, mask)
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    first.square().mean().backward()
+    assert encoder.proj.weight.grad.norm() > 0
+    assert all(parameter.grad is None for parameter in backbone.parameters())
+    optimizer.step()
+    assert not torch.equal(projection, encoder.proj.weight)
+    for key, value in backbone.state_dict().items():
+        torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    encoder.eval().train()
+    assert not backbone.training
+
+
 def test_identity_head_normalizes_embeddings() -> None:
     head = IdentityHead(dim=8, identity_dim=5)
     features = torch.randn(4, 8, requires_grad=True)

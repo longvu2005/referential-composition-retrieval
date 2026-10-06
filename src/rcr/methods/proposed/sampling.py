@@ -1,9 +1,50 @@
-"""Train-only identity pools and mixed negative sampling."""
+"""Case-balanced batches and train-only positive/negative sampling."""
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import torch
+
+
+def case_sampling_weights(samples: list[dict]) -> torch.Tensor:
+    """Per-row 1/sqrt(N_case), giving each case total mass sqrt(N_case)."""
+    counts = Counter(sample["case_type"] for sample in samples)
+    return torch.tensor(
+        [1 / math.sqrt(counts[sample["case_type"]]) for sample in samples],
+        dtype=torch.double,
+    )
+
+
+def training_batches(
+    samples: list[dict],
+    batch_size: int,
+    generator: torch.Generator,
+    *,
+    case_balanced: bool = True,
+) -> list[list[dict]]:
+    """Draw one epoch, then group by Subject count without dropping any draw."""
+    if batch_size < 1 or not samples:
+        raise ValueError("training requires samples and a positive batch_size")
+    if case_balanced:
+        order = torch.multinomial(
+            case_sampling_weights(samples),
+            len(samples),
+            replacement=True,
+            generator=generator,
+        )
+    else:
+        order = torch.randperm(len(samples), generator=generator)
+    groups = defaultdict(list)
+    for index in order.tolist():
+        sample = samples[index]
+        groups[len(sample["subjects"])].append(sample)
+    batches = [
+        rows[start : start + batch_size]
+        for rows in groups.values()
+        for start in range(0, len(rows), batch_size)
+    ]
+    order = torch.randperm(len(batches), generator=generator).tolist()
+    return [batches[index] for index in order]
 
 
 def identity_candidate_pools(data, samples, gallery_image_ids):
@@ -36,6 +77,7 @@ def identity_candidate_pools(data, samples, gallery_image_ids):
 
 def sampling_settings(cfg: dict) -> dict:
     settings = {
+        "positives_per_query": 2,
         "identity_fraction": 0.5,
         "hard_fraction": 0.0,
         "warmup_epochs": 1,
@@ -53,6 +95,9 @@ def sampling_settings(cfg: dict) -> dict:
         value = settings[key]
         if not isinstance(value, int) or value < (0 if key == "warmup_epochs" else 1):
             raise ValueError(f"invalid sampling.{key}")
+    positives = settings["positives_per_query"]
+    if isinstance(positives, bool) or not isinstance(positives, int) or positives < 1:
+        raise ValueError("sampling.positives_per_query must be a positive integer")
     return settings
 
 
@@ -135,33 +180,41 @@ def sample_candidates(
     hard_fraction: float = 0.0,
     stats: dict | None = None,
     index: CandidateIndex | None = None,
+    positives_per_query: int = 2,
 ) -> list[list[str]]:
-    """One positive, identity/mined negatives, then uniform random negatives.
+    """Up to P distinct positives, mixed negatives, and at least one negative.
 
-    Quotas and exclusions match the original sampler. The new random draws are
-    reproducible, but need not match the old randperm sequence for the same seed.
+    Negative quotas use the actual C-P slots. Unselected positives stay excluded;
+    short identity/mined pools fall back to random negatives.
     """
     if num_candidates < 2:
         raise ValueError("num_candidates must be at least 2")
     sampling_settings(
-        {"identity_fraction": identity_fraction, "hard_fraction": hard_fraction}
+        {
+            "identity_fraction": identity_fraction,
+            "hard_fraction": hard_fraction,
+            "positives_per_query": positives_per_query,
+        }
     )
     if identity_fraction and identity_pools is None:
         raise ValueError("identity sampling requires identity_pools")
     if index is None:
         index = CandidateIndex(samples, gallery_image_ids, identity_pools, excluded)
     rows = []
-    need = num_candidates - 1
     for sample in samples:
         sample_id = sample["sample_id"]
         positives, base_forbidden, identity = index.rows[sample_id]
+        positive_count = min(positives_per_query, len(positives), num_candidates - 1)
+        need = num_candidates - positive_count
         if len(index.gallery) - len(base_forbidden) < need:
             raise ValueError("not enough negative gallery images")
-        positive = positives[
-            torch.randint(len(positives), (), generator=generator).item()
-        ]
+        chosen = torch.randperm(len(positives), generator=generator)[:positive_count]
         forbidden = set(base_forbidden)
-        row = [positive]
+        row = [positives[i] for i in chosen.tolist()]
+        if stats is not None:
+            stats["sampled_positive"] = (
+                stats.get("sampled_positive", 0) + positive_count
+            )
         for pool, fraction, kind in (
             (identity, identity_fraction, "sampled_identity"),
             ((hard_pools or {}).get(sample_id, ()), hard_fraction, "sampled_hard"),

@@ -16,14 +16,22 @@ heads do not gate candidates. A shared image encoder `E_I` produces:
 - letterboxed whole-scene patch features `F`;
 - full-person crop features `h_i`.
 
-A trainable identity head produces normalized identity embeddings:
+The cache retains raw 768-dimensional DINO features. One shared trainable
+visual projection maps scene patches, person crops and global patch means to
+384 dimensions. A separate trainable text projection maps frozen BERT tokens
+from 768 to 384 dimensions. BERT parameters, including Subject-token embeddings,
+are frozen; the backbone stays in eval mode during training.
+
+A trainable identity head produces 128-dimensional normalized embeddings:
 
 ```text
+F = P_visual(F_raw)
+h_i = P_visual(h_i_raw)
 v_i = Normalize(P_id(h_i))
 ```
 
 The expensive image encoder is frozen behind the feature cache. `P_id` remains
-inside `RCRModel` and is trained normally; identity embeddings are therefore
+inside `RCRModel`, alongside `P_visual`, and is trained normally; embeddings are
 **not** stored permanently in the cache. Scene-box coordinates are transformed
 to the same letterboxed coordinate system as the scene patch grid. GT head
 annotations are used only to align optional identity supervision and compute
@@ -50,6 +58,11 @@ b_i = FFN_res(h_i + e_i)
 
 The geometry is a soft attention bias, not a hard crop mask, so relational and
 contextual evidence may remain outside the person box.
+
+All RCR attention modules use 6 heads at width 384. Binding, composition and
+fine reasoning use FFNs with hidden width 768 (`mlp_ratio=2`). Attention weights,
+attention residual updates and FFN hidden/output activations use dropout 0.1
+during training; evaluation disables it.
 
 ### 3. Query Subject grounding
 
@@ -90,7 +103,7 @@ is no threshold, one-to-one assignment, or coverage heuristic in `S_id`; its
 soft grounding + max identity similarity formula is unchanged. The state branch
 uses only the existing `final_change` token encoding (including Subject markers),
 with padding excluded from mean pooling, and whole-image patch means. Separate
-trainable text/image projections map both to `model.state_dim`, followed by L2
+trainable text/image projections map both to `model.state_dim=128`, followed by L2
 normalization. State is a rough global action/context signal; precise identity
 binding is handled by the fine reasoner. The default method YAML standardizes
 the two scalar scores per query, over their common finite split-gallery support,
@@ -188,19 +201,27 @@ where:
   labels, so detector misses do not change state supervision. Wrong-identity
   images have unknown state labels and are excluded. Queries without an eligible
   positive-negative pair contribute no state loss. It trains both state
-  projections and the shared text encoder; there is no in-batch negative
-  assumption. `state_weight` defaults to `1.0`.
+  projections, visual projection and text projection; BERT stays frozen. There
+  is no in-batch negative assumption. `state_weight` defaults to `1.0`.
   `L_ret` uses raw `S_f`; inference uses the configured fine/coarse fusion.
 
-Candidate sampling picks one reviewed positive and excludes **all** other
-known positives and the query image from that query's negatives. For equivalent
-train instructions (same ordered identities, case and exact change text), an image
+Each epoch draws `N_train` samples with replacement. Per-sample weight is
+`1 / sqrt(N_case)`, so the case probability is proportional to `sqrt(N_case)`.
+Within a case, samples are uniform. Draws are then batched by Subject count,
+without discarding any draws. `train.case_balanced=false` uses a shuffled pass
+without replacement for the natural-distribution ablation.
+
+Candidate sampling picks up to `P=2` distinct reviewed positives and excludes
+**all** known positives and the query image from that query's negatives. At
+least one candidate remains negative. For equivalent train instructions
+(same ordered identities, case and exact change text), an image
 marked positive by one query is not used as a negative by another. Original
 positive labels are retained, never merged or rewritten; val/test are untouched.
-With C=16 and mining disabled, sampling draws 7 same-identity negatives and
-8 random negatives. The main YAML enables mining (`hard_fraction=0.3`):
-7 identity, 4 mined and 4 random negatives after warmup. Quotas are floored
-fractions of C-1;
+With `C=24`, `P=2` and mining disabled, sampling draws 11 same-identity and
+11 random negatives. The main YAML enables mining (`hard_fraction=0.3`):
+11 identity, 6 mined and 5 random negatives after warmup. Quotas are floored
+fractions of the actual `C-P` negative slots. A query with only one positive
+uses 23 negative slots, giving 11 identity, 6 mined and 6 random negatives;
 missing slots fall back to random. Candidates are unique. Mining uses only the
 train split, shared coarse scoring in eval/no-grad mode and a bounded top-ranked
 pool; it does not retain a train-query by full-gallery ranking matrix.
@@ -216,3 +237,16 @@ shortlists using the same fully trained checkpoint. State projections from runs
 with `state_weight=0`, or new checkpoints with zero supervised state pairs, cannot
 be used for state-based retrieval. Existing checkpoints/cache formats remain
 readable; benefiting from the new supervision requires retraining.
+
+Periodic validation selects `best.pt` using:
+
+```text
+macro_full_map = mean(Full-mAP for each nonempty validation case)
+checkpoint_score = 0.5 * overall_full_map + 0.5 * macro_full_map
+```
+
+The four cases receive equal weight in the macro term when all are present.
+Selection uses the final complete-gallery ranking, including configured
+fine/coarse fusion. Equal scores keep the earlier checkpoint. History, W&B and
+checkpoints record the selection score and both mAP components; test is never
+used for epoch selection.

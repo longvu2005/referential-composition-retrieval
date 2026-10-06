@@ -43,7 +43,12 @@ All new training runs use the two Subject roles defined by the benchmark schema.
 The detector is Grounding DINO; the frozen image encoder is DINOv3. Authenticate
 with Hugging Face and accept the image checkpoint's license before the first
 cache build. Defaults remain scene `[224,224]`, person `[256,128]` and FP16
-storage; tensors are copied into compact CPU storage. Batch collation loads cached features as FP32; training may then use CUDA AMP. Cache format and learned parameter names are unchanged.
+storage; tensors are copied into compact CPU storage. Batch collation loads
+raw 768-dimensional features as FP32; training may then use CUDA AMP. The cache
+format is unchanged. A shared trainable visual projection maps scene/person/global
+features to `model.dim=384`; the frozen BERT has a separate 768-to-384 projection.
+Identity/state dimensions are 128, attention uses 6 heads, FFN ratio is 2 and
+attention/FFN dropout is 0.1. Only the text projection is in the text optimizer group.
 
 An existing cache with the same detector, backbone and preprocessing can be reused. Keep
 `index.pt` and `features/` together; the cache/gallery/build-ID checks remain.
@@ -55,12 +60,16 @@ cache identity; standalone `build-cache` remains available.
 Existing compatible identity+state checkpoints remain readable.
 Keep the sibling `tokenizer/` directory. Old checkpoints that predate the state
 branch still require retraining, as before.
+Inference restores dimensions and dropout from the checkpoint's training config.
+Train from scratch to use the new 384-dimensional model and frozen BERT policy;
+editing the inference YAML does not resize an existing checkpoint.
 
 ## Training outputs
 
 - `config.yaml`, `tokenizer/`: exact training settings and Subject tokens.
 - `last.pt`: latest completed epoch, written atomically.
-- `best.pt`: best full-val Full-mAP checkpoint, written atomically.
+- `best.pt`: maximizes `0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP`
+  over full-val evaluations, written atomically; ties keep the earlier epoch.
 - `history.jsonl`: epoch losses and evaluation metrics, also saved with W&B off.
 - `evaluation/epoch_NNN/{train,val}_metrics.json`: aggregate/by-case metrics.
 - `training_data.json`: resolved sampling settings and conflicting train labels.
@@ -68,18 +77,28 @@ branch still require retraining, as before.
 
 A new `train` invocation starts from scratch and clears a previous best selection
 and history in that output directory. Use a different `output.dir` for each
-experiment. There is no resume flag. Training samples one reviewed positive,
-mixes same-identity and random train-gallery negatives, groups batches by Subject
-count, and keeps the four losses. The method YAML keeps
-`train.sampling.identity_fraction=0.5` and `hard_fraction=0.3` (7 identity,
-4 mined and 4 random slots among 15 negatives, with shortages filled randomly).
+experiment. There is no resume flag. Each epoch draws as many queries as the
+train split contains, with replacement and case probability proportional to
+`sqrt(N_case)`. The per-sample weight is `1/sqrt(N_case)`. Set
+`train.case_balanced=false` for a shuffled pass without replacement. Draws are
+grouped by Subject count, without dropping short batches.
+
+Training samples up to two distinct reviewed positives among 24 candidates,
+mixes same-identity, mined and random train-gallery negatives, and keeps the four
+losses. The method YAML keeps `train.sampling.identity_fraction=0.5` and
+`hard_fraction=0.3`: with two positives, 22 negative slots become 11 identity,
+6 mined and 5 random slots. With only one positive, the remaining 23 slots become
+11 identity, 6 mined and 6 random. Short pools fall back to random; all known
+positives, the query image and disputed negatives remain excluded.
 Mining starts after one completed epoch and refreshes
 every two epochs. The pool is rebuilt for each new training run.
 
 W&B and local epoch history record losses, identity activity, grounding
 precision/recall on known aligned detections, any-match and complete-Subject
 coverage, state supervised pair counts/active-query rate, and actual negative
-source fractions. W&B additionally records learning rates and gradient norm.
+source fractions and sampled positives per query. Validation history also records
+`val/macro_full_map` (the equal mean over nonempty cases) and
+`val/checkpoint_score`. W&B additionally records learning rates and gradient norm.
 Grounding recall is conditional on valid detected/annotated people; use the cache
 audit for missing-identity coverage. Loss summaries are weighted by query batch
 size; count-derived rates use summed counts. W&B closes on exceptions.
@@ -119,8 +138,11 @@ data and pins batch memory on CUDA runs. BERT and GPU operations remain on the
 main thread, and the worker is closed before mining or evaluation.
 
 Only token IDs and Subject positions are cached, with dynamic batch padding.
-Selection and change text still pass through the trainable BERT every step;
-all occurrences of each Subject marker remain available to composition.
+Selection and change text pass through frozen BERT every step, then the trainable
+text projection. BERT stays in eval mode, including when the wrapper enters train
+mode, and runs without an autograd graph. No backbone parameter or Subject-token
+embedding is optimized. All occurrences of each Subject marker remain available
+to composition.
 
 Mining preserves per-query normalization over the complete training gallery,
 stable tie order and exclusion of queries, positives and disputed pairs. Gallery

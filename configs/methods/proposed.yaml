@@ -20,27 +20,31 @@ cache:
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
+  dim: 384                   # trainable BERT/DINO 768 -> 384 projections
+  dropout: 0.1               # attention weights/residuals and FFNs
   identity_balance:
     mode: none                 # none | pre_scale | layernorm | l2
     scale: 1.0                 # B: multiply identity BEFORE the existing projection
     alpha: 1.0                 # D: target norm = alpha * fixed initial radius
     calibration_queries: 128   # canonical train pairs; never val/test
-  identity_dim: 256
-  state_dim: 256
+  identity_dim: 128
+  state_dim: 128
   # Fallback for old checkpoints/configs; inference overrides live in retrieval.
   coarse_beta: 0.4
-  num_heads: 8
-  mlp_ratio: 4
+  num_heads: 6
+  mlp_ratio: 2
   geo_dim: 32
 train:
   epochs: 10
   batch_size: 14
-  candidates: 16
+  candidates: 24
+  case_balanced: true        # P(case) proportional to sqrt(N_case)
   seed: 0
   amp: true           # CUDA training only; mining/evaluation remain FP32
   mining_batch_size: 8
   sampling:
-    # Fractions of the C-1 negatives; remaining/unused slots are random.
+    positives_per_query: 2   # fewer if unavailable; always keep a negative
+    # Fractions of C-P negatives; remaining/unused slots are random.
     identity_fraction: 0.5
     # 0.3 enables coarse hard-negative mining after warmup.
     hard_fraction: 0.3
@@ -49,7 +53,7 @@ train:
     pool_size: 100
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05
+  text_lr: 1.0e-05           # text projection only; BERT is fully frozen
   weight_decay: 0.01
 loss:
   grounding_weight: 1.0

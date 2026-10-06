@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 
 import torch
@@ -40,6 +41,7 @@ from rcr.methods.proposed.sampling import (
     identity_candidate_pools,
     sample_candidates,
     sampling_settings,
+    training_batches,
 )
 from rcr.methods.proposed.shortlist import load_fixed_coarse
 
@@ -137,10 +139,29 @@ def _diagnostics(counts: dict) -> dict:
         "state_pairs": counts.get("state_pairs", 0),
         "state_active_query_rate": counts.get("state_active_queries", 0)
         / max(counts.get("queries", 0), 1),
+        "sampled_positives_per_query": counts.get("sampled_positive", 0)
+        / max(counts.get("queries", 0), 1),
         **{
             f"sampled_{key}_fraction": counts.get(f"sampled_{key}", 0) / negatives
             for key in ("identity", "hard", "random")
         },
+    }
+
+
+def _checkpoint_metrics(result: dict) -> dict[str, float]:
+    """Equal-weight average over nonempty cases, combined with overall mAP."""
+    full_map = float(result["overall"]["full_map"])
+    cases = [
+        float(row["full_map"])
+        for row in result["by_case"].values()
+        if row["num_queries"] > 0
+    ]
+    if not cases or not all(math.isfinite(x) for x in [full_map, *cases]):
+        raise ValueError("checkpoint selection requires finite, nonempty metrics")
+    macro_full_map = fmean(cases)
+    return {
+        "macro_full_map": macro_full_map,
+        "checkpoint_score": 0.5 * full_map + 0.5 * macro_full_map,
     }
 
 
@@ -170,7 +191,7 @@ def _require_finite_loss(values, rows, epoch, step, amp_enabled, output):
 
 
 def train(cfg: dict) -> Path:
-    """Train from scratch; select best.pt using validation Full-mAP only."""
+    """Select best.pt by 0.5 * overall + 0.5 * macro-case validation Full-mAP."""
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     train_cfg = cfg["train"]
@@ -220,11 +241,12 @@ def train(cfg: dict) -> Path:
     print(f"Training gallery: train ({len(candidate_ids)} images)")
 
     first_scene, *_ = cache.load(torch.tensor([0]))
-    dim = first_scene.shape[-1]
+    input_dim = first_scene.shape[-1]
+    dim = model_cfg.get("dim", input_dim)
     if dim % model_cfg["num_heads"]:
-        raise ValueError("feature dim must be divisible by num_heads")
+        raise ValueError("model.dim must be divisible by num_heads")
 
-    # Trainable text encoder and research modules.
+    # BERT stays frozen, including the resized Subject-token embeddings.
     tokenizer = AutoTokenizer.from_pretrained(model_cfg["text_model"])
     tokenizer.add_special_tokens(
         {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
@@ -246,6 +268,8 @@ def train(cfg: dict) -> Path:
         state_dim=model_cfg.get("state_dim"),
         coarse_beta=model_cfg.get("coarse_beta", 0.3),
         identity_balance=model_cfg.get("identity_balance"),
+        input_dim=input_dim,
+        dropout=model_cfg.get("dropout", 0.0),
     ).to(device)
 
     initialization_sha256 = parameter_fingerprint(model, text_encoder)
@@ -269,7 +293,7 @@ def train(cfg: dict) -> Path:
     optimizer = torch.optim.AdamW(
         [
             {"params": model.parameters(), "lr": optim_cfg["lr"]},
-            {"params": text_encoder.parameters(), "lr": optim_cfg["text_lr"]},
+            {"params": text_encoder.proj.parameters(), "lr": optim_cfg["text_lr"]},
         ],
         weight_decay=optim_cfg["weight_decay"],
     )
@@ -291,11 +315,6 @@ def train(cfg: dict) -> Path:
             tokens = {key: value.pin_memory() for key, value in tokens.items()}
         return rows, stats, visual, tokens
 
-    # Equal Subject counts keep batch shapes explicit.
-    groups: dict[int, list[dict]] = {}
-    for sample in samples:
-        groups.setdefault(len(sample["subjects"]), []).append(sample)
-
     output = Path(output_cfg["dir"])
     output.mkdir(parents=True, exist_ok=True)
     (output / "config.yaml").write_text(
@@ -310,6 +329,7 @@ def train(cfg: dict) -> Path:
         {
             "num_queries": len(samples),
             "sampling": sampling_cfg,
+            "case_balanced": train_cfg.get("case_balanced", True),
             "excluded_negative_pairs": sum(map(len, excluded.values())),
             "conflicts": positive_conflicts(samples),
             "policy": "retain reviewed positives; ignore disputed negative pairs",
@@ -330,12 +350,14 @@ def train(cfg: dict) -> Path:
         cfg,
         output,
         cache,
-        dim,
+        input_dim,
         len(samples),
         len(val_samples),
     )
     global_step = 0
     best_full_map: float | None = None
+    best_macro_full_map: float | None = None
+    best_score: float | None = None
     best_epoch: int | None = None
     state_pairs_seen = 0
 
@@ -372,16 +394,12 @@ def train(cfg: dict) -> Path:
                     },
                 )
             generator = torch.Generator().manual_seed(seed + epoch)
-            batches = []
-            for rows in groups.values():
-                order = torch.randperm(len(rows), generator=generator).tolist()
-                rows = [rows[i] for i in order]
-                batches.extend(
-                    rows[i : i + train_cfg["batch_size"]]
-                    for i in range(0, len(rows), train_cfg["batch_size"])
-                )
-            order = torch.randperm(len(batches), generator=generator).tolist()
-            batches = [batches[i] for i in order]
+            batches = training_batches(
+                samples,
+                train_cfg["batch_size"],
+                generator,
+                case_balanced=train_cfg.get("case_balanced", True),
+            )
 
             model.train()
             text_encoder.train()
@@ -410,6 +428,7 @@ def train(cfg: dict) -> Path:
                         hard_fraction=sampling_cfg["hard_fraction"],
                         stats=stats,
                         index=candidate_index,
+                        positives_per_query=sampling_cfg["positives_per_query"],
                     )
                     yield rows, candidates, stats
 
@@ -556,6 +575,7 @@ def train(cfg: dict) -> Path:
                         cfg["candidate_ks"],
                         split=split,
                     )
+                    result["overall"].update(_checkpoint_metrics(result))
                     compact = {
                         "overall": result["overall"],
                         "by_case": result["by_case"],
@@ -573,13 +593,18 @@ def train(cfg: dict) -> Path:
                         val_metrics = result["overall"]
 
                 val_full_map = float(val_metrics["full_map"])
-                if best_full_map is None or val_full_map > best_full_map:
+                val_score = float(val_metrics["checkpoint_score"])
+                if best_score is None or val_score > best_score:
+                    best_score = val_score
                     best_full_map = val_full_map
+                    best_macro_full_map = float(val_metrics["macro_full_map"])
                     best_epoch = epoch_number
                     is_best = True
                 print(
                     f"validation epoch {epoch_number}: "
                     f"Full-mAP={val_full_map:.4f} "
+                    f"macro={val_metrics['macro_full_map']:.4f} "
+                    f"selection={val_score:.4f} "
                     f"Full-R@1={val_metrics['full_r1']:.4f} "
                     f"ID-mAP={val_metrics['id_map']:.4f}"
                 )
@@ -591,9 +616,11 @@ def train(cfg: dict) -> Path:
                 run.log(epoch_log)
                 if is_best:
                     run.summary["best_val_full_map"] = best_full_map
+                    run.summary["best_val_macro_full_map"] = best_macro_full_map
+                    run.summary["best_val_checkpoint_score"] = best_score
                     run.summary["best_epoch"] = best_epoch
 
-            # Always save the latest state; select best.pt only by validation Full-mAP.
+            # Always save the latest state; validation alone selects best.pt.
             checkpoint = {
                 "epoch": epoch_number,
                 "model": model.state_dict(),
@@ -602,10 +629,13 @@ def train(cfg: dict) -> Path:
                 "scaler": scaler.state_dict(),
                 "config": cfg,
                 "dim": dim,
+                "input_dim": input_dim,
                 "cache_id": cache.cache_id,
                 "initialization_sha256": initialization_sha256,
                 "identity_calibration": calibration,
                 "best_full_map": best_full_map,
+                "best_macro_full_map": best_macro_full_map,
+                "best_score": best_score,
                 "best_epoch": best_epoch,
                 "state_supervised_pairs": state_pairs_seen,
             }

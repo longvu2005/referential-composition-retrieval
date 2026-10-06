@@ -132,6 +132,8 @@ def retrieve_experiments(
         state_dim=model_cfg.get("state_dim"),
         coarse_beta=model_cfg.get("coarse_beta", 0.3),
         identity_balance=model_cfg.get("identity_balance"),
+        input_dim=checkpoint.get("input_dim", dim),
+        dropout=model_cfg.get("dropout", 0.0),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
@@ -184,6 +186,8 @@ def retrieve_experiments(
                 "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
                 "best_epoch": checkpoint.get("best_epoch"),
                 "best_val_full_map": checkpoint.get("best_full_map"),
+                "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
+                "best_val_checkpoint_score": checkpoint.get("best_score"),
                 "cache_id": cache.cache_id,
                 "num_queries": len(samples),
                 "num_gallery": len(output["gallery_ids"]),

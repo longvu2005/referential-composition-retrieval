@@ -1,11 +1,17 @@
-# Each variant retrains with the same losses, seed, C=16 and evaluation policy.
+# Each variant retrains with the same losses, seed, C=24 and checkpoint policy.
 base_config: configs/methods/proposed.yaml
 stage: train
 output_dir: runs/ablations/sampling
 overrides:
   train.seed: 0
-  train.candidates: 16
+  train.candidates: 24
 experiments:
+  - name: natural_cases
+    overrides:
+      train.case_balanced: false
+  - name: one_positive
+    overrides:
+      train.sampling.positives_per_query: 1
   - name: random
     overrides:
       train.sampling.identity_fraction: 0.0

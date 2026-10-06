@@ -12,7 +12,7 @@ SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
 
 
 class QueryTextCache:
-    """CPU token IDs only; language-model outputs always keep their gradients."""
+    """CPU token IDs only; the text projection is recomputed at each step."""
 
     def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
@@ -124,7 +124,7 @@ class QueryTextCache:
 def encode_tokenized_text(
     tokens: dict[str, Tensor], text_encoder: nn.Module, device: torch.device | str
 ) -> dict[str, Tensor]:
-    """Run both differentiable BERT passes after CPU batch preparation."""
+    """Run frozen BERT and the trainable projection after CPU preparation."""
     tokens = {key: value.to(device, non_blocking=True) for key, value in tokens.items()}
     b, subjects = tokens["subject_ids"].shape
     selections, selection_mask = text_encoder(
@@ -180,24 +180,32 @@ class ImageEncoder(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    """Encode tokenized text with one shared language backbone."""
+    """Frozen, deterministic BERT features followed by a trainable projection."""
 
     def __init__(self, backbone: nn.Module, dim: int) -> None:
         super().__init__()
         self.backbone = backbone
+        self.backbone.requires_grad_(False)
+        self.backbone.eval()
 
         hidden_dim = backbone.config.hidden_size
         self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.backbone.eval()
+        return self
 
     def forward(
         self, input_ids: Tensor, attention_mask: Tensor
     ) -> tuple[Tensor, Tensor]:
         """Return text tokens [B,L,D] and a boolean valid-token mask."""
 
-        tokens = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        ).last_hidden_state
+        with torch.no_grad():
+            tokens = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).last_hidden_state
         return self.proj(tokens), attention_mask.bool()
 
 

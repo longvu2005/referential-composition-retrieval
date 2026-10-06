@@ -111,8 +111,9 @@ python tools/methods/run.py ablate \
 ```
 
 Each variant starts from the same seed 0 and initialization. Its `best.pt` is
-selected by periodic **pipeline validation Full mAP**, using the frozen
-shortlist. The suite then selects among all eight `best.pt` checkpoints by the
+selected by periodic **0.5 * overall + 0.5 * macro-case validation Full mAP**,
+using the frozen shortlist. The suite then selects among all eight `best.pt`
+checkpoints by the
 same metric. Ties keep YAML order, with A listed first. No test metrics are used
 in selection. Reference test scores may be cached beforehand without evaluating
 the eight variants on test.
