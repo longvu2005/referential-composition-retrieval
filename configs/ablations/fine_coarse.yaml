@@ -1,18 +1,21 @@
-# Run coarse.yaml first so this sweep inherits the SAME val-selected coarse beta.
-# This is inference-only: the existing checkpoint is reused; no retraining needed.
-base_config: runs/ablations/coarse/selected.yaml
+# Joint 2D calibration on the complete validation split, at one fixed checkpoint.
+# Run directly after training; no coarse sweep, retraining or cache rebuild needed.
+base_config: configs/methods/proposed.yaml
 stage: inference
 output_dir: runs/ablations/fine_coarse
 overrides:
+  retrieval.coarse_mode: identity_state
+  retrieval.coarse_normalization: zscore
   retrieval.rerank: true
   retrieval.top_m: 500
   candidate_ks: [100, 500]
 experiments:
-  - name: fine_coarse_weight
+  - name: joint_coarse_fine
     sweep:
-      retrieval.fine_coarse_weight: [0.0, 0.1, 0.25, 0.5, 1.0, 2.0]
-# Choose final-reranking calibration by the official target metric on validation.
-# The grid contains 0.0, so selection can keep the old fine-only reranker.
+      retrieval.coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
+      retrieval.fine_coarse_weight: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0]
+# Evaluate all 8 x 7 pairs by FINAL Full-mAP, not coarse CandidateRecall.
+# Both grids include 0.0 and the current 0.4/0.4 pair. Ties keep YAML order.
 select:
-  group: fine_coarse_weight
+  group: joint_coarse_fine
   metric: full_map

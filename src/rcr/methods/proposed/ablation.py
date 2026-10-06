@@ -138,6 +138,21 @@ def _result_row(experiment: dict, cfg: dict, metrics: dict, stage: str) -> dict:
     }
 
 
+def _select_validation_result(rows: list[dict], selection: dict) -> dict:
+    """Select by the final validation metric; ties retain explicit YAML order."""
+    candidates = [
+        row
+        for row in rows
+        if row["split"] == "val" and selection.get("group") in (None, row["group"])
+    ]
+    metric = selection["metric"]
+    if not candidates or any(
+        metric not in row or not math.isfinite(row[metric]) for row in candidates
+    ):
+        raise ValueError("selection requires finite validation metrics")
+    return max(candidates, key=lambda row: row[metric])
+
+
 def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict]:
     """Evaluate fixed-checkpoint variants together, or train independent variants.
 
@@ -216,13 +231,8 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                 rows.append(row)
             write_summary(root, rows)
         if selection:
-            candidates = [
-                r for r in rows if selection.get("group") in (None, r["group"])
-            ]
             metric = selection["metric"]
-            if not candidates or any(not math.isfinite(r[metric]) for r in candidates):
-                raise ValueError("selection requires finite validation metrics")
-            best = max(candidates, key=lambda row: row[metric])
+            best = _select_validation_result(rows, selection)
             chosen = next(e for e in experiments if e["name"] == best["experiment"])
             selected = copy.deepcopy(chosen["config"])
             selected["selected_checkpoint_sha256"] = best["checkpoint_sha256"]
@@ -272,27 +282,20 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
         for split in ["val"] if selection else splits:
             infer(experiments, split)
         if selection:
-            candidates = [
-                row for row in rows if selection.get("group") in (None, row["group"])
-            ]
             metric = selection["metric"]
-            if any(not math.isfinite(row[metric]) for row in candidates):
-                raise ValueError("selection requires finite validation metrics")
-            # Ties keep the first experiment in the explicit YAML sweep order.
-            best = max(candidates, key=lambda row: row[metric])
+            best = _select_validation_result(rows, selection)
             chosen = next(e for e in experiments if e["name"] == best["experiment"])
             cfg = override_config(
                 chosen["config"],
                 {
                     "retrieval.coarse_beta": best["coarse_beta"],
+                    "retrieval.fine_coarse_weight": best["fine_coarse_weight"],
                     "output.dir": str(root / "selected"),
                     "split": "val",
                 },
             )
             cfg["selected_checkpoint_sha256"] = best["checkpoint_sha256"]
             cfg["selected_validation_sha256"] = best["validation_sha256"]
-            if "test" in splits:
-                infer([{**chosen, "config": cfg}], "test")
             _write_config(root / "selected.yaml", cfg)
             write_json(
                 root / "selection.json",
@@ -302,6 +305,7 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                     "value": best[metric],
                     "experiment": best["experiment"],
                     "group": best["group"],
+                    "sweep": chosen["sweep"],
                     "coarse_beta": best["coarse_beta"],
                     "fine_coarse_weight": best["fine_coarse_weight"],
                     "checkpoint": best["checkpoint"],
@@ -311,6 +315,10 @@ def run_ablation(suite: dict, entrypoint: Path, *, splits=("val",)) -> list[dict
                     "config": str(root / "selected.yaml"),
                 },
             )
+            # A test failure must not discard a completed validation search.
+            write_summary(root, rows)
+            if "test" in splits:
+                infer([{**chosen, "config": cfg}], "test")
     write_summary(root, rows)
     return rows
 

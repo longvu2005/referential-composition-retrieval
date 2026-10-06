@@ -195,24 +195,52 @@ Within Top-M, ranking uses the configured fine/coarse fusion
 fine-only ranking. Remaining images retain coarse order. Equal scores retain
 stable canonical gallery order.
 
-## Ablations and beta selection
+## Joint 2D calibration and ablations
 
 ```bash
+# Required calibration: select both coefficients together on val.
+python tools/methods/run.py ablate --config configs/ablations/fine_coarse.yaml
+
+# Optional diagnostics using that same checkpoint and selected pair.
 python tools/methods/run.py ablate --config configs/ablations/coarse.yaml
 python tools/methods/run.py ablate --config configs/ablations/retrieval.yaml
+
+# Optional training ablations, each producing separate checkpoints.
 python tools/methods/run.py ablate --config configs/ablations/loss.yaml
 python tools/methods/run.py ablate --config configs/ablations/sampling.yaml
+
+# Final test uses the joint selection unchanged.
+python tools/methods/run.py run --config runs/ablations/fine_coarse/selected.yaml --splits test
 ```
 
-The default split is **val**. Coarse experiments reuse one checkpoint and raw
-score computation across beta values. Beta is selected by CandidateRecall@500
-for the main Top-500 shortlist. The sweep writes `selected.yaml` and
-`selection.json`; retrieval ablations inherit that selection. Loss ablations
-train separate checkpoints using the same schedule, seed and identity-only
-retrieval, so untrained state projections never influence the comparison.
-Sampling ablations compare random, identity/random and identity/mined/random.
-Existing frozen caches are reused throughout. New selections fingerprint val
-text/labels/gallery as well as the checkpoint; changing val requires a new sweep.
+The default split is **val**. `fine_coarse.yaml` reads the method YAML directly,
+reuses one checkpoint, and evaluates the Cartesian product of 8 coarse beta
+values and 7 fine/coarse weights. Both grids include zero and the existing
+0.4/0.4 pair. The selection criterion is **final Full-mAP** over the complete
+ranking, at fixed Top-500. CandidateRecall@500 is reported as a diagnostic;
+it does not select beta in a separate first stage. Ties retain YAML grid order
+(beta first, then fine/coarse weight).
+
+Raw identity/state scores are computed once per query. Normalized coarse scores
+and rankings are reused across final weights for each beta. Each query/target
+fine score is computed once across the union of the beta-specific shortlists;
+normalization for final fusion still uses each pair's own shortlist.
+
+The sweep writes `summary.csv`, `selection.json` and `selected.yaml` under
+`runs/ablations/fine_coarse/`. Both selected weights and checkpoint/validation
+fingerprints are retained. Coarse and retrieval diagnostics inherit this
+selection and never replace it. Existing sequential selections must be replaced
+by a fresh joint sweep. `--splits val test` on the joint suite runs the full grid
+on val and **only the winner** on test; a test-only suite invocation is rejected.
+Use the selected method YAML for a later test-only run.
+
+Loss ablations train separate checkpoints using the same schedule, seed and
+identity-only retrieval, so untrained state projections never influence the
+comparison. Sampling ablations compare random, identity/random and
+identity/mined/random. Existing frozen caches are reused throughout. Selections
+fingerprint val text/labels/gallery as well as the checkpoint; changing either
+requires a new sweep. The method YAML keeps 0.4/0.4 for training-time validation;
+post-training calibration does not rewrite checkpoint selection or training.
 
 Use the complete [ablation guide](ablations_vi.md) for test commands, metric
 definitions, output paths and adding future experiments.

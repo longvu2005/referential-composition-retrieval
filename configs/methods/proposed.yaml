@@ -65,11 +65,12 @@ loss:
 retrieval:
   # Shared by periodic validation and standalone retrieval.
   coarse_mode: identity_state   # identity_only | state_only | identity_state
-  coarse_beta: 0.4              # fixed validation-selected coefficient
+  coarse_beta: 0.4              # training default; joint sweep selects final pair
   coarse_normalization: zscore  # none reproduces raw ID + beta * state
   rerank: true                  # false keeps the complete coarse ranking
-  # Final Top-M score = z(fine) + 0.4 * z(coarse), selected on validation.
-  # Keep both fusion coefficients fixed during identity ablations.
+  # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
+  # Tune BOTH weights with configs/ablations/fine_coarse.yaml after training.
+  # Identity ablations keep their reference coefficients fixed explicitly.
   fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64

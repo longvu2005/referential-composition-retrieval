@@ -94,9 +94,7 @@ def retrieve_experiments(
         other.get("selected_validation_sha256", validation_sha256) != validation_sha256
         for other in configs.values()
     ):
-        raise ValueError(
-            "validation data changed since beta selection; rerun the sweep"
-        )
+        raise ValueError("validation data changed since val selection; rerun the sweep")
     samples = split_samples(data, cfg["split"])
     if not samples:
         raise ValueError(f"{cfg['split']}: selected query split is empty")

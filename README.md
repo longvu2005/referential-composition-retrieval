@@ -73,14 +73,17 @@ draws and up to 2 positives among 24 candidates. `best.pt` maximizes
 The existing DINO cache can be reused; these model settings require a new train run.
 
 ```bash
-# Proposed: build cache, train, select best.pt on val, evaluate val and test.
-python tools/methods/run.py run --config configs/methods/proposed.yaml --build-cache --train
+# Proposed: build cache, train and select best.pt on val.
+python tools/methods/run.py run --config configs/methods/proposed.yaml --build-cache --train --splits val
 
 # Reuse the cache and train a new model.
-python tools/methods/run.py run --config configs/methods/proposed.yaml --train
+python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
 
-# Evaluate an existing checkpoint.
-python tools/methods/run.py run --config configs/methods/proposed.yaml
+# Joint 2D sweep on val; evaluate only the selected pair on test.
+python tools/methods/run.py ablate --config configs/ablations/fine_coarse.yaml --splits val test
+
+# Later, evaluate that same selection without another sweep.
+python tools/methods/run.py run --config runs/ablations/fine_coarse/selected.yaml --splits test
 
 # CLIP: prepare one image/text checkpoint, run all four modes.
 python tools/methods/run.py run --config configs/methods/clip.yaml --prepare
@@ -97,7 +100,7 @@ python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
 | `retrieve` | Save rankings for the selected split(s) |
 | `evaluate` | Evaluate saved rankings without loading a model |
 | `run` | Retrieve + evaluate val/test; optionally prepare/build/train first |
-| `ablate` | Run a proposed ablation suite; optional beta sweep selected on val |
+| `ablate` | Run a proposed ablation suite; optional joint 2D sweep selected on val |
 
 `--splits val` or `--splits test` restricts the run. `--modes clip_image clip_text`
 selects CLIP modes. `--set key=value ...` overrides existing YAML fields without
@@ -128,7 +131,7 @@ Each split saves `rankings.pt`, `run.json`, `metrics.json`. Baselines also save
 `scores.npy`. `summary.csv` describes the latest successful `run` invocation.
 
 Detailed usage: [proposed](docs/proposed_runs.md), [baselines](docs/baselines.md).
-Coarse normalization, beta sweep and extensible ablations:
+Coarse normalization, joint 2D calibration and extensible ablations:
 [Ablation guide](docs/ablations_vi.md).
 Identity amplitude A–D, fixed shortlist, and validation/seed confirmation:
 [identity balance guide](docs/identity_balance_ablation.md).
@@ -136,7 +139,12 @@ Model equations: [proposed method](docs/proposed_method.md).
 
 The main proposed config uses `z(ID) + 0.4 z(state)` for coarse scoring over
 the non-self gallery, then `z(fine) + 0.4 z(coarse)` within the Top-500 shortlist.
-The remaining gallery keeps coarse order. Training optimizes raw fine scores.
+These are the training defaults. `configs/ablations/fine_coarse.yaml` jointly
+sweeps coarse beta and fine/coarse weight over 8 x 7 pairs at the same Top-500
+budget and checkpoint. It maximizes final Full-mAP on complete val, saves both
+weights in `selected.yaml`, and evaluates only that pair on test. Candidate
+recall is diagnostic. The remaining gallery keeps coarse order. Training
+optimizes raw fine scores.
 
 Training uses same-identity negatives mixed with random negatives. The main
 YAML enables coarse mining on train after warmup; set

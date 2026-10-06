@@ -113,10 +113,13 @@ uses no relevance labels and adds no learned parameters.
 
 `retrieval.coarse_normalization: none` uses raw `S_id + beta * S_state` instead.
 `retrieval.coarse_beta` overrides the checkpoint beta; null inherits it.
-The main YAML fixes beta=0.4 from validation selection;
-the model-level fallback is also 0.4. Tune beta on val
-with `configs/ablations/coarse.yaml`. The same numeric beta has a different
-relative effect after normalization. `coarse_mode` selects `identity_only`,
+The main YAML uses beta=0.4 during training-time validation;
+the model-level fallback is also 0.4. After training,
+`configs/ablations/fine_coarse.yaml` jointly sweeps beta and the final
+fine/coarse weight on val, selecting the pair by final Full-mAP at fixed Top-500.
+CandidateRecall@500 is diagnostic. `coarse.yaml` uses the selected pair only for
+optional mode comparisons. The same numeric beta has a different relative
+effect after normalization. `coarse_mode` selects `identity_only`,
 `state_only`, or `identity_state`; beta=0 in the combined mode also disables state.
 Top `M` gallery images proceed to fine when `retrieval.rerank: true`.
 
@@ -164,7 +167,10 @@ scores, after self exclusion; constant branches contribute zero. Unsupported
 coarse candidates remain last. `retrieval.fine_coarse_weight` controls the
 coarse contribution; zero returns raw fine-only scores. Images outside Top-M
 retain their coarse order, preserving a complete split-gallery ranking.
-Training still optimizes raw fine scores, not this inference-time fusion.
+The joint grid includes the default (beta=0.4, weight=0.4) and zero values for
+both axes. Both chosen coefficients are saved and applied unchanged to test;
+equal validation Full-mAP retains the first pair in YAML order. Training still
+optimizes raw fine scores, not this inference-time fusion.
 
 When the query has no detected people, it remains in retrieval and evaluation:
 `S_id` is zero for nonempty target person sets, so global state can still

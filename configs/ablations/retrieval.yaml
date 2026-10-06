@@ -1,5 +1,5 @@
-# Run coarse.yaml, then fine_coarse.yaml. All variants inherit the SAME
-# val-selected coarse beta and fine/coarse fusion weight.
+# Run fine_coarse.yaml first. All variants inherit the SAME pair selected
+# jointly by final Full-mAP on val; coarse.yaml is optional diagnostics.
 base_config: runs/ablations/fine_coarse/selected.yaml
 stage: inference
 output_dir: runs/ablations/retrieval

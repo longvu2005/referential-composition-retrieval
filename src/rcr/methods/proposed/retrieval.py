@@ -249,7 +249,8 @@ def retrieve_variants(
 
     Only the split gallery is projected. CPU gallery projections and GPU scoring
     chunks bound accelerator memory. Coarse normalization happens after gathering
-    one complete score vector, never per chunk. Fine/coarse final fusion is
+    one complete score vector, never per chunk. Variants with the same coarse
+    settings share their normalized scores and ranking. Fine/coarse final fusion is
     normalized only inside each variant's Top-M shortlist. All outputs retain the
     full gallery order; top_m only limits fine reranking. Optional ranking_limit
     retains only a prefix to bound CPU output memory. Such truncated outputs
@@ -374,22 +375,33 @@ def retrieve_variants(
             # or the final fine/coarse fusion weight, so variants can share them.
             fine_scores = torch.empty(len(gallery_ids), device=device)
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
+            coarse_orders = {}
             for name, cfg in settings.items():
-                if fixed_coarse is None:
-                    coarse = combine_scores(
-                        identity,
-                        state,
-                        mode=cfg["coarse_mode"],
-                        beta=cfg["coarse_beta"],
-                        normalization=cfg["coarse_normalization"],
-                        exclude_index=query_index,
-                    )
-                    order = torch.argsort(coarse, descending=True, stable=True)
-                    order = order[order != query_index]
-                else:
-                    row = frozen_rows[sample["sample_id"]]
-                    coarse = fixed_coarse["coarse_scores"][row].to(device)
-                    order = fixed_coarse["coarse_rankings"][row].to(device).long()
+                # A joint sweep changes the final fusion weight repeatedly for
+                # each beta. Normalize/sort coarse only once per distinct setting.
+                coarse_key = (
+                    cfg["coarse_mode"],
+                    cfg["coarse_beta"],
+                    cfg["coarse_normalization"],
+                )
+                if coarse_key not in coarse_orders:
+                    if fixed_coarse is None:
+                        coarse = combine_scores(
+                            identity,
+                            state,
+                            mode=cfg["coarse_mode"],
+                            beta=cfg["coarse_beta"],
+                            normalization=cfg["coarse_normalization"],
+                            exclude_index=query_index,
+                        )
+                        order = torch.argsort(coarse, descending=True, stable=True)
+                        order = order[order != query_index]
+                    else:
+                        row = frozen_rows[sample["sample_id"]]
+                        coarse = fixed_coarse["coarse_scores"][row].to(device)
+                        order = fixed_coarse["coarse_rankings"][row].to(device).long()
+                    coarse_orders[coarse_key] = coarse, order
+                coarse, order = coarse_orders[coarse_key]
                 top_indices = order[: cfg["top_m"]]
                 final_order = order
                 if cfg["rerank"]:

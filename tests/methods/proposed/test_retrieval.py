@@ -492,8 +492,22 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
         "fine": {**base, "coarse_beta": 1.0, "rerank": True},
         "fine_small": {**base, "coarse_beta": 1.0, "rerank": True, "top_m": 1},
     }
-    calls, loads = [], []
+    # Joint 2D sweep, with zero weights and the existing (.4, .4) pair.
+    variants.update(
+        {
+            f"joint_{beta}_{weight}": {
+                **base,
+                "coarse_beta": beta,
+                "fine_coarse_weight": weight,
+                "rerank": True,
+            }
+            for beta in (0.0, 0.4, 1.0)
+            for weight in (0.0, 0.4, 1.0)
+        }
+    )
+    calls, loads, combinations = [], [], []
     score_identity, load = retrieval._coarse_scores_chunked, cache.load
+    combine = retrieval.combine_scores
 
     def count_scores(*args, **kwargs):
         calls.append(1)
@@ -503,10 +517,16 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
         loads.extend(indices.tolist())
         return load(indices)
 
+    def count_combinations(*args, **kwargs):
+        combinations.append(1)
+        return combine(*args, **kwargs)
+
     monkeypatch.setattr(retrieval, "_coarse_scores_chunked", count_scores)
     monkeypatch.setattr(cache, "load", count_loads)
+    monkeypatch.setattr(retrieval, "combine_scores", count_combinations)
     actual = retrieve_variants(*args, gallery_ids=cache.image_ids, variants=variants)
     assert len(calls) == 1  # One ID score vector for all beta/mode variants.
+    assert len(combinations) == 5  # Reuse normalization/sort across final weights.
     assert loads[0] == 0 and len(loads[1:]) == len(set(loads[1:])) == 3
     for name, cfg in variants.items():
         # Change chunk sizes to catch normalization accidentally performed per chunk.
@@ -522,6 +542,10 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
             )
             for key in ("rankings", "coarse_topm", "coarse_rankings"):
                 assert torch.equal(actual[name][key], expected[key])
+            if cfg["rerank"]:
+                assert torch.equal(
+                    actual[name]["fine_rankings"], expected["fine_rankings"]
+                )
         assert actual[name]["rankings"].shape == (1, 4)
         assert set(actual[name]["rankings"][0].tolist()) == {1, 2, 3, 4}
     assert torch.equal(actual["id"]["rankings"], actual["beta0"]["rankings"])

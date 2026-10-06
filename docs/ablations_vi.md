@@ -2,7 +2,8 @@
 
 The fixed-weight identity A–D suite is documented in
 [Identity balance ablations](identity_balance_ablation.md). It uses the selected
-coarse/fine fusion weights 0.4/0.4 and does not rerun the older sweeps below.
+coarse/fine fusion weights 0.4/0.4 and does not rerun joint calibration for
+those controlled comparisons.
 
 First, update the paths in `configs/methods/proposed.yaml`. Run all commands from
 the repository root in the proposed environment. All suites reuse the existing
@@ -45,20 +46,41 @@ model and dropout 0.1. Epoch checkpoints use
 `0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP` on validation; macro averages
 the nonempty cases. These changes require retraining while reusing the visual cache.
 
-## 2. Coarse retrieval and beta selection
+## 2. Joint 2D coarse/fine calibration
 
 ```bash
-python tools/methods/run.py ablate --config configs/ablations/coarse.yaml
+python tools/methods/run.py ablate --config configs/ablations/fine_coarse.yaml
 ```
 
-All variants use the same checkpoint: identity-only, state-only, raw fusion,
-z-score fusion, and a beta sweep. By default, beta is selected using
-**CandidateRecall@500** on the complete validation split. The grid includes
-beta=0. If you change the main Top-M budget, update the selection metric and
-`candidate_ks` accordingly before inspecting the results.
+The suite reads `configs/methods/proposed.yaml` directly. No preceding coarse
+sweep is required. At the same checkpoint and Top-500 budget, every pair in the
+following Cartesian product is evaluated on complete validation:
 
-Results are saved under `runs/ablations/coarse/`: `summary.csv`, `selection.json`,
-`selected.yaml`, and the rankings/metrics for each variant.
+| Setting | Values |
+| --- | --- |
+| `retrieval.coarse_beta` | 0, 0.1, 0.25, 0.4, 0.5, 1, 2, 4 |
+| `retrieval.fine_coarse_weight` | 0, 0.1, 0.25, 0.4, 0.5, 1, 2 |
+
+For each of the 56 pairs, coarse scoring forms its own shortlist using
+`z(ID) + beta * z(state)`. Fine reranking uses
+`z(fine) + fine_coarse_weight * z(coarse)` on that shortlist; a zero final
+weight preserves raw fine-only ordering. The pair with the highest **final
+Full-mAP** wins. CandidateRecall@500 is diagnostic, so a beta with higher
+candidate recall can lose to another beta with better final retrieval.
+Ties retain the first pair in YAML order. Fix grids, metric and Top-M before
+inspecting the results. A different main Top-M budget requires a fresh joint
+sweep with that budget and compatible `candidate_ks`.
+
+Identity/state scores, query encodings and gallery projections are shared.
+Coarse normalization/ranking is reused for all final weights at the same beta.
+Fine scores are computed once per query/target across the union of shortlists,
+while final z-scores use each shortlist separately. No model is retrained and
+the visual cache is not rebuilt.
+
+Results are saved under `runs/ablations/fine_coarse/`: `summary.csv` with both
+weights and all metrics, `selection.json` with the chosen pair, `selected.yaml`,
+and rankings/metrics for each pair. The checkpoint and validation fingerprints
+are preserved. Rerun this suite to replace any older sequential selection.
 
 - CandidateRecall@K: the fraction of Full Positives retained in the coarse Top-K.
 - CandidateHit@K: the fraction of queries with at least one Full Positive in Top-K.
@@ -70,11 +92,14 @@ Results are saved under `runs/ablations/coarse/`: `summary.csv`, `selection.json
 ## 3. Contributions of the state score and fine reranking
 
 ```bash
+python tools/methods/run.py ablate --config configs/ablations/coarse.yaml
 python tools/methods/run.py ablate --config configs/ablations/retrieval.yaml
 ```
 
-The suite reads `selected.yaml` and keeps the checkpoint and beta selected on
-validation fixed:
+Both optional suites read `runs/ablations/fine_coarse/selected.yaml` and keep the
+checkpoint and jointly selected pair fixed. `coarse.yaml` compares identity-only,
+state-only, raw fusion and z-score fusion without selecting a new beta.
+`retrieval.yaml` compares:
 
 - `fine_identity_only` versus `fine_top500`: measures the contribution of state
   scoring to the shortlist, with fine reranking and M=500 in both variants. If
@@ -82,8 +107,8 @@ validation fixed:
   result.
 - `coarse_only` versus `fine_top500`: measures the contribution of fine reranking
   with the same shortlist.
-- `fine_top100/500/1000`: measures the effect of the M budget with **fixed beta**.
-  This experiment does not find a separate optimal beta for each M.
+- `fine_top100/500/1000`: measures the effect of the M budget with **both weights
+  fixed**. This experiment does not find a separate optimal pair for each M.
 
 ## 4. Contributions of the losses and sampler
 
@@ -109,9 +134,14 @@ variant may produce fewer state pairs, so inspect the diagnostics as well.
 ## 5. Finalize settings before testing
 
 ```bash
-python tools/methods/run.py run --config runs/ablations/coarse/selected.yaml \
-  --splits test --set retrieval.rerank=true
+python tools/methods/run.py run --config runs/ablations/fine_coarse/selected.yaml \
+  --splits test
 ```
+
+Alternatively, `ablate --config configs/ablations/fine_coarse.yaml --splits val test`
+runs the joint validation grid and then only the selected pair on test. The
+selection and validation summary are saved before test, so a test failure does
+not discard completed calibration. A test-only sweep is rejected.
 
 Do not tune on test. New selections check both checkpoint and validation-data
 fingerprints. If validation data or the checkpoint changes, rerun the sweep.
