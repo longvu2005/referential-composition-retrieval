@@ -57,13 +57,12 @@ data/raw/metadata/index.txt
 data/raw/images
 ```
 
-The supplied canonical export replaces the earlier raw export at the same path.
-Subsequent preparation validates and reads it without modifying it.
+Preparation validates and reads the canonical source export without modifying it.
 
 `data/raw/images` is machine-local; its split subdirectories may be symbolic
-links to the actual image tree. The symlinks in the supplied archive point to
-a machine-specific path, so repoint them before rebuilding the dataset or
-encoding images. Images are not committed to Git. `index.txt` defines the complete
+links to the actual image tree. Repoint machine-specific symlinks before rebuilding
+the dataset or encoding images. Images are not committed to Git. `index.txt`
+defines the complete
 indexed retrieval gallery; `pair_data.json` is source-pair metadata and must not
 be used to truncate the Full Positive candidate universe.
 
@@ -191,8 +190,7 @@ The builder checks IDs, reviewed Subject structure, seed and query exclusions,
 identity membership, gallery consistency and split membership. It creates
 `final_instruction` from `<final_desc>; <final_change>.`. The checked-in
 `final/` has **4,311 samples, 37,107 gallery images, version `0.1.0`**, with
-split counts 4,033/264/14 for train/val/test. `final_partial/` contains no
-materialized dataset in the supplied archive. To generate a partial export as
+split counts 4,033/264/14 for train/val/test. To generate a partial export as
 labels arrive, pass `--allow-partial` to the finalization launcher; it writes
 to `final_partial/` and sets `partial: true`. A full build still requires every
 selected sample to have reviewed text and positive decisions.

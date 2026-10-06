@@ -97,8 +97,7 @@ Hard-negative pools can evolve differently as the models learn.
 
 ## Run
 
-Apply the ZIP files at the repository root. No files need deletion, no dependency
-changes are needed, and the frozen visual cache does not need rebuilding.
+The suite uses the existing dependencies and frozen visual cache.
 Use the proposed Python environment; on Kaggle this can be
 `.venv-proposed/bin/python` instead of `python`.
 
@@ -181,15 +180,8 @@ and R come from its training checkpoint. Those variants require retraining.
 
 ## Verification and scope
 
-The patch was developed against commit
-`3771dbd88da0a51c0d78e8b68e6805f3bc875c1b`. Tests use small local models/caches and
-cover the full eight-variant workflow, validation selection, fixed shortlist,
+Tests use small local models/caches to cover validation selection, fixed shortlist,
 confirmation seeds, saved radii, fine-only/DUAL metrics, gradients, legacy loading
-and unchanged initialization. A was also compared directly against that original
-commit: all 170 checked weight, loss, diagnostic and gradient tensors matched
-exactly on the same two-Subject fixture.
-
-These are software checks, not PIPA accuracy experiments or T4 benchmarks. The
-patch contains no claim that B, C or D improves validation performance. Full
-training and seed confirmation run in your environment with your cache and
-reference checkpoint.
+and initialization consistency. These are software checks, not PIPA accuracy
+experiments or T4 benchmarks. No improvement from B/C/D is assumed; complete
+training and seed confirmation with the actual cache and reference checkpoint.

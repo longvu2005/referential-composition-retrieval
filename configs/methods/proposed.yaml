@@ -81,7 +81,7 @@ evaluation:
 wandb:
   enabled: true
   project: referential-composition-retrieval
-  name: null
+  name: proposed
   mode: online
   log_every_steps: 20
 runtime:

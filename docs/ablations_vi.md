@@ -14,14 +14,16 @@ visual cache.
 python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
 ```
 
-With the default C=16, each query receives 1 positive, 7 negatives containing all
+With C=16 and `train.sampling.hard_fraction=0`, each query receives 1 positive, 7 negatives containing all
 required identities, and 8 random negatives. If a pool contains too few images,
 random sampling fills the remaining slots. Candidates are unique. The query
 image and all other Full Positives are excluded from the negative pool. Negatives
 that conflict with positive labels from equivalent training queries are also
 excluded. The original annotations and validation/test protocols remain unchanged.
 
-Optional mining:
+The main YAML enables mining (`hard_fraction=0.3`). To run without mining, add
+`--set train.sampling.hard_fraction=0 output.dir=runs/proposed_no_mining` to the
+first command. To explicitly run with mining:
 
 ```bash
 python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val \

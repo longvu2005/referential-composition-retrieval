@@ -543,7 +543,12 @@ def test_cached_scoring_matches_original_formula(mode, iw):
     }
     fusion = {"image_weight": iw, "text_weight": 1 - iw}
     actual = np.concatenate(
-        [x for _, x in clip.iter_clip_scores(inputs, mode, fusion, 2)]
+        [
+            x
+            for _, x in clip.iter_clip_scores(
+                inputs, mode, fusion, 2, self_indices=list(range(5))
+            )
+        ]
     )
     # Independent dense formula; production mixes cached branch scores.
     if mode == "clip_image":
@@ -554,13 +559,13 @@ def test_cached_scoring_matches_original_formula(mode, iw):
         expected = F.normalize(iw * qi + (1 - iw) * qt, dim=-1) @ gallery.T
     else:
         a, b = qi @ gallery.T, qt @ gallery.T
-        a = (a - a.mean(-1, keepdim=True)) / a.std(
-            -1, keepdim=True, unbiased=False
-        ).clamp_min(1e-6)
-        b = (b - b.mean(-1, keepdim=True)) / b.std(
-            -1, keepdim=True, unbiased=False
-        ).clamp_min(1e-6)
-        expected = iw * a + (1 - iw) * b
+        expected = torch.zeros_like(a)
+        for row in range(5):
+            mask = torch.arange(len(gallery)) != row
+            av, bv = a[row, mask], b[row, mask]
+            az = (av - av.mean()) / av.std(unbiased=False).clamp_min(1e-6)
+            bz = (bv - bv.mean()) / bv.std(unbiased=False).clamp_min(1e-6)
+            expected[row, mask] = iw * az + (1 - iw) * bz
     expected = expected.numpy()
     np.testing.assert_allclose(actual, expected, atol=2e-6)
 
@@ -685,3 +690,67 @@ def test_cli_runner_with_native_clip(fusion_benchmark, tmp_path):
             directory = output_directory({**cfg, "mode": mode, "split": split})
             metrics = json.loads((directory / "metrics.json").read_text())
             assert 0 <= metrics["overall"]["full_map"] <= 1
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 8])
+@pytest.mark.parametrize("iw", [0.0, 0.4, 1.0])
+def test_late_fusion_self_scores_cannot_change_valid_scores(batch_size, iw):
+    image = np.array(
+        [[0.2, 0.7, 1e20, -0.1], [1e20, 0.3, 0.6, 0.0]], dtype=np.float32
+    )
+    text = np.array(
+        [[0.8, -0.1, -1e20, 0.5], [-1e20, 0.9, 0.1, 0.3]], dtype=np.float32
+    )
+    indices = [2, 0]
+    fusion = {"image_weight": iw, "text_weight": 1 - iw}
+
+    def score():
+        return np.concatenate(
+            [
+                batch
+                for _, batch in clip.iter_clip_scores(
+                    {"image": image, "text": text},
+                    "late_fusion",
+                    fusion,
+                    batch_size,
+                    self_indices=indices,
+                )
+            ]
+        )
+
+    before = score()
+    image[np.arange(2), indices] = np.nan
+    text[np.arange(2), indices] = np.inf
+    after = score()
+    np.testing.assert_array_equal(before, after)
+    mask = np.ones_like(after, dtype=bool)
+    mask[np.arange(2), indices] = False
+    assert np.isfinite(after[mask]).all()
+    assert (after[~mask] == 0).all()
+
+
+def test_late_normalize_constant_and_single_valid_target():
+    scores = torch.tensor([[float("nan"), 3.0, 3.0]])
+    assert torch.equal(
+        clip.late_normalize(scores, {}, [0]), torch.tensor([[0.0, 0.0, 0.0]])
+    )
+    assert torch.equal(
+        clip.late_normalize(torch.tensor([[100.0, 3.0]]), {}, [0]),
+        torch.tensor([[0.0, 0.0]]),
+    )
+    with pytest.raises(ValueError, match="self indices"):
+        clip.late_normalize(scores, {})
+    with pytest.raises(ValueError, match="non-self"):
+        clip.late_normalize(torch.tensor([[0.0, float("nan")]]), {}, [0])
+
+
+def test_test_rejects_old_self_inclusive_selection(fusion_benchmark, monkeypatch):
+    from rcr.methods.baselines import runner
+
+    current = runner.tuning_context
+    # An old scoring convention necessarily has a different provenance hash.
+    monkeypatch.setattr(runner, "tuning_context", lambda *args: "old-self-inclusive")
+    runner.run_experiment(fusion_benchmark, splits=["val"])
+    monkeypatch.setattr(runner, "tuning_context", current)
+    with pytest.raises(ValueError, match="stale"):
+        runner.run_experiment(fusion_benchmark, splits=["test"])

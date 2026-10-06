@@ -106,7 +106,7 @@ def tuning_context(data, cfg, device):
     """Only val inputs/labels enter selection provenance; no test labels."""
     ids = split_image_ids(data, "val")
     context = {
-        "version": "clip-fusion-val-v1",
+        "version": "clip-fusion-val-v2-self-excluded",
         "model": cfg["model"]["name"],
         "checkpoint_sha256": sha256_file(cfg["model"]["checkpoint"]),
         "encoder_precision": "float16" if device.type == "cuda" else "float32",
@@ -129,12 +129,16 @@ def tune_fusion(data, samples, gallery_ids, inputs, cfg, mode):
     """Evaluate every weight with the official evaluator, in bounded batches."""
     if [s["sample_id"] for s in samples] != data.splits["val"]:
         raise ValueError("fusion selection requires the complete validation split")
+    by_id = {image_id: i for i, image_id in enumerate(gallery_ids)}
+    self_indices = [by_id[s["query_image_id"]] for s in samples]
     trials = []
     batch_size = int(cfg["runtime"]["score_batch_size"])
     for iw in _grid(cfg):
         fusion = {**cfg.get("fusion", {}), "image_weight": iw, "text_weight": 1.0 - iw}
         total = 0.0
-        for start, batch in iter_clip_scores(inputs, mode, fusion, batch_size):
+        for start, batch in iter_clip_scores(
+            inputs, mode, fusion, batch_size, self_indices=self_indices
+        ):
             subset = samples[start : start + len(batch)]
             output = scores_to_rankings(subset, gallery_ids, batch)
             result = evaluate_retrieval_output(data, subset, output, split="val")
@@ -250,7 +254,9 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                         "context_sha256": selection["context_sha256"],
                         "file": str(tuning_path),
                     }
-                scores = write_clip_scores(inputs, run_cfg)
+                by_id = {image_id: i for i, image_id in enumerate(gallery_ids)}
+                self_indices = [by_id[s["query_image_id"]] for s in samples]
+                scores = write_clip_scores(inputs, run_cfg, self_indices=self_indices)
                 output = scores_to_rankings(samples, gallery_ids, scores)
                 save_run(run_cfg, data, output, run_details, perf_counter() - started)
             else:

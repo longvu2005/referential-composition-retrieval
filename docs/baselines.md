@@ -46,6 +46,13 @@ OpenAI CLIP state dictionaries are supported.
 | `early_fusion` | Normalize weighted query image/text sum, then dot gallery |
 | `late_fusion` | Weighted sum of branch scores after per-query gallery z-score |
 
+Late fusion excludes each query image before calculating the mean and population
+standard deviation of either branch over the complete split gallery. Constants
+contribute zero; the self score is saved as a finite zero placeholder and excluded from rankings.
+This applies to both validation weight selection and standalone retrieval.
+Selections created with the earlier self-inclusive convention are rejected:
+rerun `run --splits val` before test. Raw feature/branch caches remain reusable.
+
 Image/text features are normalized. Image features, text features and branch
 score arrays are cached; fusion reuses these arrays. A warm cache does not load
 the encoder. Cache fingerprints include checkpoint, precision, ordered image

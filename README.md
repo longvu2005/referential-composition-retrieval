@@ -57,7 +57,7 @@ For CLIP/FAFA replace `proposed` with `clip`/`fafa` in the environment and
 requirements filename. On Kaggle, call that environment's Python explicitly
 instead of relying on activation carrying over between cells.
 `requirements.txt` still installs the combined proposed + dataset dependencies;
-`requirements/proposed.txt` now installs only proposed dependencies.
+`requirements/proposed.txt` installs only proposed dependencies.
 
 ## Run experiments
 
@@ -101,6 +101,11 @@ python tools/methods/run.py run --config configs/methods/proposed.yaml --train \
   --set data.image_root=/kaggle/input/pipa/images data.cache=/kaggle/input/rcr-cache/cache
 ```
 
+CLIP late fusion computes each branch’s population z-score over the query’s
+split gallery **after excluding the query image**. Cached raw features/scores
+can be reused; saved fusion selections from the previous convention require a
+new val run.
+
 CLIP `run` tunes early/late fusion separately on complete **val**, records the
 selected image/text weights, then applies them unchanged to test. A test-only
 fusion run requires the matching saved val selection. Low-level `retrieve`
@@ -117,14 +122,18 @@ Each split saves `rankings.pt`, `run.json`, `metrics.json`. Baselines also save
 
 Detailed usage: [proposed](docs/proposed_runs.md), [baselines](docs/baselines.md).
 Coarse normalization, beta sweep and extensible ablations:
-[Vietnamese guide](docs/ablations_vi.md).
+[Ablation guide](docs/ablations_vi.md).
 Identity amplitude A–D, fixed shortlist, and validation/seed confirmation:
 [identity balance guide](docs/identity_balance_ablation.md).
 Model equations: [proposed method](docs/proposed_method.md).
-Training fixes and data review: [research notes](docs/research_fix_vi.md).
 
-Training uses same-identity negatives mixed with random negatives. Optional
-coarse mining runs only on train after warmup. The state loss compares images
+The main proposed config uses `z(ID) + 0.4 z(state)` for coarse scoring over
+the non-self gallery, then `z(fine) + 0.4 z(coarse)` within the Top-500 shortlist.
+The remaining gallery keeps coarse order. Training optimizes raw fine scores.
+
+Training uses same-identity negatives mixed with random negatives. The main
+YAML enables coarse mining on train after warmup; set
+`train.sampling.hard_fraction=0` to disable it. The state loss compares images
 containing all required identities; wrong-identity images are ignored by that
 loss. Conflicting negatives from equivalent train instructions are excluded
 without editing the reviewed labels or the evaluation protocol.
@@ -211,7 +220,7 @@ sequence is:
 ```bash
 bash scripts/phase1_rewrite.bash prepare
 python tools/dataset/prepare_handoffs.py positives
-bash scripts/phase2_finalize.bash --version 0.1.0
+bash scripts/phase2_finalize.bash --version 0.2.0
 ```
 
 `phase2_finalize.bash` validates positive decisions and writes the deterministic

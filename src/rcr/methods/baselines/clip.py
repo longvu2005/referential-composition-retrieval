@@ -43,15 +43,33 @@ def fusion_weights(fusion: dict) -> tuple[float, float]:
     return iw / (iw + tw), tw / (iw + tw)
 
 
-def late_normalize(scores: torch.Tensor, fusion: dict) -> torch.Tensor:
+def late_normalize(
+    scores: torch.Tensor, fusion: dict, self_indices=None
+) -> torch.Tensor:
+    """Population z-score over eligible gallery images, excluding each query."""
     eps = float(fusion.get("epsilon", 1e-6))
     if not np.isfinite(eps) or eps <= 0:
         raise ValueError("fusion epsilon must be finite and positive")
     if fusion.get("score_normalization", "zscore") != "zscore":
         raise ValueError("late fusion requires score_normalization: zscore")
-    return (scores - scores.mean(-1, keepdim=True)) / scores.std(
-        -1, keepdim=True, unbiased=False
-    ).clamp_min(eps)
+    if self_indices is None:
+        raise ValueError("late fusion requires query self indices")
+    indices = torch.as_tensor(self_indices, dtype=torch.long, device=scores.device)
+    if indices.shape != (len(scores),) or (
+        (indices < 0) | (indices >= scores.shape[1])
+    ).any():
+        raise ValueError("one valid self index is required per query")
+    if scores.shape[1] < 2:
+        raise ValueError("late fusion requires at least one non-self gallery image")
+    valid = torch.ones_like(scores, dtype=torch.bool)
+    valid.scatter_(1, indices[:, None], False)
+    eligible = scores[valid].reshape(len(scores), scores.shape[1] - 1)
+    if not torch.isfinite(eligible).all():
+        raise ValueError("non-self CLIP scores must be finite")
+    mean = eligible.mean(-1, keepdim=True)
+    std = eligible.std(-1, keepdim=True, unbiased=False).clamp_min(eps)
+    normalized = (scores - mean) / std
+    return normalized.masked_fill(~valid, 0.0)
 
 
 class ImageDataset(Dataset):
@@ -267,11 +285,12 @@ def prepare_clip_inputs(data, samples, gallery_ids, cfg, device, modes=None):
         "text_cache": str(text_dir) if text_dir is not None else None,
         "truncated_text_queries": truncated,
         "rcr_training": False,
+        "late_normalization_support": "split_gallery_excluding_query",
     }
     return inputs, details
 
 
-def iter_clip_scores(inputs, mode, fusion, batch_size):
+def iter_clip_scores(inputs, mode, fusion, batch_size, *, self_indices=None):
     """Mix cached branch scores on CPU, without repeating matrix multiplication."""
     mode = canonical_mode(mode)
     base = inputs["text"] if mode == "clip_text" else inputs["image"]
@@ -295,13 +314,15 @@ def iter_clip_scores(inputs, mode, fusion, batch_size):
             norm = (iw * qi + tw * qt).norm(dim=-1, keepdim=True).clamp_min(1e-12)
             mixed = (iw * image + tw * text) / norm
         else:
-            mixed = iw * late_normalize(image, fusion) + tw * late_normalize(
-                text, fusion
-            )
+            indices = None if self_indices is None else self_indices[start:stop]
+            image_z = late_normalize(image, fusion, indices)
+            text_z = late_normalize(text, fusion, indices)
+            # Self has a finite placeholder; scores_to_rankings excludes it.
+            mixed = iw * image_z + tw * text_z
         yield start, mixed.numpy()
 
 
-def write_clip_scores(inputs, cfg):
+def write_clip_scores(inputs, cfg, *, self_indices=None):
     output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
     mode = canonical_mode(cfg["mode"])
@@ -311,7 +332,11 @@ def write_clip_scores(inputs, cfg):
         temporary, mode="w+", dtype=np.float32, shape=base.shape
     )
     for start, batch in iter_clip_scores(
-        inputs, mode, cfg.get("fusion", {}), int(cfg["runtime"]["score_batch_size"])
+        inputs,
+        mode,
+        cfg.get("fusion", {}),
+        int(cfg["runtime"]["score_batch_size"]),
+        self_indices=self_indices,
     ):
         scores[start : start + len(batch)] = batch
     scores.flush()
@@ -323,4 +348,6 @@ def write_clip_scores(inputs, cfg):
 @torch.inference_mode()
 def retrieve_clip(data, samples: list[dict], gallery_ids: list[str], cfg: dict, device):
     inputs, details = prepare_clip_inputs(data, samples, gallery_ids, cfg, device)
-    return write_clip_scores(inputs, cfg), details
+    by_id = {image_id: i for i, image_id in enumerate(gallery_ids)}
+    self_indices = [by_id[s["query_image_id"]] for s in samples]
+    return write_clip_scores(inputs, cfg, self_indices=self_indices), details

@@ -99,8 +99,9 @@ chunks have been gathered. A constant branch contributes zero. This normalizatio
 uses no relevance labels and adds no learned parameters.
 
 `retrieval.coarse_normalization: none` uses raw `S_id + beta * S_state` instead.
-`retrieval.coarse_beta` overrides the checkpoint beta; null inherits it. The
-fallback value 0.4 is a starting point, not a measured optimum. Tune beta on val
+`retrieval.coarse_beta` overrides the checkpoint beta; null inherits it.
+The main YAML fixes beta=0.4 from validation selection;
+the model-level fallback is also 0.4. Tune beta on val
 with `configs/ablations/coarse.yaml`. The same numeric beta has a different
 relative effect after normalization. `coarse_mode` selects `identity_only`,
 `state_only`, or `identity_state`; beta=0 in the combined mode also disables state.
@@ -139,10 +140,18 @@ LN(projected bound evidence + projected target person identity
 The composed query cross-attends to the whole target person set, then a
 self-attention block scores its CLS token as the raw scalar `S_f(q,t)`.
 
-The final Top-M order is determined only by `S_f`; the coarse score is used only
-for shortlisting. Images outside Top-M retain their coarse order so the saved
-output remains a complete split-gallery ranking. No coarse, identity, or coverage
-score is manually added to the fine score.
+Within Top-M, the default method YAML uses:
+
+```text
+S_final(q,t) = z_topM(S_f(q,t)) + 0.4 * z_topM(S_coarse(q,t))
+```
+
+Both population z-scores use the same shortlisted candidates with finite coarse
+scores, after self exclusion; constant branches contribute zero. Unsupported
+coarse candidates remain last. `retrieval.fine_coarse_weight` controls the
+coarse contribution; zero returns raw fine-only scores. Images outside Top-M
+retain their coarse order, preserving a complete split-gallery ranking.
+Training still optimizes raw fine scores, not this inference-time fusion.
 
 When the query has no detected people, it remains in retrieval and evaluation:
 `S_id` is zero for nonempty target person sets, so global state can still
@@ -181,16 +190,17 @@ where:
   positive-negative pair contribute no state loss. It trains both state
   projections and the shared text encoder; there is no in-batch negative
   assumption. `state_weight` defaults to `1.0`.
-  Fine ranking uses only `S_f`; neither state nor identity is added to its score.
+  `L_ret` uses raw `S_f`; inference uses the configured fine/coarse fusion.
 
 Candidate sampling picks one reviewed positive and excludes **all** other
 known positives and the query image from that query's negatives. For equivalent
 train instructions (same ordered identities, case and exact change text), an image
 marked positive by one query is not used as a negative by another. Original
 positive labels are retained, never merged or rewritten; val/test are untouched.
-Default C=16 sampling draws 7 same-identity negatives, then 8 random negatives.
-Optional mining (`train.sampling.hard_fraction=0.3`) changes this to 7 identity,
-4 mined and 4 random negatives after warmup. Quotas are floored fractions of C-1;
+With C=16 and mining disabled, sampling draws 7 same-identity negatives and
+8 random negatives. The main YAML enables mining (`hard_fraction=0.3`):
+7 identity, 4 mined and 4 random negatives after warmup. Quotas are floored
+fractions of C-1;
 missing slots fall back to random. Candidates are unique. Mining uses only the
 train split, shared coarse scoring in eval/no-grad mode and a bounded top-ranked
 pool; it does not retain a train-query by full-gallery ranking matrix.

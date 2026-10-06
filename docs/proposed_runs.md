@@ -32,7 +32,7 @@ inference. The resolved config is saved as `run_config.yaml`.
 
 `model` is loaded from the checkpoint during inference. A numeric
 `retrieval.coarse_beta` overrides its beta; `null` inherits the checkpoint value.
-The new method YAML uses per-query `coarse_normalization: zscore` and
+The method YAML uses per-query `coarse_normalization: zscore` and
 `coarse_mode: identity_state`. `none` restores raw score fusion. Setting
 `rerank: false` returns the complete coarse ranking, not just Top-M.
 `candidate_ks` must not exceed `retrieval.top_m`.
@@ -45,14 +45,14 @@ with Hugging Face and accept the image checkpoint's license before the first
 cache build. Defaults remain scene `[224,224]`, person `[256,128]` and FP16
 storage; tensors are copied into compact CPU storage. Batch collation loads cached features as FP32; training may then use CUDA AMP. Cache format and learned parameter names are unchanged.
 
-An existing person-based cache from the source commit can be reused. Keep
+An existing cache with the same detector, backbone and preprocessing can be reused. Keep
 `index.pt` and `features/` together; the cache/gallery/build-ID checks remain.
 Legacy caches without pooled global features are supported with a read-only
 initial pooling pass. Changing detector/backbone/preprocessing requires a cache
 rebuild. `run --build-cache` requires `--train` because rebuilding changes the
 cache identity; standalone `build-cache` remains available.
 
-Existing identity+state checkpoints from the source commit remain readable.
+Existing compatible identity+state checkpoints remain readable.
 Keep the sibling `tokenizer/` directory. Old checkpoints that predate the state
 branch still require retraining, as before.
 
