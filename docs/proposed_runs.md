@@ -1,246 +1,105 @@
-# Proposed: one config, explicit stages
+# Run the proposed model
 
-All commands use `configs/methods/proposed.yaml`. Run from the repository root
-with the proposed environment. Use `--set` or edit YAML to set your paths.
-
-```bash
-python tools/methods/run.py build-cache --config configs/methods/proposed.yaml
-python tools/methods/run.py train --config configs/methods/proposed.yaml
-python tools/methods/run.py retrieve --config configs/methods/proposed.yaml --splits val test
-python tools/methods/run.py evaluate --config configs/methods/proposed.yaml --splits val test
-```
-
-Or use `run --build-cache --train` for the complete sequence. `run --train`
-reuses the cache; `run` alone uses `checkpoint`. Stages run in separate Python
-processes so model memory is released between cache building, training and
-inference. The resolved config is saved as `run_config.yaml`.
-
-## Config ownership
-
-| Section | Used by |
-| --- | --- |
-| `data` | All stages, including the one shared cache path |
-| `detector`, `image_encoder`, `cache.storage_dtype` | Cache building |
-| `model`, `train`, `optimizer`, `loss`, `cache.prefetch_batches` | Training |
-| `cache.lru_mib` | Training and inference feature reads |
-| `retrieval`, `candidate_ks` | Periodic and standalone retrieval/evaluation |
-| `evaluation` | Validation interval and fixed train subset size |
-| `wandb` | Optional experiment tracking |
-| `runtime.device` | Cache, training and inference |
-| `checkpoint` | Standalone inference; `run --train` uses the new best.pt |
-| `output.dir` | Root for model and split outputs |
-
-`model` is loaded from the checkpoint during inference. A numeric
-`retrieval.coarse_beta` overrides its beta; `null` inherits the checkpoint value.
-The method YAML uses per-query `coarse_normalization: zscore` and
-`coarse_mode: identity_state`. `none` restores raw score fusion. Setting
-`rerank: false` returns the complete coarse ranking, not just Top-M.
-`candidate_ks` must not exceed `retrieval.top_m`.
-All new training runs use the two Subject roles defined by the benchmark schema.
-
-## Cache and checkpoint reuse
-
-The detector is Grounding DINO; the frozen image encoder is DINOv3. Authenticate
-with Hugging Face and accept the image checkpoint's license before the first
-cache build. Defaults remain scene `[224,224]`, person `[256,128]` and FP16
-storage; tensors are copied into compact CPU storage. Batch collation loads
-raw 768-dimensional features as FP32; training may then use CUDA AMP. The cache
-format is unchanged. A shared trainable visual projection maps scene/person/global
-features to `model.dim=384`; the frozen BERT has a separate 768-to-384 projection.
-Identity/state dimensions are 128, attention uses 6 heads, FFN ratio is 2 and
-attention/FFN dropout is 0.1. Only the text projection is in the text optimizer group.
-
-An existing cache with the same detector, backbone and preprocessing can be reused. Keep
-`index.pt` and `features/` together; the cache/gallery/build-ID checks remain.
-Legacy caches without pooled global features are supported with a read-only
-initial pooling pass. Changing detector/backbone/preprocessing requires a cache
-rebuild. `run --build-cache` requires `--train` because rebuilding changes the
-cache identity; standalone `build-cache` remains available.
-
-Existing compatible identity+state checkpoints remain readable.
-Keep the sibling `tokenizer/` directory. Old checkpoints that predate the state
-branch still require retraining, as before.
-Inference restores dimensions and dropout from the checkpoint's training config.
-Train from scratch to use the new 384-dimensional model and frozen BERT policy;
-editing the inference YAML does not resize an existing checkpoint.
-
-## Training outputs
-
-- `config.yaml`, `tokenizer/`: exact training settings and Subject tokens.
-- `last.pt`: latest completed epoch, written atomically.
-- `best.pt`: maximizes `0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP`
-  over full-val evaluations, written atomically; ties keep the earlier epoch.
-- `history.jsonl`: epoch losses and evaluation metrics, also saved with W&B off.
-- `evaluation/epoch_NNN/{train,val}_metrics.json`: aggregate/by-case metrics.
-- `training_data.json`: resolved sampling settings and conflicting train labels.
-- `hard_negatives.json`: latest train-only mined ID lists, when mining is enabled.
-
-A new `train` invocation starts from scratch and clears a previous best selection
-and history in that output directory. Use a different `output.dir` for each
-experiment. There is no resume flag. Each epoch draws as many queries as the
-train split contains, with replacement and case probability proportional to
-`sqrt(N_case)`. The per-sample weight is `1/sqrt(N_case)`. Set
-`train.case_balanced=false` for a shuffled pass without replacement. Draws are
-grouped by Subject count, without dropping short batches.
-
-Training samples up to two distinct reviewed positives among 24 candidates,
-mixes same-identity, mined and random train-gallery negatives, and keeps the four
-losses. The method YAML keeps `train.sampling.identity_fraction=0.5` and
-`hard_fraction=0.3`: with two positives, 22 negative slots become 11 identity,
-6 mined and 5 random slots. With only one positive, the remaining 23 slots become
-11 identity, 6 mined and 6 random. Short pools fall back to random; all known
-positives, the query image and disputed negatives remain excluded.
-Mining starts after one completed epoch and refreshes
-every two epochs. The pool is rebuilt for each new training run.
-
-W&B and local epoch history record losses, identity activity, grounding
-precision/recall on known aligned detections, any-match and complete-Subject
-coverage, state supervised pair counts/active-query rate, and actual negative
-source fractions and sampled positives per query. Validation history also records
-`val/macro_full_map` (the equal mean over nonempty cases) and
-`val/checkpoint_score`. W&B additionally records learning rates and gradient norm.
-Grounding recall is conditional on valid detected/annotated people; use the cache
-audit for missing-identity coverage. Loss summaries are weighted by query batch
-size; count-derived rates use summed counts. W&B closes on exceptions.
-Set `wandb.enabled=false` or `wandb.mode=offline` as needed.
-
-`evaluation.enabled=false` produces `last.pt` only. Use standalone `train` for
-this case; the `run --train` pipeline requires val to select best.pt.
-
-State loss requires an explicit image-level identity mask. There is no fallback
-that treats every candidate as a state negative. State-based validation fails
-clearly if no supervised state pair has ever been seen. Use more identity
-negatives or `retrieval.coarse_mode=identity_only` for an intentionally tiny
-smoke run. When disabling `loss.state_weight`, also select identity-only
-retrieval (or beta=0); the loss suite already does this.
-
-## Training throughput options
-
-The default YAML enables these options without changing the evaluation schedule,
-Top-500 reranking, scoring/metrics, losses, optimizer settings or sampling quotas.
-Validation still runs every two epochs and at the final epoch, with 100 fixed
-train queries and the full val split, on each split's complete image gallery.
-
-| Option | Default YAML | Behavior |
-| --- | --- | --- |
-| `train.mining_batch_size` | `8` | Group coarse mining queries by Subject count; omit unused fine composition. |
-| `cache.lru_mib` | `1024` | Bound retained feature tensor storage in CPU RAM; `0` disables the LRU. |
-| `cache.prefetch_batches` | `1` | Prepare one next CPU batch on a reader thread; `0` uses synchronous preparation. |
-| `train.amp` | `true` | CUDA FP16 autocast and GradScaler during training; CPU falls back to FP32. |
-
-Repeated image files are read once across query and candidate groups within a
-batch. Their order, masks, supervision and separate query/target padding remain
-intact. The LRU retains the cache's original storage precision, not expanded FP32
-batches. Its budget covers cached tensor storage, not total process memory:
-the person index, current/prefetched batches and Python objects also consume RAM.
-Sampling and its RNG remain on the main thread; the worker only loads/pads CPU
-data and pins batch memory on CUDA runs. BERT and GPU operations remain on the
-main thread, and the worker is closed before mining or evaluation.
-
-Only token IDs and Subject positions are cached, with dynamic batch padding.
-Selection and change text pass through frozen BERT every step, then the trainable
-text projection. BERT stays in eval mode, including when the wrapper enters train
-mode, and runs without an autograd graph. No backbone parameter or Subject-token
-embedding is optimized. All occurrences of each Subject marker remain available
-to composition.
-
-Mining preserves per-query normalization over the complete training gallery,
-stable tie order and exclusion of queries, positives and disputed pairs. Gallery
-projection is reused within each mining refresh, never across optimizer updates.
-The sampler retains uniform sampling without replacement and the same fallback
-quotas. Fixed seeds remain reproducible, but its new random-draw algorithm does
-not reproduce the old `randperm` sample sequence bit for bit.
-
-AMP keeps model parameters, optimizer state, geometry bias, normalization and
-losses in FP32. Mining and evaluation run outside autocast in FP32. Logged
-gradient norms are unscaled, and checkpoints include the scaler state (training
-still starts from scratch; this does not add resume support). AMP can change the
-numerical training trajectory, so retrieval quality still needs a real run.
-
-Existing YAML files that omit these options retain conservative defaults:
-mining batch 1, LRU 0, prefetch 0 and AMP off. To use them without replacing local
-paths, add the four options above or pass them with `--set`. Reuse the existing
-feature cache and the same training command; no cache rebuild is required.
-For a synchronous FP32 comparison:
+Run commands from the repository root. Python 3.11/3.12 is supported. DINO needs
+new Transformers; native FAFA needs its pinned older version. Keep two venvs:
 
 ```bash
-python tools/methods/run.py train --config configs/methods/proposed.yaml \
-  --set train.amp=false train.mining_batch_size=1 \
-        cache.lru_mib=0 cache.prefetch_batches=0 output.dir=runs/proposed_fp32
+python3.11 -m venv .venv-proposed
+.venv-proposed/bin/python -m pip install -r requirements/bootstrap.txt
+.venv-proposed/bin/python -m pip install --no-build-isolation -r requirements/proposed.txt
+
+python3.11 -m venv .venv-fafa
+.venv-fafa/bin/python -m pip install -r requirements/bootstrap.txt
+.venv-fafa/bin/python -m pip install --no-build-isolation -r requirements/fafa.txt
 ```
 
-## Small smoke run
+The proposed extra includes Torchvision, required by DINOv3's fast image
+processor. Reinstall `requirements/proposed.txt` when updating an existing venv.
 
-A separate copied smoke YAML is unnecessary. This still trains one complete
-epoch over the train split with smaller batches; it is not a query-limited train:
+Set `data.final_dir`, `data.image_root`, `data.cache`, and
+`person_encoder.python` in `configs/methods/proposed.yaml`. All relative paths are
+relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
+For Kaggle, use venv Python paths explicitly in every cell.
+
+## Main workflow
 
 ```bash
-python tools/methods/run.py train --config configs/methods/proposed.yaml \
-  --set train.epochs=1 train.batch_size=2 train.candidates=4 \
-        evaluation.enabled=false wandb.enabled=false output.dir=runs/smoke
+# Download only FAFA source, checkpoint and runtime assets needed by person encoding.
+# Uses person_encoder.python; no baseline CLIP selector/detector is prepared.
+.venv-proposed/bin/python tools/methods/run.py prepare --config configs/methods/proposed.yaml
 
-python tools/methods/run.py retrieve --config configs/methods/proposed.yaml \
-  --splits val --max-queries 2 \
-  --set checkpoint=runs/smoke/last.pt output.dir=runs/smoke
+# Check native FAFA assets/imports, then build scene/person features in two stages.
+.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml
 
-python tools/methods/run.py evaluate --config configs/methods/proposed.yaml \
-  --splits val --max-queries 2 --set output.dir=runs/smoke
+# Train from cached features, select best.pt, retrieve/evaluate complete val.
+.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
+
+# Select both inference coefficients jointly on val; only that pair reaches test.
+.venv-proposed/bin/python tools/methods/run.py ablate --config configs/calibration/joint.yaml --splits val test
+
+# A later test run uses the same frozen selection.
+.venv-proposed/bin/python tools/methods/run.py run --config runs/calibration/selected.yaml --splits test
 ```
 
-Use the same `--max-queries` for retrieval and evaluation. Normal `run` always
-uses the complete requested query splits. Train diagnostics search only train
-images; val/test each search their own complete image split, excluding self.
-Within Top-M, ranking uses the configured fine/coarse fusion
-(`retrieval.fine_coarse_weight=0.4` in the method YAML); setting it to 0 restores
-fine-only ranking. Remaining images retain coarse order. Equal scores retain
-stable canonical gallery order.
-
-## Joint 2D calibration and ablations
+Equivalent one-command initial pipeline:
 
 ```bash
-# Required calibration: select both coefficients together on val.
-python tools/methods/run.py ablate --config configs/ablations/fine_coarse.yaml
-
-# Optional diagnostics using that same checkpoint and selected pair.
-python tools/methods/run.py ablate --config configs/ablations/coarse.yaml
-python tools/methods/run.py ablate --config configs/ablations/retrieval.yaml
-
-# Optional training ablations, each producing separate checkpoints.
-python tools/methods/run.py ablate --config configs/ablations/loss.yaml
-python tools/methods/run.py ablate --config configs/ablations/sampling.yaml
-
-# Final test uses the joint selection unchanged.
-python tools/methods/run.py run --config runs/ablations/fine_coarse/selected.yaml --splits test
+.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --prepare --build-cache --train --splits val
 ```
 
-The default split is **val**. `fine_coarse.yaml` reads the method YAML directly,
-reuses one checkpoint, and evaluates the Cartesian product of 8 coarse beta
-values and 7 fine/coarse weights. Both grids include zero and the existing
-0.4/0.4 pair. The selection criterion is **final Full-mAP** over the complete
-ranking, at fixed Top-500. CandidateRecall@500 is reported as a diagnostic;
-it does not select beta in a separate first stage. Ties retain YAML grid order
-(beta first, then fine/coarse weight).
+For training another seed, reuse the cache and use a separate output directory.
+`run --train` sets its checkpoint to that directory's `best.pt` automatically:
 
-Raw identity/state scores are computed once per query. Normalized coarse scores
-and rankings are reused across final weights for each beta. Each query/target
-fine score is computed once across the union of the beta-specific shortlists;
-normalization for final fusion still uses each pair's own shortlist.
+```bash
+.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val \
+  --set train.seed=1 output.dir=runs/proposed_seed1
+```
 
-The sweep writes `summary.csv`, `selection.json` and `selected.yaml` under
-`runs/ablations/fine_coarse/`. Both selected weights and checkpoint/validation
-fingerprints are retained. Coarse and retrieval diagnostics inherit this
-selection and never replace it. Existing sequential selections must be replaced
-by a fresh joint sweep. `--splits val test` on the joint suite runs the full grid
-on val and **only the winner** on test; a test-only suite invocation is rejected.
-Use the selected method YAML for a later test-only run.
+## Cache and checkpoint migration
 
-Loss ablations train separate checkpoints using the same schedule, seed and
-identity-only retrieval, so untrained state projections never influence the
-comparison. Sampling ablations compare random, identity/random and
-identity/mined/random. Existing frozen caches are reused throughout. Selections
-fingerprint val text/labels/gallery as well as the checkpoint; changing either
-requires a new sweep. The method YAML keeps 0.4/0.4 for training-time validation;
-post-training calibration does not rewrite checkpoint selection or training.
+Old DINO caches/checkpoints are not FAFA/dual artifacts, even if their widths
+match. Build the new `cache/proposed-fafa` and retrain. Do not overwrite useful
+old run/cache directories. The loader rejects legacy formats, wrong encoder
+specifications, and caches that differ from the training checkpoint.
 
-Use the complete [ablation guide](ablations_vi.md) for test commands, metric
-definitions, output paths and adding future experiments.
+Each cache stores source/preprocessing metadata, FAFA checkpoint SHA256, original
+pixel boxes, scene boxes, compact pooled person features, DINO patches, identity
+labels and CPU scene means. Scene/person widths are validated separately. The
+`.building` marker stays present through both stages; interrupted FAFA extraction
+cannot be consumed as a completed cache. Repeat the build command to rebuild;
+this version does not add a general resumable detector/cache pipeline.
+
+Before detection, a short FAFA worker checks its source, checkpoint, runtime
+assets and native imports. Missing prerequisites abort before scene extraction.
+The check does not load model weights or download assets; use `prepare` first.
+
+After a successful build, training/retrieval read cached features only. They do
+not need native FAFA weights loaded or raw crop images opened. Keep the FAFA YAML
+for feature-provenance checks. Encoder environment paths are used only in prepare
+and cache extraction.
+
+## Outputs and diagnostics
+
+`runs/proposed` contains config, tokenizer, `last.pt`, `best.pt`, history,
+training-data diagnostics and per-epoch train/val metrics. Split runs save
+`rankings.pt`, `run.json`, `metrics.json`; `run` writes `summary.csv`.
+
+W&B retains loss/metric keys and adds `train/binding_scale` and
+`epoch/binding_scale`; its cache config records both feature widths and encoder
+provenance. It closes on exceptions. Nonfinite loss aborts before
+backward/optimizer updates and writes `nonfinite_batch.json`. Model parameters,
+geometry attention and losses stay FP32; CUDA training uses existing AMP/scaler.
+Mining and evaluation use FP32. LRU, deduplication and one-batch prefetch remain.
+Fine scores must be finite even when `fine_coarse_weight=0`; a failed reranker
+cannot publish NaN-based rankings or enter validation calibration.
+
+Training state loss needs eligible same-identity positive/negative pairs. A tiny
+smoke run without them must set `loss.state_weight=0` and identity-only coarse.
+Standalone query-limited retrieval/evaluation use matching `--max-queries`; normal
+`run` and ablation suites evaluate complete requested query splits.
+
+## New experiments
+
+See [the ablation guide](ablations_vi.md). Calibration now lives in
+`configs/calibration/joint.yaml`; the old coarse/loss/sampling/identity-amplitude
+ablation configurations have been removed.

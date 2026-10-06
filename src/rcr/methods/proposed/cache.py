@@ -31,13 +31,20 @@ class GalleryCache:
         self.image_ids = index["image_ids"]
         self.by_id = {image_id: i for i, image_id in enumerate(self.image_ids)}
         self.cache_id = index.get("cache_id")
+        self.format_version = index.get("format_version", 1)
+        self.encoder_metadata = {
+            key: index.get(key)
+            for key in ("image_encoder", "person_encoder", "detector")
+        }
+        self.scene_dim = index.get("scene_dim", index["persons"].shape[-1])
+        self.person_dim = index["persons"].shape[-1]
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
         self.patch_hw = tuple(index["patch_hw"])
         self._global_features = index.get("global_features")
         if self._global_features is not None and self._global_features.shape != (
             len(self.image_ids),
-            self.persons.shape[-1],
+            self.scene_dim,
         ):
             raise ValueError("cache global features/gallery shape mismatch")
         if self.persons.shape[:2] != self.mask.shape or self.persons.shape[0] != len(
@@ -49,6 +56,29 @@ class GalleryCache:
         """Require the cached image order to match the finalized benchmark."""
         if self.image_ids != image_ids:
             raise ValueError("cache gallery IDs/order differ from finalized data")
+
+    def validate_encoders(self, cfg: dict) -> None:
+        """Do not reinterpret an old DINO cache as FAFA merely because widths match."""
+        expected = cfg.get("person_encoder")
+        if expected is None:
+            return  # Small in-memory test configs have no external encoder spec.
+        if self.format_version != 2:
+            raise ValueError("legacy cache: rebuild for the new person architecture")
+        actual = self.encoder_metadata["person_encoder"] or {}
+        if actual.get("backend") != expected["backend"]:
+            raise ValueError("cache person encoder differs from config; rebuild cache")
+        if self.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
+            raise ValueError("cache image encoder/preprocessing differs from config")
+        if self.encoder_metadata["detector"] != cfg["detector"]:
+            raise ValueError("cache detector differs from config")
+        if expected["backend"] == "fafa":
+            from rcr.methods.proposed.person_encoder import fafa_spec, load_fafa_config
+
+            native_cfg = load_fafa_config(cfg)
+            if actual.get("spec") != fafa_spec(native_cfg):
+                raise ValueError(
+                    "cache FAFA checkpoint/source/preprocessing spec differs"
+                )
 
     def _load_item(self, index: int) -> dict:
         item = torch.load(
@@ -62,9 +92,15 @@ class GalleryCache:
             raise ValueError(f"cache feature {index} does not match index.pt")
         if item["scene"].shape != (
             self.patch_hw[0] * self.patch_hw[1],
-            self.persons.shape[-1],
+            self.scene_dim,
         ):
             raise ValueError("cache scene shape differs from patch_hw/feature dim")
+        if self.format_version >= 2:
+            count = int(self.mask[index].sum())
+            if item["persons"].shape != (count, self.person_dim):
+                raise ValueError("cache person shape differs from index.pt")
+            if item["boxes_scene"].shape != (count, 4):
+                raise ValueError("cache person box count differs from index.pt")
         return item
 
     def _get_item(self, index: int) -> dict:
@@ -101,7 +137,7 @@ class GalleryCache:
         New caches store the same FP32 means directly in index.pt.
         """
         if self._global_features is None:
-            features = torch.empty(len(self.image_ids), self.persons.shape[-1])
+            features = torch.empty(len(self.image_ids), self.scene_dim)
             for i in tqdm(
                 range(len(self.image_ids)), desc="pool cached global features"
             ):

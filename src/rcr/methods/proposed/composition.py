@@ -1,10 +1,8 @@
-"""Compose grounded identities with the requested change."""
+"""Compose grounded person semantics with the requested change."""
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-
-from rcr.methods.proposed.identity_balance import IdentityBalance
 
 
 def composed_query_mask(
@@ -34,7 +32,7 @@ def reference_key_bias(
     change_mask: Tensor | None = None,
     subject_mask: Tensor | None = None,
 ) -> Tensor:
-    """Soft membership prior aligned with [CLS, change, Subject identities]."""
+    """Soft membership prior aligned with [CLS, change, Subject persons]."""
     b, length = change.shape[:2]
     prior = F.logsigmoid(grounding_logits.float())
     if subject_mask is not None:
@@ -48,24 +46,23 @@ def reference_key_bias(
 
 
 class StructuredComposition(nn.Module):
-    """Ground each Subject with identity features, then compose the full query."""
+    """Ground each Subject with person features, then compose the full query."""
 
     def __init__(
         self,
         dim: int,
-        identity_dim: int,
+        person_dim: int,
         num_heads: int,
         max_subjects: int = 2,
         mlp_ratio: int = 2,
-        identity_balance: dict | None = None,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.identity_balance = IdentityBalance(identity_balance)
-        self.norm_observer = None
 
-        self.identity_proj = nn.Linear(identity_dim, dim)
+        self.person_proj = (
+            nn.Identity() if person_dim == dim else nn.Linear(person_dim, dim)
+        )
         self.role = nn.Embedding(max_subjects, dim)
         self.cls = nn.Parameter(torch.zeros(1, 1, dim))
 
@@ -87,7 +84,7 @@ class StructuredComposition(nn.Module):
     def forward(
         self,
         change: Tensor,
-        identity: Tensor,
+        persons: Tensor,
         grounding_logits: Tensor,
         subject_pos: Tensor,
         change_mask: Tensor | None = None,
@@ -114,18 +111,8 @@ class StructuredComposition(nn.Module):
                 b, -1
             )
         role = self.role(subject_ids.long().clamp_min(1) - 1)
-        projected = self.identity_balance(identity, self.identity_proj)
+        projected = self.person_proj(persons)
         ids = projected[:, None] + role[:, :, None]
-        if self.norm_observer is not None:
-            valid = torch.isfinite(grounding_logits) & active[:, :, None]
-            person_mask = valid.any(dim=1)
-            self.norm_observer.add("query.identity_input", identity, person_mask)
-            self.norm_observer.add(
-                "query.identity_projected", self.identity_proj(identity), person_mask
-            )
-            self.norm_observer.add("query.identity_added", projected, person_mask)
-            self.norm_observer.add("query.role", role, active)
-            self.norm_observer.add("query.identity_role", ids, valid)
 
         grounded = torch.sum(weight[..., None] * ids, dim=2)
         if subject_token_mask is None:

@@ -29,7 +29,7 @@ def compute_loss(
 
     query_person_mask = batch.get("query_person_mask")
     subject_mask = batch.get("subject_mask")
-    logits, query_identity, query, query_mask, prior = model.encode_query(
+    query = model.encode_query(
         batch["query_scene"],
         batch["query_persons"],
         batch["query_boxes"],
@@ -48,18 +48,12 @@ def compute_loss(
     # Score B queries against C candidates as B*C independent pairs.
     b, c = batch["target_scene"].shape[:2]
 
-    query = query[:, None].expand(-1, c, -1, -1).reshape(b * c, *query.shape[1:])
-    query_mask = query_mask[:, None].expand(-1, c, -1).reshape(b * c, -1)
-    prior = prior[:, None].expand(-1, c, -1).reshape(b * c, -1)
-
     target_mask = batch.get("target_mask")
     if target_mask is not None:
         target_mask = target_mask.flatten(0, 1)
 
     scores = model.score_target(
-        query,
-        query_mask,
-        prior,
+        query.repeat_candidates(c),
         batch["target_scene"].flatten(0, 1),
         batch["target_persons"].flatten(0, 1),
         batch["target_boxes"].flatten(0, 1),
@@ -67,6 +61,7 @@ def compute_loss(
         target_mask,
     ).reshape(b, c)
 
+    logits, query_identity = query.logits, query.identity
     person_mask = torch.ones_like(logits, dtype=torch.bool)
     if query_person_mask is not None:
         person_mask &= query_person_mask[:, None].bool()
@@ -96,12 +91,14 @@ def compute_loss(
         target_keep &= batch["candidate_mask"][:, :, None].bool()
     if "target_identity_mask" in batch:
         target_keep &= batch["target_identity_mask"].bool()
-    target_identity = model.encode_identity(batch["target_persons"][target_keep])
-    loss_identity = identity_loss(
-        torch.cat((query_identity[query_keep], target_identity), dim=0),
-        torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),
-        temperature=identity_temperature,
-    )
+    loss_identity = scores.new_zeros(())
+    if identity_weight != 0:
+        target_identity = model.encode_identity(batch["target_persons"][target_keep])
+        loss_identity = identity_loss(
+            torch.cat((query_identity[query_keep], target_identity), dim=0),
+            torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),
+            temperature=identity_temperature,
+        )
     loss_retrieval = retrieval_loss(
         scores,
         batch["positive_mask"],

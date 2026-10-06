@@ -67,7 +67,7 @@ def test_compute_loss_and_backward() -> None:
     loss.backward()
     assert model.grounding.score.weight.grad is not None
     assert model.identity_head.proj.weight.grad is not None
-    assert model.composition.identity_proj.weight.grad is not None
+    assert model.semantic_proj.weight.grad is not None
     assert model.reasoner.score[-1].weight.grad is not None
     assert model.state_text_proj.weight.grad.norm() > 0
     assert model.state_image_proj.weight.grad.norm() > 0
@@ -98,7 +98,7 @@ def test_384_model_trains_from_raw_768_features_with_frozen_text():
     assert attentions and all(m.dropout == 0.1 for m in attentions)
     assert all(m.embed_dim == 384 and m.num_heads == 6 for m in attentions)
     assert all(m.p == 0.1 for m in model.modules() if isinstance(m, nn.Dropout))
-    assert model.identity_head.proj.weight.shape == (128, 384)
+    assert model.identity_head.proj.weight.shape == (128, 768)
     assert model.state_image_proj.weight.shape == (128, 384)
     assert model.composition.ffn[0].out_features == 768
 
@@ -282,7 +282,7 @@ def test_grounding_skips_subject_whose_gt_person_was_not_detected() -> None:
 
     logits = model.grounding(
         batch["query_scene"],
-        batch["query_persons"],
+        model.encode_semantic(batch["query_persons"]),
         batch["query_boxes"],
         batch["selections"],
         (2, 3),

@@ -4,7 +4,7 @@ split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  cache: cache/proposed
+  cache: cache/proposed-fafa
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
@@ -14,22 +14,24 @@ image_encoder:
   # [height, width], letterboxed; changing sizes requires rebuilding the cache.
   scene_size: [224, 224]
   person_size: [256, 128]
+person_encoder:
+  backend: fafa              # fafa | dino (backbone control)
+  python: .venv-fafa/bin/python
+  fafa_config: configs/methods/fafa.yaml
+  batch_size: 4
 cache:
   storage_dtype: float16
   lru_mib: 1024
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
-  dim: 384                   # trainable BERT/DINO 768 -> 384 projections
+  dim: 384                   # semantic, scene and text width; identity is separate
   dropout: 0.1               # attention weights/residuals and FFNs
-  identity_balance:
-    mode: none                 # none | pre_scale | layernorm | l2
-    scale: 1.0                 # B: multiply identity BEFORE the existing projection
-    alpha: 1.0                 # D: target norm = alpha * fixed initial radius
-    calibration_queries: 128   # canonical train pairs; never val/test
+  representation: dual       # dual | shared (retrained old-style control)
+  binding_mode: both          # both | identity | semantic | none
   identity_dim: 128
   state_dim: 128
-  # Fallback for old checkpoints/configs; inference overrides live in retrieval.
+  # Training default; inference overrides live in retrieval.
   coarse_beta: 0.4
   num_heads: 6
   mlp_ratio: 2
@@ -68,9 +70,9 @@ retrieval:
   coarse_beta: 0.4              # training default; joint sweep selects final pair
   coarse_normalization: zscore  # none reproduces raw ID + beta * state
   rerank: true                  # false keeps the complete coarse ranking
+  binding_mode: null           # null inherits model; inference binding ablations
   # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
-  # Tune BOTH weights with configs/ablations/fine_coarse.yaml after training.
-  # Identity ablations keep their reference coefficients fixed explicitly.
+  # Tune BOTH weights with configs/calibration/joint.yaml after training.
   fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64
@@ -78,8 +80,6 @@ retrieval:
   coarse_batch_size: 512
 candidate_ks: [100, 500]
 evaluation:
-  fixed_coarse: null  # suite fills immutable val/test reference artifacts
-  branch_norms: false
   enabled: true
   every_epochs: 2
   train_max_queries: 100

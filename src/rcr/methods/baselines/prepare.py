@@ -47,44 +47,48 @@ def prepare_clip(model_name: str, path: str, force: bool):
     download(url, Path(path), force=force, expected_hash=url.split("/")[-2])
 
 
+def prepare_fafa_model(cfg: dict, *, force: bool = False) -> None:
+    """Only FAFA weights/source/runtime; no CLIP selector or baseline detector."""
+    import gdown
+
+    from rcr.methods.baselines.fafa import official_source, prepare_runtime_assets
+
+    official_source(cfg, prepare=True)
+    checkpoint = Path(cfg["checkpoint"]["path"])
+    if force or not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint.with_suffix(".part")
+        try:
+            source_url = cfg["checkpoint"]["source_url"]
+            parsed = urlparse(source_url)
+            if parsed.hostname == "drive.google.com" and parsed.path.startswith(
+                "/file/d/"
+            ):
+                file_id = parsed.path.split("/")[3]
+                source_url = f"https://drive.google.com/uc?id={file_id}"
+            result = gdown.download(
+                url=source_url,
+                output=str(temporary),
+                quiet=False,
+            )
+            if (
+                result is None
+                or not temporary.is_file()
+                or not temporary.stat().st_size
+            ):
+                raise RuntimeError("FAFA checkpoint download did not produce a file")
+            os.replace(temporary, checkpoint)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    prepare_runtime_assets(cfg, force=force)
+
+
 def prepare(cfg: dict, *, force: bool = False) -> None:
     if cfg["method"] == "clip":
         prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], force)
     elif cfg["method"] == "fafa":
-        import gdown
-
-        from rcr.methods.baselines.fafa import official_source, prepare_runtime_assets
-
-        official_source(cfg, prepare=True)
-        checkpoint = Path(cfg["checkpoint"]["path"])
-        if force or not checkpoint.is_file() or checkpoint.stat().st_size == 0:
-            checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            temporary = checkpoint.with_suffix(".part")
-            try:
-                source_url = cfg["checkpoint"]["source_url"]
-                parsed = urlparse(source_url)
-                if parsed.hostname == "drive.google.com" and parsed.path.startswith(
-                    "/file/d/"
-                ):
-                    file_id = parsed.path.split("/")[3]
-                    source_url = f"https://drive.google.com/uc?id={file_id}"
-                result = gdown.download(
-                    url=source_url,
-                    output=str(temporary),
-                    quiet=False,
-                )
-                if (
-                    result is None
-                    or not temporary.is_file()
-                    or not temporary.stat().st_size
-                ):
-                    raise RuntimeError(
-                        "FAFA checkpoint download did not produce a file"
-                    )
-                os.replace(temporary, checkpoint)
-            except BaseException:
-                temporary.unlink(missing_ok=True)
-                raise
+        prepare_fafa_model(cfg, force=force)
         selector = cfg["localization"]["query_selector"]
         prepare_clip(selector["model"], selector["checkpoint"], force)
         detector = cfg["localization"]["detector"]
@@ -94,7 +98,6 @@ def prepare(cfg: dict, *, force: bool = False) -> None:
             force=force,
             expected_hash=detector["hash_prefix"],
         )
-        prepare_runtime_assets(cfg, force=force)
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
     print("Baseline artifacts ready", flush=True)

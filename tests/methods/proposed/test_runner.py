@@ -76,6 +76,7 @@ def experiment(tmp_path):
     }
     cfg = yaml.safe_load(Path("configs/methods/proposed.yaml").read_text())
     cfg["data"] = data
+    cfg["person_encoder"]["backend"] = "dino"
     cfg["runtime"]["device"] = "cpu"
     cfg["image_encoder"].update(
         model="tiny-image", scene_size=[8, 8], person_size=[8, 4]

@@ -1,5 +1,6 @@
 """Build reference-free gallery features for coarse and fine retrieval."""
 
+import gc
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,7 @@ from rcr.methods.common.data import load_rcr_data
 from rcr.methods.common.detector import detect
 from rcr.methods.common.experiment import resolve_device
 from rcr.methods.proposed.encoders import ImageEncoder
+from rcr.methods.proposed.person_encoder import run_person_worker
 
 
 def boxes_to_scene(
@@ -49,6 +51,8 @@ def build_cache(
     detector_threshold: float = 0.3,
     detector_text_threshold: float = 0.25,
     storage_dtype: str = "float32",
+    encode_persons: bool = True,
+    encoder_metadata: dict | None = None,
 ) -> None:
     """Encode gallery images and write a cache compatible with GalleryCache."""
 
@@ -106,7 +110,7 @@ def build_cache(
         elif patch_hw != current_hw:
             raise ValueError("scene processor must produce one fixed patch grid")
 
-        if len(persons):
+        if len(persons) and encode_persons:
             person_crops = [image.crop(tuple(box.tolist())) for box in persons]
 
             pixels = person_processor(images=person_crops, return_tensors="pt")[
@@ -115,8 +119,8 @@ def build_cache(
             _, person_features, _ = image_encoder(pixels.to(device))
 
         else:
-            dim = scene.shape[-1]
-            person_features = scene.new_empty(0, dim)
+            dim = scene.shape[-1] if encode_persons else 0
+            person_features = scene.new_empty(len(persons), dim)
 
         identity_ids: list[str | None] = [None] * len(persons)
         if gt_heads_by_image is not None:
@@ -153,6 +157,7 @@ def build_cache(
                 "persons": cached_persons,
                 "identity_ids": identity_ids,
                 "boxes_scene": compact_cpu(boxes_scene, torch.float32),
+                "boxes_pixel": compact_cpu(persons, torch.float32),
             },
             feature_dir / f"{index}.pt",
         )
@@ -173,8 +178,13 @@ def build_cache(
     temporary_index = root / "index.pt.tmp"
     torch.save(
         {
+            "format_version": 2,
             "cache_id": cache_id,
             "image_ids": image_ids,
+            "image_paths": [str(Path(path).resolve()) for path in image_paths],
+            "scene_dim": cached_scene.shape[-1],
+            "person_encoder": {"backend": "dino" if encode_persons else "pending_fafa"},
+            **(encoder_metadata or {}),
             "persons": person_index,
             "mask": mask,
             "patch_hw": patch_hw,
@@ -184,7 +194,8 @@ def build_cache(
         temporary_index,
     )
     os.replace(temporary_index, index_path)
-    building.unlink()
+    if encode_persons:
+        building.unlink()
 
 
 class _LetterboxProcessor:
@@ -215,6 +226,11 @@ class _LetterboxProcessor:
 
 
 def prepare_cache(cfg: dict) -> None:
+    backend = cfg.get("person_encoder", {}).get("backend", "dino")
+    if backend not in ("dino", "fafa"):
+        raise ValueError("person_encoder.backend must be dino or fafa")
+    if backend == "fafa":
+        run_person_worker(cfg, check=True)
     device = resolve_device(cfg)
 
     from transformers import (
@@ -252,4 +268,14 @@ def prepare_cache(cfg: dict) -> None:
         detector_threshold=detector_cfg["threshold"],
         detector_text_threshold=detector_cfg["text_threshold"],
         storage_dtype=cfg.get("cache", {}).get("storage_dtype", "float32"),
+        encode_persons=backend == "dino",
+        encoder_metadata={"image_encoder": image_cfg, "detector": detector_cfg},
     )
+
+    # Release DINO/detector GPU storage before starting the isolated FAFA worker.
+    del detector, image_encoder, backbone
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    if backend == "fafa":
+        run_person_worker(cfg)

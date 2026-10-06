@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,35 @@ from torch import nn
 from rcr.methods.proposed.build_cache import boxes_to_scene, build_cache
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import ImageEncoder
+
+
+def test_real_dinov3_processor_and_encoder_without_downloading_weights(tmp_path):
+    transformers = pytest.importorskip("transformers", minversion="4.56")
+    pytest.importorskip("torchvision")
+    from rcr.methods.proposed.build_cache import _LetterboxProcessor
+
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps({"image_processor_type": "DINOv3ViTImageProcessorFast"})
+    )
+    processor = transformers.AutoImageProcessor.from_pretrained(tmp_path)
+    pixels = _LetterboxProcessor(processor, [32, 48])(
+        Image.new("RGB", (80, 160)), return_tensors="pt"
+    )["pixel_values"]
+    backbone = transformers.DINOv3ViTModel(
+        transformers.DINOv3ViTConfig(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_register_tokens=4,
+        )
+    ).eval()
+    with torch.inference_mode():
+        patches, person, grid = ImageEncoder(backbone, 32)(pixels)
+    assert pixels.shape == (1, 3, 32, 48)
+    assert grid == (2, 3) and patches.shape == (1, 6, 32)
+    assert person.shape == (1, 32)
+    assert torch.isfinite(patches).all() and torch.isfinite(person).all()
 
 
 class DetectorBatch(dict):

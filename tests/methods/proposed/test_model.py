@@ -1,7 +1,7 @@
 import torch
 
 from rcr.methods.proposed.binding import EvidenceBinding
-from rcr.methods.proposed.model import RCRModel
+from rcr.methods.proposed.model import QueryEncoding, RCRModel
 
 
 def test_state_encoders_normalize_and_ignore_masked_text() -> None:
@@ -61,7 +61,8 @@ def test_model_forward_shape_and_grad() -> None:
         target_persons,
     ):
         assert tensor.grad is not None
-    assert model.identity_head.proj.weight.grad is not None
+    assert model.identity_head.proj.weight.grad is None
+    assert model.semantic_proj.weight.grad is not None
 
 
 def test_model_uses_one_shared_binding() -> None:
@@ -115,16 +116,19 @@ def test_target_score_changes_with_membership_prior() -> None:
     persons = torch.randn(1, 2, 8)
     boxes = _boxes(1, 2)
     mask = torch.ones(1, 5, dtype=torch.bool)
-    a = model.score_target(ref, mask, torch.zeros(1, 5), scene, persons, boxes, (2, 2))
-    b = model.score_target(
-        ref,
-        mask,
-        torch.tensor([[0.0, 0.0, 0.0, -15.0, 0.0]]),
-        scene,
-        persons,
-        boxes,
-        (2, 2),
+    query = QueryEncoding(
+        logits=torch.zeros(1, 1, 0),
+        identity=torch.empty(1, 0, 6),
+        reference=ref,
+        mask=mask,
+        prior=torch.zeros(1, 5),
+        composed=torch.empty(1, 1, 0, 8),
+        membership=torch.empty(1, 1, 0),
+        subjects=torch.ones(1, 1, dtype=torch.bool),
     )
+    a = model.score_target(query, scene, persons, boxes, (2, 2))
+    query.prior = torch.tensor([[0.0, 0.0, 0.0, -15.0, 0.0]])
+    b = model.score_target(query, scene, persons, boxes, (2, 2))
     assert not torch.allclose(a, b)
 
 

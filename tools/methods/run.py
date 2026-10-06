@@ -35,7 +35,9 @@ def main(argv=None):
         help="Override existing YAML keys, e.g. train.epochs=1 runtime.device=cpu",
     )
     parser.add_argument(
-        "--prepare", action="store_true", help="Prepare baseline assets before run"
+        "--prepare",
+        action="store_true",
+        help="Prepare encoder/baseline assets before run",
     )
     parser.add_argument(
         "--build-cache",
@@ -46,7 +48,7 @@ def main(argv=None):
         "--train", action="store_true", help="Train proposed before run"
     )
     parser.add_argument(
-        "--force", action="store_true", help="Replace prepared baseline assets"
+        "--force", action="store_true", help="Replace prepared model assets"
     )
     parser.add_argument(
         "--max-queries",
@@ -118,10 +120,13 @@ def main(argv=None):
         splits = [s for s in ("val", "test") if s in splits]
     if command == "prepare" or args.prepare:
         if method == "proposed":
-            parser.error("prepare is for baseline assets; use build-cache for proposed")
-        from rcr.methods.baselines.prepare import prepare
+            from rcr.methods.proposed.person_encoder import run_person_worker
 
-        prepare(cfg, force=args.force)
+            run_person_worker(cfg, prepare=True, force=args.force)
+        else:
+            from rcr.methods.baselines.prepare import prepare
+
+            prepare(cfg, force=args.force)
         if command == "prepare":
             return
     if command == "build-cache":

@@ -282,7 +282,7 @@ def test_retrieve_rejects_old_checkpoint_before_loading_backbones(
 ) -> None:
     checkpoint_path = tmp_path / "old.pt"
     torch.save({"model": {}, "config": {"model": {}}}, checkpoint_path)
-    with pytest.raises(ValueError, match="train a new checkpoint"):
+    with pytest.raises(ValueError, match="legacy checkpoint"):
         retrieve_proposed.retrieve(
             {
                 "checkpoint": str(checkpoint_path),

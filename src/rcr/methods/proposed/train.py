@@ -1,5 +1,6 @@
 """Train the proposed RCR model from cached visual features."""
 
+import hashlib
 import json
 import math
 import shutil
@@ -24,12 +25,7 @@ from rcr.methods.proposed.batch import (
 )
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
-from rcr.methods.proposed.identity_balance import (
-    calibrate_identity,
-    collect_branch_norms,
-    parameter_fingerprint,
-)
-from rcr.methods.proposed.model import RCRModel
+from rcr.methods.proposed.model import ARCHITECTURE_VERSION, RCRModel
 from rcr.methods.proposed.objective import compute_loss
 from rcr.methods.proposed.retrieval import (
     mine_hard_negatives,
@@ -43,14 +39,22 @@ from rcr.methods.proposed.sampling import (
     sampling_settings,
     training_batches,
 )
-from rcr.methods.proposed.shortlist import load_fixed_coarse
+
+
+def parameter_fingerprint(*modules):
+    """Hash initialization for run provenance, not cross-architecture equality."""
+    digest = hashlib.sha256()
+    for index, module in enumerate(modules):
+        for name, value in module.named_parameters():
+            digest.update(f"{index}:{name}:{tuple(value.shape)}".encode())
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _wandb_run(
     cfg: dict,
     output: Path,
     cache: GalleryCache,
-    feature_dim: int,
     num_train_samples: int,
     num_val_samples: int,
 ) -> Any | None:
@@ -75,7 +79,9 @@ def _wandb_run(
         cache={
             "id": cache.cache_id,
             "patch_hw": list(cache.patch_hw),
-            "feature_dim": feature_dim,
+            "scene_dim": cache.scene_dim,
+            "person_dim": cache.person_dim,
+            "encoders": cache.encoder_metadata,
         },
         num_train_samples=num_train_samples,
         num_val_samples=num_val_samples,
@@ -232,6 +238,8 @@ def train(cfg: dict) -> Path:
     )
     cache = GalleryCache(data_cfg["cache"], lru_mib=cache_cfg.get("lru_mib", 0))
     cache.validate_gallery(data.gallery_ids)
+    if cfg.get("person_encoder"):
+        cache.validate_encoders(cfg)
     candidate_ids = split_image_ids(data, "train")
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
@@ -240,7 +248,8 @@ def train(cfg: dict) -> Path:
     hard_pools = None
     print(f"Training gallery: train ({len(candidate_ids)} images)")
 
-    first_scene, *_ = cache.load(torch.tensor([0]))
+    first_scene, first_persons, *_ = cache.load(torch.tensor([0]))
+    person_input_dim = first_persons.shape[-1]
     input_dim = first_scene.shape[-1]
     dim = model_cfg.get("dim", input_dim)
     if dim % model_cfg["num_heads"]:
@@ -267,29 +276,14 @@ def train(cfg: dict) -> Path:
         geo_dim=model_cfg["geo_dim"],
         state_dim=model_cfg.get("state_dim"),
         coarse_beta=model_cfg.get("coarse_beta", 0.3),
-        identity_balance=model_cfg.get("identity_balance"),
+        person_input_dim=person_input_dim,
+        representation=model_cfg.get("representation", "dual"),
+        binding_mode=model_cfg.get("binding_mode", "both"),
         input_dim=input_dim,
         dropout=model_cfg.get("dropout", 0.0),
     ).to(device)
 
     initialization_sha256 = parameter_fingerprint(model, text_encoder)
-    balance_cfg = model_cfg.get("identity_balance")
-    calibration = None
-    if balance_cfg and (
-        balance_cfg["mode"] != "none" or evaluation_cfg.get("branch_norms", False)
-    ):
-        calibration = calibrate_identity(
-            model,
-            samples,
-            cache,
-            tokenizer,
-            text_encoder,
-            device,
-            max_queries=balance_cfg.get("calibration_queries", 128),
-            text_cache=text_cache,
-        )
-    fixed_val = load_fixed_coarse(cfg, data, cache.cache_id, "val")
-
     optimizer = torch.optim.AdamW(
         [
             {"params": model.parameters(), "lr": optim_cfg["lr"]},
@@ -340,7 +334,7 @@ def train(cfg: dict) -> Path:
         {
             "seed": seed,
             "initialization_sha256": initialization_sha256,
-            "identity_calibration": calibration,
+            "architecture_version": ARCHITECTURE_VERSION,
         },
     )
     tokenizer.save_pretrained(output / "tokenizer")
@@ -350,7 +344,6 @@ def train(cfg: dict) -> Path:
         cfg,
         output,
         cache,
-        input_dim,
         len(samples),
         len(val_samples),
     )
@@ -492,6 +485,7 @@ def train(cfg: dict) -> Path:
                                 "train/identity_active": values["identity_active"],
                                 "train/retrieval_loss": values["retrieval"],
                                 "train/state_loss": values["state"],
+                                "train/binding_scale": model.binding_scale.item(),
                                 **{
                                     f"train/{k}": v
                                     for k, v in _diagnostics(batch_counts).items()
@@ -526,6 +520,7 @@ def train(cfg: dict) -> Path:
                 "epoch/identity_active_rate": summary["identity_active"],
                 "epoch/retrieval_loss": summary["retrieval"],
                 "epoch/state_loss": summary["state"],
+                "epoch/binding_scale": model.binding_scale.item(),
                 **{f"epoch/{k}": v for k, v in _diagnostics(counts).items()},
             }
             is_best = False
@@ -548,26 +543,18 @@ def train(cfg: dict) -> Path:
                 ):
                     if not rows:
                         continue
-                    with collect_branch_norms(
-                        model, evaluation_cfg.get("branch_norms", False)
-                    ) as norms:
-                        split_output = retrieve_rankings(
-                            rows,
-                            cache,
-                            tokenizer,
-                            text_encoder,
-                            model,
-                            device,
-                            gallery_ids=split_image_ids(data, split),
-                            fixed_coarse=fixed_val if split == "val" else None,
-                            **cfg["retrieval"],
-                            text_cache=text_cache,
-                            description=f"{split} epoch {epoch_number}",
-                        )
-                    if norms is not None:
-                        write_json(
-                            metrics_dir / f"{split}_branch_norms.json", norms.report()
-                        )
+                    split_output = retrieve_rankings(
+                        rows,
+                        cache,
+                        tokenizer,
+                        text_encoder,
+                        model,
+                        device,
+                        gallery_ids=split_image_ids(data, split),
+                        **cfg["retrieval"],
+                        text_cache=text_cache,
+                        description=f"{split} epoch {epoch_number}",
+                    )
                     result = evaluate_retrieval_output(
                         data,
                         rows,
@@ -630,9 +617,11 @@ def train(cfg: dict) -> Path:
                 "config": cfg,
                 "dim": dim,
                 "input_dim": input_dim,
+                "person_input_dim": person_input_dim,
+                "encoder_metadata": getattr(cache, "encoder_metadata", None),
                 "cache_id": cache.cache_id,
                 "initialization_sha256": initialization_sha256,
-                "identity_calibration": calibration,
+                "architecture_version": ARCHITECTURE_VERSION,
                 "best_full_map": best_full_map,
                 "best_macro_full_map": best_macro_full_map,
                 "best_score": best_score,

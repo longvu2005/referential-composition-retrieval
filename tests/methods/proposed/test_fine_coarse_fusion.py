@@ -53,6 +53,15 @@ def test_negative_weight_is_rejected() -> None:
         fuse_fine_coarse_scores(torch.ones(2), torch.ones(2), -0.1)
 
 
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("weight", [0.0, 0.4])
+def test_nonfinite_fine_scores_never_become_rankings(invalid, weight):
+    with pytest.raises(ValueError, match="fine scores must be finite"):
+        fuse_fine_coarse_scores(
+            torch.tensor([0.5, invalid]), torch.tensor([1.0, -torch.inf]), weight
+        )
+
+
 def test_old_configs_default_to_fine_only() -> None:
     settings = retrieval_settings(
         {"coarse_mode": "identity_state", "coarse_beta": None}, default_beta=0.4

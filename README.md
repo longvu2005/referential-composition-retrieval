@@ -40,138 +40,93 @@ recursive config inheritance or plugin registry. An ablation suite reads one
 method YAML and applies flat overrides. Method dependencies are imported only
 when that method/stage is used.
 
-## Setup
+## Architecture
 
-Use Python 3.11 or 3.12 and run commands from the repository root. Keep proposed,
-CLIP and FAFA in separate environments because FAFA pins an older Transformers.
-Example for proposed:
+The proposed model uses frozen **DINO scene patches** and a frozen **FAFA
+image-only person trunk**. Mean hidden Q-Former tokens produce each cached crop
+feature. Separate trainable heads produce normalized identity (128) and semantic
+(384) embeddings. Identity is trained only by supervised contrastive loss;
+semantic features feed selection grounding and instruction composition.
+
+Fine scoring combines identity and composed semantics on the SAME target person,
+then pools soft Subject memberships. Its learned positive scale adds that binding
+score to the existing context/set reasoner. Scene/geometry reasoning handles
+conditions outside crops. Global-state coarse scoring and the official evaluation
+protocol remain. See [equations and limitations](docs/proposed_method.md).
+
+## Setup and run
+
+Use Python 3.11/3.12. Run commands from the repository root. Keep proposed and
+native FAFA in separate environments because they need different Transformers:
 
 ```bash
 python3.11 -m venv .venv-proposed
-source .venv-proposed/bin/activate
-python -m pip install -r requirements/bootstrap.txt
-python -m pip install --no-build-isolation -r requirements/proposed.txt
+.venv-proposed/bin/python -m pip install -r requirements/bootstrap.txt
+.venv-proposed/bin/python -m pip install --no-build-isolation -r requirements/proposed.txt
+python3.11 -m venv .venv-fafa
+.venv-fafa/bin/python -m pip install -r requirements/bootstrap.txt
+.venv-fafa/bin/python -m pip install --no-build-isolation -r requirements/fafa.txt
 ```
 
-For CLIP/FAFA replace `proposed` with `clip`/`fafa` in the environment and
-requirements filename. On Kaggle, call that environment's Python explicitly
-instead of relying on activation carrying over between cells.
-`requirements.txt` still installs the combined proposed + dataset dependencies;
-`requirements/proposed.txt` installs only proposed dependencies.
-
-## Run experiments
-
-Edit data/checkpoint/cache paths in the method YAML first. All relative paths
-are relative to the working directory, which should be the repository root.
-The scripts never install packages automatically.
-
-The proposed model freezes BERT and DINO. Trainable projections map their
-768-dimensional features to `model.dim=384`; identity/state dimensions are 128,
-with 6 attention heads, FFN ratio 2 and dropout 0.1. Training uses case-balanced
-draws and up to 2 positives among 24 candidates. `best.pt` maximizes
-`0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP` on validation.
-The existing DINO cache can be reused; these model settings require a new train run.
+Set data/cache paths and `person_encoder.python` in the proposed YAML. `prepare`
+downloads only FAFA model assets for proposed. Cache construction runs detector
+and DINO first, releases their GPU storage, then invokes FAFA in its own venv.
+Training and retrieval read cached features without loading FAFA.
 
 ```bash
-# Proposed: build cache, train and select best.pt on val.
-python tools/methods/run.py run --config configs/methods/proposed.yaml --build-cache --train --splits val
+# Main model: new cache, train, validation.
+.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --prepare --build-cache --train --splits val
 
-# Reuse the cache and train a new model.
-python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
+# Joint 2D validation calibration; only the selected pair reaches test.
+.venv-proposed/bin/python tools/methods/run.py ablate --config configs/calibration/joint.yaml --splits val test
 
-# Joint 2D sweep on val; evaluate only the selected pair on test.
-python tools/methods/run.py ablate --config configs/ablations/fine_coarse.yaml --splits val test
+# Score-term removals from the same calibrated checkpoint/shortlist.
+.venv-proposed/bin/python tools/methods/run.py ablate --config configs/ablations/binding.yaml --splits val test
 
-# Later, evaluate that same selection without another sweep.
-python tools/methods/run.py run --config runs/ablations/fine_coarse/selected.yaml --splits test
-
-# CLIP: prepare one image/text checkpoint, run all four modes.
-python tools/methods/run.py run --config configs/methods/clip.yaml --prepare
-
-# FAFA: use its own environment.
-python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
+# CLIP and native FAFA baselines use their respective environments/configs.
+.venv-clip/bin/python tools/methods/run.py run --config configs/methods/clip.yaml --prepare
+.venv-fafa/bin/python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
 ```
+
+Old DINO caches/checkpoints require a new build/train for this architecture.
+Cache version, encoder/preprocessing metadata and checkpoint cache identity are
+checked explicitly. Existing run directories can be kept for historical results.
 
 | Command | Purpose |
 | --- | --- |
-| `prepare` | Download/verify CLIP or official FAFA assets |
-| `build-cache` | Build proposed's frozen visual cache |
-| `train` | Train proposed from its cache |
-| `retrieve` | Save rankings for the selected split(s) |
-| `evaluate` | Evaluate saved rankings without loading a model |
-| `run` | Retrieve + evaluate val/test; optionally prepare/build/train first |
-| `ablate` | Run a proposed ablation suite; optional joint 2D sweep selected on val |
+| `prepare` | Prepare proposed person encoder or baseline assets |
+| `build-cache` | Build frozen scene/person features |
+| `train` | Train from cache; validation selects best.pt |
+| `retrieve` | Save complete split-gallery rankings |
+| `evaluate` | Evaluate saved rankings without a model |
+| `run` | Coordinate prepare/build/train/retrieve/evaluate |
+| `ablate` | Explicit training/inference suites or validation calibration |
 
-`--splits val` or `--splits test` restricts the run. `--modes clip_image clip_text`
-selects CLIP modes. `--set key=value ...` overrides existing YAML fields without
-modifying the file:
+`--set key=value ...` overrides existing YAML fields. `--splits` selects splits.
+`--max-queries` is only for matching retrieve/evaluate smoke runs. Normal run and
+ablation use complete requested query splits. Outputs contain checkpoints,
+config/tokenizer, history, per-epoch metrics, rankings, run metadata and summaries.
+W&B retains its metrics and additionally logs the learned binding scale.
 
-```bash
-python tools/methods/run.py run --config configs/methods/proposed.yaml --train \
-  --set data.image_root=/kaggle/input/pipa/images data.cache=/kaggle/input/rcr-cache/cache
-```
-
-CLIP late fusion computes each branch’s population z-score over the query’s
-split gallery **after excluding the query image**. Cached raw features/scores
-can be reused; saved fusion selections from the previous convention require a
-new val run.
-
-CLIP `run` tunes early/late fusion separately on complete **val**, records the
-selected image/text weights, then applies them unchanged to test. A test-only
-fusion run requires the matching saved val selection. Low-level `retrieve`
-uses the fixed weights in YAML; use `run` for automatic val selection.
-
-`output.dir` is a root directory, with no `{split}` / `{mode}` templates:
-
-- Proposed: `runs/proposed/{val,test}/` plus checkpoints, tokenizer and training logs.
-- CLIP: `runs/clip/<mode>/{val,test}/`, `tuning.json` and `summary.csv`.
-- FAFA: `runs/fafa/{val,test}/` and `summary.csv`.
-
-Each split saves `rankings.pt`, `run.json`, `metrics.json`. Baselines also save
-`scores.npy`. `summary.csv` describes the latest successful `run` invocation.
-
-Detailed usage: [proposed](docs/proposed_runs.md), [baselines](docs/baselines.md).
-Coarse normalization, joint 2D calibration and extensible ablations:
-[Ablation guide](docs/ablations_vi.md).
-Identity amplitude A–D, fixed shortlist, and validation/seed confirmation:
-[identity balance guide](docs/identity_balance_ablation.md).
-Model equations: [proposed method](docs/proposed_method.md).
-
-The main proposed config uses `z(ID) + 0.4 z(state)` for coarse scoring over
-the non-self gallery, then `z(fine) + 0.4 z(coarse)` within the Top-500 shortlist.
-These are the training defaults. `configs/ablations/fine_coarse.yaml` jointly
-sweeps coarse beta and fine/coarse weight over 8 x 7 pairs at the same Top-500
-budget and checkpoint. It maximizes final Full-mAP on complete val, saves both
-weights in `selected.yaml`, and evaluates only that pair on test. Candidate
-recall is diagnostic. The remaining gallery keeps coarse order. Training
-optimizes raw fine scores.
-
-Training uses same-identity negatives mixed with random negatives. The main
-YAML enables coarse mining on train after warmup; set
-`train.sampling.hard_fraction=0` to disable it. The state loss compares images
-containing all required identities; wrong-identity images are ignored by that
-loss. Conflicting negatives from equivalent train instructions are excluded
-without editing the reviewed labels or the evaluation protocol.
-
-Read-only label and optional cache coverage audit:
-
-```bash
-python tools/dataset/audit.py --output runs/data_audit.json
-python tools/dataset/audit.py --cache cache/proposed --output runs/cache_audit.json
-```
+Detailed [proposed workflow](docs/proposed_runs.md),
+[baseline workflow](docs/baselines.md), and [new ablations](docs/ablations_vi.md).
+Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
+retraining. The old identity-amplitude, coarse-only, loss and sampling suites
+have been removed. Calibration lives separately in `configs/calibration/`.
 
 ## Tests
 
 ```bash
-python -m pip install -e '.[dev]'
-python -m pytest -q
+.venv-proposed/bin/python -m pip install -e '.[dev]'
+.venv-proposed/bin/python -m pytest -q
 ruff check src tools tests labelstudio
 ```
 
-Core tests use small local encoders and cache fixtures. CLIP's native checkpoint
-integration tests need the `clip` extra; baseline preparation tests need `gdown`.
-The CUDA memory test is skipped on CPU. Tests do not download full pretrained
-models or measure PIPA retrieval quality.
+Tests use tiny local encoders/caches, including gradient isolation, same-person
+binding, separate scene/person widths, empty sets, padding and the train/retrieve
+pipeline. The FAFA extraction contract is tested with a fake native trunk; tests
+do not download full weights or claim PIPA quality/CUDA throughput. Optional
+CLIP integration and CUDA tests require their corresponding dependencies/device.
 
 ## Current dataset snapshot
 

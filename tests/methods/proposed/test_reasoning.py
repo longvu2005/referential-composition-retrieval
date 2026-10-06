@@ -12,7 +12,7 @@ def test_target_person_builder_shape_and_grad() -> None:
     boxes = torch.rand(2, 3, 4)
     boxes[..., 2:] = boxes[..., :2] + boxes[..., 2:] * (1 - boxes[..., :2])
 
-    out = model(evidence, identity, boxes)
+    out = model(evidence, boxes, identity)
     assert out.shape == (2, 3, 8)
 
     out.mean().backward()
@@ -30,8 +30,8 @@ def test_target_person_builder_uses_box_geometry() -> None:
     right = torch.tensor([[[0.6, 0.1, 1.0, 0.9]]])
 
     assert not torch.allclose(
-        model(evidence, identity, left),
-        model(evidence, identity, right),
+        model(evidence, left, identity),
+        model(evidence, right, identity),
     )
 
 

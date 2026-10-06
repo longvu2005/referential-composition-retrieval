@@ -20,7 +20,7 @@ def test_role_mapping_uses_subject_id_not_list_position() -> None:
 
 def test_composition_shape_and_grad() -> None:
     torch.manual_seed(0)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2)
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2)
 
     change = torch.randn(2, 5, 8, requires_grad=True)
     identity = torch.randn(2, 3, 6, requires_grad=True)
@@ -38,7 +38,7 @@ def test_composition_shape_and_grad() -> None:
 
 def test_grounding_pool_matches_normalized_sigmoid_membership() -> None:
     torch.manual_seed(1)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2).eval()
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2).eval()
 
     change = torch.randn(1, 5, 8)
     identity = torch.randn(1, 3, 6)
@@ -55,7 +55,7 @@ def test_grounding_pool_matches_normalized_sigmoid_membership() -> None:
     handle.remove()
 
     role = model.role(torch.arange(2))
-    ids = model.identity_proj(identity)[:, None] + role[None, :, None]
+    ids = model.person_proj(identity)[:, None] + role[None, :, None]
     membership = logits.sigmoid()
     p = membership / membership.sum(dim=-1, keepdim=True)
 
@@ -68,7 +68,7 @@ def test_grounding_pool_matches_normalized_sigmoid_membership() -> None:
 
 def test_repeated_mentions_receive_the_same_grounded_identity() -> None:
     torch.manual_seed(7)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2)
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2)
     change = torch.randn(1, 5, 8)
     identity = torch.randn(1, 3, 6)
     logits = torch.randn(1, 2, 3)
@@ -83,7 +83,7 @@ def test_repeated_mentions_receive_the_same_grounded_identity() -> None:
     handle = model.bind_norm.register_forward_pre_hook(capture)
     model(change, identity, logits, torch.tensor([[0, 1]]), subject_token_mask=mentions)
     handle.remove()
-    ids = model.identity_proj(identity)[:, None] + model.role.weight[None, :, None]
+    ids = model.person_proj(identity)[:, None] + model.role.weight[None, :, None]
     membership = logits.sigmoid()
     weight = membership / membership.sum(-1, keepdim=True)
     grounded = (weight[..., None] * ids).sum(2)
@@ -96,7 +96,7 @@ def test_repeated_mentions_receive_the_same_grounded_identity() -> None:
 
 def test_padded_subject_has_no_effect_on_real_composition_tokens() -> None:
     torch.manual_seed(8)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2)
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2)
     change = torch.randn(1, 5, 8)
     identity = torch.randn(1, 3, 6)
     logits = torch.randn(1, 1, 3)
@@ -114,7 +114,7 @@ def test_padded_subject_has_no_effect_on_real_composition_tokens() -> None:
 
 
 def test_empty_query_composition_is_finite() -> None:
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2)
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2)
     out = model(
         torch.randn(1, 5, 8),
         torch.empty(1, 0, 6),
@@ -127,7 +127,7 @@ def test_empty_query_composition_is_finite() -> None:
 
 def test_identity_order_is_permutation_invariant() -> None:
     torch.manual_seed(2)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2).eval()
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2).eval()
 
     change = torch.randn(1, 5, 8)
     identity = torch.randn(1, 3, 6)
@@ -149,7 +149,7 @@ def test_identity_order_is_permutation_invariant() -> None:
 
 def test_subject_marker_uses_its_grounding_distribution() -> None:
     torch.manual_seed(3)
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2).eval()
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2).eval()
 
     change = torch.randn(1, 5, 8)
     identity = torch.randn(1, 2, 6)
@@ -169,5 +169,5 @@ def test_subject_marker_uses_its_grounding_distribution() -> None:
 
 
 def test_binding_has_no_content_attention() -> None:
-    model = StructuredComposition(dim=8, identity_dim=6, num_heads=2)
+    model = StructuredComposition(dim=8, person_dim=6, num_heads=2)
     assert not hasattr(model, "bind_attn")

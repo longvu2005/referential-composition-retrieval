@@ -55,8 +55,14 @@ def test_wandb_tracks_only_training_essentials(monkeypatch, tmp_path) -> None:
         return run
 
     monkeypatch.setitem(__import__("sys").modules, "wandb", SimpleNamespace(init=init))
-    cache = SimpleNamespace(cache_id="cache-1", patch_hw=(14, 14))
-    actual = _wandb_run(_config(), tmp_path, cache, 768, 100, 20)
+    cache = SimpleNamespace(
+        cache_id="cache-1",
+        patch_hw=(14, 14),
+        scene_dim=768,
+        person_dim=1024,
+        encoder_metadata={"person_encoder": {"backend": "fafa"}},
+    )
+    actual = _wandb_run(_config(), tmp_path, cache, 100, 20)
 
     assert actual is run
     assert captured["project"] == "rcr-test"
@@ -74,13 +80,16 @@ def test_wandb_tracks_only_training_essentials(monkeypatch, tmp_path) -> None:
     }
     assert "data" not in captured["config"]
     assert captured["config"]["cache"]["patch_hw"] == [14, 14]
+    assert captured["config"]["cache"]["scene_dim"] == 768
+    assert captured["config"]["cache"]["person_dim"] == 1024
+    assert captured["config"]["cache"]["encoders"] == cache.encoder_metadata
     assert len(run.metrics) == 6
 
 
 def test_disabled_wandb_needs_no_dependency(tmp_path) -> None:
     cfg = _config()
     cfg["wandb"]["enabled"] = False
-    assert _wandb_run(cfg, tmp_path, None, 768, 100, 20) is None
+    assert _wandb_run(cfg, tmp_path, None, 100, 20) is None
 
 
 def test_gradient_norm_matches_all_modules() -> None:

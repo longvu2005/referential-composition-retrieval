@@ -3,50 +3,33 @@
 import torch
 from torch import Tensor, nn
 
-from rcr.methods.proposed.identity_balance import IdentityBalance
-
 
 class TargetPersonBuilder(nn.Module):
-    """Combine target evidence, identity, and geometry into person tokens."""
+    """Context/geometry tokens; identity addition exists only in shared control."""
 
-    def __init__(self, dim: int, identity_dim: int, identity_balance=None) -> None:
+    def __init__(self, dim: int, identity_dim: int | None = None) -> None:
         super().__init__()
-        self.identity_balance = IdentityBalance(identity_balance)
-        self.norm_observer = None
         self.evidence_proj = nn.Linear(dim, dim)
-        self.identity_proj = nn.Linear(identity_dim, dim)
+        self.identity_proj = (
+            None if identity_dim is None else nn.Linear(identity_dim, dim)
+        )
         self.box_proj = nn.Linear(4, dim)
         self.norm = nn.LayerNorm(dim)
 
     def forward(
         self,
         evidence: Tensor,
-        identity: Tensor,
         boxes: Tensor,
-        person_mask: Tensor | None = None,
+        identity: Tensor | None = None,
     ) -> Tensor:
-        """Return target person tokens [B,K,D] from normalized xyxy boxes."""
-
         x1, y1, x2, y2 = boxes.unbind(-1)
-        box = torch.stack(
-            ((x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1),
-            dim=-1,
-        )
-        evidence = self.evidence_proj(evidence)
-        projected = self.identity_balance(identity, self.identity_proj)
-        geometry = self.box_proj(box)
-        if self.norm_observer is not None:
-            for name, value in (
-                ("identity_input", identity),
-                ("identity_projected", self.identity_proj(identity)),
-                ("identity_added", projected),
-                ("evidence", evidence),
-                ("geometry", geometry),
-                ("evidence_geometry", evidence + geometry),
-                ("combined", evidence + projected + geometry),
-            ):
-                self.norm_observer.add(f"target.{name}", value, person_mask)
-        return self.norm(evidence + projected + geometry)
+        geometry = torch.stack(((x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1), dim=-1)
+        target = self.evidence_proj(evidence) + self.box_proj(geometry)
+        if self.identity_proj is not None:
+            if identity is None:
+                raise ValueError("shared representation requires target identities")
+            target = target + self.identity_proj(identity)
+        return self.norm(target)
 
 
 class FineReasoner(nn.Module):

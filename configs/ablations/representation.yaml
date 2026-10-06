@@ -1,0 +1,23 @@
+# Train each variant from scratch. Build both encoder caches first (see docs).
+# Same benchmark, seed, schedule, sampler and inference coefficients.
+base_config: configs/methods/proposed.yaml
+stage: train
+output_dir: runs/ablations/representation
+experiments:
+  - name: dino_shared
+    overrides:
+      data.cache: cache/proposed-dino
+      person_encoder.backend: dino
+      model.representation: shared
+      model.binding_mode: none
+      retrieval.binding_mode: none
+  - name: fafa_shared
+    overrides:
+      model.representation: shared
+      model.binding_mode: none
+      retrieval.binding_mode: none
+  - name: dino_dual
+    overrides:
+      data.cache: cache/proposed-dino
+      person_encoder.backend: dino
+  - name: fafa_dual

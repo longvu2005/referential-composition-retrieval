@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 proposed = [
     "transformers>=4.56,<5",
+    "torchvision>=0.19,<1",
     "wandb>=0.18,<1",
 ]
 clip = [
