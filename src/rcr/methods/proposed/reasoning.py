@@ -90,11 +90,13 @@ class FineReasoner(nn.Module):
         else:
             empty = None
             if target_padding is not None:
+                # A key mask does not sanitize NaN/Inf in K/V. Remove padded
+                # values before the projections/attention, including empty rows.
+                target = target.masked_fill(target_padding[..., None], 0)
                 empty = target_padding.all(dim=1)
                 # Avoid an all-masked softmax, then remove its dummy update.
                 target_padding = target_padding.clone()
                 target_padding[empty, 0] = False
-                target = target.masked_fill(empty[:, None, None], 0)
             update, _ = self.cross_attn(
                 query,
                 target,

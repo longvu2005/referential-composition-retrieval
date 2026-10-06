@@ -82,6 +82,9 @@ def retrieval_loss(
         positive_mask = positive_mask.bool() & valid_mask
         negative_mask = valid_mask & ~positive_mask
         pairs = positive_mask[:, :, None] & negative_mask[:, None, :]
+        # Invalid/padded candidates must not turn a zero-pair loss into
+        # NaN via (NaN/Inf)*0 or inf-inf. Valid score failures remain visible.
+        scores = scores.masked_fill(~valid_mask, 0)
         if not pairs.any():
             return scores.sum() * 0
         differences = scores[:, None, :] - scores[:, :, None]

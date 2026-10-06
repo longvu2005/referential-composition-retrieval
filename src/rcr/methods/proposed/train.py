@@ -1,6 +1,7 @@
 """Train the proposed RCR model from cached visual features."""
 
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,31 @@ def _diagnostics(counts: dict) -> dict:
     }
 
 
+def _require_finite_loss(values, rows, epoch, step, amp_enabled, output):
+    """Abort before backward/step so failed AMP runs cannot select a checkpoint."""
+    if all(math.isfinite(value) for value in values.values()):
+        return
+    path = output / "nonfinite_batch.json"
+    write_json(
+        path,
+        {
+            "epoch": epoch,
+            "step": step,
+            "amp_enabled": amp_enabled,
+            "sample_ids": [row["sample_id"] for row in rows],
+            "query_image_ids": [row["query_image_id"] for row in rows],
+            "losses": {
+                key: value if math.isfinite(value) else str(value)
+                for key, value in values.items()
+            },
+        },
+    )
+    raise FloatingPointError(
+        f"non-finite training loss before backward at epoch={epoch}, step={step}; "
+        f"see {path}. Fix the forward path and train from scratch."
+    )
+
+
 def train(cfg: dict) -> Path:
     """Train from scratch; select best.pt using validation Full-mAP only."""
     data_cfg = cfg["data"]
@@ -278,6 +304,7 @@ def train(cfg: dict) -> Path:
     (output / "best.pt").unlink(missing_ok=True)
     (output / "history.jsonl").write_text("", encoding="utf-8")
     (output / "hard_negatives.json").unlink(missing_ok=True)
+    (output / "nonfinite_batch.json").unlink(missing_ok=True)
     write_json(
         output / "training_data.json",
         {
@@ -401,6 +428,16 @@ def train(cfg: dict) -> Path:
                         loss, parts = compute_loss(
                             model, batch, cache.patch_hw, **loss_cfg
                         )
+                    values = {
+                        "loss": loss.item(),
+                        **{
+                            k: parts[k].item()
+                            for k in ("grounding", "identity", "retrieval", "state")
+                        },
+                    }
+                    _require_finite_loss(
+                        values, rows, epoch + 1, global_step + 1, amp_enabled, output
+                    )
                     scaler.scale(loss).backward()
                     global_step += 1
                     should_log = run is not None and (
@@ -414,13 +451,6 @@ def train(cfg: dict) -> Path:
                     scaler.step(optimizer)
                     scaler.update()
 
-                    values = {
-                        "loss": loss.item(),
-                        **{
-                            k: parts[k].item()
-                            for k in ("grounding", "identity", "retrieval", "state")
-                        },
-                    }
                     values["identity_active"] = float(values["identity"] > 0)
                     for name, value in values.items():
                         totals[name] += value * len(rows)

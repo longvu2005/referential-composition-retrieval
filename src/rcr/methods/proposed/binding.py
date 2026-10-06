@@ -75,21 +75,26 @@ class EvidenceBinding(nn.Module):
         if persons.shape[1] == 0:
             return persons
 
-        update, _ = self.person_attn(
-            persons,
-            scene,
-            scene,
-            attn_mask=self._geo_bias(boxes, patch_hw),
-            need_weights=False,
-        )
+        # A float32 bias alone is insufficient: SDPA under FP16 autocast can
+        # overflow on large geometry offsets. Keep this attention region FP32;
+        # the text encoder, reference attention and FFNs still use outer AMP.
+        with torch.autocast(persons.device.type, enabled=False):
+            update, _ = self.person_attn(
+                persons.float(),
+                scene.float(),
+                scene.float(),
+                attn_mask=self._geo_bias(boxes, patch_hw),
+                need_weights=False,
+            )
         persons = self.norm_p(persons + update)
         return self.norm_out(persons + self.ffn(persons))
 
     def _geo_bias(self, boxes: Tensor, patch_hw: tuple[int, int]) -> Tensor:
         """Return additive geometry bias [B*H, K, P] for normalized xyxy boxes."""
 
-        # Zero-width padded boxes produce offsets above FP16's finite range.
-        # Keep geometry and its MLP in FP32, including the additive attention bias.
+        # Padding/degenerate boxes have no geometry. Give them a neutral bias
+        # rather than dividing patch offsets by 1e-6. Valid small boxes retain
+        # their original geometry, protected by the FP32 attention above.
         with torch.autocast(boxes.device.type, enabled=False):
             boxes = boxes.float()
             hp, wp = patch_hw
@@ -100,6 +105,9 @@ class EvidenceBinding(nn.Module):
             yy, xx = torch.meshgrid(y, x, indexing="ij")
             patches = torch.stack((xx, yy), dim=-1).reshape(-1, 2)
 
+            valid = (boxes[..., 2] > boxes[..., 0]) & (boxes[..., 3] > boxes[..., 1])
+            neutral = boxes.new_tensor([0.0, 0.0, 1.0, 1.0])
+            boxes = torch.where(valid[..., None], boxes, neutral)
             x1, y1, x2, y2 = boxes.unbind(-1)
             w = (x2 - x1).clamp_min(1e-6)
             h = (y2 - y1).clamp_min(1e-6)
@@ -112,6 +120,7 @@ class EvidenceBinding(nn.Module):
             dh = torch.log(h)[..., None].expand_as(dy)
 
             bias = self.geo(torch.stack((dx, dy, dw, dh), dim=-1))
+            bias = bias.masked_fill(~valid[..., None, None], 0)
             bias = bias.permute(0, 3, 1, 2)
             b, h, k, p = bias.shape
             return bias.reshape(b * h, k, p)
