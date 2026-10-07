@@ -25,14 +25,14 @@ never creates environments or installs packages.
 ## CLIP
 
 ```bash
-python tools/methods/run.py run --config configs/methods/clip.yaml --prepare
+python scripts/run.py run --config configs/clip.yaml --prepare
 # Reuse prepared weights/cache:
-python tools/methods/run.py run --config configs/methods/clip.yaml
+python scripts/run.py run --config configs/clip.yaml
 # Split the experiment into val selection and frozen test:
-python tools/methods/run.py run --config configs/methods/clip.yaml --splits val
-python tools/methods/run.py run --config configs/methods/clip.yaml --splits test
+python scripts/run.py run --config configs/clip.yaml --splits val
+python scripts/run.py run --config configs/clip.yaml --splits test
 # Run only image/text baselines:
-python tools/methods/run.py run --config configs/methods/clip.yaml --modes clip_image clip_text
+python scripts/run.py run --config configs/clip.yaml --modes clip_image clip_text
 ```
 
 One official OpenAI CLIP checkpoint contains both encoders. There is no separate
@@ -70,10 +70,10 @@ selection file with that mode; select both if both will be tested later.
 For a fixed-weight ablation or retrieval smoke check:
 
 ```bash
-python tools/methods/run.py retrieve --config configs/methods/clip.yaml \
+python scripts/run.py retrieve --config configs/clip.yaml \
   --modes early_fusion --splits val --max-queries 2 \
   --set fusion.image_weight=0.4 fusion.text_weight=0.6
-python tools/methods/run.py evaluate --config configs/methods/clip.yaml \
+python scripts/run.py evaluate --config configs/clip.yaml \
   --modes early_fusion --splits val --max-queries 2
 ```
 
@@ -83,8 +83,8 @@ Use the same mode/split/subset when evaluating saved results.
 ## FAFA
 
 ```bash
-python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
-python tools/methods/run.py run --config configs/methods/fafa.yaml
+python scripts/run.py run --config configs/fafa.yaml --prepare
+python scripts/run.py run --config configs/fafa.yaml
 ```
 
 `prepare` gets the pinned official source, released checkpoint, CLIP selector,

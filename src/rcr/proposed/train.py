@@ -231,6 +231,12 @@ def train(cfg: dict) -> Path:
         lru_mib=cache_cfg.get("lru_mib", 0),
     )
     cache.validate_gallery(data.gallery_ids)
+    expected_backend = cfg.get("person_encoder", {}).get("backend")
+    actual_backend = (cache.encoder_metadata.get("person_encoder") or {}).get(
+        "backend", "dino"
+    )
+    if expected_backend is not None and expected_backend != actual_backend:
+        raise ValueError("cache person encoder differs from the training config")
     candidate_ids = split_image_ids(data, "train")
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}

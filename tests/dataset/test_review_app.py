@@ -9,7 +9,7 @@ from labelstudio.review.app import (
     build_task_payload,
     validate_submission,
 )
-from rcr.utils.jsonl import load_jsonl, write_jsonl
+from rcr.common.io import load_jsonl, write_jsonl
 
 BOXES = {
     "1_1": [

@@ -66,6 +66,10 @@ def load_rcr_data(
     if len(images_by_id) != len(images):
         raise ValueError("duplicate image_id in images.jsonl")
     gallery_ids = [row["image_id"] for row in gallery]
+    if len(set(gallery_ids)) != len(gallery_ids) or set(gallery_ids) != set(
+        images_by_id
+    ):
+        raise ValueError("gallery must contain every registered image exactly once")
     splits = _load_split_ids(final_dir)
     seen = set()
     for name, ids in splits.items():
@@ -74,6 +78,8 @@ def load_rcr_data(
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate sample_id in {name}.txt")
         seen.update(ids)
+    if seen != set(samples_by_id):
+        raise ValueError("splits must contain every sample exactly once")
 
     gt_head_boxes_by_image = defaultdict(list)
     for box in head_boxes:

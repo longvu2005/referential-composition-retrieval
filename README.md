@@ -24,15 +24,18 @@ The benchmark uses four case types:
 
 ## Code layout
 
-- `tools/methods/run.py`: the single experiment CLI.
-- `configs/methods/{proposed,clip,fafa}.yaml`: one config per method.
+- `scripts/run.py`: the single experiment CLI.
+- `configs/{proposed,clip,fafa}.yaml`: one config per method.
 - `configs/ablations/*.yaml`: explicit experiments.
-- `src/rcr/methods/proposed/`: cache, train loop, model, loss and retrieval.
-- `src/rcr/methods/baselines/`: CLIP, official FAFA adapter and val tuning.
-- `src/rcr/methods/common/`: shared loader, device, result paths and evaluation I/O.
+- `src/rcr/proposed/`: training, losses, ranking and experiments; `nn/` holds
+  model components and `cache/` holds frozen feature extraction/loading.
+- `src/rcr/baselines/`: CLIP, official FAFA adapter and val tuning.
+- `src/rcr/common/`: shared data loading, runtime, I/O and detection utilities.
 - `src/rcr/evaluation/`: shared benchmark protocol and metrics.
-- `dataset/`, `src/rcr/dataset/`, `tools/dataset/`, `labelstudio/`: dataset pipeline.
-- `scripts/`: dataset launchers; method experiments use the Python CLI directly.
+- `dataset/`, `src/rcr/dataset/`, `scripts/data/`, `labelstudio/`: dataset pipeline.
+- `scripts/`: experiment CLI, isolated FAFA worker and dataset launchers.
+
+See [where to edit and the path migration table](docs/code_structure.md).
 
 Dependency direction: CLI → method functions → model / shared utilities.
 Model and loss modules do not import the CLI. There is no trainer framework,
@@ -78,17 +81,17 @@ See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash
 # Main model: build/reuse caches, train, validation.
-.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --prepare --build-cache --train --splits val
+.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
 
 # Joint 2D validation calibration; only the selected pair reaches test.
-.venv-proposed/bin/python tools/methods/run.py ablate --config configs/calibration/joint.yaml --splits val test
+.venv-proposed/bin/python scripts/run.py ablate --config configs/calibration.yaml --splits val test
 
 # Score-term removals from the same calibrated checkpoint/shortlist.
-.venv-proposed/bin/python tools/methods/run.py ablate --config configs/ablations/binding.yaml --splits val test
+.venv-proposed/bin/python scripts/run.py ablate --config configs/ablations/binding.yaml --splits val test
 
 # CLIP and native FAFA baselines use their respective environments/configs.
-.venv-clip/bin/python tools/methods/run.py run --config configs/methods/clip.yaml --prepare
-.venv-fafa/bin/python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
+.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --prepare
+.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --prepare
 ```
 
 The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only
@@ -117,14 +120,14 @@ Detailed [proposed workflow](docs/proposed_runs.md),
 [baseline workflow](docs/baselines.md), and [new ablations](docs/ablations.md).
 Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
 retraining. The old identity-amplitude, coarse-only, loss and sampling suites
-have been removed. Calibration lives separately in `configs/calibration/`.
+have been removed. Calibration lives separately in `configs/calibration.yaml`.
 
 ## Tests
 
 ```bash
 .venv-proposed/bin/python -m pip install -e '.[dev]'
 .venv-proposed/bin/python -m pytest -q
-ruff check src tools tests labelstudio
+python -m ruff check src scripts tests labelstudio
 ```
 
 Tests use tiny local encoders/caches, including gradient isolation, same-person
@@ -193,9 +196,9 @@ The accepted Stage-2 text is treated as immutable input. The normal rebuild
 sequence is:
 
 ```bash
-bash scripts/phase1_rewrite.bash prepare
-python tools/dataset/prepare_handoffs.py positives
-bash scripts/phase2_finalize.bash --version 0.2.0
+bash scripts/data/phase1_rewrite.bash prepare
+python scripts/data/prepare_handoffs.py positives
+bash scripts/data/phase2_finalize.bash --version 0.2.0
 ```
 
 `phase2_finalize.bash` validates positive decisions and writes the deterministic

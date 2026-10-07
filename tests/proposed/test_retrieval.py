@@ -117,6 +117,12 @@ class _Cache:
         self.mask = torch.ones(len(self.image_ids), 1, dtype=torch.bool)
         self.patch_hw = (1, 1)
         self.global_features = self.scenes.mean(dim=1)
+        self.scene_dim = self.person_dim = 8
+        self.encoder_metadata = {
+            "image_encoder": None,
+            "person_encoder": None,
+            "detector": None,
+        }
 
     @property
     def by_id(self):

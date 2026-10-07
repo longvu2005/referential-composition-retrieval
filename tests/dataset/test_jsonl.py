@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from rcr.utils.jsonl import load_jsonl, write_jsonl
+from rcr.common.io import load_jsonl, write_jsonl
 
 
 def test_jsonl_round_trip(tmp_path: Path) -> None:

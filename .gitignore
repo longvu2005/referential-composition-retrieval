@@ -11,8 +11,8 @@ __pycache__/
 .ipynb_checkpoints/
 .coverage
 htmlcov/
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 
 # Data files
@@ -21,6 +21,7 @@ dataset/data/work/*
 
 # Virtual environments and secrets
 .venv/
+.venv-*/
 venv/
 .env
 .env.*
@@ -31,16 +32,19 @@ venv/
 .idea/
 
 # Runtime artifacts
-cache/
-runs/
-wandb/
+/cache/
+/runs/
+/wandb/
 *.log
 *.tmp
 
 # Model checkpoints
-checkpoints/*
-!checkpoints/README.md
+/checkpoints/*
+!/checkpoints/README.md
 
 # Machine-local image directory or symbolic link
 dataset/data/raw/images/*
 !dataset/data/raw/images/.gitkeep
+
+# External upstream sources
+/third_party/

@@ -13,7 +13,7 @@ Neither interface requires Label Studio. Canonical data remains under
 Prepare or refresh the cumulative review catalog:
 
 ```bash
-python tools/dataset/prepare_handoffs.py review
+python scripts/data/prepare_handoffs.py review
 ```
 
 Run:
@@ -43,14 +43,14 @@ Subject assignment but cannot be moved, resized, created, or deleted.
 Prepare or refresh the cumulative positive catalog after rewrite review:
 
 ```bash
-python tools/dataset/prepare_handoffs.py positives
+python scripts/data/prepare_handoffs.py positives
 ```
 
 Add `--clip-rerank` to rank only newly reviewed tasks with CLIP. Existing tasks
 are never reranked. With no new task, CLIP is not loaded. Stop this UI before
 running the finalization command because that launcher validates and may
 rewrite the saved positive decisions. For example,
-`bash scripts/phase2_finalize.bash --version 0.2.0` builds a new export after
+`bash scripts/data/phase2_finalize.bash --version 0.2.0` builds a new export after
 the checked-in version `0.1.0`; this command also requires a working local
 image tree.
 

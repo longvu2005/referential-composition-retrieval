@@ -2,9 +2,9 @@
 
 from collections import defaultdict
 
+from rcr.common.data import split_image_ids, split_samples
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.rewrite import validate_review_output
-from rcr.methods.common.data import split_image_ids, split_samples
 
 
 def positive_conflicts(samples: list[dict]) -> list[dict]:

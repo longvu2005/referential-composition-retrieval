@@ -115,7 +115,7 @@ def test_evaluate_cli(tmp_path: Path, templated) -> None:
     subprocess.run(
         [
             sys.executable,
-            "tools/methods/run.py",
+            "scripts/run.py",
             "evaluate",
             "--config",
             str(config),

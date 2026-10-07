@@ -13,7 +13,7 @@ z_sem = normalize(P_sem(h))      # 384 dimensions
 ```
 
 Use the official pinned FAFA checkpoint and preprocessing from
-`configs/methods/fafa.yaml`. Pool `extract_features(..., mode="image").image_embeds`,
+`configs/fafa.yaml`. Pool `extract_features(..., mode="image").image_embeds`,
 before native `vision_proj`; never pool projected features or multimodal outputs.
 The complete image-only trunk, including Q-Former, is frozen/eval during cache
 construction. No instruction enters this cache. `h` is cached, not learned heads.

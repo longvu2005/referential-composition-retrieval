@@ -8,10 +8,10 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from rcr.common.io import load_jsonl, write_jsonl
 from rcr.dataset.rewrite import prepare_rewrite_inputs
 from rcr.dataset.selection import select_samples
-from rcr.utils.jsonl import load_jsonl, write_jsonl
-from tools.dataset import build_final, prepare_handoffs, prepare_rewrite
+from scripts.data import build_final, prepare_handoffs, prepare_rewrite
 
 
 def _source(query, target, identity, split):

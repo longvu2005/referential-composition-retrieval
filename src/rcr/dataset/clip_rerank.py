@@ -9,7 +9,7 @@ import open_clip
 import torch
 from PIL import Image
 
-from rcr.utils.images import image_relative_path as _image_relative_path
+from rcr.common.io import image_relative_path as _image_relative_path
 
 IMAGE_ROOT = Path("dataset/data/raw/images")
 CACHE_ROOT = Path("cache/features/clip_vit_b32_openai")

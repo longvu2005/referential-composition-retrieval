@@ -81,63 +81,6 @@ class GalleryCache:
         if self.image_ids != image_ids:
             raise ValueError("cache gallery IDs/order differ from finalized data")
 
-    def validate_files(self) -> None:
-        """Check completeness without loading models or reading every scene tensor."""
-        for i in range(len(self.image_ids)):
-            path = self.root / "features" / f"{i}.pt"
-            if not path.is_file() or not path.stat().st_size:
-                raise ValueError(f"cache feature missing/empty: {path}")
-        if self._scene_cache is not None:
-            self._scene_cache.validate_files()
-
-    def validate_encoders(self, cfg: dict) -> None:
-        """Do not reinterpret an old DINO cache as FAFA merely because widths match."""
-        expected = cfg.get("person_encoder")
-        if expected is None:
-            return  # Small in-memory test configs have no external encoder spec.
-        if self._scene_cache is not None:
-            self._scene_cache.validate_encoders(
-                {**cfg, "person_encoder": {"backend": "dino"}}
-            )
-        if self.format_version == 1:
-            if expected["backend"] != "dino" or not cfg.get("cache", {}).get(
-                "allow_legacy_dino", False
-            ):
-                raise ValueError(
-                    "legacy DINO cache requires cache.allow_legacy_dino=true"
-                )
-            # Legacy files cannot prove their model/detector provenance. This is
-            # an explicit user assertion, never inferred from equal feature widths.
-            height, width = cfg["image_encoder"]["scene_size"]
-            if self.patch_hw != (height // 16, width // 16):
-                raise ValueError("legacy DINO patch grid differs from scene_size")
-            return
-        if self.format_version not in (2, 3):
-            raise ValueError("unsupported cache format")
-        actual = self.encoder_metadata["person_encoder"] or {}
-        if actual.get("backend") != expected["backend"]:
-            raise ValueError(
-                "cache person encoder differs; use a matching cache directory"
-            )
-        if self.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
-            raise ValueError("cache image encoder/preprocessing differs from config")
-        if self.encoder_metadata["detector"] != cfg["detector"]:
-            raise ValueError("cache detector differs from config")
-        if expected["backend"] == "fafa":
-            from rcr.methods.proposed.person_encoder import fafa_spec, load_fafa_config
-
-            native_cfg = load_fafa_config(cfg)
-            if actual.get("spec") != fafa_spec(native_cfg):
-                raise ValueError(
-                    "cache FAFA checkpoint/source/preprocessing spec differs"
-                )
-            checkpoint = Path(native_cfg["checkpoint"]["path"])
-            if checkpoint.is_file():
-                from rcr.methods.common.results import sha256_file
-
-                if actual.get("checkpoint_sha256") != sha256_file(checkpoint):
-                    raise ValueError("cache FAFA checkpoint weights differ")
-
     def _read_feature(self, index: int) -> dict:
         item = torch.load(
             self.root / "features" / f"{index}.pt",

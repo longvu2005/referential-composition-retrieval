@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 import torch
 
+from rcr.common.io import save_results, scores_to_rankings
 from rcr.evaluation.evaluate import evaluate_retrieval_output
-from rcr.methods.common.results import save_results, scores_to_rankings
 
 
 def inputs():

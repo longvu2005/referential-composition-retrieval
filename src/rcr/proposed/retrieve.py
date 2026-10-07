@@ -98,6 +98,13 @@ def retrieve_experiments(
     cache.validate_gallery(data.gallery_ids)
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")
+    if (cache.scene_dim, cache.person_dim) != (
+        checkpoint.get("input_dim", dim),
+        checkpoint["person_input_dim"],
+    ):
+        raise ValueError("retrieval feature dimensions differ from training")
+    if cache.encoder_metadata != checkpoint.get("encoder_metadata"):
+        raise ValueError("retrieval encoder metadata differs from training")
 
     from transformers import AutoModel, AutoTokenizer
 

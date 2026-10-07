@@ -7,8 +7,8 @@ The previous ablation set has been removed. This version focuses on the backbone
 This step selects inference coefficients; it is **not an architectural ablation**:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py ablate \
-  --config configs/calibration/joint.yaml --splits val test
+.venv-proposed/bin/python scripts/run.py ablate \
+  --config configs/calibration.yaml --splits val test
 ```
 
 An 8 × 7 grid jointly selects `coarse_beta` and `fine_coarse_weight` using **final Full-mAP on the validation set**, at Top-500. Only the winning coefficient pair is evaluated on the test set. The selected coefficients and the checkpoint/validation fingerprint are stored in `runs/calibration/selected.yaml`.
@@ -20,7 +20,7 @@ Do not select models or coefficients using the test set. Re-run calibration when
 Run this after calibration:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py ablate \
+.venv-proposed/bin/python scripts/run.py ablate \
   --config configs/ablations/binding.yaml --splits val test
 ```
 
@@ -42,10 +42,10 @@ DINO crop features for the DINO controls. FAFA variants add the separate person
 cache built by the main pipeline. Reuse your existing DINO cache or build it once:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py build-cache \
-  --config configs/methods/proposed.yaml --cache-stage dino
+.venv-proposed/bin/python scripts/run.py build-cache \
+  --config configs/proposed.yaml --cache-stage dino
 
-.venv-proposed/bin/python tools/methods/run.py ablate \
+.venv-proposed/bin/python scripts/run.py ablate \
   --config configs/ablations/representation.yaml --splits val test
 ```
 
@@ -80,7 +80,7 @@ to each experiment to run paired seeds. Run names automatically include the swee
 ## 4. Optional: retrain the binding variants
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py ablate \
+.venv-proposed/bin/python scripts/run.py ablate \
   --config configs/ablations/binding_train.yaml --splits val test
 ```
 

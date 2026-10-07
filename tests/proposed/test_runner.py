@@ -310,6 +310,35 @@ def test_training_rejects_using_state_without_its_loss(experiment, local_stages)
         training_cli.train(cfg)
 
 
+def test_training_rejects_wrong_person_backend_without_native_assets(
+    experiment, local_stages
+):
+    cfg, path = experiment
+    cli.main(["build-cache", "--config", str(path)])
+    cfg["person_encoder"].update(backend="fafa", fafa_config="missing-fafa.yaml")
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match="cache person encoder differs"):
+        cli.main(["train", "--config", str(path)])
+
+
+@pytest.mark.parametrize("mismatch", ["width", "metadata"])
+def test_retrieval_rejects_checkpoint_cache_mismatch(
+    experiment, local_stages, mismatch
+):
+    cfg, path = experiment
+    cli.main(
+        ["run", "--config", str(path), "--build-cache", "--train", "--splits", "val"]
+    )
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    if mismatch == "width":
+        checkpoint["person_input_dim"] += 1
+    else:
+        checkpoint["encoder_metadata"]["person_encoder"] = {"backend": "fafa"}
+    torch.save(checkpoint, cfg["checkpoint"])
+    with pytest.raises(ValueError, match="differ.*training"):
+        cli.main(["retrieve", "--config", str(path), "--splits", "val"])
+
+
 def test_validation_fingerprint_never_depends_on_test_labels(experiment):
     from rcr.common.data import load_rcr_data, split_fingerprint
 

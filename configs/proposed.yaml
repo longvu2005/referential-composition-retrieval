@@ -18,7 +18,7 @@ image_encoder:
 person_encoder:
   backend: fafa              # fafa | dino (backbone control)
   python: .venv-fafa/bin/python
-  fafa_config: configs/methods/fafa.yaml
+  fafa_config: configs/fafa.yaml
   batch_size: 4
 cache:
   # Legacy Kaggle DINO files lack encoder metadata. Confirm image_encoder/detector
@@ -76,7 +76,7 @@ retrieval:
   rerank: true                  # false keeps the complete coarse ranking
   binding_mode: null           # null inherits model; inference binding ablations
   # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
-  # Tune BOTH weights with configs/calibration/joint.yaml after training.
+  # Tune BOTH weights with configs/calibration.yaml after training.
   fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64

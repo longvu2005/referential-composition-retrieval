@@ -90,7 +90,7 @@ def fafa_preparation(tmp_path, monkeypatch):
     ],
 )
 def test_fafa_prepare_uses_supported_gdown_api(fafa_preparation, monkeypatch, url):
-    import gdown
+    gdown = pytest.importorskip("gdown")
 
     cfg, config_path = fafa_preparation
     cfg["checkpoint"]["source_url"] = url
@@ -118,7 +118,7 @@ def test_fafa_prepare_uses_supported_gdown_api(fafa_preparation, monkeypatch, ur
 def test_fafa_failed_download_preserves_existing_checkpoint(
     fafa_preparation, monkeypatch
 ):
-    import gdown
+    gdown = pytest.importorskip("gdown")
 
     cfg, config_path = fafa_preparation
     config_path.write_text(yaml.safe_dump(cfg))

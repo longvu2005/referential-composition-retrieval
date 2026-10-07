@@ -1,6 +1,6 @@
 # Optional: retrain score-removal variants on the same FAFA cache.
 # Semantic context and coarse identity remain present in every variant.
-base_config: configs/methods/proposed.yaml
+base_config: configs/proposed.yaml
 stage: train
 output_dir: runs/ablations/binding_train
 experiments:

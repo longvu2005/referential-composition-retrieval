@@ -16,11 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from rcr.common.io import image_relative_path as _image_relative_path
+from rcr.common.io import load_jsonl, write_jsonl
 from rcr.dataset.cases import CASE_TYPES, EDITABLE_CASE_TYPES, ONE_SUBJECT_CASES
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.rewrite import validate_review_output
-from rcr.utils.images import image_relative_path as _image_relative_path
-from rcr.utils.jsonl import load_jsonl, write_jsonl
 
 INPUT = Path("dataset/data/work/review/review_input.jsonl")
 OUTPUT = Path("dataset/data/work/review/reviewed.jsonl")

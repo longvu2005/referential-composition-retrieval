@@ -10,13 +10,10 @@ from PIL import Image, ImageOps
 from torch import nn
 from tqdm import tqdm
 
-from rcr.methods.common.anchors import match_heads_to_persons
-from rcr.methods.common.data import load_rcr_data
-from rcr.methods.common.detector import detect
-from rcr.methods.common.experiment import resolve_device
-from rcr.methods.proposed.cache import GalleryCache
-from rcr.methods.proposed.encoders import ImageEncoder
-from rcr.methods.proposed.person_encoder import run_person_worker
+from rcr.common.runtime import resolve_device
+from rcr.common.vision import detect, match_heads_to_persons
+from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.nn.encoders import ImageEncoder
 
 
 def boxes_to_scene(
@@ -75,7 +72,6 @@ def build_cache(
     if (root / "index.pt").is_file() and not (root / ".building").exists():
         cache = GalleryCache(root)
         cache.validate_gallery(image_ids)
-        cache.validate_files()
         for key, value in (encoder_metadata or {}).items():
             if cache.encoder_metadata[key] != value:
                 raise ValueError(
@@ -265,57 +261,6 @@ class _LetterboxProcessor:
             do_center_crop=False,
             return_tensors=return_tensors,
         )
-
-
-def dino_root(cfg: dict) -> Path:
-    if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
-        return Path(cfg["data"]["cache"])
-    return Path(cfg["data"]["dino_cache"])
-
-
-def existing_cache(cfg: dict, root: Path, *, scene_root: Path | None = None):
-    if not (root / "index.pt").is_file() or (root / ".building").exists():
-        return None
-    cache = GalleryCache(root, scene_root=scene_root)
-    cache.validate_encoders(cfg)
-    cache.validate_files()
-    return cache
-
-
-def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
-    """Build DINO and/or FAFA independently; completed caches stay immutable."""
-    backend = cfg.get("person_encoder", {}).get("backend", "dino")
-    if backend not in ("dino", "fafa"):
-        raise ValueError("person_encoder.backend must be dino or fafa")
-    if stage not in ("all", "dino", "persons"):
-        raise ValueError("cache stage must be all, dino or persons")
-    if stage == "persons" and backend != "fafa":
-        raise ValueError("persons stage requires person_encoder.backend=fafa")
-    data_cfg = cfg["data"]
-    root = dino_root(cfg)
-    if backend == "fafa" and root.resolve() == Path(data_cfg["cache"]).resolve():
-        raise ValueError("data.dino_cache and data.cache must be separate directories")
-    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
-    dino_cfg = {**cfg, "person_encoder": {"backend": "dino"}}
-    source = existing_cache(dino_cfg, root)
-    if source is not None:
-        source.validate_gallery(data.gallery_ids)
-        print(f"Using existing DINO cache: {root}", flush=True)
-    elif stage == "persons":
-        raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
-    if backend == "fafa" and stage != "dino":
-        if source is not None:
-            ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
-            if ready is not None:
-                ready.validate_gallery(data.gallery_ids)
-                print(f"Using existing FAFA cache: {data_cfg['cache']}", flush=True)
-                return
-        # Only check FAFA prerequisites when new extraction is actually needed.
-        run_person_worker(cfg, check=True)
-    if source is None:
-        _prepare_dino(cfg, data, root)
-    if backend == "fafa" and stage != "dino":
-        run_person_worker(cfg)
 
 
 def _prepare_dino(cfg: dict, data, root: Path) -> None:

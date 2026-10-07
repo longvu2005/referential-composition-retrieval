@@ -134,7 +134,7 @@ The canonical Stage 2 file has 14 fields per row: `sample_id`, `split`,
 passed Stage 2 QC and already contain the rewritten instruction.
 
 ```bash
-bash scripts/phase1_rewrite.bash prepare
+bash scripts/data/phase1_rewrite.bash prepare
 ```
 
 This validates every source row and ordered pair against `pair_data.json`,
@@ -149,7 +149,7 @@ does not invoke Gemini.
 After review edits, prepare or refresh the Full Positive catalog:
 
 ```bash
-python tools/dataset/prepare_handoffs.py positives
+python scripts/data/prepare_handoffs.py positives
 ```
 
 The 4,311 migrated catalog entries retain the original candidate order and all
@@ -163,7 +163,7 @@ seed target is first, selected and locked. The local UIs are in
 For CLIP ordering of **new** tasks only, use:
 
 ```bash
-python tools/dataset/prepare_handoffs.py positives --clip-rerank
+python scripts/data/prepare_handoffs.py positives --clip-rerank
 ```
 
 Without this flag, new non-seed candidates use deterministic image-ID order.
@@ -178,7 +178,7 @@ the builder currently defaults to `0.2.0`, so this explicit command produces
 a new version after successful finalization:
 
 ```bash
-bash scripts/phase2_finalize.bash --version 0.2.0
+bash scripts/data/phase2_finalize.bash --version 0.2.0
 ```
 
 The write operation preserves each positive set, including the seed, and orders

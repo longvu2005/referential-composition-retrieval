@@ -17,7 +17,7 @@ The proposed extra includes Torchvision, required by DINOv3's fast image
 processor. Reinstall `requirements/proposed.txt` when updating an existing venv.
 
 Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`, and
-`person_encoder.python` in `configs/methods/proposed.yaml`. All relative paths are
+`person_encoder.python` in `configs/proposed.yaml`. All relative paths are
 relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
 For Kaggle, use venv Python paths explicitly in every cell.
 
@@ -26,38 +26,38 @@ For Kaggle, use venv Python paths explicitly in every cell.
 ```bash
 # Download only FAFA source, checkpoint and runtime assets needed by person encoding.
 # Uses person_encoder.python; no baseline CLIP selector/detector is prepared.
-.venv-proposed/bin/python tools/methods/run.py prepare --config configs/methods/proposed.yaml
+.venv-proposed/bin/python scripts/run.py prepare --config configs/proposed.yaml
 
 # Stream 1: DINO scenes/detections/crops; no FAFA environment required.
-.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage dino
+.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage dino
 
 # Stream 2: FAFA persons from the completed DINO source.
-.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage persons
+.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage persons
 
 # Or ensure both caches; compatible completed stages are skipped.
-.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml
+.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml
 
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
-.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
+.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val
 
 # Select both inference coefficients jointly on val; only that pair reaches test.
-.venv-proposed/bin/python tools/methods/run.py ablate --config configs/calibration/joint.yaml --splits val test
+.venv-proposed/bin/python scripts/run.py ablate --config configs/calibration.yaml --splits val test
 
 # A later test run uses the same frozen selection.
-.venv-proposed/bin/python tools/methods/run.py run --config runs/calibration/selected.yaml --splits test
+.venv-proposed/bin/python scripts/run.py run --config runs/calibration/selected.yaml --splits test
 ```
 
 Equivalent one-command initial pipeline:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --prepare --build-cache --train --splits val
+.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
 ```
 
 For training another seed, reuse the cache and use a separate output directory.
 `run --train` sets its checkpoint to that directory's `best.pt` automatically:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val \
+.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val \
   --set train.seed=1 output.dir=runs/proposed_seed1
 ```
 
@@ -81,9 +81,9 @@ are needed to extract FAFA crops; the DINO source supplies detections, so this
 stage does not load DINO or rerun the detector:
 
 ```bash
-.venv-proposed/bin/python tools/methods/run.py prepare --config configs/methods/proposed.yaml
-.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage persons
-.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
+.venv-proposed/bin/python scripts/run.py prepare --config configs/proposed.yaml
+.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage persons
+.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val
 ```
 
 The supplied legacy cache has a 14 x 14 patch grid, 768 feature channels, FP16
@@ -104,9 +104,11 @@ DINO caches store explicit metadata and pixel boxes.
 | `data.cache` with DINO controls | The existing DINO directory | Reuses DINO crops/scenes without FAFA |
 
 Both builders skip a completed compatible cache before loading models. A
-completed cache with different encoders, gallery order, source ID or missing
-feature files fails explicitly; choose a new output directory for new settings.
-It is never silently replaced. `--force` remains an asset-preparation option.
+completed cache with different encoders, gallery order or source ID fails
+explicitly; choose a new output directory for new settings. Feature files are
+checked when read, without scanning the entire directory on every reuse. A
+missing file raises an I/O error; it does not silently trigger a rebuild.
+`--force` remains an asset-preparation option.
 
 Each unfinished directory has its own `.building` marker and `.build.pt`
 manifest. Feature files and final indexes are published atomically. Repeating
@@ -121,19 +123,22 @@ temporary file-backed tensor, requiring temporary disk space approximately equal
 to the final person index. FAFA stores FP32 scene means so later runs need not
 repool all legacy scene files.
 
-FAFA preflight runs only when new FAFA extraction is needed. The default `all`
-stage checks prerequisites before building a missing DINO source; the DINO-only
-stage is independent. Use `prepare` when assets are missing. Complete caches can
-be reused without a FAFA environment or raw images.
+The default `all` stage builds/reuses DINO, then builds/reuses FAFA persons.
+Native FAFA assets are loaded only by the person worker when extraction is
+needed; there is no extra preflight subprocess. Use `prepare` first when assets
+are missing. Complete caches can be reused without a FAFA environment or raw
+images. The saved FAFA YAML is still needed by `build-cache` to compare extraction
+settings.
 
 Old DINO checkpoints still need new training for the FAFA/dual architecture.
 Source/cache IDs and separate feature widths are checked against the training
 checkpoint. Keep historical run directories separately.
 
 After a successful build, training/retrieval read cached features only. They do
-not need native FAFA weights loaded or raw crop images opened. Keep the FAFA YAML
-for feature-provenance checks. Encoder environment paths are used only in prepare
-and cache extraction.
+not need native FAFA weights, its YAML or raw crop images. Training checks the
+requested person backend against the saved cache metadata; retrieval compares
+cache ID, feature widths and encoder metadata with the checkpoint. Encoder
+environment paths are used only in prepare and cache extraction.
 
 ## Outputs and diagnostics
 
@@ -158,5 +163,5 @@ Standalone query-limited retrieval/evaluation use matching `--max-queries`; norm
 ## New experiments
 
 See [the ablation guide](ablations.md). Calibration now lives in
-`configs/calibration/joint.yaml`; the old coarse/loss/sampling/identity-amplitude
+`configs/calibration.yaml`; the old coarse/loss/sampling/identity-amplitude
 ablation configurations have been removed.

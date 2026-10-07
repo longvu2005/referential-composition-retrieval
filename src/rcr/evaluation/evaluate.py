@@ -7,13 +7,13 @@ from statistics import fmean
 
 import torch
 
+from rcr.common.data import RCRData, split_image_ids
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.metrics import (
     average_precision,
     candidate_recall_at_k,
     recall_at_k,
 )
-from rcr.methods.common.data import RCRData, split_image_ids
 
 RECALL_KS = (1, 5, 10)
 
