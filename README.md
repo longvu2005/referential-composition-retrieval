@@ -35,10 +35,11 @@ The benchmark uses four case types:
 - `dataset/`, `src/rcr/dataset/`, `scripts/data/`, `labelstudio/`: dataset pipeline.
 - `scripts/`: experiment CLI, isolated FAFA worker and dataset launchers.
 
-See [where to edit and the path migration table](docs/code_structure.md).
+See [where to edit and module responsibilities](docs/code_structure.md).
 
 Dependency direction: CLI → method functions → model / shared utilities.
-Model and loss modules do not import the CLI. There is no trainer framework,
+YAML parsing lives in `common/config.py`; saved-result evaluation lives in
+`evaluation/runner.py`. Model and loss modules do not import the CLI. There is no trainer framework,
 recursive config inheritance or plugin registry. An ablation suite reads one
 method YAML and applies flat overrides. Method dependencies are imported only
 when that method/stage is used.
@@ -127,14 +128,23 @@ have been removed. Calibration lives separately in `configs/calibration.yaml`.
 ```bash
 .venv-proposed/bin/python -m pip install -e '.[dev]'
 .venv-proposed/bin/python -m pytest -q
-python -m ruff check src scripts tests labelstudio
+.venv-proposed/bin/python -m ruff check src scripts tests labelstudio
 ```
+
+The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
+`dev` includes SciPy for the FAFA matching adapter tests; native FAFA weights
+are not needed.
 
 Tests use tiny local encoders/caches, including gradient isolation, same-person
 binding, separate scene/person widths, empty sets, padding and the train/retrieve
 pipeline. The FAFA extraction contract is tested with a fake native trunk; tests
 do not download full weights or claim PIPA quality/CUDA throughput. Optional
 CLIP integration and CUDA tests require their corresponding dependencies/device.
+
+For an isolated CLIP environment, see [baseline setup](docs/baselines.md).
+`requirements.txt` installs the proposed method. The deterministic dataset
+pipeline uses the base package; optional candidate ordering with OpenCLIP needs
+`pip install -e '.[dataset]'`. No Gemini client is required by the current pipeline.
 
 ## Current dataset snapshot
 

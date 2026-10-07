@@ -367,3 +367,23 @@ def test_inference_rejects_checkpoint_with_untrained_state(
     )
     with pytest.raises(ValueError, match="state branch is untrained"):
         cli.main(["retrieve", "--config", str(path)])
+
+
+@pytest.mark.parametrize(
+    "override", ["train.epochs=0", "train.batch_size=0", "evaluation.every_epochs=0"]
+)
+def test_invalid_training_schedule_never_prepares_assets(
+    experiment, local_stages, monkeypatch, override
+):
+    from rcr.proposed.cache import build
+
+    _, path = experiment
+    monkeypatch.setattr(
+        build, "run_person_worker", lambda *a, **k: pytest.fail("prepared assets")
+    )
+    with pytest.raises(SystemExit):
+        cli.main([
+            "run", "--config", str(path), "--prepare", "--build-cache", "--train",
+            "--set", override,
+        ])
+    assert not local_stages

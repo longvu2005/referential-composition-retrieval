@@ -3,7 +3,12 @@
 import argparse
 from pathlib import Path
 
-import yaml
+from rcr.common.config import (
+    load_config,
+    override_config,
+    parse_overrides,
+    validate_training_schedule,
+)
 
 
 def main(argv=None):
@@ -40,19 +45,18 @@ def main(argv=None):
     ablate.add_argument("--splits", nargs="+", choices=("val", "test"), default=["val"])
     args = parser.parse_args(argv)
 
-    from rcr.common.runtime import override_config
-
-    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    overrides = dict(item.split("=", 1) for item in args.set)
-    cfg = override_config(
-        cfg, {key: yaml.safe_load(value) for key, value in overrides.items()}
-    )
+    try:
+        cfg = override_config(load_config(args.config), parse_overrides(args.set))
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     command = args.command
     if command == "ablate":
         from rcr.proposed.experiments import run_ablation
 
         return run_ablation(cfg, Path(__file__).resolve(), splits=args.splits)
-    method = cfg["method"]
+    method = cfg.get("method")
+    if method not in ("proposed", "clip", "fafa"):
+        parser.error("method must be proposed, clip or fafa")
     if command in ("train", "build-cache") and method != "proposed":
         parser.error("train/build-cache are only available for proposed")
     if command == "run":
@@ -60,6 +64,13 @@ def main(argv=None):
             parser.error("--train/--build-cache are only available for proposed")
         if args.force and not args.prepare:
             parser.error("--force requires --prepare")
+    if command == "train" or (command == "run" and args.train):
+        try:
+            validate_training_schedule(cfg)
+        except (KeyError, ValueError) as error:
+            parser.error(str(error))
+        if command == "run" and not cfg.get("evaluation", {}).get("enabled", False):
+            parser.error("run --train requires validation to select best.pt")
     if getattr(args, "modes", None) and method != "clip":
         parser.error("--modes is only available for CLIP")
     if getattr(args, "max_queries", None) is not None and args.max_queries < 1:
@@ -108,7 +119,7 @@ def main(argv=None):
 
         return run_experiment(cfg, modes=args.modes, splits=splits)
 
-    from rcr.common.runtime import evaluate_run
+    from rcr.evaluation.runner import evaluate_run
 
     if command == "retrieve":
         if method == "proposed":

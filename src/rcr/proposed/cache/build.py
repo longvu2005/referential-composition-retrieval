@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from rcr.common.config import load_config
 from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.proposed.cache.dino import _prepare_dino
@@ -14,7 +15,7 @@ from rcr.proposed.cache.store import GalleryCache
 
 def load_fafa_config(cfg: dict) -> dict:
     path = Path(cfg["person_encoder"]["fafa_config"])
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return load_config(path)
 
 
 def fafa_spec(cfg: dict) -> dict:

@@ -94,11 +94,15 @@ class GalleryCache:
         return item
 
     def _load_item(self, index: int) -> dict:
-        item = self._read_feature(index)
         if self._scene_cache is not None:
-            if item.get("source_cache_id") != self._scene_cache.cache_id:
-                raise ValueError("FAFA person feature has a different DINO source")
-            item = {**self._scene_cache._load_item(index), "persons": item["persons"]}
+            # The published person index is authoritative. FAFA shards are only
+            # extraction checkpoints and may be removed during finalization.
+            # Clone the row so a small LRU item does not retain/count the whole
+            # memory-mapped person index as its tensor storage.
+            persons = self.persons[index, self.mask[index]].clone()
+            item = {**self._scene_cache._load_item(index), "persons": persons}
+        else:
+            item = self._read_feature(index)
         if item["scene"].shape != (
             self.patch_hw[0] * self.patch_hw[1],
             self.scene_dim,

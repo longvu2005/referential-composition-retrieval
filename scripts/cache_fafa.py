@@ -2,7 +2,7 @@
 
 import argparse
 
-import yaml
+from rcr.common.config import load_config
 
 
 def main(argv=None):
@@ -13,8 +13,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.force and not args.prepare:
         parser.error("--force requires --prepare")
-    with open(args.config, encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
+    cfg = load_config(args.config)
     if args.prepare:
         from rcr.baselines.prepare import prepare_fafa_model
         from rcr.proposed.cache.build import load_fafa_config

@@ -201,10 +201,11 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
         persons[0], torch.tensor([[2.5, 3.5, 4.5, 5.5, 6.5]] * 2)
     )
     torch.testing.assert_close(cache.global_features, loaded_scene.mean(1))
-    saved = torch.load(root / "features/0.pt", weights_only=True)["persons"]
+    saved = torch.load(root / "index.pt", weights_only=True)["persons"]
     assert saved.untyped_storage().nbytes() == saved.numel() * saved.element_size()
     assert before == {p: p.read_bytes() for p in source_root.rglob("*") if p.is_file()}
-    assert "scene" not in torch.load(root / "features/0.pt", weights_only=True)
+    assert not (root / "features").exists()
+    assert "scene" not in torch.load(root / "index.pt", weights_only=True)
     check_cache_config(cache, cfg)
     monkeypatch.setattr(
         fafa_cache, "load_fafa", lambda *args: pytest.fail("loaded FAFA")

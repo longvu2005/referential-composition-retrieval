@@ -120,3 +120,25 @@ def test_retrieval_replaces_results_and_removes_previous_metrics(tmp_path):
     assert saved["rankings"].tolist() == [[2, 1]]
     assert json.loads((tmp_path / "run.json").read_text()) == {"num_queries": 1}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_saved_evaluation_rejects_changed_labels_without_overwriting_metrics(tmp_path):
+    from rcr.common.data import split_fingerprint
+    from rcr.evaluation.runner import evaluate_run
+
+    data, samples = inputs()
+    samples[0].update(target_image_id="a", final_change="Subject 1 is standing")
+    data.samples_by_id = {"s": samples[0]}
+    output = scores_to_rankings(
+        samples, ["q", "a", "b"], np.array([[0, 2, 1]], dtype=np.float32)
+    )
+    cfg = {"method": "clip", "mode": "clip_image", "split": "test",
+           "output": {"dir": str(tmp_path)}}
+    directory = tmp_path / "clip_image" / "test"
+    save_results(directory, output, {"split_sha256": split_fingerprint(data, "test")})
+    evaluate_run(cfg, data=data, samples=samples)
+    before = (directory / "metrics.json").read_bytes()
+    samples[0]["final_change"] = "Subject 1 is sitting"
+    with pytest.raises(ValueError, match="changed since retrieval"):
+        evaluate_run(cfg, data=data, samples=samples)
+    assert (directory / "metrics.json").read_bytes() == before

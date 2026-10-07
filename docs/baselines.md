@@ -116,3 +116,7 @@ The evaluator requires complete split-gallery rankings with self excluded.
 It reports Full/ID mAP and R@1/5/10 plus by-case/per-query metrics. Baselines do
 not fabricate coarse candidate metrics. Test currently has only 14 queries;
 use it as pipeline validation, not a publication-scale final benchmark.
+
+New baseline runs record `split_sha256`, using the same benchmark fingerprint as
+the proposed method. Saved-result evaluation rejects changed benchmark inputs;
+older rankings without this metadata still use gallery/sample consistency checks.

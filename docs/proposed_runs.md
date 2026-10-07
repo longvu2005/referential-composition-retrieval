@@ -100,14 +100,17 @@ DINO caches store explicit metadata and pixel boxes.
 | Directory | Contents | Usage |
 | --- | --- | --- |
 | `data.dino_cache` | DINO scenes, detections, identities, DINO crops/index | Shared immutable source; may be read-only Kaggle input |
-| `data.cache` with FAFA | FAFA person features/index, FP32 global scene means | References source ID; does not copy scene patches |
+| `data.cache` with FAFA | FAFA `index.pt` (persons + FP32 scene means) | References source ID; does not copy scene patches |
 | `data.cache` with DINO controls | The existing DINO directory | Reuses DINO crops/scenes without FAFA |
 
 Both builders skip a completed compatible cache before loading models. A
 completed cache with different encoders, gallery order or source ID fails
-explicitly; choose a new output directory for new settings. Feature files are
+explicitly; choose a new output directory for new settings. DINO feature files are
 checked when read, without scanning the entire directory on every reuse. A
-missing file raises an I/O error; it does not silently trigger a rebuild.
+missing DINO file raises an I/O error; it does not silently trigger a rebuild.
+For FAFA, the completed `index.pt` owns the person features; per-image FAFA
+shards are temporary extraction checkpoints and are removed after finalization.
+The loader reads the same indexed person features for coarse and fine scoring.
 `--force` remains an asset-preparation option.
 
 Each unfinished directory has its own `.building` marker and `.build.pt`
@@ -119,8 +122,11 @@ interrupted build without a resume manifest starts that incomplete stage again;
 completed legacy DINO files remain untouched.
 
 Large padded indexes are memory-mapped when loaded. FAFA index assembly uses a
-temporary file-backed tensor, requiring temporary disk space approximately equal
-to the final person index. FAFA stores FP32 scene means so later runs need not
+padded tensor in CPU RAM and writes `index.pt.tmp` before publishing `index.pt`.
+RAM must hold that padded tensor. The finalizer estimates disk needs plus a
+margin; when necessary it removes already-consumed FAFA shards before writing.
+If interrupted after such removal, resume re-extracts those images. DINO source
+files are never deleted. FAFA stores FP32 scene means so later runs need not
 repool all legacy scene files.
 
 The default `all` stage builds/reuses DINO, then builds/reuses FAFA persons.
@@ -145,6 +151,10 @@ environment paths are used only in prepare and cache extraction.
 `runs/proposed` contains config, tokenizer, `last.pt`, `best.pt`, history,
 training-data diagnostics and per-epoch train/val metrics. Split runs save
 `rankings.pt`, `run.json`, `metrics.json`; `run` writes `summary.csv`.
+Saved-result evaluation checks the recorded split fingerprint before writing
+metrics, rejecting changed query text, labels, gallery records or head annotations.
+Older results without a fingerprint retain the existing gallery/sample checks.
+Use a new retrieval run to evaluate changed benchmark inputs.
 
 W&B retains loss/metric keys and adds `train/binding_scale` and
 `epoch/binding_scale`; its cache config records both feature widths and encoder

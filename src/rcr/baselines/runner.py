@@ -17,7 +17,12 @@ from rcr.baselines.clip import (
     prepare_clip_inputs,
     write_clip_scores,
 )
-from rcr.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.common.data import (
+    load_rcr_data,
+    split_fingerprint,
+    split_image_ids,
+    split_samples,
+)
 from rcr.common.io import (
     image_signature,
     output_directory,
@@ -27,8 +32,9 @@ from rcr.common.io import (
     write_json,
     write_summary,
 )
-from rcr.common.runtime import evaluate_run, resolve_device
+from rcr.common.runtime import resolve_device
 from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.runner import evaluate_run
 
 
 def run_retrieval(cfg: dict, *, max_queries: int | None = None, data=None) -> dict:
@@ -81,6 +87,7 @@ def save_run(cfg, data, output, details, elapsed_seconds, *, query_subset=False)
             "mode": cfg.get("mode"),
             "config": cfg,
             "dataset_version": data.manifest.get("version"),
+            "split_sha256": split_fingerprint(data, cfg["split"]),
             "num_queries": len(output["sample_ids"]),
             "num_gallery": len(output["gallery_ids"]),
             "query_subset": query_subset,

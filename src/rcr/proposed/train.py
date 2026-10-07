@@ -12,6 +12,7 @@ import yaml
 from torch import nn
 from tqdm import tqdm
 
+from rcr.common.config import validate_training_schedule
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.common.io import write_json
 from rcr.common.runtime import resolve_device
@@ -187,6 +188,7 @@ def _require_finite_loss(values, rows, epoch, step, amp_enabled, output):
 
 def train(cfg: dict) -> Path:
     """Select best.pt by 0.5 * overall + 0.5 * macro-case validation Full-mAP."""
+    validate_training_schedule(cfg)
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     train_cfg = cfg["train"]

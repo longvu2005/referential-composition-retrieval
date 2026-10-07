@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import pytest
@@ -179,7 +180,11 @@ def test_fafa_resumes_saved_images_and_never_publishes_partial(
     fafa_cache.finish_fafa_cache(cfg)
     cache = GalleryCache(root, scene_root=source)
     assert calls == len(cache.image_ids) - 1
-    assert (root / "features/0.pt").read_bytes() == first
+    first_persons = torch.load(
+        io.BytesIO(first), weights_only=True
+    )["persons"]
+    torch.testing.assert_close(cache.persons[0, cache.mask[0]], first_persons)
+    assert not (root / "features").exists()
     assert cache.cache_id == manifest["cache_id"]
     assert not (root / ".build.pt").exists()
     assert not (root / ".persons.bin").exists()
@@ -213,11 +218,11 @@ def test_existing_cache_mismatch_fails_without_rebuilding(
         builder.prepare_cache(cfg)
 
 
-def test_complete_cache_does_not_scan_features_until_read(split_cache, monkeypatch):
+def test_complete_person_index_needs_only_dino_shards(split_cache, monkeypatch):
     cfg, _, source, _, _ = split_cache
     fafa_cache.finish_fafa_cache(cfg)
     root = Path(cfg["data"]["cache"])
-    (root / "features/0.pt").unlink()
+    assert not (root / "features").exists()
     monkeypatch.setattr(
         builder, "_prepare_dino", lambda *args: pytest.fail("rebuilt DINO")
     )
@@ -225,6 +230,16 @@ def test_complete_cache_does_not_scan_features_until_read(split_cache, monkeypat
         builder, "run_person_worker", lambda *args, **kw: pytest.fail("FAFA")
     )
     builder.prepare_cache(cfg)
+    cache = GalleryCache(root, scene_root=source)
+    _, persons, _, _, _ = cache.load(torch.tensor([0]))
+    torch.testing.assert_close(persons[0], cache.persons[0, cache.mask[0]].float())
+    # Older completed caches can retain shards. They must not make fine
+    # scoring read different persons from the coarse index.
+    (root / "features").mkdir()
+    torch.save({"persons": torch.full_like(persons[0], -999)}, root / "features/0.pt")
+    _, legacy_persons, _, _, _ = cache.load(torch.tensor([0]))
+    torch.testing.assert_close(legacy_persons, persons)
+    (source / "features/0.pt").unlink()
     with pytest.raises(FileNotFoundError):
         GalleryCache(root, scene_root=source).load(torch.tensor([0]))
 

@@ -11,15 +11,18 @@ from pathlib import Path
 
 import yaml
 
+from rcr.common.config import load_config, override_config, validate_training_schedule
 from rcr.common.data import load_rcr_data
 from rcr.common.io import output_directory, write_json, write_summary
-from rcr.common.runtime import evaluate_run, override_config
+from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.retrieve import retrieve_experiments
 
 
 def run_experiment(
     cfg, entrypoint, *, splits=("val", "test"), build=False, train=False
 ):
+    if train:
+        validate_training_schedule(cfg)
     if train and not cfg["evaluation"]["enabled"]:
         raise ValueError("run --train requires validation to select best.pt")
     cfg = copy.deepcopy(cfg)
@@ -63,7 +66,7 @@ def run_experiment(
 
 
 def expand_experiments(suite: dict) -> list[dict]:
-    base = yaml.safe_load(Path(suite["base_config"]).read_text(encoding="utf-8"))
+    base = load_config(suite["base_config"])
     base = override_config(base, suite.get("overrides", {}))
     stage = suite["stage"]
     if base["method"] != "proposed" or stage not in ("train", "inference"):
@@ -115,6 +118,7 @@ def expand_experiments(suite: dict) -> list[dict]:
             root = Path(suite["output_dir"]) / name
             cfg["output"]["dir"] = str(root)
             if stage == "train":
+                validate_training_schedule(cfg)
                 if not cfg["evaluation"]["enabled"]:
                     raise ValueError("training variants require validation")
                 cfg["checkpoint"] = str(root / "best.pt")

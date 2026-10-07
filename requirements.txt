@@ -1,1 +1,2 @@
--e .[proposed,dataset]
+# Default: proposed method. Dataset CLIP reranking is optional: pip install -e ".[dataset]"
+-e .[proposed]

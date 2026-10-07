@@ -15,9 +15,8 @@ htmlcov/
 /dist/
 *.egg-info/
 
-# Data files
+# Generated working files; already tracked annotation snapshots remain versioned.
 dataset/data/work/*
-!dataset/data/work/.gitkeep
 
 # Virtual environments and secrets
 .venv/
@@ -39,8 +38,7 @@ venv/
 *.tmp
 
 # Model checkpoints
-/checkpoints/*
-!/checkpoints/README.md
+/checkpoints/
 
 # Machine-local image directory or symbolic link
 dataset/data/raw/images/*
@@ -48,3 +46,7 @@ dataset/data/raw/images/*
 
 # External upstream sources
 /third_party/
+
+# Generated dataset exports/reports
+/dataset/data/final_partial/
+/dataset/reports/
