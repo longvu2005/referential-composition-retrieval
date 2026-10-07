@@ -5,6 +5,7 @@ data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
   cache: cache/proposed-fafa
+  dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
@@ -20,6 +21,9 @@ person_encoder:
   fafa_config: configs/methods/fafa.yaml
   batch_size: 4
 cache:
+  # Legacy Kaggle DINO files lack encoder metadata. Confirm image_encoder/detector
+  # settings match the original build; this flag does not verify that provenance.
+  allow_legacy_dino: true
   storage_dtype: float16
   lru_mib: 1024
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead

@@ -11,7 +11,7 @@ from torch import nn
 
 from rcr.methods.baselines import fafa as native_fafa
 from rcr.methods.proposed import fafa_cache
-from rcr.methods.proposed.build_cache import build_cache, prepare_cache
+from rcr.methods.proposed.build_cache import build_cache
 from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import ImageEncoder
 from rcr.methods.proposed.losses import identity_loss
@@ -69,10 +69,8 @@ def test_fafa_preflight_runs_before_scene_models(tmp_path, monkeypatch, failure)
             "assets": RuntimeError,
             "imports": ImportError,
         }[failure]
-        # This config intentionally lacks data/device: failed preflight must
-        # abort before even resolving those or constructing scene models.
         with pytest.raises(error):
-            prepare_cache(cfg)
+            run_person_worker(cfg, check=True)
 
 
 def test_retrieval_updates_semantic_and_scale_but_never_identity():
@@ -177,11 +175,13 @@ class FakeFAFA(nn.Module):
 def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monkeypatch):
     image = tmp_path / "person.png"
     Image.new("RGB", (10, 10)).save(image)
-    root = tmp_path / "cache"
+    root = tmp_path / "persons"
+    source_root = tmp_path / "dino"
+    metadata = {"image_encoder": {"scene_size": [8, 8]}, "detector": {"model": "tiny"}}
     build_cache(
         ["image"],
         [image],
-        root,
+        source_root,
         Detector(),
         DetectorProcessor(2),
         ImageEncoder(Backbone(), 8),
@@ -189,11 +189,12 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
         Processor(8, 4),
         "cpu",
         storage_dtype="float16",
-        encode_persons=False,
+        encoder_metadata=metadata,
     )
-    scene = torch.load(root / "features/0.pt", weights_only=True)["scene"].clone()
-    with pytest.raises(RuntimeError, match="incomplete"):
-        GalleryCache(root)
+    scene = torch.load(source_root / "features/0.pt", weights_only=True)[
+        "scene"
+    ].clone()
+    before = {p: p.read_bytes() for p in source_root.rglob("*") if p.is_file()}
     native = yaml.safe_load(open("configs/methods/fafa.yaml"))
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"fixture weights")
@@ -201,10 +202,28 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
     native_path = tmp_path / "fafa.yaml"
     native_path.write_text(yaml.safe_dump(native))
     cfg = {
-        "data": {"cache": str(root)},
+        "data": {
+            "cache": str(root),
+            "dino_cache": str(source_root),
+            "final_dir": "unused",
+            "image_root": str(tmp_path),
+        },
+        **metadata,
+        "cache": {"storage_dtype": "float16"},
         "runtime": {"device": "cpu"},
-        "person_encoder": {"fafa_config": str(native_path), "batch_size": 1},
+        "person_encoder": {
+            "backend": "fafa",
+            "fafa_config": str(native_path),
+            "batch_size": 1,
+        },
     }
+    monkeypatch.setattr(
+        fafa_cache,
+        "load_rcr_data",
+        lambda *args: SimpleNamespace(
+            gallery_ids=["image"], image_path=lambda _: image
+        ),
+    )
     model = FakeFAFA()
     monkeypatch.setattr(
         fafa_cache,
@@ -221,7 +240,7 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
         GalleryCache(root)
     monkeypatch.setattr(model, "extract_features", extract)
     fafa_cache.finish_fafa_cache(cfg)
-    cache = GalleryCache(root)
+    cache = GalleryCache(root, scene_root=source_root)
     assert cache.scene_dim == 8 and cache.person_dim == 5
     assert cache.encoder_metadata["person_encoder"]["backend"] == "fafa"
     loaded_scene, persons, _, _, _ = cache.load(torch.tensor([0]))
@@ -232,3 +251,12 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
     torch.testing.assert_close(cache.global_features, loaded_scene.mean(1))
     saved = torch.load(root / "features/0.pt", weights_only=True)["persons"]
     assert saved.untyped_storage().nbytes() == saved.numel() * saved.element_size()
+    assert before == {p: p.read_bytes() for p in source_root.rglob("*") if p.is_file()}
+    assert "scene" not in torch.load(root / "features/0.pt", weights_only=True)
+    cache.validate_encoders(cfg)
+    monkeypatch.setattr(
+        fafa_cache, "load_fafa", lambda *args: pytest.fail("loaded FAFA")
+    )
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    fafa_cache.finish_fafa_cache(cfg)
+    assert before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}

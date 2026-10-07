@@ -25,6 +25,11 @@ def test_representation_suite_has_factorial_controls():
         for v in variants
     } == {("dino", "shared"), ("fafa", "shared"), ("dino", "dual"), ("fafa", "dual")}
     assert len({v["config"]["checkpoint"] for v in variants}) == 4
+    assert all(
+        v["config"]["data"]["cache"] == v["config"]["data"]["dino_cache"]
+        for v in variants
+        if v["config"]["person_encoder"]["backend"] == "dino"
+    )
     assert {v["config"]["train"]["seed"] for v in variants} == {0}
     assert all(
         v["config"]["model"]["binding_mode"] == "none"

@@ -208,6 +208,77 @@ def test_letterbox_boxes_match_patch_coordinate_system() -> None:
     )
 
 
+def test_completed_dino_cache_skips_without_models(tmp_path):
+    image = tmp_path / "image.png"
+    Image.new("RGB", (10, 10)).save(image)
+    root = tmp_path / "cache"
+    build_cache(
+        ["image"],
+        [image],
+        root,
+        Detector(),
+        DetectorProcessor(),
+        ImageEncoder(Backbone(), 8),
+        Processor(8, 8),
+        Processor(8, 4),
+        "cpu",
+    )
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    build_cache(["image"], [image], root, None, None, None, None, None, "cpu")
+    assert before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_dino_resumes_completed_images(tmp_path):
+    paths = [tmp_path / f"{i}.png" for i in range(3)]
+    for path in paths:
+        Image.new("RGB", (10, 10)).save(path)
+    root = tmp_path / "cache"
+    calls = 0
+
+    class InterruptedDetector(Detector):
+        def forward(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("interrupted")
+            return super().forward(**kwargs)
+
+    arguments = (["0", "1", "2"], paths, root)
+    encoder = ImageEncoder(Backbone(), 8)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        build_cache(
+            *arguments,
+            InterruptedDetector(),
+            DetectorProcessor(),
+            encoder,
+            Processor(8, 8),
+            Processor(8, 4),
+            "cpu",
+        )
+    first = (root / "features/0.pt").read_bytes()
+    cache_id = (root / ".building").read_text()
+    calls = 0
+
+    class CountingDetector(Detector):
+        def forward(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            return super().forward(**kwargs)
+
+    build_cache(
+        *arguments,
+        CountingDetector(),
+        DetectorProcessor(),
+        encoder,
+        Processor(8, 8),
+        Processor(8, 4),
+        "cpu",
+    )
+    assert calls == 2 and (root / "features/0.pt").read_bytes() == first
+    assert GalleryCache(root).cache_id == cache_id
+    assert not (root / ".build.pt").exists()
+
+
 def test_detector_without_head_keeps_person(tmp_path) -> None:
     image_path = tmp_path / "portrait.jpg"
     Image.new("RGB", (10, 10)).save(image_path)

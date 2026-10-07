@@ -22,7 +22,10 @@ Mean pooling is a simple person representation, not native FDA scoring.
 DINO scene and FAFA person inputs have separate widths and cache metadata. In
 `dual`, the scene projection is not on the person identity path. BERT remains
 frozen/eval; only its output projection is trained. No FAFA library/model is
-loaded during training or retrieval.
+loaded during training or retrieval. The DINO directory stores scenes,
+detections, identities and DINO crop features for the backbone controls. The
+FAFA directory stores only new crop features and its index. `GalleryCache`
+combines them and verifies the FAFA index references the same DINO cache ID.
 
 ## Grounding and composition
 
@@ -130,4 +133,4 @@ identity binding. The control is not backward compatibility for old checkpoints.
 DINO/FAFA x shared/dual tests backbone and the complete representation/routing
 change. Binding removals compare `both`, `identity`, `semantic`, `none`; they
 remove score terms, not semantic context or coarse identity. Evaluate by case and
-CandidateRecall@500 as well as ID-mAP/Full-mAP. See [ablations](ablations_vi.md).
+CandidateRecall@500 as well as ID-mAP/Full-mAP. See [ablations](ablations.md).

@@ -236,7 +236,11 @@ def train(cfg: dict) -> Path:
         int(evaluation_cfg.get("train_max_queries", 0)),
         seed,
     )
-    cache = GalleryCache(data_cfg["cache"], lru_mib=cache_cfg.get("lru_mib", 0))
+    cache = GalleryCache(
+        data_cfg["cache"],
+        scene_root=data_cfg.get("dino_cache"),
+        lru_mib=cache_cfg.get("lru_mib", 0),
+    )
     cache.validate_gallery(data.gallery_ids)
     if cfg.get("person_encoder"):
         cache.validate_encoders(cfg)

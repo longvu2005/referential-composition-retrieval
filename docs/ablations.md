@@ -37,12 +37,13 @@ Results are written to `runs/ablations/binding/summary.csv`, together with ranki
 
 ## 3. Backbone × representation: train from scratch
 
-Two separate caches are required. The FAFA cache is the main cache already built by the proposed-method pipeline. Build an additional DINO cache using the same detector, scene settings, and gallery:
+The same DINO scene/detection cache is shared by every variant. It also holds the
+DINO crop features for the DINO controls. FAFA variants add the separate person
+cache built by the main pipeline. Reuse your existing DINO cache or build it once:
 
 ```bash
 .venv-proposed/bin/python tools/methods/run.py build-cache \
-  --config configs/methods/proposed.yaml \
-  --set person_encoder.backend=dino data.cache=cache/proposed-dino
+  --config configs/methods/proposed.yaml --cache-stage dino
 
 .venv-proposed/bin/python tools/methods/run.py ablate \
   --config configs/ablations/representation.yaml --splits val test
@@ -63,7 +64,10 @@ Backbone pairs keep the architecture identical. The shared-vs-dual comparison me
 
 Each variant generates its own shortlist using its own model. Therefore, inspect CandidateRecall@500 to distinguish changes in coarse retrieval from changes in fine ranking. Do not interpret this table as a comparison of fine ranking under a fixed shortlist. The binding experiments in Section 2 explicitly control the shortlist.
 
-If paths are modified in the method YAML, update `data.cache` for the two DINO variants in the corresponding suite. The two FAFA variants inherit the main cache.
+DINO variants automatically use `data.dino_cache` from the method YAML as their
+`data.cache`. An explicit experiment override of `data.cache` takes precedence.
+FAFA variants inherit both paths from the main config. Keep
+`cache.allow_legacy_dino=true` for the old Kaggle source; no detector is rerun.
 
 You may add:
 

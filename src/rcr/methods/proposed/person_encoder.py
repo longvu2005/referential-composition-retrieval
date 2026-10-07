@@ -40,7 +40,7 @@ def worker_python(cfg: dict) -> str:
 
 
 def check_fafa_assets(cfg: dict) -> None:
-    """Validate the native environment/assets before expensive scene extraction."""
+    """Validate the native environment/assets only when FAFA extraction is needed."""
     from rcr.methods.baselines.fafa import assets_ready, official_api, official_source
 
     batch_size = cfg["person_encoder"]["batch_size"]

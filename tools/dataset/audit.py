@@ -11,6 +11,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--final-dir", default="dataset/data/final")
     parser.add_argument("--cache", help="Optional existing proposed cache directory")
+    parser.add_argument(
+        "--dino-cache", help="DINO source for a separate FAFA person cache"
+    )
     parser.add_argument("--output", default="runs/data_audit.json")
     args = parser.parse_args()
     data = load_rcr_data(args.final_dir)
@@ -19,7 +22,9 @@ def main():
     if args.cache:
         from rcr.methods.proposed.cache import GalleryCache
 
-        report["detection"] = audit_detection(data, GalleryCache(args.cache))
+        report["detection"] = audit_detection(
+            data, GalleryCache(args.cache, scene_root=args.dino_cache)
+        )
     write_json(args.output, report)
     for split, values in report["splits"].items():
         print(

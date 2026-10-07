@@ -16,7 +16,7 @@ python3.11 -m venv .venv-fafa
 The proposed extra includes Torchvision, required by DINOv3's fast image
 processor. Reinstall `requirements/proposed.txt` when updating an existing venv.
 
-Set `data.final_dir`, `data.image_root`, `data.cache`, and
+Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`, and
 `person_encoder.python` in `configs/methods/proposed.yaml`. All relative paths are
 relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
 For Kaggle, use venv Python paths explicitly in every cell.
@@ -28,7 +28,13 @@ For Kaggle, use venv Python paths explicitly in every cell.
 # Uses person_encoder.python; no baseline CLIP selector/detector is prepared.
 .venv-proposed/bin/python tools/methods/run.py prepare --config configs/methods/proposed.yaml
 
-# Check native FAFA assets/imports, then build scene/person features in two stages.
+# Stream 1: DINO scenes/detections/crops; no FAFA environment required.
+.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage dino
+
+# Stream 2: FAFA persons from the completed DINO source.
+.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage persons
+
+# Or ensure both caches; compatible completed stages are skipped.
 .venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml
 
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
@@ -55,23 +61,74 @@ For training another seed, reuse the cache and use a separate output directory.
   --set train.seed=1 output.dir=runs/proposed_seed1
 ```
 
-## Cache and checkpoint migration
+## Reuse the existing Kaggle DINO cache
 
-Old DINO caches/checkpoints are not FAFA/dual artifacts, even if their widths
-match. Build the new `cache/proposed-fafa` and retrain. Do not overwrite useful
-old run/cache directories. The loader rejects legacy formats, wrong encoder
-specifications, and caches that differ from the training checkpoint.
+Add [rcr-proposed-cache](https://www.kaggle.com/datasets/phmhunhlongv/rcr-proposed-cache)
+as a notebook input. Set these fields in the method YAML (use the actual mounted
+directory containing `index.pt` and `features/`):
 
-Each cache stores source/preprocessing metadata, FAFA checkpoint SHA256, original
-pixel boxes, scene boxes, compact pooled person features, DINO patches, identity
-labels and CPU scene means. Scene/person widths are validated separately. The
-`.building` marker stays present through both stages; interrupted FAFA extraction
-cannot be consumed as a completed cache. Repeat the build command to rebuild;
-this version does not add a general resumable detector/cache pipeline.
+```yaml
+data:
+  final_dir: dataset/data/final
+  image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
+  dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
+  cache: /kaggle/working/cache/proposed-fafa
+```
 
-Before detection, a short FAFA worker checks its source, checkpoint, runtime
-assets and native imports. Missing prerequisites abort before scene extraction.
-The check does not load model weights or download assets; use `prepare` first.
+Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.
+Keep your actual `final_dir`, raw-image root and worker Python paths. Raw images
+are needed to extract FAFA crops; the DINO source supplies detections, so this
+stage does not load DINO or rerun the detector:
+
+```bash
+.venv-proposed/bin/python tools/methods/run.py prepare --config configs/methods/proposed.yaml
+.venv-proposed/bin/python tools/methods/run.py build-cache --config configs/methods/proposed.yaml --cache-stage persons
+.venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --train --splits val
+```
+
+The supplied legacy cache has a 14 x 14 patch grid, 768 feature channels, FP16
+storage and normalized scene boxes. It lacks encoder metadata and pixel boxes.
+`cache.allow_legacy_dino=true` explicitly accepts that missing provenance; keep
+the original DINOv3 ViT-B/16, 224 x 224 scene, 256 x 128 person letterbox and
+Grounding DINO tiny settings. The loader checks the scene grid and gallery order.
+Legacy pixel boxes are recovered by inverting the same letterbox transform using
+current raw-image dimensions. This cannot verify missing encoder metadata. New
+DINO caches store explicit metadata and pixel boxes.
+
+## Cache lifecycle and checkpoints
+
+| Directory | Contents | Usage |
+| --- | --- | --- |
+| `data.dino_cache` | DINO scenes, detections, identities, DINO crops/index | Shared immutable source; may be read-only Kaggle input |
+| `data.cache` with FAFA | FAFA person features/index, FP32 global scene means | References source ID; does not copy scene patches |
+| `data.cache` with DINO controls | The existing DINO directory | Reuses DINO crops/scenes without FAFA |
+
+Both builders skip a completed compatible cache before loading models. A
+completed cache with different encoders, gallery order, source ID or missing
+feature files fails explicitly; choose a new output directory for new settings.
+It is never silently replaced. `--force` remains an asset-preparation option.
+
+Each unfinished directory has its own `.building` marker and `.build.pt`
+manifest. Feature files and final indexes are published atomically. Repeating
+the same stage preserves its cache ID and skips saved compatible images.
+Different resume settings fail. Training/retrieval reject incomplete source or
+person caches. After publishing the index, the marker is removed. An older
+interrupted build without a resume manifest starts that incomplete stage again;
+completed legacy DINO files remain untouched.
+
+Large padded indexes are memory-mapped when loaded. FAFA index assembly uses a
+temporary file-backed tensor, requiring temporary disk space approximately equal
+to the final person index. FAFA stores FP32 scene means so later runs need not
+repool all legacy scene files.
+
+FAFA preflight runs only when new FAFA extraction is needed. The default `all`
+stage checks prerequisites before building a missing DINO source; the DINO-only
+stage is independent. Use `prepare` when assets are missing. Complete caches can
+be reused without a FAFA environment or raw images.
+
+Old DINO checkpoints still need new training for the FAFA/dual architecture.
+Source/cache IDs and separate feature widths are checked against the training
+checkpoint. Keep historical run directories separately.
 
 After a successful build, training/retrieval read cached features only. They do
 not need native FAFA weights loaded or raw crop images opened. Keep the FAFA YAML
@@ -100,6 +157,6 @@ Standalone query-limited retrieval/evaluation use matching `--max-queries`; norm
 
 ## New experiments
 
-See [the ablation guide](ablations_vi.md). Calibration now lives in
+See [the ablation guide](ablations.md). Calibration now lives in
 `configs/calibration/joint.yaml`; the old coarse/loss/sampling/identity-amplitude
 ablation configurations have been removed.

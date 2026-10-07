@@ -12,7 +12,13 @@ from tqdm import tqdm
 class GalleryCache:
     """CPU person index plus a bounded LRU for immutable on-disk image features."""
 
-    def __init__(self, root: str | Path, *, lru_mib: int = 0) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        scene_root: str | Path | None = None,
+        lru_mib: int = 0,
+    ) -> None:
         if not isinstance(lru_mib, int) or lru_mib < 0:
             raise ValueError("cache.lru_mib must be a nonnegative integer")
         self._limit = lru_mib * 1024**2
@@ -22,11 +28,29 @@ class GalleryCache:
         self.root = Path(root)
         if (self.root / ".building").exists():
             raise RuntimeError(
-                f"cache build is incomplete at {self.root}; rebuild before use"
+                f"cache build is incomplete at {self.root}; "
+                "resume build-cache before use"
             )
         index = torch.load(
-            self.root / "index.pt", map_location="cpu", weights_only=True
+            self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
         )
+
+        self._scene_cache = None
+        if index.get("layout") == "persons":
+            if scene_root is None:
+                raise ValueError("FAFA person cache requires data.dino_cache")
+            self._scene_cache = GalleryCache(scene_root)
+            source = self._scene_cache
+            source.validate_gallery(index["image_ids"])
+            if index["source_cache_id"] != source.cache_id:
+                raise ValueError("FAFA cache differs from its source DINO cache")
+            if not torch.equal(index["mask"].bool(), source.mask):
+                raise ValueError("FAFA/DINO person masks differ")
+            if (
+                index["scene_dim"] != source.scene_dim
+                or tuple(index["patch_hw"]) != source.patch_hw
+            ):
+                raise ValueError("FAFA/DINO scene specifications differ")
 
         self.image_ids = index["image_ids"]
         self.by_id = {image_id: i for i, image_id in enumerate(self.image_ids)}
@@ -57,16 +81,44 @@ class GalleryCache:
         if self.image_ids != image_ids:
             raise ValueError("cache gallery IDs/order differ from finalized data")
 
+    def validate_files(self) -> None:
+        """Check completeness without loading models or reading every scene tensor."""
+        for i in range(len(self.image_ids)):
+            path = self.root / "features" / f"{i}.pt"
+            if not path.is_file() or not path.stat().st_size:
+                raise ValueError(f"cache feature missing/empty: {path}")
+        if self._scene_cache is not None:
+            self._scene_cache.validate_files()
+
     def validate_encoders(self, cfg: dict) -> None:
         """Do not reinterpret an old DINO cache as FAFA merely because widths match."""
         expected = cfg.get("person_encoder")
         if expected is None:
             return  # Small in-memory test configs have no external encoder spec.
-        if self.format_version != 2:
-            raise ValueError("legacy cache: rebuild for the new person architecture")
+        if self._scene_cache is not None:
+            self._scene_cache.validate_encoders(
+                {**cfg, "person_encoder": {"backend": "dino"}}
+            )
+        if self.format_version == 1:
+            if expected["backend"] != "dino" or not cfg.get("cache", {}).get(
+                "allow_legacy_dino", False
+            ):
+                raise ValueError(
+                    "legacy DINO cache requires cache.allow_legacy_dino=true"
+                )
+            # Legacy files cannot prove their model/detector provenance. This is
+            # an explicit user assertion, never inferred from equal feature widths.
+            height, width = cfg["image_encoder"]["scene_size"]
+            if self.patch_hw != (height // 16, width // 16):
+                raise ValueError("legacy DINO patch grid differs from scene_size")
+            return
+        if self.format_version not in (2, 3):
+            raise ValueError("unsupported cache format")
         actual = self.encoder_metadata["person_encoder"] or {}
         if actual.get("backend") != expected["backend"]:
-            raise ValueError("cache person encoder differs from config; rebuild cache")
+            raise ValueError(
+                "cache person encoder differs; use a matching cache directory"
+            )
         if self.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
             raise ValueError("cache image encoder/preprocessing differs from config")
         if self.encoder_metadata["detector"] != cfg["detector"]:
@@ -79,8 +131,14 @@ class GalleryCache:
                 raise ValueError(
                     "cache FAFA checkpoint/source/preprocessing spec differs"
                 )
+            checkpoint = Path(native_cfg["checkpoint"]["path"])
+            if checkpoint.is_file():
+                from rcr.methods.common.results import sha256_file
 
-    def _load_item(self, index: int) -> dict:
+                if actual.get("checkpoint_sha256") != sha256_file(checkpoint):
+                    raise ValueError("cache FAFA checkpoint weights differ")
+
+    def _read_feature(self, index: int) -> dict:
         item = torch.load(
             self.root / "features" / f"{index}.pt",
             map_location="cpu",
@@ -90,6 +148,14 @@ class GalleryCache:
             "image_id" in item and item["image_id"] != self.image_ids[index]
         ):
             raise ValueError(f"cache feature {index} does not match index.pt")
+        return item
+
+    def _load_item(self, index: int) -> dict:
+        item = self._read_feature(index)
+        if self._scene_cache is not None:
+            if item.get("source_cache_id") != self._scene_cache.cache_id:
+                raise ValueError("FAFA person feature has a different DINO source")
+            item = {**self._scene_cache._load_item(index), "persons": item["persons"]}
         if item["scene"].shape != (
             self.patch_hw[0] * self.patch_hw[1],
             self.scene_dim,
@@ -137,6 +203,9 @@ class GalleryCache:
         New caches store the same FP32 means directly in index.pt.
         """
         if self._global_features is None:
+            if self._scene_cache is not None:
+                self._global_features = self._scene_cache.global_features
+                return self._global_features
             features = torch.empty(len(self.image_ids), self.scene_dim)
             for i in tqdm(
                 range(len(self.image_ids)), desc="pool cached global features"

@@ -55,6 +55,14 @@ def expand_experiments(suite: dict) -> list[dict]:
                 raise ValueError(f"duplicate or invalid experiment name: {name}")
             names.add(name)
             cfg = override_config(base, changes)
+            if (
+                stage == "train"
+                and cfg.get("person_encoder", {}).get("backend") == "dino"
+                and "data.cache" not in changes
+            ):
+                cfg["data"]["cache"] = cfg["data"].get(
+                    "dino_cache", cfg["data"]["cache"]
+                )
             if max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]:
                 raise ValueError("candidate_ks cannot exceed top_m")
             root = Path(suite["output_dir"]) / name
@@ -95,9 +103,9 @@ def _result_row(experiment: dict, cfg: dict, metrics: dict, stage: str) -> dict:
         "seed": metadata["checkpoint_seed"],
         "sweep": json.dumps(experiment["sweep"], sort_keys=True),
         "representation": metadata["representation"],
-        "person_backend": (metadata.get("encoder_metadata") or {})
-        .get("person_encoder", {})
-        .get("backend"),
+        "person_backend": (
+            (metadata.get("encoder_metadata") or {}).get("person_encoder") or {}
+        ).get("backend", cfg.get("person_encoder", {}).get("backend")),
         "binding_mode": metadata["binding_mode"],
         "binding_scale": metadata["binding_scale"],
         **{

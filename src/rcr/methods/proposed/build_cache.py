@@ -14,6 +14,7 @@ from rcr.methods.common.anchors import match_heads_to_persons
 from rcr.methods.common.data import load_rcr_data
 from rcr.methods.common.detector import detect
 from rcr.methods.common.experiment import resolve_device
+from rcr.methods.proposed.cache import GalleryCache
 from rcr.methods.proposed.encoders import ImageEncoder
 from rcr.methods.proposed.person_encoder import run_person_worker
 
@@ -51,7 +52,6 @@ def build_cache(
     detector_threshold: float = 0.3,
     detector_text_threshold: float = 0.25,
     storage_dtype: str = "float32",
-    encode_persons: bool = True,
     encoder_metadata: dict | None = None,
 ) -> None:
     """Encode gallery images and write a cache compatible with GalleryCache."""
@@ -72,10 +72,39 @@ def build_cache(
         )
 
     root = Path(root)
+    if (root / "index.pt").is_file() and not (root / ".building").exists():
+        cache = GalleryCache(root)
+        cache.validate_gallery(image_ids)
+        cache.validate_files()
+        for key, value in (encoder_metadata or {}).items():
+            if cache.encoder_metadata[key] != value:
+                raise ValueError(
+                    f"existing DINO cache {key} differs; use a new directory"
+                )
+        print(f"Using existing DINO cache: {root}", flush=True)
+        return
     feature_dir = root / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)
-    cache_id = uuid4().hex
     building = root / ".building"
+    manifest_path = root / ".build.pt"
+    signature = {
+        "image_ids": image_ids,
+        "image_paths": [str(Path(path).resolve()) for path in image_paths],
+        "encoders": encoder_metadata or {},
+        "storage_dtype": storage_dtype,
+    }
+    if manifest_path.is_file():
+        manifest = torch.load(manifest_path, map_location="cpu", weights_only=True)
+        if manifest["signature"] != signature:
+            raise ValueError(
+                "unfinished DINO cache settings differ; use a new directory"
+            )
+        cache_id = manifest["cache_id"]
+    else:
+        cache_id = uuid4().hex
+        temporary_manifest = manifest_path.with_suffix(".pt.tmp")
+        torch.save({"cache_id": cache_id, "signature": signature}, temporary_manifest)
+        temporary_manifest.replace(manifest_path)
     building.write_text(cache_id, encoding="utf-8")
 
     detector.eval()
@@ -88,6 +117,17 @@ def build_cache(
     for index, (image_id, path) in enumerate(
         tqdm(zip(image_ids, image_paths, strict=True), total=len(image_ids))
     ):
+        feature_path = feature_dir / f"{index}.pt"
+        if feature_path.is_file():
+            saved = torch.load(feature_path, map_location="cpu", weights_only=True)
+            if saved.get("cache_id") == cache_id and saved.get("image_id") == image_id:
+                current_hw = saved["patch_hw"]
+                if patch_hw is not None and patch_hw != current_hw:
+                    raise ValueError("resumed DINO patch grid differs")
+                patch_hw = current_hw
+                all_persons.append(saved["persons"])
+                all_global.append(saved["scene"].float().mean(0))
+                continue
         image = Image.open(path).convert("RGB")
         boxes = detect(
             detector,
@@ -110,7 +150,7 @@ def build_cache(
         elif patch_hw != current_hw:
             raise ValueError("scene processor must produce one fixed patch grid")
 
-        if len(persons) and encode_persons:
+        if len(persons):
             person_crops = [image.crop(tuple(box.tolist())) for box in persons]
 
             pixels = person_processor(images=person_crops, return_tensors="pt")[
@@ -119,7 +159,7 @@ def build_cache(
             _, person_features, _ = image_encoder(pixels.to(device))
 
         else:
-            dim = scene.shape[-1] if encode_persons else 0
+            dim = scene.shape[-1]
             person_features = scene.new_empty(len(persons), dim)
 
         identity_ids: list[str | None] = [None] * len(persons)
@@ -158,9 +198,11 @@ def build_cache(
                 "identity_ids": identity_ids,
                 "boxes_scene": compact_cpu(boxes_scene, torch.float32),
                 "boxes_pixel": compact_cpu(persons, torch.float32),
+                "patch_hw": current_hw,
             },
-            feature_dir / f"{index}.pt",
+            feature_path.with_suffix(".pt.tmp"),
         )
+        feature_path.with_suffix(".pt.tmp").replace(feature_path)
         all_persons.append(cached_persons)
 
     if patch_hw is None:
@@ -182,8 +224,8 @@ def build_cache(
             "cache_id": cache_id,
             "image_ids": image_ids,
             "image_paths": [str(Path(path).resolve()) for path in image_paths],
-            "scene_dim": cached_scene.shape[-1],
-            "person_encoder": {"backend": "dino" if encode_persons else "pending_fafa"},
+            "scene_dim": all_global[0].shape[-1],
+            "person_encoder": {"backend": "dino"},
             **(encoder_metadata or {}),
             "persons": person_index,
             "mask": mask,
@@ -194,8 +236,8 @@ def build_cache(
         temporary_index,
     )
     os.replace(temporary_index, index_path)
-    if encode_persons:
-        building.unlink()
+    building.unlink()
+    manifest_path.unlink(missing_ok=True)
 
 
 class _LetterboxProcessor:
@@ -225,12 +267,58 @@ class _LetterboxProcessor:
         )
 
 
-def prepare_cache(cfg: dict) -> None:
+def dino_root(cfg: dict) -> Path:
+    if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
+        return Path(cfg["data"]["cache"])
+    return Path(cfg["data"]["dino_cache"])
+
+
+def existing_cache(cfg: dict, root: Path, *, scene_root: Path | None = None):
+    if not (root / "index.pt").is_file() or (root / ".building").exists():
+        return None
+    cache = GalleryCache(root, scene_root=scene_root)
+    cache.validate_encoders(cfg)
+    cache.validate_files()
+    return cache
+
+
+def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
+    """Build DINO and/or FAFA independently; completed caches stay immutable."""
     backend = cfg.get("person_encoder", {}).get("backend", "dino")
     if backend not in ("dino", "fafa"):
         raise ValueError("person_encoder.backend must be dino or fafa")
-    if backend == "fafa":
+    if stage not in ("all", "dino", "persons"):
+        raise ValueError("cache stage must be all, dino or persons")
+    if stage == "persons" and backend != "fafa":
+        raise ValueError("persons stage requires person_encoder.backend=fafa")
+    data_cfg = cfg["data"]
+    root = dino_root(cfg)
+    if backend == "fafa" and root.resolve() == Path(data_cfg["cache"]).resolve():
+        raise ValueError("data.dino_cache and data.cache must be separate directories")
+    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
+    dino_cfg = {**cfg, "person_encoder": {"backend": "dino"}}
+    source = existing_cache(dino_cfg, root)
+    if source is not None:
+        source.validate_gallery(data.gallery_ids)
+        print(f"Using existing DINO cache: {root}", flush=True)
+    elif stage == "persons":
+        raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
+    if backend == "fafa" and stage != "dino":
+        if source is not None:
+            ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
+            if ready is not None:
+                ready.validate_gallery(data.gallery_ids)
+                print(f"Using existing FAFA cache: {data_cfg['cache']}", flush=True)
+                return
+        # Only check FAFA prerequisites when new extraction is actually needed.
         run_person_worker(cfg, check=True)
+    if source is None:
+        _prepare_dino(cfg, data, root)
+    if backend == "fafa" and stage != "dino":
+        run_person_worker(cfg)
+
+
+def _prepare_dino(cfg: dict, data, root: Path) -> None:
     device = resolve_device(cfg)
 
     from transformers import (
@@ -239,9 +327,6 @@ def prepare_cache(cfg: dict) -> None:
         AutoModelForZeroShotObjectDetection,
         AutoProcessor,
     )
-
-    data_cfg = cfg["data"]
-    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
 
     detector_cfg = cfg["detector"]
     detector_processor = AutoProcessor.from_pretrained(detector_cfg["model"])
@@ -257,7 +342,7 @@ def prepare_cache(cfg: dict) -> None:
     build_cache(
         image_ids=data.gallery_ids,
         image_paths=[data.image_path(image_id) for image_id in data.gallery_ids],
-        root=data_cfg["cache"],
+        root=root,
         detector=detector,
         detector_processor=detector_processor,
         image_encoder=image_encoder,
@@ -268,7 +353,6 @@ def prepare_cache(cfg: dict) -> None:
         detector_threshold=detector_cfg["threshold"],
         detector_text_threshold=detector_cfg["text_threshold"],
         storage_dtype=cfg.get("cache", {}).get("storage_dtype", "float32"),
-        encode_persons=backend == "dino",
         encoder_metadata={"image_encoder": image_cfg, "detector": detector_cfg},
     )
 
@@ -277,5 +361,3 @@ def prepare_cache(cfg: dict) -> None:
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    if backend == "fafa":
-        run_person_worker(cfg)

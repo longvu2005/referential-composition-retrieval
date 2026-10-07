@@ -68,13 +68,16 @@ python3.11 -m venv .venv-fafa
 .venv-fafa/bin/python -m pip install --no-build-isolation -r requirements/fafa.txt
 ```
 
-Set data/cache paths and `person_encoder.python` in the proposed YAML. `prepare`
-downloads only FAFA model assets for proposed. Cache construction runs detector
-and DINO first, releases their GPU storage, then invokes FAFA in its own venv.
-Training and retrieval read cached features without loading FAFA.
+Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
+in the proposed YAML. DINO scenes/detections and FAFA person features live in
+separate directories. `build-cache --cache-stage dino` builds/reuses the DINO
+source; `--cache-stage persons` builds/reuses FAFA only. The default runs both.
+Completed compatible caches are skipped before model/worker loading; interrupted
+builds resume saved images. Training/retrieval join both caches without FAFA.
+See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash
-# Main model: new cache, train, validation.
+# Main model: build/reuse caches, train, validation.
 .venv-proposed/bin/python tools/methods/run.py run --config configs/methods/proposed.yaml --prepare --build-cache --train --splits val
 
 # Joint 2D validation calibration; only the selected pair reaches test.
@@ -88,14 +91,16 @@ Training and retrieval read cached features without loading FAFA.
 .venv-fafa/bin/python tools/methods/run.py run --config configs/methods/fafa.yaml --prepare
 ```
 
-Old DINO caches/checkpoints require a new build/train for this architecture.
-Cache version, encoder/preprocessing metadata and checkpoint cache identity are
-checked explicitly. Existing run directories can be kept for historical results.
+The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only
+FAFA person features need extraction. Legacy files require the explicit
+`cache.allow_legacy_dino` setting and matching original preprocessing. Train new
+heads for the new architecture. Cache/source IDs, gallery order, encoder metadata
+and checkpoint identity are checked. Keep historical run directories separately.
 
 | Command | Purpose |
 | --- | --- |
 | `prepare` | Prepare proposed person encoder or baseline assets |
-| `build-cache` | Build frozen scene/person features |
+| `build-cache` | Build/reuse DINO and/or FAFA caches (`--cache-stage`) |
 | `train` | Train from cache; validation selects best.pt |
 | `retrieve` | Save complete split-gallery rankings |
 | `evaluate` | Evaluate saved rankings without a model |
@@ -109,7 +114,7 @@ config/tokenizer, history, per-epoch metrics, rankings, run metadata and summari
 W&B retains its metrics and additionally logs the learned binding scale.
 
 Detailed [proposed workflow](docs/proposed_runs.md),
-[baseline workflow](docs/baselines.md), and [new ablations](docs/ablations_vi.md).
+[baseline workflow](docs/baselines.md), and [new ablations](docs/ablations.md).
 Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
 retraining. The old identity-amplitude, coarse-only, loss and sampling suites
 have been removed. Calibration lives separately in `configs/calibration/`.

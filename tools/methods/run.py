@@ -42,7 +42,13 @@ def main(argv=None):
     parser.add_argument(
         "--build-cache",
         action="store_true",
-        help="Build proposed cache before run --train",
+        help="Build/reuse both proposed caches before run --train",
+    )
+    parser.add_argument(
+        "--cache-stage",
+        choices=("all", "dino", "persons"),
+        default="all",
+        help="build-cache only: DINO source, FAFA persons, or both (default)",
     )
     parser.add_argument(
         "--train", action="store_true", help="Train proposed before run"
@@ -75,6 +81,7 @@ def main(argv=None):
                 args.train,
                 args.force,
                 args.max_queries is not None,
+                args.cache_stage != "all",
             )
         ) or "train" in (args.splits or []):
             parser.error("ablate uses a suite YAML and complete val/test splits")
@@ -89,6 +96,8 @@ def main(argv=None):
         parser.error(f"unknown method: {method}")
     if args.modes and method != "clip":
         parser.error("--modes is only for CLIP")
+    if args.cache_stage != "all" and command != "build-cache":
+        parser.error("--cache-stage is only for build-cache")
     if args.max_queries is not None and (
         args.max_queries < 1 or command not in ("retrieve", "evaluate")
     ):
@@ -132,7 +141,7 @@ def main(argv=None):
     if command == "build-cache":
         from rcr.methods.proposed.build_cache import prepare_cache
 
-        return prepare_cache(cfg)
+        return prepare_cache(cfg, stage=args.cache_stage)
     if command == "train":
         from rcr.methods.proposed.train import train
 

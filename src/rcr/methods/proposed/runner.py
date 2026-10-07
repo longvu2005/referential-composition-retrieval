@@ -16,7 +16,8 @@ def run_experiment(
 ):
     if build and not train:
         raise ValueError(
-            "--build-cache requires --train: a rebuild changes the cache ID"
+            "run --build-cache requires --train; use build-cache to prepare/reuse "
+            "caches separately"
         )
     if train and not cfg["evaluation"]["enabled"]:
         raise ValueError("run --train requires validation to select best.pt")
