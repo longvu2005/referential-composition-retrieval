@@ -132,8 +132,12 @@ def test_saved_evaluation_rejects_changed_labels_without_overwriting_metrics(tmp
     output = scores_to_rankings(
         samples, ["q", "a", "b"], np.array([[0, 2, 1]], dtype=np.float32)
     )
-    cfg = {"method": "clip", "mode": "clip_image", "split": "test",
-           "output": {"dir": str(tmp_path)}}
+    cfg = {
+        "method": "clip",
+        "mode": "clip_image",
+        "split": "test",
+        "output": {"dir": str(tmp_path)},
+    }
     directory = tmp_path / "clip_image" / "test"
     save_results(directory, output, {"split_sha256": split_fingerprint(data, "test")})
     evaluate_run(cfg, data=data, samples=samples)

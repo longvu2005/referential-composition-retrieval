@@ -382,8 +382,16 @@ def test_invalid_training_schedule_never_prepares_assets(
         build, "run_person_worker", lambda *a, **k: pytest.fail("prepared assets")
     )
     with pytest.raises(SystemExit):
-        cli.main([
-            "run", "--config", str(path), "--prepare", "--build-cache", "--train",
-            "--set", override,
-        ])
+        cli.main(
+            [
+                "run",
+                "--config",
+                str(path),
+                "--prepare",
+                "--build-cache",
+                "--train",
+                "--set",
+                override,
+            ]
+        )
     assert not local_stages

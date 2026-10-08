@@ -180,9 +180,7 @@ def test_fafa_resumes_saved_images_and_never_publishes_partial(
     fafa_cache.finish_fafa_cache(cfg)
     cache = GalleryCache(root, scene_root=source)
     assert calls == len(cache.image_ids) - 1
-    first_persons = torch.load(
-        io.BytesIO(first), weights_only=True
-    )["persons"]
+    first_persons = torch.load(io.BytesIO(first), weights_only=True)["persons"]
     torch.testing.assert_close(cache.persons[0, cache.mask[0]], first_persons)
     assert not (root / "features").exists()
     assert cache.cache_id == manifest["cache_id"]
