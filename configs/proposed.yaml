@@ -41,9 +41,9 @@ model:
   mlp_ratio: 2
   geo_dim: 32
 train:
-  epochs: 10
+  epochs: 20
   batch_size: 14
-  candidates: 24
+  candidates: 32
   case_balanced: true        # P(case) proportional to sqrt(N_case)
   seed: 0
   amp: true           # CUDA training only; mining/evaluation remain FP32
