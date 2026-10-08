@@ -122,6 +122,20 @@ def test_retrieval_replaces_results_and_removes_previous_metrics(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_completed_previous_run_keeps_scores_rankings_and_json_together(tmp_path):
+    from rcr.common.io import preserve_run
+
+    names = ("scores.npy", "rankings.pt", "run.json", "metrics.json")
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+    before = {name: (tmp_path / name).read_bytes() for name in names}
+    preserve_run(tmp_path)
+    histories = list((tmp_path / ".history").iterdir())
+    assert len(histories) == 1
+    assert {p.name: p.read_bytes() for p in histories[0].iterdir()} == before
+    assert not any((tmp_path / name).exists() for name in names)
+
+
 def test_saved_evaluation_rejects_changed_labels_without_overwriting_metrics(tmp_path):
     from rcr.common.data import split_fingerprint
     from rcr.evaluation.runner import evaluate_run

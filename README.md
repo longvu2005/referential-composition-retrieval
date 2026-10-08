@@ -25,6 +25,7 @@ The benchmark uses four case types:
 ## Code layout
 
 - `scripts/run.py`: the single experiment CLI.
+- `scripts/report.py`: validate saved JSON and export overall/by-case paper tables.
 - `configs/{proposed,clip,fafa}.yaml`: one config per method.
 - `configs/ablations/*.yaml`: explicit experiments.
 - `src/rcr/proposed/`: training, losses, ranking and experiments; `nn/` holds
@@ -91,8 +92,9 @@ See [Kaggle reuse and commands](docs/proposed_runs.md).
 .venv-proposed/bin/python scripts/run.py ablate --config configs/ablations/binding.yaml --splits val test
 
 # CLIP and native FAFA baselines use their respective environments/configs.
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --prepare
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --prepare
+.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --prepare --splits val
+.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --prepare --splits val
+python scripts/report.py --split val
 ```
 
 The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only

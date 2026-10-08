@@ -16,6 +16,8 @@ fusion:
   # Fixed weights for the low-level retrieve CLI. run selects on val.
   image_weight: 0.5
   text_weight: 0.5
+  score_normalization: zscore  # late fusion: complete eligible split gallery
+  epsilon: 1.0e-6
 
 tuning:
   metric: full_map

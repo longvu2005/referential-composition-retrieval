@@ -28,7 +28,7 @@ from rcr.baselines.fafa_adapter import (
     detect_gallery,
     setmatch_score,
 )
-from rcr.common.io import cache_directory, output_directory, sha256_file
+from rcr.common.io import cache_directory, output_directory, preserve_run, sha256_file
 
 
 def official_source(cfg: dict, *, prepare: bool = False) -> Path:
@@ -433,6 +433,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     )
     output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
+    preserve_run(output)
     temporary = output / "scores.npy.tmp"
     scores = np.lib.format.open_memmap(
         temporary, mode="w+", dtype=np.float32, shape=(len(samples), len(gallery_ids))
@@ -454,6 +455,8 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     return np.load(output / "scores.npy", mmap_mode="r", allow_pickle=False), {
         "adapter_version": ADAPTER_VERSION,
         "checkpoint_sha256": checkpoint_sha,
+        "selector_checkpoint_sha256": selector_sha,
+        "detector_checkpoint_sha256": sha256_file(detector["checkpoint"]),
         "source_commit": cfg["source"]["commit"],
         "checkpoint_status": cfg["checkpoint"]["status"],
         "checkpoint_load": load_info,

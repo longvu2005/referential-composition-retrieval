@@ -17,6 +17,7 @@ from rcr.common.io import (
     sha256_file,
 )
 from rcr.common.runtime import resolve_device
+from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
@@ -161,7 +162,8 @@ def retrieve_experiments(
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha256,
                 "validation_sha256": validation_sha256,
-                "split_sha256": split_fingerprint(data, cfg["split"]),
+                **benchmark_metadata(data, cfg["split"], output),
+                **runtime_metadata(device),
                 "architecture_version": ARCHITECTURE_VERSION,
                 "representation": model.representation,
                 "binding_mode": settings[name]["binding_mode"] or model.binding_mode,

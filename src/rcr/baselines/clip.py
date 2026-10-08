@@ -19,6 +19,7 @@ from rcr.common.io import (
     cache_directory,
     image_signature,
     output_directory,
+    preserve_run,
     sha256_file,
 )
 
@@ -326,6 +327,7 @@ def iter_clip_scores(inputs, mode, fusion, batch_size, *, self_indices=None):
 def write_clip_scores(inputs, cfg, *, self_indices=None):
     output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
+    preserve_run(output)
     mode = canonical_mode(cfg["mode"])
     base = inputs["text"] if mode == "clip_text" else inputs["image"]
     temporary = output / "scores.npy.tmp"

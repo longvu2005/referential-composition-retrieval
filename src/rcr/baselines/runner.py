@@ -26,6 +26,7 @@ from rcr.common.data import (
 from rcr.common.io import (
     image_signature,
     output_directory,
+    preserve_file,
     save_results,
     scores_to_rankings,
     sha256_file,
@@ -34,10 +35,17 @@ from rcr.common.io import (
 )
 from rcr.common.runtime import resolve_device
 from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.provenance import (
+    benchmark_metadata,
+    digest_json,
+    runtime_metadata,
+)
 from rcr.evaluation.runner import evaluate_run
 
 
-def run_retrieval(cfg: dict, *, max_queries: int | None = None, data=None) -> dict:
+def run_retrieval(
+    cfg: dict, *, max_queries: int | None = None, data=None, selection_metadata=None
+) -> dict:
     """Shared retrieval entry point for the single-run and experiment CLIs."""
     cfg = copy.deepcopy(cfg)
     if data is None:
@@ -66,6 +74,8 @@ def run_retrieval(cfg: dict, *, max_queries: int | None = None, data=None) -> di
         scores, details = retrieve_fafa(data, samples, gallery_ids, cfg, device)
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
+    if selection_metadata is not None:
+        details["adapter_selection"] = selection_metadata
     output = scores_to_rankings(samples, gallery_ids, scores)
     save_run(
         cfg,
@@ -86,10 +96,8 @@ def save_run(cfg, data, output, details, elapsed_seconds, *, query_subset=False)
             "method": cfg["method"],
             "mode": cfg.get("mode"),
             "config": cfg,
-            "dataset_version": data.manifest.get("version"),
-            "split_sha256": split_fingerprint(data, cfg["split"]),
-            "num_queries": len(output["sample_ids"]),
-            "num_gallery": len(output["gallery_ids"]),
+            **benchmark_metadata(data, cfg["split"], output),
+            **runtime_metadata(resolve_device(cfg)),
             "query_subset": query_subset,
             "higher_is_better": True,
             "elapsed_seconds": elapsed_seconds,
@@ -104,8 +112,8 @@ def _grid(cfg):
     grid = sorted(set(float(x) for x in tuning["image_weights"]))
     if not grid or not np.isfinite(grid).all() or min(grid) < 0 or max(grid) > 1:
         raise ValueError("tuning.image_weights must be a non-empty grid in [0, 1]")
-    if tuning["metric"] not in ("full_map", "full_r1", "full_r5", "full_r10"):
-        raise ValueError("tuning.metric must be full_map or full_r1/5/10")
+    if tuning["metric"] != "full_map":
+        raise ValueError("tuning.metric must be full_map for the RCR benchmark")
     return grid
 
 
@@ -161,8 +169,38 @@ def tune_fusion(data, samples, gallery_ids, inputs, cfg, mode):
     return {"selected": dict(best), "trials": trials}
 
 
-def run_experiment(cfg, *, modes=None, splits=("val", "test")):
-    """Default: tune val, freeze, then evaluate test. Test-only loads selection."""
+def fafa_context(data, cfg, device):
+    """Lock the manually chosen adapter settings after complete validation.
+
+    No automatic FAFA search is performed. Re-running val freezes the supplied
+    configuration; test only checks it, without selecting from test metrics.
+    """
+    return digest_json(
+        {
+            "version": "fafa-rcr-val-v1",
+            "val_sha256": split_fingerprint(data, "val"),
+            "source": cfg["source"],
+            "checkpoint": cfg["checkpoint"],
+            "localization": cfg["localization"],
+            "setmatch": cfg["setmatch"],
+            "gallery_feature_dtype": cfg["runtime"]["gallery_feature_dtype"],
+            "device_type": device.type,
+            "weight_hashes": {
+                "fafa": sha256_file(cfg["checkpoint"]["path"]),
+                "detector": sha256_file(cfg["localization"]["detector"]["checkpoint"]),
+                "selector": sha256_file(
+                    cfg["localization"]["query_selector"]["checkpoint"]
+                ),
+                "runtime_assets": sha256_file(
+                    cfg["checkpoint"]["runtime_assets_marker"]
+                ),
+            },
+        }
+    )
+
+
+def run_experiment(cfg, *, modes=None, splits=("val",)):
+    """Default: validation only. Explicit test loads validation-frozen settings."""
     cfg = copy.deepcopy(cfg)
     splits = list(dict.fromkeys(splits))
     if not splits or any(s not in ("val", "test") for s in splits):
@@ -184,6 +222,32 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                 f"{split}: need non-empty queries and at least two gallery images"
             )
     device = resolve_device(cfg)
+    adapter_selection, adapter_path = None, None
+    if cfg["method"] == "fafa":
+        if not data.splits["val"]:
+            raise ValueError("FAFA benchmark runs require complete validation first")
+        context = fafa_context(data, cfg, device)
+        adapter_path = Path(cfg["output"]["dir"]) / "protocol.json"
+        if "val" in splits:
+            adapter_selection = {
+                "split": "val",
+                "metric": "full_map",
+                "context_sha256": context,
+                "num_queries": len(data.splits["val"]),
+                "validation_sha256": split_fingerprint(data, "val"),
+                "policy": "manually fixed parameters evaluated on validation",
+            }
+        else:
+            if not adapter_path.is_file():
+                raise FileNotFoundError(
+                    f"Run --splits val first: missing {adapter_path}"
+                )
+            adapter_selection = json.loads(adapter_path.read_text(encoding="utf-8"))
+            if (
+                adapter_selection.get("split") != "val"
+                or adapter_selection.get("context_sha256") != context
+            ):
+                raise ValueError("Saved FAFA configuration is stale; run --splits val")
     fusion_modes = [m for m in modes if m in ("early_fusion", "late_fusion")]
     selection = None
     tuning_path = None
@@ -218,7 +282,9 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                 raise ValueError(
                     "Saved selection lacks requested fusion modes; run --splits val"
                 )
-    (Path(cfg["output"]["dir"]) / "summary.csv").unlink(missing_ok=True)
+    summary = Path(cfg["output"]["dir"]) / "summary.csv"
+    preserve_file(summary)
+    summary.unlink(missing_ok=True)
     rows = []
     for split in splits:
         samples = split_samples(data, split)
@@ -236,6 +302,7 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                         data, samples, gallery_ids, inputs, cfg, mode
                     )
                 # Published before touching test inputs.
+                preserve_file(tuning_path)
                 write_json(tuning_path, selection)
         for mode in modes:
             run_cfg = copy.deepcopy(split_cfg)
@@ -259,6 +326,8 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                         "metric": selection["metric"],
                         "val_value": best["value"],
                         "context_sha256": selection["context_sha256"],
+                        "image_weight": best["image_weight"],
+                        "text_weight": best["text_weight"],
                         "file": str(tuning_path),
                     }
                 by_id = {image_id: i for i, image_id in enumerate(gallery_ids)}
@@ -267,8 +336,20 @@ def run_experiment(cfg, *, modes=None, splits=("val", "test")):
                 output = scores_to_rankings(samples, gallery_ids, scores)
                 save_run(run_cfg, data, output, run_details, perf_counter() - started)
             else:
-                output = run_retrieval(run_cfg, data=data)
+                output = run_retrieval(
+                    run_cfg, data=data, selection_metadata=adapter_selection
+                )
             metrics = evaluate_run(run_cfg, data=data, samples=samples, output=output)
+            if cfg["method"] == "fafa" and split == "val":
+                preserve_file(adapter_path)
+                write_json(
+                    adapter_path,
+                    {
+                        **adapter_selection,
+                        "val_full_map": metrics["overall"]["full_map"],
+                        "config": run_cfg,
+                    },
+                )
             rows.append(
                 {
                     "method": mode or cfg["method"],

@@ -249,6 +249,7 @@ def test_fafa_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch)
     cfg["cache"]["dir"] = str(tmp_path / "fafa_cache")
     cfg["checkpoint"].update(path=str(weights), runtime_assets_marker=str(marker))
     cfg["localization"]["query_selector"]["checkpoint"] = str(weights)
+    cfg["localization"]["detector"]["checkpoint"] = str(weights)
     cfg["runtime"].update(device="cpu", num_workers=0, gallery_feature_dtype="float32")
     monkeypatch.setattr(fafa, "official_source", lambda *a, **k: tmp_path)
     monkeypatch.setattr(fafa, "assets_ready", lambda cfg: True)
@@ -287,8 +288,8 @@ def test_fafa_retrieval_to_official_evaluation(benchmark, tmp_path, monkeypatch)
 
     from rcr.baselines.runner import run_experiment
 
-    rows = run_experiment(cfg, splits=["test"])
-    assert rows[0]["method"] == "fafa" and rows[0]["full_map"] == 1
+    with pytest.raises(ValueError, match="complete validation first"):
+        run_experiment(cfg, splits=["test"])
 
 
 def test_query_subset_requires_matching_evaluation_selection(
@@ -748,3 +749,96 @@ def test_test_rejects_old_self_inclusive_selection(fusion_benchmark, monkeypatch
     monkeypatch.setattr(runner, "tuning_context", current)
     with pytest.raises(ValueError, match="stale"):
         runner.run_experiment(fusion_benchmark, splits=["test"])
+
+
+@pytest.fixture
+def fafa_protocol(fusion_benchmark, tmp_path, monkeypatch):
+    cfg = yaml.safe_load(Path("configs/fafa.yaml").read_text())
+    cfg["data"] = fusion_benchmark["data"]
+    weights = fusion_benchmark["model"]["checkpoint"]
+    marker = tmp_path / "fafa-runtime.json"
+    marker.write_text("{}")
+    cfg["checkpoint"].update(path=weights, runtime_assets_marker=str(marker))
+    cfg["localization"]["detector"]["checkpoint"] = weights
+    cfg["localization"]["query_selector"]["checkpoint"] = weights
+    cfg["runtime"]["device"] = "cpu"
+    cfg["output"]["dir"] = str(tmp_path / "runs" / "fafa")
+    calls = []
+
+    def retrieve(data, samples, gallery_ids, cfg, device):
+        from rcr.common.io import sha256_file
+
+        calls.append(cfg["split"])
+        return np.zeros((len(samples), len(gallery_ids)), dtype=np.float32), {
+            "checkpoint_sha256": sha256_file(weights),
+            "rcr_training": False,
+        }
+
+    monkeypatch.setattr(fafa, "retrieve_fafa", retrieve)
+    return cfg, calls
+
+
+def test_fafa_requires_complete_val_then_frozen_test(fafa_protocol):
+    from rcr.baselines.runner import run_experiment
+    from rcr.evaluation.report import load_run
+
+    cfg, calls = fafa_protocol
+    with pytest.raises(FileNotFoundError, match="splits val first"):
+        run_experiment(cfg, splits=["test"])
+    assert not calls
+    run_experiment(cfg, splits=["val"])
+    lock = Path(cfg["output"]["dir"]) / "protocol.json"
+    before = lock.read_bytes()
+    run_experiment(cfg, splits=["test"])
+    assert calls == ["val", "test"] and lock.read_bytes() == before
+    result = load_run("fafa", Path(cfg["output"]["dir"]) / "test", "test")
+    assert result["run"]["adapter_selection"]["split"] == "val"
+
+
+@pytest.mark.parametrize("part", ["detector", "selector", "matching", "checkpoint"])
+def test_fafa_test_rejects_changed_parameters_before_inference(fafa_protocol, part):
+    from rcr.baselines.runner import run_experiment
+
+    cfg, calls = fafa_protocol
+    run_experiment(cfg, splits=["val"])
+    if part == "detector":
+        cfg["localization"]["detector"]["score_threshold"] = 0.7
+    elif part == "selector":
+        cfg["localization"]["query_selector"]["membership_margin"] = 0.1
+    elif part == "matching":
+        cfg["setmatch"]["unmatched_score"] = -0.5
+    else:
+        Path(cfg["checkpoint"]["path"]).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="stale"):
+        run_experiment(cfg, splits=["test"])
+    assert calls == ["val"]
+
+
+def test_fafa_lock_never_depends_on_test_labels(fafa_protocol):
+    from rcr.baselines.runner import fafa_context
+
+    cfg, _ = fafa_protocol
+    data = load_rcr_data(**cfg["data"])
+    before = fafa_context(data, cfg, torch.device("cpu"))
+    for sample_id in data.splits["test"]:
+        data.samples_by_id[sample_id]["positive_image_ids"] = ["b"]
+        data.samples_by_id[sample_id]["subjects"][0]["identity_ids"] = ["changed"]
+    assert fafa_context(data, cfg, torch.device("cpu")) == before
+
+
+def test_clip_benchmark_selection_requires_full_map(fusion_benchmark):
+    from rcr.baselines.runner import run_experiment
+
+    fusion_benchmark["tuning"]["metric"] = "full_r1"
+    with pytest.raises(ValueError, match="must be full_map"):
+        run_experiment(fusion_benchmark, splits=["val"])
+
+
+def test_clip_native_text_truncation_is_counted():
+    native = pytest.importorskip("clip")
+    texts = ["person", "person " * 100]
+    features, count = clip.encode_texts(
+        native, TinyCLIP(), texts, 1, torch.device("cpu")
+    )
+    assert count == 1 and features.shape == (2, 77)
+    assert np.isfinite(features).all()

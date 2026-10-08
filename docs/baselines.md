@@ -4,6 +4,11 @@ Each baseline uses the existing final dataset, split galleries and official
 ID/Full evaluator. Raw PIPA images and pretrained weights are not checked in.
 Run all commands from the repository root.
 
+Read the [benchmark protocol](benchmark_protocol.md), detailed
+[CLIP baseline](baselines/clip.md), [FAFA adapter](baselines/fafa.md), and
+[experiments/reporting](experiments.md). Baseline `run` defaults to val only;
+request test explicitly after locking validation settings.
+
 ## Environments
 
 Use separate environments for proposed, CLIP and FAFA. FAFA uses its pinned
@@ -105,6 +110,11 @@ The long `fafa.py`/`fafa_adapter.py` files have separate responsibilities:
 upstream model/runtime integration versus scene/Subject adaptation. Both are
 needed for a faithful baseline and are retained.
 
+`run --splits val` freezes the supplied FAFA adapter configuration/artifact hashes
+in `protocol.json`. This is a manual validation protocol, not an automatic sweep.
+`run --splits test` requires a matching lock and rejects changed settings before
+inference.
+
 ## Saved results
 
 `output.dir` is the run root (default `runs/clip` or `runs/fafa`). The CLI appends
@@ -120,3 +130,9 @@ use it as pipeline validation, not a publication-scale final benchmark.
 New baseline runs record `split_sha256`, using the same benchmark fingerprint as
 the proposed method. Saved-result evaluation rejects changed benchmark inputs;
 older rankings without this metadata still use gallery/sample consistency checks.
+
+New runs add dataset/sample/gallery digests, case counts, Git/runtime metadata.
+Evaluations bind metrics to `run.json`. `scripts/report.py --split val` exports
+the two paper tables without inference. Re-evaluate legacy rankings to attach
+the binding first. Replacements preserve prior run files/selections/reports in
+`.history/` and retain the active output layout.

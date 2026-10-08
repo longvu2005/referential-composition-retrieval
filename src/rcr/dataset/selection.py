@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from rcr.dataset.review import normalize_review_assignment
-from rcr.dataset.rewrite import validate_review_output
+from rcr.dataset.rewrite import SUBJECT_RE, validate_review_output
 
 STAGE2_FIELDS = {
     "sample_id",
@@ -116,10 +116,28 @@ def select_samples(
         required_ids = {identity for s in subjects for identity in s["identity_ids"]}
         if not required_ids <= query_boxes.keys():
             raise ValueError(f"{sample_id}: subject identity missing from boxes")
-        validate_review_output(
-            case_type,
-            {"final_desc": row["final_desc"], "final_change": row["final_change"]},
-        )
+
+        # Preserve strict validation: only attach context to the error, never
+        # silently alter, skip, or accept an invalid annotation.
+        try:
+            validate_review_output(
+                case_type,
+                {"final_desc": row["final_desc"], "final_change": row["final_change"]},
+            )
+        except ValueError as exc:
+            context = f"{sample_id} [{case_type}]: {exc}"
+            if "final_change must mention exactly" in str(exc):
+                expected = [subject["subject_id"] for subject in subjects]
+                found = sorted(
+                    {int(s) for s in SUBJECT_RE.findall(row["final_change"])}
+                )
+                context += (
+                    f"\n  Expected Subjects: {expected}"
+                    f"\n  Found Subjects: {found}"
+                    f"\n  final_change: {row['final_change']!r}"
+                )
+            raise ValueError(context) from exc
+
         instruction = f"{row['final_desc']}; {row['final_change']}."
         if row["final_instruction"] != instruction:
             raise ValueError(f"{sample_id}: final_instruction mismatch")

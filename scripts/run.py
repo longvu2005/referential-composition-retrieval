@@ -101,7 +101,11 @@ def main(argv=None):
     splits = list(
         dict.fromkeys(
             args.splits
-            or (["val", "test"] if command == "run" else [cfg.get("split", "val")])
+            or (
+                (["val", "test"] if method == "proposed" else ["val"])
+                if command == "run"
+                else [cfg.get("split", "val")]
+            )
         )
     )
     if command == "run":
