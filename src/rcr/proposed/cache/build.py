@@ -1,5 +1,8 @@
 """Select cache stages; the FAFA worker uses the current Python interpreter."""
 
+import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,6 +13,7 @@ import yaml
 from rcr.common.config import load_config
 from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
+from rcr.common.storage import format_bytes
 from rcr.proposed.cache.dino import _prepare_dino
 from rcr.proposed.cache.store import GalleryCache
 
@@ -101,6 +105,105 @@ def existing_cache(cfg: dict, root: Path, *, scene_root: Path | None = None):
     return cache
 
 
+def completed_person_cache(cfg: dict):
+    """Return a compatible complete FAFA cache, including its DINO binding."""
+    if cfg["person_encoder"]["backend"] != "fafa":
+        return None
+    scene_root = dino_root(cfg)
+    if existing_cache(
+        {**cfg, "person_encoder": {"backend": "dino"}}, scene_root
+    ) is None:
+        return None
+    ready = existing_cache(cfg, Path(cfg["data"]["cache"]), scene_root=scene_root)
+    if ready is not None:
+        data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+        ready.validate_gallery(data.gallery_ids)
+    return ready
+
+
+def prepare_person_assets(cfg: dict, *, force: bool = False) -> None:
+    if not force and completed_person_cache(cfg) is not None:
+        print(
+            "FAFA features already cached; skipping native asset preparation",
+            flush=True,
+        )
+        return
+    run_person_worker(cfg, prepare=True, force=force)
+
+
+def release_fafa_assets(cfg: dict) -> None:
+    """Release only published FAFA base assets after compatible features exist."""
+    if completed_person_cache(cfg) is None:
+        raise ValueError(
+            "cannot release FAFA assets before its feature cache is complete"
+        )
+    native = load_fafa_config(cfg)
+    root = Path(native["checkpoint"]["cache_root"]).resolve()
+    marker = Path(native["checkpoint"]["runtime_assets_marker"])
+    if not root.is_dir() or not marker.is_file():
+        return
+    if os.statvfs(root).f_flag & os.ST_RDONLY:
+        print(f"Keeping read-only FAFA runtime assets: {root}", flush=True)
+        return
+    protected = [
+        *cfg["data"].values(),
+        native["checkpoint"]["path"],
+        cfg["checkpoint"],
+        cfg["output"]["dir"],
+    ]
+    if any(
+        Path(path).resolve().is_relative_to(root)
+        or Path(path).absolute().is_relative_to(root)
+        for path in protected
+    ):
+        raise ValueError("FAFA runtime cache overlaps protected data/cache/checkpoints")
+    saved = json.loads(marker.read_text(encoding="utf-8"))
+    identity = {
+        "source_commit": native["source"]["commit"],
+        "model_name": native["checkpoint"]["model_name"],
+        "model_type": native["checkpoint"]["model_type"],
+    }
+    if any(saved.get(key) != value for key, value in identity.items()):
+        raise ValueError("FAFA runtime asset marker differs; refusing cleanup")
+    paths = []
+    for item in saved["files"]:
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("invalid FAFA runtime asset path")
+        # Names used by the pinned native FAFA implementation. Retain unrelated
+        # models/files, including ones that happened to appear in the marker.
+        base_weight = relative.parts[:3] == ("torch", "hub", "checkpoints") and (
+            relative.name in ("eva_vit_g.pth", "blip2_pretrained.pth")
+        )
+        bert_asset = "models--bert-base-uncased" in relative.parts
+        if not (base_weight or bert_asset):
+            continue
+        path = root / relative
+        if not path.parent.resolve().is_relative_to(root):
+            raise ValueError("FAFA runtime asset parent escapes its cache")
+        if path.is_file():
+            if path.stat().st_size != item["size"]:
+                raise ValueError("FAFA runtime asset changed; refusing cleanup")
+            paths.append(path)
+        elif path.is_symlink():
+            paths.append(path)
+    if not paths:
+        return
+    probe = Path(cfg["data"]["clip_cache"])
+    probe.mkdir(parents=True, exist_ok=True)
+    before = shutil.disk_usage(probe).free
+    for path in paths:
+        path.unlink(missing_ok=True)
+    marker.unlink()
+    after = shutil.disk_usage(probe).free
+    print(
+        f"Released FAFA base assets: {len(paths)} files; "
+        f"CLIP volume free={format_bytes(after)} "
+        f"(change={format_bytes(max(0, after - before))})",
+        flush=True,
+    )
+
+
 def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     """Build DINO and/or FAFA independently; completed caches stay immutable."""
     backend = cfg.get("person_encoder", {}).get("backend", "dino")
@@ -140,4 +243,6 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
 
             source = GalleryCache(data_cfg["cache"], scene_root=root)
             check_cache_config(source, cfg)
+            if cfg.get("cache", {}).get("release_fafa_assets", False):
+                release_fafa_assets(cfg)
             build_clip_cache(cfg, data, source)

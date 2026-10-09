@@ -48,6 +48,10 @@ installed packages. This does not remove an older pip cache; use
 is tight. Proposed checks cache/checkpoint/ranking writes with a 1 GiB reserve
 and estimates remaining CLIP cache space before downloading its weights.
 See [disk-space recovery](../docs/proposed_runs.md#notebook-disk-space).
+Once compatible frozen FAFA features are complete, proposed preparation skips
+native FAFA downloads. The default config releases its recorded downloadable
+base assets before the CLIP stage; set `cache.release_fafa_assets=false` to retain
+them. Tuned checkpoints and feature caches are retained.
 
 When combining stages in one notebook cell, stop the outer shell on errors too:
 

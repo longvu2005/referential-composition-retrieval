@@ -81,9 +81,9 @@ def main(argv=None):
 
     if command == "prepare" or getattr(args, "prepare", False):
         if method == "proposed":
-            from rcr.proposed.cache.build import run_person_worker
+            from rcr.proposed.cache.build import prepare_person_assets
 
-            run_person_worker(cfg, prepare=True, force=args.force)
+            prepare_person_assets(cfg, force=args.force)
         else:
             from rcr.baselines.prepare import prepare
 

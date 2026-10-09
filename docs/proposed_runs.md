@@ -29,7 +29,7 @@ Set `data.image_root`, `data.final_dir`, `data.dino_cache`, `data.cache` (FAFA),
 The CLIP image/text model and processor share the pinned revision in this config.
 
 ```bash
-# Prepare official FAFA source/checkpoint in the current runtime.
+# Prepare native FAFA only if compatible frozen person features are not ready.
 python tools/run.py prepare --config configs/proposed.yaml
 
 # Full build: reuse completed compatible stages; resume interrupted shards.
@@ -90,8 +90,31 @@ python -m pip cache info
 python -m pip cache purge
 ```
 
-Keep existing feature shards, build manifests, FAFA runtime assets and trained
-checkpoints. Use read-only inputs for already completed compatible caches and
+Keep existing feature shards, build manifests and trained checkpoints.
+The default proposed config enables `cache.release_fafa_assets`: after validating
+complete compatible FAFA/DINO features, the CLIP stage removes only recorded
+EVA/BLIP2 base weights and the native BERT cache from the dedicated FAFA runtime
+cache. The tuned checkpoint, all features, other models and read-only assets stay.
+The asset marker is removed so native preparation can restore them if needed.
+Set this option false to retain base assets for another native FAFA use.
+`prepare` skips native downloads while compatible complete FAFA features exist;
+`prepare --force` still prepares native assets explicitly.
+
+For a saved config from an earlier version, enable release when resuming:
+
+```bash
+%%bash
+set -euo pipefail
+python tools/run.py build-cache --config runs/proposed-v2/run_config.yaml \
+  --cache-stage clip --set cache.release_fafa_assets=true
+```
+
+This frees downloadable model files, not feature shards. It leaves the cache's
+raw tensors, precision, model revision and signatures unchanged. The actual
+free-space change is printed before the CLIP estimate; enough capacity is still
+required for the CLIP checkpoint download, later training checkpoints and rankings.
+
+Use read-only inputs for already completed compatible caches and
 pretrained weights instead of copying them into the writable output volume.
 Keep paths/settings fixed when resuming an unfinished build. Once sufficient
 space is available, rerun `build-cache` with the saved run config and the same
@@ -121,7 +144,7 @@ training output directory if a prior completed epoch has already saved `last.pt`
 
 ## Warmup, train, retrieve and evaluate
 
-`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses all three
+`bash scripts/methods/proposed.bash val` prepares required assets, builds/reuses all three
 caches, trains/selects `best.pt`, and evaluates validation. It saves the exact
 run config in `runs/proposed-v2/run_config.yaml`. A later
 `bash scripts/methods/proposed.bash test` uses that config and selected checkpoint

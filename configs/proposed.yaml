@@ -31,6 +31,9 @@ cache:
   storage_dtype: float16
   lru_mib: 512
   prefetch_batches: 1
+  # After validated FAFA features exist, release only its downloadable base assets.
+  # Set false to retain them for another native FAFA use in this same runtime.
+  release_fafa_assets: true
 model:
   dim: 256
   identity_dim: 128
