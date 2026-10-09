@@ -23,6 +23,7 @@ from rcr.proposed.batch import build_batch, prefetch_batches, to_device
 from rcr.proposed.cache.clip import CACHE_VERSION, FeatureCache, source_signature
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
+from rcr.proposed.optimization import NonfiniteStepError, train_step
 from rcr.proposed.ranking import mine_hard_negatives, retrieve_rankings
 from rcr.proposed.sampling import (
     CandidateIndex,
@@ -183,39 +184,42 @@ def train(cfg):
                     ),
                 )
                 for rows, stats, batch in progress:
-                    optimizer.zero_grad(set_to_none=True)
                     batch = to_device(batch, device)
-                    with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-                        loss, parts = compute_loss(
+                    try:
+                        loss, parts = train_step(
                             model,
-                            batch,
-                            cache.patch_hw,
-                            warmup=warmup,
-                            pair_batch_size=train_cfg["pair_batch_size"],
-                            **cfg["loss"],
+                            optimizer,
+                            scaler,
+                            lambda batch=batch, warmup=warmup: compute_loss(
+                                model,
+                                batch,
+                                cache.patch_hw,
+                                warmup=warmup,
+                                pair_batch_size=train_cfg["pair_batch_size"],
+                                **cfg["loss"],
+                            ),
+                            device,
+                            amp=amp,
+                            max_grad_norm=train_cfg["max_grad_norm"],
                         )
-                    if not torch.isfinite(loss):
+                    except NonfiniteStepError as error:
                         write_json(
                             output / "nonfinite_batch.json",
                             {
                                 "epoch": epoch + 1,
+                                "warmup": warmup,
                                 "sample_ids": [s["sample_id"] for s in rows],
-                                "loss": str(loss.item()),
+                                **error.details,
                             },
                         )
-                        raise FloatingPointError(
-                            "nonfinite loss; optimizer not stepped"
+                        raise
+                    if parts["fp32_retries"]:
+                        tqdm.write(
+                            "AMP overflow: updated this batch in FP32; "
+                            f"epoch={epoch + 1}, "
+                            f"samples={[s['sample_id'] for s in rows]}, "
+                            f"scale={scaler.get_scale():g}"
                         )
-                    if loss.requires_grad:
-                        scaler.scale(loss).backward()
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(),
-                            train_cfg["max_grad_norm"],
-                            error_if_nonfinite=True,
-                        )
-                        scaler.step(optimizer)
-                        scaler.update()
                     for key, value in {
                         "loss": loss.item(),
                         **{

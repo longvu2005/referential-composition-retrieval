@@ -194,6 +194,36 @@ textual role IDs explicitly and raises if exceeded.
 
 `history.jsonl` includes loss terms, identity active-anchor rate, supervised
 matching counts, sampling counts and maximum transport residuals/iterations.
+With `train.amp=true`, an FP16 loss/gradient overflow retries the **same batch**
+once in FP32 without loss scaling. GradScaler rejects the overflowing gradient
+update and lowers its scale; only a finite, clipped retry updates AdamW. The
+retry restores the pre-forward RNG state for dropout. `fp32_retries` in each
+history row counts recovered batches, which are also printed during training.
+Finite batches keep the normal AMP path. A nonfinite FP32 loss/gradient still
+stops training before an optimizer update and records the epoch, sample IDs,
+precision attempts and bad parameter names (for bad gradients) in
+`nonfinite_batch.json`. Do not disable `error_if_nonfinite` or replace gradients
+with zeros. Use `--set train.amp=false` for a full FP32 diagnostic if needed.
+
+After applying a training fix, reuse the completed feature caches and start a
+fresh training output; this does not resume the interrupted optimizer. In a
+Kaggle `%%bash` cell, the **outer cell** must stop before ablation if train fails:
+
+```bash
+set -euo pipefail
+python_bin="${PYTHON:-python}"
+new_run="runs/proposed-stable-$(date +%Y%m%d-%H%M%S)"
+"$python_bin" tools/run.py run --config runs/proposed-v2/run_config.yaml \
+  --train --splits val --set "output.dir=$new_run"
+"$python_bin" tools/run.py ablate --config configs/ablations/shortlist.yaml \
+  --splits val --set "base_config=$new_run/run_config.yaml" \
+  "output_dir=$new_run-policies"
+```
+
+This recovery requires all feature caches to be complete. It avoids repeating
+setup/asset downloads/cache building, preserves earlier checkpoints and uses
+the new validation-selected `best.pt` for all retrieval policies.
+
 Per-epoch validation JSON contains overall, by-case and per-query metrics.
 `run.json` records cache/checkpoint/version provenance, shortlist policy,
 retrieval elapsed time and CUDA peak allocated memory where available.
