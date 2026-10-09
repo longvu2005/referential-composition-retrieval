@@ -1,6 +1,8 @@
 import pytest
 import torch
 
+from rcr.common.config import load_config
+from rcr.proposed.cache.build import check_cache_config, fafa_spec
 from rcr.proposed.cache.store import GalleryCache
 
 
@@ -109,3 +111,50 @@ def test_legacy_global_features_pool_once_without_writing(
     assert cache.global_features is actual
     after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     assert before == after
+
+
+def test_known_legacy_dino_source_reused_by_fafa_without_writes(tmp_path):
+    source = tmp_path / "dino"
+    source.mkdir()
+    torch.save(
+        {
+            "cache_id": "known-legacy-dino",
+            "image_ids": ["photo"],
+            "persons": torch.ones(1, 1, 8),
+            "mask": torch.ones(1, 1, dtype=torch.bool),
+            "patch_hw": (14, 14),
+        },
+        source / "index.pt",
+    )
+    persons = tmp_path / "fafa"
+    persons.mkdir()
+    cfg = load_config("configs/proposed.yaml")
+    native = load_config(cfg["person_encoder"]["fafa_config"])
+    torch.save(
+        {
+            "format_version": 3,
+            "layout": "persons",
+            "cache_id": "known-fafa",
+            "source_cache_id": "known-legacy-dino",
+            "image_ids": ["photo"],
+            "persons": torch.ones(1, 1, 16),
+            "mask": torch.ones(1, 1, dtype=torch.bool),
+            "patch_hw": (14, 14),
+            "scene_dim": 8,
+            "image_encoder": cfg["image_encoder"],
+            "detector": cfg["detector"],
+            "person_encoder": {"backend": "fafa", "spec": fafa_spec(native)},
+        },
+        persons / "index.pt",
+    )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.pt")}
+    cache = GalleryCache(persons, scene_root=source)
+    check_cache_config(cache, cfg)
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*.pt")}
+    with pytest.raises(ValueError, match="allow_legacy_dino"):
+        check_cache_config(cache, {**cfg, "cache": {"allow_legacy_dino": False}})
+    with pytest.raises(ValueError, match="allow_legacy_dino"):
+        check_cache_config(cache._scene_cache, cfg)  # DINO cannot replace FAFA.
+    cache._scene_cache.patch_hw = (7, 7)
+    with pytest.raises(ValueError, match="patch grid"):
+        check_cache_config(cache, cfg)

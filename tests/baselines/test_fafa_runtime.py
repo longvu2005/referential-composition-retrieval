@@ -61,6 +61,39 @@ def test_native_qformer_safetensors_roundtrip(native, tmp_path):
     torch.testing.assert_close(expected, actual)
 
 
+@pytest.mark.parametrize("vocab_size", [31, 32, 33])
+def test_native_qformer_pretrained_resize_loads_complete_checkpoint(
+    native, tmp_path, vocab_size
+):
+    from safetensors.torch import save_file
+
+    model = native.BertLMHeadModel(small_config(native)).eval()
+    model.config.save_pretrained(tmp_path)
+    save_file(
+        {key: value.clone() for key, value in model.state_dict().items()},
+        str(tmp_path / "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    restored = native.BertLMHeadModel.from_pretrained(tmp_path).eval()
+    restored.resize_token_embeddings(vocab_size, mean_resizing=False)
+    head = restored.cls.predictions
+    assert head.bias is head.decoder.bias
+    assert head.bias.shape == (vocab_size,)
+    assert head.decoder.weight.shape == (vocab_size, 16)
+
+    # A complete BLIP-2/FAFA vocabulary-sized checkpoint must load without
+    # filtering keys or ignoring mismatches, including both saved bias aliases.
+    checkpoint = {key: value.clone() for key, value in restored.state_dict().items()}
+    checkpoint["cls.predictions.bias"] = torch.arange(vocab_size).float()
+    checkpoint["cls.predictions.decoder.bias"] = checkpoint[
+        "cls.predictions.bias"
+    ].clone()
+    restored.load_state_dict(checkpoint, strict=True)
+    torch.testing.assert_close(head.bias, torch.arange(vocab_size).float())
+    logits = head(torch.randn(2, 3, 16))
+    assert logits.shape == (2, 3, vocab_size) and torch.isfinite(logits).all()
+
+
 def test_native_fafa_image_and_composed_extraction(native, tmp_path, monkeypatch):
     from lavis.models.blip2_models.blip2 import Blip2Base
     from lavis.models.blip2_models.blip2_fafa_cpr import Blip2FAFACPR
@@ -72,6 +105,7 @@ def test_native_fafa_image_and_composed_extraction(native, tmp_path, monkeypatch
     vocab += [f"word{i}" for i in range(27)]
     (tmp_path / "vocab.txt").write_text("\n".join(vocab))
     tokenizer = BertTokenizer(vocab_file=str(tmp_path / "vocab.txt"))
+    tokenizer.add_special_tokens({"bos_token": "[DEC]"})
 
     class Vision(nn.Module):
         num_features = 12
@@ -100,6 +134,7 @@ def test_native_fafa_image_and_composed_extraction(native, tmp_path, monkeypatch
     model = Blip2FAFACPR(
         num_query_token=2, embed_dim=8, max_txt_len=8, use_mlm=False, use_dsu=False
     ).eval()
+    assert model.Qformer.cls.predictions.bias.shape == (33,)
     pixels = torch.randn(2, 3, 8, 8)
     with torch.inference_mode():
         features = model.extract_features({"image": pixels}, mode="image")

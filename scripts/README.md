@@ -21,6 +21,8 @@ Dependencies are declared in `pyproject.toml`; requirements files select extras.
 Proposed includes FAFA cache extraction in the same runtime, with Transformers
 4.57.6 shared by FAFA and DINOv3. FAFA's legacy utility imports are bridged in
 `baselines/fafa.py` without editing the authors' source or model computations.
+The loader also restores the native Q-former prediction-bias tie before
+`from_pretrained` and vocabulary resizing for BLIP-2's extra `[DEC]` token.
 
 In Colab/Kaggle, run this before shell setup/workflows:
 
@@ -37,6 +39,20 @@ pins preserve OpenAI CLIP's `pkg_resources` build support. `requirements.txt`
 provides deterministic annotation and JSON reports without model dependencies.
 The FAFA cache subprocess uses `sys.executable` from the caller; it runs in the
 same runtime and ends before CLIP extraction to release GPU/library state.
+
+When combining stages in one notebook cell, stop the outer shell on errors too:
+
+```bash
+%%bash
+set -euo pipefail
+bash scripts/setup.bash proposed
+bash scripts/methods/proposed.bash val
+python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
+```
+
+Pip may report conflicts with unused packages preinstalled by Colab/Kaggle.
+Those warnings are distinct from a failed model/cache stage; do not continue
+to retrieval or ablation when setup or training actually exits with an error.
 
 ## Dataset
 

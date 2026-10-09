@@ -25,7 +25,9 @@ clip_encoder:
   revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
   batch_size: 16
 cache:
-  allow_legacy_dino: false
+  # Reuse the existing published DINO cache with known original settings.
+  # Set false for caches whose encoder/detector/preprocessing are unknown.
+  allow_legacy_dino: true
   storage_dtype: float16
   lru_mib: 512
   prefetch_batches: 1

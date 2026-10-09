@@ -41,9 +41,10 @@ python tools/run.py build-cache --config configs/proposed.yaml --cache-stage cli
 Existing valid DINO/FAFA caches can stay in read-only Kaggle inputs. CLIP builds
 only missing semantic features against exactly those detector boxes. If the DINO
 cache lacks metadata, `cache.allow_legacy_dino=true` explicitly asserts that its
-checkpoint/detector/preprocessing match; default false rejects unverified legacy
-provenance. Rebuild instead if the original settings are unknown. No GT boxes
-replace detector proposals.
+checkpoint/detector/preprocessing match. The example config enables this for
+the existing published DINO cache. Use false and rebuild if the original
+settings are unknown. Gallery order, patch grid and FAFA source bindings are
+still checked. No GT boxes replace detector proposals.
 
 The semantic cache contains `index.pt`, `features/<gallery-index>.pt`, `text.pt`,
 `supervision.pt`, and the tokenizer. `.building` prevents partial caches from
@@ -75,12 +76,18 @@ python tools/run.py evaluate --config configs/proposed.yaml --splits val \
   --set retrieval.mode=full output.dir=runs/proposed-v2-full
 
 # Same trained checkpoint, fixed policies (full may be expensive).
+# Suite base_config reads runs/proposed-v2/run_config.yaml from the val workflow.
 python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
 
 # Use selected best.pt and fixed settings for test.
 python tools/run.py run --config configs/proposed.yaml --splits test
 python tools/report.py --split val --run proposed=runs/proposed-v2/val
 ```
+
+If training uses a custom output directory, update the suite's `base_config`
+to that directory's `run_config.yaml` (`config.yaml` for standalone `train`).
+The saved config preserves the actual cache paths and legacy setting;
+ablation does not reread the starter YAML.
 
 `warmup.pt` is saved after warmup, `last.pt` after every epoch, and `best.pt` only
 when main-training overall validation Full-mAP improves. Training requires a new

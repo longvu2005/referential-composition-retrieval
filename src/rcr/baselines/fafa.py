@@ -111,6 +111,15 @@ def official_api(directory: Path):
         sys.path.insert(0, src)
     from data_utils import squarepad_transform_test
     from lavis.models import load_model_and_preprocess
+    from lavis.models.blip2_models.Qformer import BertLMPredictionHead
+
+    # Modern from_pretrained can materialize these aliases as separate
+    # Parameters. Restore BERT's bias tie before FAFA adds its [DEC] token;
+    # otherwise only decoder.bias grows and the BLIP-2 checkpoint cannot load.
+    def tie_prediction_bias(self):
+        self.decoder.bias = self.bias
+
+    BertLMPredictionHead._tie_weights = tie_prediction_bias
 
     return squarepad_transform_test, load_model_and_preprocess
 

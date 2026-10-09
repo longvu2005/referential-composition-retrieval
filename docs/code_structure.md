@@ -51,7 +51,8 @@ loading uses the shared annotation parser in `dataset/text.py`.
 Proposed and native FAFA use the same Python/runtime. The FAFA cache worker
 uses the caller's `sys.executable`; cached training/retrieval never launch it.
 `baselines/fafa.py` restores three legacy Transformers utility import aliases
-before loading the unchanged pinned native source. The base package supports annotation and JSON reports without
+and the Q-former prediction-bias tie before constructing the native model.
+The pinned source stays unchanged. The base package supports annotation and JSON reports without
 Torch; method extras, optional candidate ordering and saved-ranking evaluation
 have separate requirements files.
 

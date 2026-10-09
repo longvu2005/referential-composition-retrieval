@@ -64,7 +64,8 @@ refresh the separate supervision sidecar. Cache IDs are retained across these
 refreshes, but checkpoint text/supervision signatures distinguish their contents.
 Legacy DINO metadata requires an explicit user assertion via
 `cache.allow_legacy_dino=true`; it cannot prove the missing provenance. Default
-configuration rejects that legacy format. Reusing raw source caches assumes their
+configuration enables that assertion for the existing published cache; set it
+to false for unverified legacy caches. Reusing raw source caches assumes their
 image bytes and feature shards remain immutable; metadata is not a reconstruction
 of an undocumented historical encoder run.
 

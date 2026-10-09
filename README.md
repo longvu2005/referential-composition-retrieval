@@ -127,9 +127,10 @@ call `tools/run.py` directly. See [workflow contracts](scripts/README.md).
 
 The new architecture requires training from scratch. Source IDs/checksums,
 per-image detector boxes, gallery order, encoder/preprocessing metadata and
-checkpoint/cache versions are checked. Legacy DINO metadata is rejected by
-default; explicitly assert known original settings with
-`cache.allow_legacy_dino=true` only when appropriate.
+checkpoint/cache versions are checked. The example proposed config sets
+`cache.allow_legacy_dino=true` to reuse the existing published DINO cache with
+known original settings; use `false` when those settings are unknown. This
+permits legacy DINO scene features, never DINO person features in place of FAFA.
 
 | Command | Purpose |
 | --- | --- |

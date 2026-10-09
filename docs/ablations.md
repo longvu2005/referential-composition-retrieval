@@ -3,6 +3,11 @@
 `configs/ablations/shortlist.yaml` compares three explicit inference policies
 using one frozen trained checkpoint and the same split gallery:
 
+Its `base_config` is `runs/proposed-v2/run_config.yaml`, saved by the val workflow, so
+the checkpoint, cache paths and legacy DINO setting match the trained run.
+For a custom output directory, point `base_config` at its saved run config.
+Standalone `train` saves `config.yaml`; use that file when training without `run`.
+
 | Policy | Scoring |
 | --- | --- |
 | `coarse` | Grounded identity maximum, no transport or reasoner |

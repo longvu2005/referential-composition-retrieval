@@ -36,8 +36,9 @@ from the repository root is:
 Choose `requirements/fafa.txt` for FAFA. Install before model imports; restart
 if those packages were already loaded. Bootstrap retains `pkg_resources` needed
 by OpenAI CLIP. FAFA uses the pinned official source and Transformers 4.57.6;
-its loader restores the three legacy utility import aliases. Model/weight
-computations stay native. The runtime never creates environments or installs
+its loader restores the three legacy utility import aliases and Q-former's
+prediction-bias tie before vocabulary resizing. Model/weight computations
+stay native. The runtime never creates environments or installs
 packages during retrieval.
 
 For the default reproduction sequence, use `bash scripts/methods/clip.bash val`

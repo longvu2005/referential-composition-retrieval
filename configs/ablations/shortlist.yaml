@@ -1,4 +1,5 @@
-base_config: configs/proposed.yaml
+# Keep the validation workflow's exact checkpoint/cache configuration.
+base_config: runs/proposed-v2/run_config.yaml
 output_dir: runs/proposed-v2-policies
 experiments:
   - name: coarse
