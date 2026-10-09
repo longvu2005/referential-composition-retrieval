@@ -18,8 +18,10 @@ Replace `proposed` with the selected profile: `clip`, `fafa`, `dataset`,
 `dataset-clip`, `evaluation` or `dev`. The script installs into the current
 Python; it creates no venvs. One notebook installs and runs one method.
 Dependencies are declared in `pyproject.toml`; requirements files select extras.
-Proposed includes FAFA cache extraction in the same runtime, with Transformers
-4.57.6 shared by FAFA and DINOv3. FAFA's legacy utility imports are bridged in
+Proposed includes FAFA cache extraction in the same runtime, with Torch 2.6.0,
+torchvision 0.21.0 and Transformers 4.57.6 shared by FAFA, CLIP and DINOv3.
+Torch 2.6 is required by Transformers for the pinned CLIP revision's `.bin`
+checkpoint. FAFA's legacy utility imports are bridged in
 `baselines/fafa.py` without editing the authors' source or model computations.
 The loader also restores the native Q-former prediction-bias tie before
 `from_pretrained` and vocabulary resizing for BLIP-2's extra `[DEC]` token.

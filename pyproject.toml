@@ -31,8 +31,10 @@ clip = [
 # Official FAFA is imported from the pinned source, not a PyPI LAVIS fork.
 # Proposed reuses this native runtime for its FAFA cache stage in the same notebook.
 fafa = [
-    "torch==2.5.1",
-    "torchvision==0.20.1",
+    # Transformers 4.57 rejects PyTorch .bin weights on Torch < 2.6.
+    # The pinned OpenAI HF CLIP revision contains pytorch_model.bin only.
+    "torch==2.6.0",
+    "torchvision==0.21.0",
     "transformers==4.57.6",
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
     "scipy>=1.11,<2",
@@ -63,7 +65,9 @@ evaluation = [
     "torch>=2.4,<3",  # Decode saved rankings.pt; no model encoders needed.
 ]
 dev = [
-    "torch>=2.4,<3",  # CPU contracts for all methods.
+    "torch==2.6.0",  # Same checkpoint loader as the proposed/FAFA runtime.
+    "torchvision==0.21.0",
+    "transformers==4.57.6",  # Exercise native .bin loading in offline CI tests.
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "scipy>=1.11,<2",  # CPU FAFA adapter contract tests (no native weights).

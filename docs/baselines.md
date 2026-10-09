@@ -35,7 +35,9 @@ from the repository root is:
 
 Choose `requirements/fafa.txt` for FAFA. Install before model imports; restart
 if those packages were already loaded. Bootstrap retains `pkg_resources` needed
-by OpenAI CLIP. FAFA uses the pinned official source and Transformers 4.57.6;
+by OpenAI CLIP. FAFA/proposed pin Torch 2.6.0, torchvision 0.21.0 and Transformers
+4.57.6 so the shared runtime can load the pinned Hugging Face CLIP `.bin` weights.
+FAFA uses the pinned official source;
 its loader restores the three legacy utility import aliases and Q-former's
 prediction-bias tie before vocabulary resizing. Model/weight computations
 stay native. The runtime never creates environments or installs

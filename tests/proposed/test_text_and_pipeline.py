@@ -181,8 +181,7 @@ def test_full_text_windows_all_mentions_and_unequal_subjects():
     )
 
 
-def test_real_clip_extraction_without_downloaded_weights():
-    pytest.importorskip("transformers")
+def tiny_native_clip():
     from transformers import CLIPConfig, CLIPModel, CLIPTextConfig, CLIPVisionConfig
 
     config = CLIPConfig(
@@ -204,8 +203,19 @@ def test_real_clip_extraction_without_downloaded_weights():
         ).to_dict(),
         projection_dim=6,
     )
-    model = CLIPModel(config).eval()
-    encoder = CLIPFeatures(model, Tokenizer())
+    return CLIPModel(config).eval()
+
+
+@pytest.mark.parametrize("safe_serialization", [False, True])
+def test_real_clip_checkpoint_load_and_extraction(tmp_path, safe_serialization):
+    from transformers import CLIPModel
+
+    model = tiny_native_clip()
+    model.save_pretrained(tmp_path, safe_serialization=safe_serialization)
+    filename = "model.safetensors" if safe_serialization else "pytorch_model.bin"
+    assert (tmp_path / filename).is_file()
+    restored = CLIPModel.from_pretrained(tmp_path).eval()
+    encoder = CLIPFeatures(restored, Tokenizer())
     pixels = torch.randn(2, 3, 8, 8)
     pooled, tokens = encoder.image(pixels)
     native = model.vision_model(pixel_values=pixels)
@@ -219,6 +229,56 @@ def test_real_clip_extraction_without_downloaded_weights():
     assert pooled.shape == (2, 6) and tokens.shape == (2, 5, 8)
     encoded = encoder.text("Subject 1 " + "word " * 20)
     assert encoded["tokens"].shape == (22, 8)
+
+
+def test_real_clip_bin_cache_resumes_after_failed_build(experiment, monkeypatch):
+    cfg, data = experiment
+    # The fixture already prepared tiny source caches. Restore real Transformers
+    # before testing its binary checkpoint loader; no CLIP model API is mocked.
+    monkeypatch.undo()
+    from transformers import CLIPImageProcessor, CLIPTokenizerFast
+
+    checkpoint = data.final_dir.parent / "local-clip-bin"
+    tiny_native_clip().save_pretrained(checkpoint, safe_serialization=False)
+    cfg["clip_encoder"]["model"] = str(checkpoint)
+    monkeypatch.setattr(
+        CLIPTokenizerFast, "from_pretrained", lambda *a, **kw: Tokenizer()
+    )
+    monkeypatch.setattr(
+        CLIPImageProcessor, "from_pretrained", lambda *a, **kw: PixelProcessor()
+    )
+    source = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
+    indexes = [source.root / "index.pt", source._scene_cache.root / "index.pt"]
+    before = [path.read_bytes() for path in indexes]
+    original = CLIPFeatures.image
+    calls = 0
+
+    def interrupted(self, pixels):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted native CLIP build")
+        return original(self, pixels)
+
+    monkeypatch.setattr(CLIPFeatures, "image", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted native CLIP build"):
+        build_clip_cache(cfg, data, source)
+    with pytest.raises(ValueError, match="incomplete"):
+        FeatureCache(cfg, data)
+    root = Path(cfg["data"]["clip_cache"])
+    first_shard = (root / "features/0.pt").read_bytes()
+    cache_id = (root / ".building").read_text()
+    monkeypatch.setattr(CLIPFeatures, "image", original)
+    builder.prepare_cache(cfg, stage="clip")
+    cache = FeatureCache(cfg, data)
+    loaded = cache.load(torch.tensor([0]))
+    assert torch.isfinite(loaded["clip_tokens"]).all()
+    assert loaded["clip_tokens"].shape == (1, 1, 5, 8)
+    assert loaded["clip_pooled"].shape == (1, 1, 6)
+    assert cache.cache_id == cache_id
+    assert (root / "features/0.pt").read_bytes() == first_shard
+    assert [path.read_bytes() for path in indexes] == before
+    assert not (root / ".building").exists() and not (root / ".build.pt").exists()
 
 
 @pytest.fixture

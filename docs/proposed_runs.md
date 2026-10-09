@@ -14,8 +14,11 @@ os.environ["PYTHON"] = sys.executable
 
 Then run `!bash scripts/setup.bash proposed` in Colab/Kaggle. This installs the
 complete proposed method, including its FAFA cache stage, into the kernel's
-runtime. There is no additional Python path to configure. Install before model
-imports; restart the kernel if those packages were already imported. Direct
+runtime: Torch 2.6.0, torchvision 0.21.0 and Transformers 4.57.6. Transformers
+requires Torch >= 2.6 for the pinned CLIP revision's `pytorch_model.bin`;
+that revision does not contain safetensors. There is no additional Python
+path to configure. Install before model imports; restart the kernel after
+upgrading an already loaded Torch runtime. Direct
 commands below use the same Python (`{sys.executable}` in notebook shell cells).
 
 ## Build or reuse frozen features
@@ -51,6 +54,24 @@ The semantic cache contains `index.pt`, `features/<gallery-index>.pt`, `text.pt`
 being used. Text/annotation changes refresh their sidecars through the clip stage;
 vision checkpoint/preprocessing/source mismatches require a new cache directory.
 Model training/retrieval use cached tensors and do not import native FAFA.
+
+If a previous run stopped while loading CLIP, apply the runtime fix, rerun
+setup and restart the kernel. Retain the existing cache directories: the model
+revision and cache signatures are unchanged. To finish only that stage, using
+the actual paths saved by the failed run:
+
+```bash
+%%bash
+set -euo pipefail
+python tools/run.py build-cache --config runs/proposed-v2/run_config.yaml \
+  --cache-stage clip
+```
+
+Then run the val workflow below, followed by ablation after validation succeeds.
+The val workflow reuses completed DINO/FAFA/CLIP caches. Keep `set -euo pipefail`
+at the start of every notebook Bash cell that combines multiple commands so
+ablation cannot continue after a failed cache or training stage. Use a new
+training output directory if a prior completed epoch has already saved `last.pt`.
 
 ## Warmup, train, retrieve and evaluate
 
