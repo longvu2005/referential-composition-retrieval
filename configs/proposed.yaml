@@ -1,101 +1,87 @@
-# One source of truth for cache, training, retrieval and evaluation.
+# Frozen FAFA identity + CLIP semantics + DINO context; v2 checkpoints only.
 method: proposed
 split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
   cache: cache/proposed-fafa
-  dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
+  dino_cache: cache/proposed-dino
+  clip_cache: cache/proposed-clip-v4
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
   text_threshold: 0.25
 image_encoder:
   model: facebook/dinov3-vitb16-pretrain-lvd1689m
-  # [height, width], letterboxed; changing sizes requires rebuilding the cache.
   scene_size: [224, 224]
   person_size: [256, 128]
 person_encoder:
-  backend: fafa              # fafa | dino (backbone control)
+  backend: fafa
   python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
   batch_size: 4
+clip_encoder:
+  model: openai/clip-vit-base-patch32
+  # Pinned Hugging Face revision shared by image encoder, text encoder and processor.
+  revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
+  batch_size: 16
 cache:
-  # Legacy Kaggle DINO files lack encoder metadata. Confirm image_encoder/detector
-  # settings match the original build; this flag does not verify that provenance.
-  allow_legacy_dino: true
+  allow_legacy_dino: false
   storage_dtype: float16
-  lru_mib: 1024
-  prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
+  lru_mib: 512
+  prefetch_batches: 1
 model:
-  text_model: google-bert/bert-base-uncased
-  dim: 384                   # semantic, scene and text width; identity is separate
-  dropout: 0.1               # attention weights/residuals and FFNs
-  representation: dual       # dual | shared (retrained old-style control)
-  binding_mode: both          # both | identity | semantic | none
+  dim: 256
   identity_dim: 128
-  state_dim: 128
-  # Training default; inference overrides live in retrieval.
-  coarse_beta: 0.4
-  num_heads: 6
-  mlp_ratio: 2
-  geo_dim: 32
+  num_heads: 4
+  max_subjects: 16
+  dropout: 0.1
+  transport_tau: 0.2
+  transport_iterations: 512
+  transport_tolerance: 0.00001
+  roi_size: 2
+  roi_expansion: 1.25
 train:
-  epochs: 20
-  batch_size: 14
-  candidates: 32
-  case_balanced: true        # P(case) proportional to sqrt(N_case)
+  epochs: 20                 # Includes warmup; main training starts at epoch 3.
+  warmup_epochs: 2
+  batch_size: 2
+  candidates: 8
+  pair_batch_size: 8
   seed: 0
-  amp: true           # CUDA training only; mining/evaluation remain FP32
-  mining_batch_size: 8
+  amp: true
+  max_grad_norm: 5.0
   sampling:
-    positives_per_query: 2   # fewer if unavailable; always keep a negative
-    # Fractions of C-P negatives; remaining/unused slots are random.
+    positives_per_query: 2
     identity_fraction: 0.5
-    # 0.3 enables coarse hard-negative mining after warmup.
     hard_fraction: 0.3
-    warmup_epochs: 1
     refresh_every_epochs: 2
     pool_size: 100
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05           # text projection only; BERT is fully frozen
   weight_decay: 0.01
 loss:
-  grounding_weight: 1.0
   identity_weight: 0.1
+  matching_weight: 1.0
   retrieval_weight: 1.0
   identity_temperature: 0.1
-  state_weight: 1.0
-  state_temperature: 0.1
+  rank_temperature: 0.1
 retrieval:
-  # Shared by periodic validation and standalone retrieval.
-  coarse_mode: identity_state   # identity_only | state_only | identity_state
-  coarse_beta: 0.4              # training default; joint sweep selects final pair
-  coarse_normalization: zscore  # none reproduces raw ID + beta * state
-  rerank: true                  # false keeps the complete coarse ranking
-  binding_mode: null           # null inherits model; inference binding ablations
-  # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
-  # Tune BOTH weights with configs/calibration.yaml after training.
-  fine_coarse_weight: 0.4
-  top_m: 500
-  fine_batch_size: 64
+  mode: shortlist             # shortlist | full | coarse
+  top_m: 500                  # Starting point, not a measured optimum.
+  fine_batch_size: 16
   identity_batch_size: 512
-  coarse_batch_size: 512
+  coarse_batch_size: 256
 candidate_ks: [100, 500]
 evaluation:
   enabled: true
   every_epochs: 2
-  train_max_queries: 100
 wandb:
-  enabled: true
+  enabled: false
   project: referential-composition-retrieval
-  name: proposed
+  name: soft-partial-v2
   mode: online
-  log_every_steps: 20
 runtime:
   device: auto
-checkpoint: runs/proposed/best.pt
+checkpoint: runs/proposed-v2/best.pt
 output:
-  # Root only; the runner appends each split.
-  dir: runs/proposed
+  dir: runs/proposed-v2

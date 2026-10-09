@@ -1,0 +1,13 @@
+base_config: configs/proposed.yaml
+output_dir: runs/proposed-v2-policies
+experiments:
+  - name: coarse
+    overrides:
+      retrieval.mode: coarse
+  - name: shortlist500
+    overrides:
+      retrieval.mode: shortlist
+      retrieval.top_m: 500
+  - name: full
+    overrides:
+      retrieval.mode: full

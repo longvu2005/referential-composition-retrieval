@@ -15,6 +15,7 @@ from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
 from rcr.proposed.cache.build import check_cache_config, fafa_spec, load_fafa_config
+from rcr.proposed.cache.dino import boxes_to_pixels
 from rcr.proposed.cache.store import GalleryCache
 
 
@@ -25,29 +26,6 @@ def extract_person_features(model, pixels: torch.Tensor) -> torch.Tensor:
     if features.ndim != 3:
         raise ValueError("FAFA image_embeds must be [B,query_tokens,hidden_dim]")
     return features.float().mean(dim=1)
-
-
-def boxes_to_pixels(
-    boxes: torch.Tensor,
-    image_size: tuple[int, int],
-    scene_size: tuple[int, int],
-) -> torch.Tensor:
-    """Invert the legacy ImageOps.pad box transform; no detector is rerun."""
-    width, height = image_size
-    scene_width, scene_height = scene_size
-    scale = min(scene_width / width, scene_height / height)
-    resized_width = min(scene_width, round(width * scale))
-    resized_height = min(scene_height, round(height * scale))
-    left = round((scene_width - resized_width) * 0.5)
-    top = round((scene_height - resized_height) * 0.5)
-    size = boxes.new_tensor([scene_width, scene_height] * 2)
-    offset = boxes.new_tensor([left, top, left, top])
-    factors = boxes.new_tensor([resized_width / width, resized_height / height] * 2)
-    return (
-        ((boxes * size - offset) / factors)
-        .clamp(min=0)
-        .minimum(boxes.new_tensor([width, height] * 2))
-    )
 
 
 def _format_bytes(value: int) -> str:

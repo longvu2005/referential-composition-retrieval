@@ -50,7 +50,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, calibrate and publish selected val results | Use `runs/calibration/selected.yaml` |
+| `scripts/methods/proposed.bash` | Prepare/build DINO, FAFA and CLIP caches, train/select best.pt, evaluate val | Use `runs/proposed-v2/run_config.yaml` and selected best.pt |
 
 ```bash
 bash scripts/methods/clip.bash val
@@ -66,10 +66,12 @@ PYTHON=/path/to/clip-env/bin/python bash scripts/methods/clip.bash test
 ```
 
 Test never trains or selects parameters. Run validation first. Proposed's val
-recipe uses `configs/proposed.yaml` and `configs/calibration.yaml`; it includes
-training even if a prior checkpoint exists. For cache reuse without retraining,
-or another seed/config, call `tools/run.py` directly. Raw images and model assets
-must be available as described in the method guides.
+recipe uses `configs/proposed.yaml` and saves the exact run config; it includes
+training and requires a new output directory if `last.pt` exists. Its test recipe
+loads that saved config and selected checkpoint. For cache reuse without
+retraining, another seed/config, or fixed coarse/top-500/full-gallery controls
+with `configs/ablations/shortlist.yaml`, call `tools/run.py` directly. Raw images
+and model assets must be available as described in the method guides.
 
 ## Reports
 
@@ -77,9 +79,9 @@ Use any base/method environment to export already evaluated JSON:
 
 ```bash
 .venv-dataset/bin/python tools/report.py --split val \
-  --run proposed=runs/calibration/selected/val
+  --run proposed=runs/proposed-v2/val
 .venv-dataset/bin/python tools/report.py --split test \
-  --run proposed=runs/calibration/selected/test
+  --run proposed=runs/proposed-v2/test
 ```
 
 To evaluate saved `rankings.pt` first, use a method environment or install

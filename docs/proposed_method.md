@@ -1,136 +1,213 @@
-# Proposed method: separate person identity and semantics
+# RCR soft partial matching (v2)
 
-## Frozen features
+Architecture ID: `rcr-soft-partial-v2`. Semantic cache ID: `clip-person-text-v4`.
+Old BERT/shared-semantic/state-fusion checkpoints are incompatible and must be
+retrained. Loading is strict: no missing-key or partial checkpoint fallback.
 
-The existing person detector supplies full-person boxes. DINO supplies the
-letterboxed scene patch grid. A separate frozen FAFA image-only trunk supplies
-person crops for BOTH query and target images:
+## Inputs and ownership
 
-```text
-crop -> FAFA visual encoder -> image-only Q-Former hidden tokens -> mean pool h
-z_id  = normalize(P_id(h))       # 128 dimensions
-z_sem = normalize(P_sem(h))      # 384 dimensions
-```
+Inference takes only query image features, selection text, the complete change,
+and candidate image features. `parse_subjects` derives ordered Subject IDs,
+counts and all mentions from text. Subject IDs up to `model.max_subjects` are
+supported; larger IDs raise an explicit error. A Subject may contain any number
+of detected members. The model never receives cases, identity annotations,
+GT boxes, or cardinalities. Cases are used by the unchanged evaluator only.
 
-Use the official pinned FAFA checkpoint and preprocessing from
-`configs/fafa.yaml`. Pool `extract_features(..., mode="image").image_embeds`,
-before native `vision_proj`; never pool projected features or multimodal outputs.
-The complete image-only trunk, including Q-Former, is frozen/eval during cache
-construction. No instruction enters this cache. `h` is cached, not learned heads.
-Mean pooling is a simple person representation, not native FDA scoring.
+All backbones are frozen and remain in evaluation mode. Training loads their
+cached outputs and therefore does not keep any backbone on the accelerator.
 
-DINO scene and FAFA person inputs have separate widths and cache metadata. In
-`dual`, the scene projection is not on the person identity path. BERT remains
-frozen/eval; only its output projection is trained. No FAFA library/model is
-loaded during training or retrieval. The DINO directory stores scenes,
-detections, identities and DINO crop features for the backbone controls. The
-FAFA directory stores only new crop features and its index. `GalleryCache`
-combines them and verifies the FAFA index references the same DINO cache ID.
+| Tensor | Shape | Meaning / mask |
+| --- | --- | --- |
+| `persons` | B × K × Df | Mean FAFA image-only Q-Former hidden tokens, before vision projection |
+| `clip_pooled` | B × K × Dc | Normalized CLIP projected pooled CLS; `person_mask` is B × K |
+| `clip_tokens` | B × K × N × Dv | CLIP vision last hidden states; `clip_token_mask` is B × K × N |
+| `scene` | B × P × Dd | DINO patches without CLS/register tokens |
+| `boxes` | B × K × 4 | Detector xyxy boxes on the normalized letterboxed canvas |
+| `selections` | B × S × Ld × Dt | Frozen CLIP selection hidden tokens; `selection_mask` |
+| `change` | B × Lc × Dt | Full reassembled condition tokens; `change_mask` |
+| `subject_token_mask` | B × S × Lc | Every token overlapping every mention of each role |
+| `subject_ids`, `subject_mask` | B × S | IDs from text; padded roles are inactive |
+| `membership` A | B × S × Kq | Soft categorical foreground memberships |
+| `transport` P | B × Kq × (1 + Kt) | Column zero is null |
+| `members`, `evidence` | B × S × Kq × D | Distinct role/member outputs, retained until reasoning |
+
+Training adds a candidate axis C, then scores pairs in chunks. Batch dictionaries
+have separate `inputs` and `supervision` branches; only the former enters the model.
+
+## Frozen features and text
+
+CLIP image and text use the same pinned `openai/clip-vit-base-patch32` revision
+and its image processor/tokenizer. Implementation follows Hugging Face
+`CLIPModel`: `vision_model(...).pooler_output` is post-layernorm pooled CLS;
+`visual_projection` produces the pooled embedding. `last_hidden_state` contains
+raw visual hidden tokens before the pooled post-layernorm. Text
+`last_hidden_state` already has the text final layernorm. Only projected pooled
+CLS/EOS embeddings were trained for CLIP contrastive alignment; intermediate
+visual/text tokens are not claimed to be independently aligned. Trainable task
+projections consume those hidden tokens.
+
+The fast tokenizer supplies offsets on the original unchanged text. Token IDs
+are split into non-overlapping windows of context length minus two, with native
+BOS/EOS added to each window. We remove those boundary tokens after encoding,
+concatenate all original content tokens in order, and use their original offsets
+for all Subject mentions. Composition adds global sinusoidal positions to the
+reassembled text, plus learned role embeddings at every mention. No text is
+silently truncated and no condition is split into independent per-Subject tasks.
+Pretrained context does not cross window boundaries; the trainable composition
+Transformer reads across them. Very long texts still increase Transformer memory.
+
+DINO/FAFA source caches remain immutable. CLIP adds only missing features. Source
+IDs, source index checksums, gallery order, encoder/preprocessing metadata,
+per-image detector boxes, dataset image registry, exact text set and sidecar
+checksums are validated. Text changes refresh text features; annotations only
+refresh the separate supervision sidecar. Cache IDs are retained across these
+refreshes, but checkpoint text/supervision signatures distinguish their contents.
+Legacy DINO metadata requires an explicit user assertion via
+`cache.allow_legacy_dino=true`; it cannot prove the missing provenance. Default
+configuration rejects that legacy format. Reusing raw source caches assumes their
+image bytes and feature shards remain immutable; metadata is not a reconstruction
+of an undocumented historical encoder run.
 
 ## Grounding and composition
 
-Selection text grounds each Subject against scene/context and person semantics:
+Grounding owns its own appearance, text, scene and geometry projections. Query
+person tokens read selection tokens and scene patches; local ROI scene features
+and box geometry provide spatial context. For each person, a background logit
+and one logit per active textual Subject form a categorical softmax:
 
-```text
-g_si = Ground(F_q, z_sem_qi, box_qi, selection_s)
-a_si = sigmoid(g_si)
-```
+\[
+a_{si}=\operatorname{softmax}_{s=0,\ldots,S}(g_{si}),\qquad
+\sum_{s=1}^S a_{si}\leq1.
+\]
 
-Independent sigmoid memberships support GROUP. Padding and missing annotated
-identities retain the existing loss masks. Selection text chooses people;
-identity embeddings themselves remain crop-only.
+Padding is zero membership, not a background example. Multiple persons can have
+high membership in the same Subject. There is no top-1 person selection.
 
-`StructuredComposition` uses semantic tokens, Subject roles, all Subject-marker
-mentions and the complete change text. It keeps one token per Subject/person,
-plus CLS/change tokens. Subject summaries are injected into marker tokens, while
-individual members remain available. Reference keys retain the existing
-log-sigmoid membership prior. The person-token outputs are normalized to form
-`z_comp_si`. DUAL roles stay distinct and RELATIONAL can read both Subjects.
+Composition creates
 
-## Coarse retrieval
+\[
+r_{si}=P_vv_i+e_s+P_b\operatorname{geom}(b_i)
+\]
 
-Keep the existing optimistic soft-identity score and global state branch:
+and reads `[sentinel, entire condition, all Subject/person tokens]` with a small
+Transformer and key prior `log(a + 1e-8)` on member tokens. Roles are added at
+all matching text spans. Member tokens have no arbitrary index positional
+embedding, making the set permutation-equivariant. Text tokens retain order.
 
-```text
-S_id(q,t) = mean_s sum_i normalized(a_si) max_j dot(z_id_qi,z_id_tj)
-S_global_state(q,t) = dot(projected change text, projected mean DINO scene)
-S_coarse = z_gallery(S_id) + coarse_beta * z_gallery(S_global_state)
-```
+## Identity and differentiable transport
 
-Population z-scores use common eligible non-self split-gallery support. A
-constant branch contributes zero. `identity_only`, `state_only`, empty-person
-handling, Top-500 budget, stable ties and complete-gallery ordering are unchanged.
-Local person semantics do not replace global state/context.
+A shared identity head gives normalized FAFA projections. Its confidence is
 
-## Fine binding and context
+\[
+D_{ij}=z_i^{q\top}z_j^t,\qquad
+p^{id}_{ij}=\sigma((\operatorname{softplus}(a)+10^{-6})D_{ij}+\beta).
+\]
 
-Identity and requested semantics meet on the SAME target person:
+Row relevance is \(w_i=\sum_sa_{si}\). For real targets use
+\(\ell_{ij}=\log p^{id}_{ij}\); null uses learned \(b_\varnothing\). We maximize
 
-```text
-S_id_ij  = dot(stopgrad(z_id_qi), stopgrad(z_id_tj))
-S_sem_sij = dot(z_comp_si, z_sem_tj)
-M_sij = S_id_ij + S_sem_sij
-B(q,t) = mean_active_subjects sum_i normalized(a_si) max_j M_sij
-```
+\[
+\sum_{ij}X_{ij}\ell_{ij}-\tau_A\sum_{ij}X_{ij}\log X_{ij}
+\]
 
-The maximum is taken AFTER summing pairwise scores. Separately maximizing ID
-and semantics would let two different target people satisfy the two conditions.
-This first version allows target reuse; it does not guarantee one-to-one matching
-or complete GROUP coverage. Missing people contribute zero binding evidence.
+subject to nonnegative X, row sums w, real-column sums at most one and unrestricted
+null capacity. This is soft capacity-constrained matching, not hard one-to-one
+assignment, independent row softmax or balanced Sinkhorn.
 
-The existing shared `EvidenceBinding` still conditions scene patches, then binds
-scene/geometry evidence to target semantic person features. In dual mode,
-`TargetPersonBuilder` combines bound evidence (which already has a semantic
-residual) with geometry, without an identity addition. The existing set reasoner
-produces a context score for actions/context/relations outside individual crops:
+The FP32 log-domain solver minimizes the convex dual by alternating exact row
+and column updates. With \(L=\ell/\tau_A\), row log scalings u and column log
+scalings v:
 
-```text
-S_fine_new = S_context + softplus(binding_log_scale) * B
-```
+\[
+u_i=\log w_i-\operatorname{LSE}_j(L_{ij}+v_j),\qquad
+v_j=\min(0,-\operatorname{LSE}_i(L_{ij}+u_i)),\quad v_0=0.
+\]
 
-The scale starts at 1 and is trained by retrieval loss. Identity/semantic pair
-coefficients are fixed at 1. Identity and semantic representations are never
-added. Pairwise binding does not impose a hard logical identity AND state gate.
+A final row update restores the row equalities. Stop only when the row residual,
+real-column violation and dual update residual all meet tolerance. Otherwise
+raise an error; never return a violating solution as converged. Updates remain
+in the autograd graph. Invalid rows/columns use finite masked log values to avoid
+undefined all-masked logsumexp derivatives, then are explicitly zeroed. Empty
+targets send all relevant mass to null. \(P=X/(w+10^{-8})\); zero rows give zero P.
 
-## Objective and ranking
+## Target binding and joint condition reasoning
 
-```text
-L = L_ground + 0.1 L_id + L_ret + L_global_state
-```
+Each target person supplies raw CLIP visual tokens, 2 × 2 bilinear samples from
+an expanded DINO ROI, and a geometry token. Coordinates use the existing
+letterbox transform, normalized patch centers and `align_corners=False`.
 
-- Identity: the existing supervised contrastive formulation. Query people and
-  valid positive-target people share an ID vocabulary. Unknown IDs, padding,
-  duplicate observations and self-pairs are excluded.
-- In dual mode, `P_id` receives gradient only from `L_id`. Fine binding detaches
-  BOTH identity inputs. With identity loss disabled, AdamW also leaves this head
-  untouched. Pose/clothing/background invariance requires suitable cross-image
-  supervision and empirical verification.
-- Grounding and retrieval train semantic projection/composition/context. Retrieval
-  keeps pairwise softplus ranking and optimizes the complete NEW fine score.
-  There is no additional person semantic auxiliary loss in this version.
-- Global state keeps same-required-identity positive/negative supervision at image
-  level. Wrong-identity images have unknown state labels and are excluded.
+Binding uses hierarchical attention: each reference member attends within each
+person's evidence, then mixes those summaries with its transport P and a learned
+null value. This preserves the person-level prior exactly; adding tokens to a
+person does not multiply that person's matching mass. The epsilon residual and
+zero-relevance rows are treated as missing/null, never redistributed across real
+people. No CLS/readout attends directly to unbound target evidence.
 
-Within Top-M:
+Two small self-attention blocks jointly read the full composed text, reference
+members, bound evidence, role markers, memberships, matching entropy and null
+mass. An explicit missing marker exists for each empty Subject. Role ordering is
+preserved; permuting member/target enumeration leaves the scalar score unchanged.
+The joint logit is the principal condition decision, not a bounded correction.
 
-```text
-S_final = z_topM(S_fine_new) + fine_coarse_weight * z_topM(S_coarse)
-```
+## Retrieval score and shortlist
 
-Weight zero uses raw fine scores (the same ordering). The remaining gallery keeps
-coarse order. Periodic evaluation, checkpoint selection, sampling, mining, AMP,
-LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
-`0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
+\[
+q_i^{id}=\sum_{j\geq1}P_{ij}p_{ij}^{id},\qquad
+S_{id}=\frac1S\sum_s
+\frac{\sum_i a_{si}\log\operatorname{clamp}(q_i^{id},\epsilon,1)}
+{\sum_i a_{si}+\epsilon},\qquad
+S=S_{id}+\operatorname{logsigmoid}(z_{cond}).
+\]
 
-## Architecture controls
+Here epsilon is 1e-8. An active Subject with membership mass at most epsilon has
+identity score `log(epsilon)` and an explicit missing marker. If no Subjects are
+active, the same finite low identity score applies. Null does not contribute
+identity confidence. Scores are ranking confidences, not calibrated probabilities.
 
-`model.representation: shared` is a retrained old-style control: one identity
-head feeds identity loss/coarse, instruction composition and the target-token
-identity addition. It has no explicit pairwise binding and requires
-`model.binding_mode: none`. `dual` has independent raw-feature heads and detached
-identity binding. The control is not backward compatibility for old checkpoints.
+Coarse replaces \(q_i^{id}\) by the maximum valid real-target identity confidence;
+it never calls transport or joint reasoning. An empty target has confidence
+epsilon. Gallery projections are refreshed from the current identity head once
+per retrieval/mining invocation, then reused in CPU chunks.
 
-DINO/FAFA x shared/dual tests backbone and the complete representation/routing
-change. Binding removals compare `both`, `identity`, `semantic`, `none`; they
-remove score terms, not semantic context or coarse identity. Evaluate by case and
-CandidateRecall@500 as well as ID-mAP/Full-mAP. See [ablations](ablations.md).
+Default `retrieval.mode=shortlist` fine-scores top-M (initially 500), followed by
+the unchanged coarse tail. No state branch, z-score, or coarse/fine weighted sum
+exists. `full` fine-scores the complete self-excluded gallery; `coarse` is an
+explicit identity-only diagnostic. All modes pass complete rankings to the same
+unchanged evaluator, with identical positives and AP denominators. CandidateRecall
+and CandidateHit come from the coarse shortlist. Runtime metadata records elapsed
+retrieval time including feature I/O and gallery projection, seconds/query and
+peak CUDA allocated bytes when on CUDA. It excludes initial data/checkpoint loads.
+No empirical speedup or accuracy improvement is implied by pair-count reduction.
+
+## Supervision and gradient routes
+
+| Loss | Supervision | Trainable ownership |
+| --- | --- | --- |
+| Grounding CE | Known referenced identity → textual role; known unreferenced identity → background; unknown/conflicting → ignore | Grounding only |
+| Identity SupCon | Shared train-only vocabulary; crop deduplication across query/candidate appearances; unknowns ignored; anchors without positives skipped | Identity head only |
+| Matching NLL | Negative log sum of P over all usable same-ID detections | Matching calibration/null parameters |
+| Multi-positive rank | Mean positive log-softmax over valid candidate scores / temperature | Matching, composition, target binding, joint reasoner |
+
+Memberships and both identity embeddings are detached at retrieval/matching
+boundaries. Grounding and composition do not share a trainable projection.
+Backbone features are detached as well. Transport output itself is not detached.
+
+GT heads only label existing detector boxes. A crop containing multiple annotated
+head centers is conservatively unknown. Correspondence positives include all
+usable detections of the same identity regardless of image-level condition.
+A null positive is allowed only when all target detections have known labels and
+either the GT identity is present with no usable detection (confirmed detector
+miss), or the image explicitly declares `identities_complete=true`. Missing or
+unknown annotations never imply absence. The current dataset has no completeness
+flag, so absent identities do not automatically supervise null.
+
+Warmup trains grounding and identity only. Main epochs keep those losses and
+add matching/ranking. After a main epoch, hard mining uses the current coarse
+pool and current fine scorer, on train queries/gallery only. Sampling reserves
+a wrong-ID negative when available, includes same-ID/wrong-condition negatives,
+and fills remaining slots with mined/random negatives. Self, every known positive
+and disputed negative pairs are excluded. No case-balanced sampling exists.
+Only overall validation Full-mAP selects `best.pt`; warmup checkpoints are never
+selected as primary retrieval models.
+
+See [run commands and verification boundaries](proposed_runs.md).

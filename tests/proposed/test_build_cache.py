@@ -82,11 +82,11 @@ class Backbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(
-            hidden_size=6,
+            hidden_size=8,
             patch_size=2,
             num_register_tokens=0,
         )
-        self.patch = nn.Conv2d(3, 6, kernel_size=2, stride=2)
+        self.patch = nn.Conv2d(3, 8, kernel_size=2, stride=2)
 
     def forward(self, pixel_values):
         patches = self.patch(pixel_values).flatten(2).transpose(1, 2)

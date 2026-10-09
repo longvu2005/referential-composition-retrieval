@@ -1,251 +1,165 @@
-"""Loss functions and the complete training objective."""
-
-import math
+"""Grounding, identity, matching and multi-positive ranking losses."""
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor
-
-from rcr.proposed.nn.model import RCRModel
 
 
-def grounding_loss(
-    logits: Tensor,
-    targets: Tensor,
-    mask: Tensor | None = None,
-) -> Tensor:
-    """Binary Subject-person grounding loss."""
-
-    with torch.autocast(logits.device.type, enabled=False):
-        logits = logits.float()
-        # Ignore padded positions BEFORE BCE: BCE(-inf, 0) can produce NaN.
-        safe_logits = logits if mask is None else logits.masked_fill(~mask.bool(), 0)
-        if safe_logits.numel() == 0:
-            return safe_logits.sum() * 0
-        loss = F.binary_cross_entropy_with_logits(
-            safe_logits,
-            targets.to(logits.dtype),
-            reduction="none",
-        )
-        if mask is None:
-            return loss.mean()
-
-        mask = mask.to(loss.dtype)
-        return (loss * mask).sum() / mask.sum().clamp_min(1)
+def grounding_loss(logits, labels):
+    valid = labels >= 0
+    if not valid.any():
+        return logits.new_zeros(())
+    return F.cross_entropy(logits.float().transpose(1, 2)[valid], labels[valid])
 
 
-def identity_loss(
-    identity: Tensor,
-    labels: Tensor,
-    temperature: float = 0.1,
-    ignore_index: int = -1,
-) -> Tensor:
-    """Supervised contrastive loss over identity embeddings."""
-
+def identity_loss(identity, labels, temperature=0.1):
+    keep = labels >= 0
+    identity, labels = F.normalize(identity[keep].float(), dim=-1), labels[keep]
+    if len(identity) < 2:
+        return identity.new_zeros(()), 0, len(identity)
+    self_mask = torch.eye(len(identity), dtype=torch.bool, device=identity.device)
+    positive = (labels[:, None] == labels[None]) & ~self_mask
+    if temperature <= 0:
+        raise ValueError("identity temperature must be positive")
     with torch.autocast(identity.device.type, enabled=False):
-        identity = identity.float()
-        identity = identity.reshape(-1, identity.shape[-1])
-        labels = labels.reshape(-1)
-
-        keep = labels != ignore_index
-        identity = F.normalize(identity[keep], dim=-1)
-        labels = labels[keep]
-
-        if identity.shape[0] < 2:
-            return identity.sum() * 0
-
-        logits = identity @ identity.T / temperature
-        self_mask = torch.eye(logits.shape[0], device=logits.device, dtype=torch.bool)
-        positive = labels[:, None].eq(labels[None, :]) & ~self_mask
-
-        logits = logits.masked_fill(self_mask, -torch.inf)
-        log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
-
-        count = positive.sum(dim=1)
-        valid = count > 0
-        if not valid.any():
-            return identity.sum() * 0
-
-        loss = -(log_prob.masked_fill(~positive, 0).sum(dim=1) / count.clamp_min(1))
-        return loss[valid].mean()
+        logits = (identity @ identity.T / temperature).masked_fill(
+            self_mask, -torch.inf
+        )
+    log_prob = logits - torch.logsumexp(logits, 1, keepdim=True)
+    count = positive.sum(-1)
+    active = count > 0
+    loss = -(log_prob.masked_fill(~positive, 0).sum(-1) / count.clamp_min(1))
+    return (
+        loss[active].mean() if active.any() else identity.new_zeros(()),
+        int(active.sum()),
+        len(identity),
+    )
 
 
-def retrieval_loss(
-    scores: Tensor,
-    positive_mask: Tensor,
-    valid_mask: Tensor | None = None,
-) -> Tensor:
-    """Mean pairwise softplus(negative - positive) over valid pairs."""
+def retrieval_loss(scores, positive_mask, valid_mask=None, temperature=0.1):
+    """Average positive log-softmax, with a complete valid-candidate denominator."""
+    if temperature <= 0:
+        raise ValueError("ranking temperature must be positive")
+    valid = torch.ones_like(positive_mask) if valid_mask is None else valid_mask.bool()
+    positive = positive_mask.bool() & valid
+    active = positive.any(-1)
+    if not active.any():
+        return scores.masked_fill(~valid, 0).sum() * 0
+    logits = (
+        scores[active].float().masked_fill(~valid[active], -torch.inf) / temperature
+    )
+    log_prob = logits - torch.logsumexp(logits, -1, keepdim=True)
+    return -(
+        log_prob.masked_fill(~positive[active], 0).sum(-1) / positive[active].sum(-1)
+    ).mean()
 
-    with torch.autocast(scores.device.type, enabled=False):
-        scores = scores.float()
-        if valid_mask is None:
-            valid_mask = torch.ones_like(positive_mask, dtype=torch.bool)
 
-        valid_mask = valid_mask.bool()
-        positive_mask = positive_mask.bool() & valid_mask
-        negative_mask = valid_mask & ~positive_mask
-        pairs = positive_mask[:, :, None] & negative_mask[:, None, :]
-        # Invalid/padded candidates must not turn a zero-pair loss into
-        # NaN via (NaN/Inf)*0 or inf-inf. Valid score failures remain visible.
-        scores = scores.masked_fill(~valid_mask, 0)
-        if not pairs.any():
-            return scores.sum() * 0
-        differences = scores[:, None, :] - scores[:, :, None]
-        return F.softplus(differences[pairs]).mean()
+def matching_loss(p, positive, mask):
+    if not mask.any():
+        return p.sum() * 0
+    probability = (p * positive).sum(-1)
+    return -probability[mask].clamp_min(1e-8).log().mean()
+
+
+def score_candidates(model, inputs, patch_hw, pair_batch_size=16):
+    """One scoring implementation shared by training and pairwise inference."""
+    query = model.encode_query(
+        inputs["query"]["visual"], inputs["query"]["text"], patch_hw
+    )
+    target = inputs["target"]
+    b, c = target["scene"].shape[:2]
+    repeated = query.repeat_candidates(c)
+    from dataclasses import fields
+
+    from rcr.proposed.nn.model import QueryEncoding
+
+    scores, coupling, diagnostics = [], [], []
+    for start in range(0, b * c, pair_batch_size):
+        stop = start + pair_batch_size
+        local_query = QueryEncoding(
+            **{f.name: getattr(repeated, f.name)[start:stop] for f in fields(repeated)}
+        )
+        output = model.score_target(
+            local_query,
+            {k: v.flatten(0, 1)[start:stop] for k, v in target.items()},
+            patch_hw,
+        )
+        scores.append(output["scores"])
+        coupling.append(output["transport"])
+        diagnostics.append(output["diagnostics"])
+    return (
+        query,
+        torch.cat(scores).reshape(b, c),
+        torch.cat(coupling).reshape(b, c, *coupling[0].shape[1:]),
+        diagnostics,
+    )
 
 
 def compute_loss(
-    model: RCRModel,
-    batch: dict[str, Tensor],
-    patch_hw: tuple[int, int],
-    grounding_weight: float = 1.0,
-    identity_weight: float = 0.1,
-    retrieval_weight: float = 1.0,
-    identity_temperature: float = 0.1,
-    state_weight: float = 1.0,
-    state_temperature: float = 0.1,
-) -> tuple[Tensor, dict[str, Tensor]]:
-    """Compute grounding, identity, fine ranking and global state ranking losses."""
+    model,
+    batch,
+    patch_hw,
+    *,
+    warmup=False,
+    identity_weight=0.1,
+    matching_weight=1.0,
+    retrieval_weight=1.0,
+    identity_temperature=0.1,
+    rank_temperature=0.1,
+    pair_batch_size=16,
+):
+    inputs, labels = batch["inputs"], batch["supervision"]
+    # Warmup avoids transport/composition/reasoning altogether.
+    if warmup:
+        from rcr.proposed.nn.model import clean_visual
 
-    if not math.isfinite(state_temperature) or state_temperature <= 0:
-        raise ValueError("state_temperature must be finite and positive")
-    if not math.isfinite(state_weight) or state_weight < 0:
-        raise ValueError("state_weight must be finite and nonnegative")
-
-    query_person_mask = batch.get("query_person_mask")
-    subject_mask = batch.get("subject_mask")
-    query = model.encode_query(
-        batch["query_scene"],
-        batch["query_persons"],
-        batch["query_boxes"],
-        batch["selections"],
-        batch["change"],
-        batch["subject_pos"],
-        patch_hw,
-        selection_mask=batch.get("selection_mask"),
-        change_mask=batch.get("change_mask"),
-        query_person_mask=query_person_mask,
-        subject_mask=subject_mask,
-        subject_token_mask=batch.get("subject_token_mask"),
-        subject_ids=batch.get("subject_ids"),
-    )
-
-    # Score B queries against C candidates as B*C independent pairs.
-    b, c = batch["target_scene"].shape[:2]
-
-    target_mask = batch.get("target_mask")
-    if target_mask is not None:
-        target_mask = target_mask.flatten(0, 1)
-
-    scores = model.score_target(
-        query.repeat_candidates(c),
-        batch["target_scene"].flatten(0, 1),
-        batch["target_persons"].flatten(0, 1),
-        batch["target_boxes"].flatten(0, 1),
-        patch_hw,
-        target_mask,
-    ).reshape(b, c)
-
-    logits, query_identity = query.logits, query.identity
-    person_mask = torch.ones_like(logits, dtype=torch.bool)
-    if query_person_mask is not None:
-        person_mask &= query_person_mask[:, None].bool()
-    if subject_mask is not None:
-        person_mask &= subject_mask[:, :, None].bool()
-    # Unmatched detections are unknown, not annotated negative people.
-    person_mask &= batch["query_identity_labels"][:, None] >= 0
-    # A missed GT person is unknown, not evidence that every detected person
-    # is a negative for that Subject. Skip its grounding row entirely.
-    person_mask &= batch["grounding_targets"].bool().any(dim=-1, keepdim=True)
-
-    loss_ground = grounding_loss(logits, batch["grounding_targets"], person_mask)
-    query_labels = batch["query_identity_labels"]
-    target_labels = batch["target_identity_labels"]
-    query_keep = query_labels >= 0
-    if query_person_mask is not None:
-        query_keep &= query_person_mask.bool()
-    if "query_identity_mask" in batch:
-        query_keep &= batch["query_identity_mask"].bool()
-
-    # Share the query/target label vocabulary and learn from positive images.
-    # Retrieval negatives, padding, unknown IDs and duplicate crops are excluded.
-    target_keep = (target_labels >= 0) & batch["positive_mask"][:, :, None].bool()
-    if "target_mask" in batch:
-        target_keep &= batch["target_mask"].bool()
-    if "candidate_mask" in batch:
-        target_keep &= batch["candidate_mask"][:, :, None].bool()
-    if "target_identity_mask" in batch:
-        target_keep &= batch["target_identity_mask"].bool()
-    loss_identity = scores.new_zeros(())
-    if identity_weight != 0:
-        target_identity = model.encode_identity(batch["target_persons"][target_keep])
-        loss_identity = identity_loss(
-            torch.cat((query_identity[query_keep], target_identity), dim=0),
-            torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),
-            temperature=identity_temperature,
+        visual = clean_visual(inputs["query"]["visual"])
+        logits, _ = model.grounding(visual, inputs["query"]["text"], patch_hw)
+        query_identity = model.encode_identity(visual["persons"])
+        scores = logits.new_zeros(labels["positive_mask"].shape)
+        rank = match = logits.new_zeros(())
+        diagnostics = []
+    else:
+        query, scores, p, diagnostics = score_candidates(
+            model, inputs, patch_hw, pair_batch_size
         )
-    loss_retrieval = retrieval_loss(
-        scores,
-        batch["positive_mask"],
-        valid_mask=batch.get("candidate_mask"),
+        logits, query_identity = query.logits, query.identity
+        match = matching_loss(
+            p,
+            labels["match_positive"],
+            labels["match_mask"] & labels["candidate_mask"][..., None],
+        )
+        rank = retrieval_loss(
+            scores, labels["positive_mask"], labels["candidate_mask"], rank_temperature
+        )
+    ground = grounding_loss(logits, labels["grounding"])
+    q_keep = labels["query_unique"] & inputs["query"]["visual"]["person_mask"]
+    t_keep = (
+        labels["target_unique"]
+        & inputs["target"]["person_mask"]
+        & labels["candidate_mask"][..., None]
     )
-
-    # State sees only the condition. Compare positive/negative images that both
-    # contain all required identities; wrong-ID images have unknown state labels.
-    loss_state = scores.new_zeros(())
-    state_pairs = scores.new_zeros((), dtype=torch.long)
-    state_queries = scores.new_zeros((), dtype=torch.long)
-    if state_weight != 0:
-        if "state_mask" not in batch:
-            raise ValueError("state loss requires a GT identity-based state_mask")
-        state_mask = batch["state_mask"].bool()
-        if state_mask.shape != batch["positive_mask"].shape:
-            raise ValueError("state_mask must match candidate/positive shape")
-        if "candidate_mask" in batch:
-            state_mask = state_mask & batch["candidate_mask"].bool()
-        positives = (batch["positive_mask"] & state_mask).sum(dim=-1)
-        negatives = (~batch["positive_mask"] & state_mask).sum(dim=-1)
-        state_pairs = (positives * negatives).sum()
-        state_queries = ((positives > 0) & (negatives > 0)).sum()
-        if state_pairs > 0:
-            z_text = model.encode_text_state(batch["change"], batch.get("change_mask"))
-            z_image = model.encode_image_state(batch["target_scene"].mean(dim=-2))
-            state_scores = (z_text[:, None] * z_image).sum(dim=-1)
-            loss_state = retrieval_loss(
-                state_scores / state_temperature,
-                batch["positive_mask"],
-                valid_mask=state_mask,
-            )
-
-    loss = (
-        grounding_weight * loss_ground
-        + identity_weight * loss_identity
-        + retrieval_weight * loss_retrieval
-        + state_weight * loss_state
+    target_identity = model.encode_identity(inputs["target"]["persons"][t_keep])
+    identity, active, anchors = identity_loss(
+        torch.cat((query_identity[q_keep], target_identity)),
+        torch.cat((labels["query_ids"][q_keep], labels["target_ids"][t_keep])),
+        identity_temperature,
     )
-    predicted = (logits.detach() >= 0) & person_mask
-    expected = batch["grounding_targets"].bool() & person_mask
-    active_subjects = (
-        torch.ones(logits.shape[:2], dtype=torch.bool, device=logits.device)
-        if subject_mask is None
-        else subject_mask.bool()
+    total = (
+        ground
+        + (identity_weight * identity if identity_weight else identity.detach() * 0)
+        + matching_weight * match
+        + retrieval_weight * rank
     )
-    return loss, {
-        "grounding": loss_ground.detach(),
-        "identity": loss_identity.detach(),
-        "retrieval": loss_retrieval.detach(),
-        "state": loss_state.detach(),
-        "grounding_tp": (predicted & expected).sum(),
-        "grounding_fp": (predicted & ~expected).sum(),
-        "grounding_fn": (~predicted & expected).sum(),
-        "grounding_subjects": active_subjects.sum(),
-        "grounding_supervised_subjects": person_mask.any(dim=-1).sum(),
-        "grounding_complete_subjects": (
-            batch.get("grounding_complete", torch.zeros_like(active_subjects))
-            & active_subjects
-        ).sum(),
-        "state_pairs": state_pairs,
-        "state_active_queries": state_queries,
-        "queries": scores.new_tensor(b, dtype=torch.long),
+    parts = {
+        "grounding": ground.detach().item(),
+        "identity": identity.detach().item(),
+        "matching": match.detach().item(),
+        "retrieval": rank.detach().item(),
+        "identity_active_anchors": active,
+        "identity_anchors": anchors,
+        "match_supervised_rows": int(labels["match_mask"].sum()),
+        "grounding_known_persons": int((labels["grounding"] >= 0).sum()),
     }
+    for key in ("row_residual", "capacity_violation", "dual_residual", "iterations"):
+        parts[f"transport_{key}"] = max((d[key] for d in diagnostics), default=0)
+    return total, parts

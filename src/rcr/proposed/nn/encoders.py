@@ -1,220 +1,166 @@
-"""Shared encoders, query text preparation, and identity projection."""
+"""Frozen backbone features; trainable heads live only in the retrieval model."""
 
 import re
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import nn
 
-from rcr.common.data import sample_selection_texts
-
-SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
-
-
-class QueryTextCache:
-    """CPU token IDs only; the text projection is recomputed at each step."""
-
-    def __init__(self, tokenizer) -> None:
-        self.tokenizer = tokenizer
-        self.rows: dict[tuple, dict] = {}
-
-    @staticmethod
-    def _key(sample: dict) -> tuple:
-        return (
-            sample["final_desc"],
-            sample["final_change"],
-            tuple(int(x["subject_id"]) for x in sample["subjects"]),
-        )
-
-    def prepare(self, samples: list[dict]) -> None:
-        missing = {
-            self._key(sample): sample
-            for sample in samples
-            if self._key(sample) not in self.rows
-        }
-        entries = list(missing.items())
-        for start in range(0, len(entries), 64):
-            chunk = entries[start : start + 64]
-            selections, changes = [], []
-            for _, sample in chunk:
-                selections.extend(sample_selection_texts(sample))
-                change = sample["final_change"]
-                for subject in sample["subjects"]:
-                    sid = int(subject["subject_id"])
-                    change = re.sub(
-                        rf"\bSubject\s+{sid}\b", SUBJECT_MARKERS[sid], change
-                    )
-                changes.append(change)
-
-            def tokenize(texts):
-                encoded = self.tokenizer(texts, padding=True, return_tensors="pt")
-                return [
-                    ids[mask.bool()].clone()
-                    for ids, mask in zip(
-                        encoded["input_ids"], encoded["attention_mask"], strict=True
-                    )
-                ]
-
-            selected, changed = tokenize(selections), tokenize(changes)
-            offset = 0
-            for (key, sample), ids in zip(chunk, changed, strict=True):
-                subject_ids = [int(x["subject_id"]) for x in sample["subjects"]]
-                positions = []
-                for sid in subject_ids:
-                    marker = SUBJECT_MARKERS[sid]
-                    marker_id = self.tokenizer.convert_tokens_to_ids(marker)
-                    found = (ids == marker_id).nonzero(as_tuple=True)[0]
-                    if not len(found):
-                        raise ValueError(
-                            f"{marker} must be one tokenizer token and occur"
-                        )
-                    positions.append(found)
-                count = len(subject_ids)
-                self.rows[key] = {
-                    "selections": selected[offset : offset + count],
-                    "change": ids,
-                    "positions": positions,
-                    "subject_ids": subject_ids,
-                }
-                offset += count
-
-    def batch(self, samples: list[dict]) -> dict[str, Tensor]:
-        self.prepare(samples)
-        rows = [self.rows[self._key(sample)] for sample in samples]
-        b, subjects = len(rows), len(rows[0]["subject_ids"])
-        if any(len(row["subject_ids"]) != subjects for row in rows):
-            raise ValueError("text batches require equal Subject counts")
-        left = getattr(self.tokenizer, "padding_side", "right") == "left"
-        pad = getattr(self.tokenizer, "pad_token_id", 0)
-
-        def padded(sequences):
-            length = max(map(len, sequences))
-            ids = torch.full((len(sequences), length), pad, dtype=torch.long)
-            mask = torch.zeros_like(ids)
-            offsets = []
-            for i, sequence in enumerate(sequences):
-                offset = length - len(sequence) if left else 0
-                ids[i, offset : offset + len(sequence)] = sequence
-                mask[i, offset : offset + len(sequence)] = 1
-                offsets.append(offset)
-            return ids, mask, offsets
-
-        selection_ids, selection_mask, _ = padded(
-            [tokens for row in rows for tokens in row["selections"]]
-        )
-        change_ids, change_mask, offsets = padded([row["change"] for row in rows])
-        subject_pos = torch.empty(b, subjects, dtype=torch.long)
-        mentions = torch.zeros(b, subjects, change_ids.shape[1], dtype=torch.bool)
-        for n, row in enumerate(rows):
-            for j, positions in enumerate(row["positions"]):
-                positions = positions + offsets[n]
-                subject_pos[n, j] = positions[0]
-                mentions[n, j, positions] = True
-        return {
-            "selection_ids": selection_ids,
-            "selection_mask": selection_mask,
-            "change_ids": change_ids,
-            "change_mask": change_mask,
-            "subject_pos": subject_pos,
-            "subject_token_mask": mentions,
-            "subject_ids": torch.tensor([row["subject_ids"] for row in rows]),
-        }
+MENTION = re.compile(r"\bSubject\s+(\d+)\b", re.IGNORECASE)
+DEFINITION = re.compile(r"\bSubject\s+(\d+)\s+as\s+", re.IGNORECASE)
 
 
-def encode_tokenized_text(
-    tokens: dict[str, Tensor], text_encoder: nn.Module, device: torch.device | str
-) -> dict[str, Tensor]:
-    """Run frozen BERT and the trainable projection after CPU preparation."""
-    tokens = {key: value.to(device, non_blocking=True) for key, value in tokens.items()}
-    b, subjects = tokens["subject_ids"].shape
-    selections, selection_mask = text_encoder(
-        tokens["selection_ids"], tokens["selection_mask"]
-    )
-    change, change_mask = text_encoder(tokens["change_ids"], tokens["change_mask"])
-    return {
-        "selections": selections.reshape(b, subjects, *selections.shape[1:]),
-        "selection_mask": selection_mask.reshape(b, subjects, -1),
-        "change": change,
-        "change_mask": change_mask,
-        **{
-            key: tokens[key]
-            for key in ("subject_pos", "subject_token_mask", "subject_ids")
-        },
-    }
+def parse_subjects(description, change):
+    """Infer ordered roles from text alone, never from annotation cardinalities."""
+    definitions = list(DEFINITION.finditer(description))
+    ids = [int(m[1]) for m in definitions]
+    if not ids or len(ids) != len(set(ids)) or min(ids) < 1:
+        raise ValueError("selection must define distinct positive Subject IDs")
+    selections = []
+    for i, match in enumerate(definitions):
+        end = definitions[i + 1].start() if i + 1 < len(ids) else len(description)
+        value = re.sub(r"\s+and\s*$", "", description[match.end() : end]).strip()
+        if not value:
+            raise ValueError("empty Subject description")
+        selections.append(value)
+    mentions = [(int(m[1]), m.start(), m.end()) for m in MENTION.finditer(change)]
+    if not {sid for sid, _, _ in mentions} <= set(ids):
+        raise ValueError("change mentions an undefined Subject")
+    return ids, selections, mentions
 
 
-def encode_query_text(
-    samples: list[dict],
-    tokenizer,
-    text_encoder: nn.Module,
-    device: torch.device | str,
-    *,
-    text_cache: QueryTextCache | None = None,
-) -> dict[str, Tensor]:
-    cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
-    return encode_tokenized_text(cache.batch(samples), text_encoder, device)
+class FrozenEncoder(nn.Module):
+    def train(self, mode=True):
+        super().train(False)
+        return self
 
 
-class ImageEncoder(nn.Module):
-    """Extract DINOv3-style patch and CLS features with one shared backbone."""
+class ImageEncoder(FrozenEncoder):
+    """DINO patch tokens without CLS/registers, plus the raw CLS for source reuse."""
 
-    def __init__(self, backbone: nn.Module, dim: int) -> None:
+    def __init__(self, backbone, dim):
         super().__init__()
-        self.backbone = backbone
+        if dim != backbone.config.hidden_size:
+            raise ValueError("cache only raw frozen DINO features")
+        self.backbone = backbone.requires_grad_(False).eval()
         self.patch_size = backbone.config.patch_size
         self.num_register_tokens = getattr(backbone.config, "num_register_tokens", 0)
 
-        hidden_dim = backbone.config.hidden_size
-        self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
-
-    def forward(self, images: Tensor) -> tuple[Tensor, Tensor, tuple[int, int]]:
-        """Return patch features [B,P,D], CLS [B,D], and patch grid."""
-
-        tokens = self.proj(self.backbone(pixel_values=images).last_hidden_state)
-        patches = tokens[:, 1 + self.num_register_tokens :]
-        patch_hw = (
-            images.shape[-2] // self.patch_size,
-            images.shape[-1] // self.patch_size,
-        )
-        return patches, tokens[:, 0], patch_hw
+    @torch.no_grad()
+    def forward(self, images):
+        tokens = self.backbone(pixel_values=images).last_hidden_state
+        hw = (images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size)
+        return tokens[:, 1 + self.num_register_tokens :], tokens[:, 0], hw
 
 
-class TextEncoder(nn.Module):
-    """Frozen, deterministic BERT features followed by a trainable projection."""
+class CLIPFeatures(FrozenEncoder):
+    """Hugging Face CLIPModel: aligned pooled image, raw hidden visual/text tokens.
 
-    def __init__(self, backbone: nn.Module, dim: int) -> None:
+    Only pooled EOS/CLS projections were contrastively aligned by CLIP. Hidden
+    patch/text tokens are contextual features with separately learned task heads.
+    """
+
+    def __init__(self, backbone, tokenizer):
         super().__init__()
-        self.backbone = backbone
-        self.backbone.requires_grad_(False)
-        self.backbone.eval()
+        self.backbone = backbone.requires_grad_(False).eval()
+        self.tokenizer = tokenizer
+        if not tokenizer.is_fast:
+            raise ValueError("CLIP requires the fast tokenizer for offset mapping")
 
-        hidden_dim = backbone.config.hidden_size
-        self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
+    @torch.no_grad()
+    def image(self, pixels):
+        output = self.backbone.vision_model(pixel_values=pixels)
+        pooled = F.normalize(
+            self.backbone.visual_projection(output.pooler_output), dim=-1
+        )
+        # last_hidden_state is pre-post_layernorm; only pooled CLS is post-LN.
+        tokens = output.last_hidden_state
+        return pooled.float(), tokens.float()
 
-    def train(self, mode: bool = True):
-        super().train(mode)
-        self.backbone.eval()
-        return self
+    @torch.no_grad()
+    def text(self, text):
+        encoded = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            truncation=False,
+            return_offsets_mapping=True,
+        )
+        ids, offsets = encoded["input_ids"], encoded["offset_mapping"]
+        if not ids:
+            raise ValueError("empty text")
+        window = self.backbone.config.text_config.max_position_embeddings - 2
+        device = next(self.backbone.parameters()).device
+        features = []
+        for start in range(0, len(ids), window):
+            chunk = ids[start : start + window]
+            inputs = torch.tensor(
+                [[self.tokenizer.bos_token_id, *chunk, self.tokenizer.eos_token_id]],
+                device=device,
+            )
+            output = self.backbone.text_model(input_ids=inputs)
+            features.append(
+                output.last_hidden_state[0, 1 : 1 + len(chunk)].float().cpu()
+            )
+        return {"tokens": torch.cat(features), "offsets": offsets, "input_ids": ids}
 
-    def forward(
-        self, input_ids: Tensor, attention_mask: Tensor
-    ) -> tuple[Tensor, Tensor]:
-        """Return text tokens [B,L,D] and a boolean valid-token mask."""
 
-        with torch.no_grad():
-            tokens = self.backbone(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            ).last_hidden_state
-        return self.proj(tokens), attention_mask.bool()
+class QueryTextCache:
+    """Frozen CLIP features keyed by exact text; no trainable outputs are cached."""
+
+    def __init__(self, features):
+        self.features = features
+
+    def batch(self, samples):
+        parsed = [parse_subjects(x["final_desc"], x["final_change"]) for x in samples]
+        b, s = len(samples), max(len(x[0]) for x in parsed)
+        changes = [self.features[x["final_change"]] for x in samples]
+        length = max(len(x["tokens"]) for x in changes)
+        width = changes[0]["tokens"].shape[-1]
+        sel_length = max(
+            len(self.features[t]["tokens"]) for _, texts, _ in parsed for t in texts
+        )
+        selections = torch.zeros(b, s, sel_length, width)
+        selection_mask = torch.zeros(b, s, sel_length, dtype=torch.bool)
+        change = torch.zeros(b, length, width)
+        change_mask = torch.zeros(b, length, dtype=torch.bool)
+        mentions = torch.zeros(b, s, length, dtype=torch.bool)
+        subject_ids = torch.zeros(b, s, dtype=torch.long)
+        subject_mask = torch.zeros(b, s, dtype=torch.bool)
+        for n, (ids, texts, spans) in enumerate(parsed):
+            item = changes[n]
+            size = len(item["tokens"])
+            change[n, :size] = item["tokens"]
+            change_mask[n, :size] = True
+            for j, (sid, text) in enumerate(zip(ids, texts, strict=True)):
+                tokens = self.features[text]["tokens"]
+                selections[n, j, : len(tokens)] = tokens
+                selection_mask[n, j, : len(tokens)] = True
+                subject_ids[n, j] = sid
+                subject_mask[n, j] = True
+                for role, left, right in spans:
+                    if role != sid:
+                        continue
+                    overlap = torch.tensor(
+                        [a < right and z > left for a, z in item["offsets"]]
+                    )
+                    if not overlap.any():
+                        raise ValueError("Subject span has no CLIP tokens")
+                    mentions[n, j, :size] |= overlap
+        return dict(
+            selections=selections,
+            selection_mask=selection_mask,
+            change=change,
+            change_mask=change_mask,
+            subject_ids=subject_ids,
+            subject_mask=subject_mask,
+            subject_token_mask=mentions,
+        )
 
 
 class IdentityHead(nn.Module):
-    """Project reference-free person features to normalized identity embeddings."""
-
-    def __init__(self, dim: int, identity_dim: int) -> None:
+    def __init__(self, dim, identity_dim):
         super().__init__()
         self.proj = nn.Linear(dim, identity_dim)
 
-    def forward(self, person: Tensor) -> Tensor:
-        return F.normalize(self.proj(person).float(), dim=-1)
+    def forward(self, persons):
+        return F.normalize(self.proj(persons).float(), dim=-1)

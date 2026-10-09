@@ -21,7 +21,7 @@ def main(argv=None):
     prepare.add_argument("--force", action="store_true")
     cache = commands.add_parser("build-cache", parents=[shared])
     cache.add_argument(
-        "--cache-stage", choices=("all", "dino", "persons"), default="all"
+        "--cache-stage", choices=("all", "dino", "persons", "clip"), default="all"
     )
     commands.add_parser("train", parents=[shared])
     for name in ("retrieve", "evaluate", "run"):

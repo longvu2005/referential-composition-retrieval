@@ -1,188 +1,135 @@
-# Run the proposed model
+# Proposed v2 runs
 
-Run commands from the repository root. Python 3.11/3.12 is supported. DINO needs
-new Transformers; native FAFA needs its pinned older version. Keep two venvs:
+Use the repository root and the separate proposed/FAFA environments described in
+README. DINO/CLIP may need Hugging Face model access. No pretrained model assets or
+raw dataset images are distributed in this patch.
 
-```bash
-python3.11 -m venv .venv-proposed
-.venv-proposed/bin/python -m pip install -r requirements/bootstrap.txt
-.venv-proposed/bin/python -m pip install --no-build-isolation -r requirements/proposed.txt
-
-python3.11 -m venv .venv-fafa
-.venv-fafa/bin/python -m pip install -r requirements/bootstrap.txt
-.venv-fafa/bin/python -m pip install --no-build-isolation -r requirements/fafa.txt
-```
-
-The proposed extra includes Torchvision, required by DINOv3's fast image
-processor. Reinstall `requirements/proposed.txt` when updating an existing venv.
-
-Alternatively, `PYTHON=python3.11 bash scripts/setup.bash proposed` and
-`PYTHON=python3.11 bash scripts/setup.bash fafa` create the isolated environments,
-including on notebook images without `ensurepip`. The host pip needs 22.3+.
-
-Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`, and
-`person_encoder.python` in `configs/proposed.yaml`. All relative paths are
-relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
-For Kaggle, use venv Python paths explicitly in every cell.
-
-## Main workflow
-
-`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses both
-caches, trains, calibrates coefficients on validation and writes the selected
-validation result to `runs/calibration/selected/val`. Run
-`bash scripts/methods/proposed.bash test` later to use the frozen selected YAML.
-The val recipe includes training. Use the individual tools below when reusing a
-checkpoint, changing configs/seeds or running only one cache stage.
+## Environments
 
 ```bash
-# Download only FAFA source, checkpoint and runtime assets needed by person encoding.
-# Uses person_encoder.python; no baseline CLIP selector/detector is prepared.
-.venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
-
-# Stream 1: DINO scenes/detections/crops; no FAFA environment required.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
-
-# Stream 2: FAFA persons from the completed DINO source.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
-
-# Or ensure both caches; compatible completed stages are skipped.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
-
-# Train from cached features, select best.pt, retrieve/evaluate complete val.
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
-
-# Select both inference coefficients jointly on val; only that pair reaches test.
-.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
-
-# A later test run uses the same frozen selection.
-.venv-proposed/bin/python tools/run.py run --config runs/calibration/selected.yaml --splits test
+PYTHON=python3.11 bash scripts/setup.bash proposed
+PYTHON=python3.11 bash scripts/setup.bash fafa
 ```
 
-Equivalent one-command initial pipeline:
+The setup scripts support notebook images without `ensurepip`; the host pip
+needs 22.3+. Set `person_encoder.python` to the FAFA environment. Direct commands
+below use `python` from the proposed environment; on Kaggle use its full venv
+Python path in each cell. Windows uses `.venv-fafa/Scripts/python.exe`.
+
+## Build or reuse frozen features
+
+Set `data.image_root`, `data.final_dir`, `data.dino_cache`, `data.cache` (FAFA),
+`data.clip_cache` and `person_encoder.python` in `configs/proposed.yaml`.
+`data.clip_cache` must be writable and different from both source directories.
+The CLIP image/text model and processor share the pinned revision in this config.
 
 ```bash
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
+# Prepare official FAFA source/checkpoint in its separate environment.
+python tools/run.py prepare --config configs/proposed.yaml
+
+# Full build: reuse completed compatible stages; resume interrupted shards.
+python tools/run.py build-cache --config configs/proposed.yaml
+
+# Independent stages (the third needs completed DINO + FAFA sources).
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage clip
 ```
 
-For training another seed, reuse the cache and use a separate output directory.
-`run --train` sets its checkpoint to that directory's `best.pt` automatically:
+Existing valid DINO/FAFA caches can stay in read-only Kaggle inputs. CLIP builds
+only missing semantic features against exactly those detector boxes. If the DINO
+cache lacks metadata, `cache.allow_legacy_dino=true` explicitly asserts that its
+checkpoint/detector/preprocessing match; default false rejects unverified legacy
+provenance. Rebuild instead if the original settings are unknown. No GT boxes
+replace detector proposals.
+
+The semantic cache contains `index.pt`, `features/<gallery-index>.pt`, `text.pt`,
+`supervision.pt`, and the tokenizer. `.building` prevents partial caches from
+being used. Text/annotation changes refresh their sidecars through the clip stage;
+vision checkpoint/preprocessing/source mismatches require a new cache directory.
+Model training/retrieval use cached tensors and do not import native FAFA.
+
+## Warmup, train, retrieve and evaluate
+
+`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses all three
+caches, trains/selects `best.pt`, and evaluates validation. It saves the exact
+run config in `runs/proposed-v2/run_config.yaml`. A later
+`bash scripts/methods/proposed.bash test` uses that config and selected checkpoint
+without training or parameter selection. The val recipe includes training; use
+the tools below to reuse a checkpoint or change configs/seeds.
 
 ```bash
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val \
-  --set train.seed=1 output.dir=runs/proposed_seed1
+# Default: 20 total epochs, including 2 grounding/identity warmup epochs.
+python tools/run.py train --config configs/proposed.yaml
+
+# Primary validation result: fine top-500 followed by coarse tail.
+python tools/run.py retrieve --config configs/proposed.yaml --splits val
+python tools/run.py evaluate --config configs/proposed.yaml --splits val
+
+# Full-gallery fine control; separate output avoids overwriting primary rankings.
+python tools/run.py retrieve --config configs/proposed.yaml --splits val \
+  --set retrieval.mode=full output.dir=runs/proposed-v2-full
+python tools/run.py evaluate --config configs/proposed.yaml --splits val \
+  --set retrieval.mode=full output.dir=runs/proposed-v2-full
+
+# Same trained checkpoint, fixed policies (full may be expensive).
+python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
+
+# Use selected best.pt and fixed settings for test.
+python tools/run.py run --config configs/proposed.yaml --splits test
+python tools/report.py --split val --run proposed=runs/proposed-v2/val
 ```
 
-## Reuse the existing Kaggle DINO cache
+`warmup.pt` is saved after warmup, `last.pt` after every epoch, and `best.pt` only
+when main-training overall validation Full-mAP improves. Training requires a new
+output directory if `last.pt` already exists; this version does not implement
+optimizer resume. For a warmup-only diagnostic, set `train.epochs=2`,
+`train.warmup_epochs=2` and a separate `output.dir`; it is not a retrieval model.
 
-Add [rcr-proposed-cache](https://www.kaggle.com/datasets/phmhunhlongv/rcr-proposed-cache)
-as a notebook input. Set these fields in the method YAML (use the actual mounted
-directory containing `index.pt` and `features/`):
+Kaggle T4 starting settings are batch size 2, 8 candidates, 8 training pairs per
+chunk, fine batch 16, FP16 CUDA autocast and FP32 transport/attention regions.
+These are conservative initial settings, not a measured T4 memory or speed claim.
+Reduce batch/candidates if needed; long texts or many people increase memory.
+There is no truncation or hidden cardinality cap. `model.max_subjects` bounds
+textual role IDs explicitly and raises if exceeded.
 
-```yaml
-data:
-  final_dir: dataset/data/final
-  image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
-  dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
-  cache: /kaggle/working/cache/proposed-fafa
-```
+`history.jsonl` includes loss terms, identity active-anchor rate, supervised
+matching counts, sampling counts and maximum transport residuals/iterations.
+Per-epoch validation JSON contains overall, by-case and per-query metrics.
+`run.json` records cache/checkpoint/version provenance, shortlist policy,
+retrieval elapsed time and CUDA peak allocated memory where available.
 
-Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.
-Keep your actual `final_dir`, raw-image root and worker Python paths. Raw images
-are needed to extract FAFA crops; the DINO source supplies detections, so this
-stage does not load DINO or rerun the detector:
+## Diagnostics and tests
 
 ```bash
-.venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
+# Dataset/GT coverage diagnostic only; it does not select or alter retrieval scores.
+python tools/data/audit.py --final-dir dataset/data/final \
+  --cache cache/proposed-fafa --dino-cache cache/proposed-dino \
+  --output runs/gt-coverage-diagnostic.json
+
+# Small matching retrieve/evaluate subsets for environment smoke tests.
+python tools/run.py retrieve --config configs/proposed.yaml --splits val --max-queries 8
+python tools/run.py evaluate --config configs/proposed.yaml --splits val --max-queries 8
+
+python -m pytest -q
+python -m ruff check src tools tests labelstudio
 ```
 
-The supplied legacy cache has a 14 x 14 patch grid, 768 feature channels, FP16
-storage and normalized scene boxes. It lacks encoder metadata and pixel boxes.
-`cache.allow_legacy_dino=true` explicitly accepts that missing provenance; keep
-the original DINOv3 ViT-B/16, 224 x 224 scene, 256 x 128 person letterbox and
-Grounding DINO tiny settings. The loader checks the scene grid and gallery order.
-Legacy pixel boxes are recovered by inverting the same letterbox transform using
-current raw-image dimensions. This cannot verify missing encoder metadata. New
-DINO caches store explicit metadata and pixel boxes.
+Subset outputs are marked and are not full-split results. Run full retrieval
+again before paper reporting. Oracle/GT coverage is a separate diagnostic file,
+never a primary model input, score or checkpoint criterion.
 
-## Cache lifecycle and checkpoints
+The synthetic suite checks the transport optimum against an independent SLSQP
+solution, gradients through active capacities, null/capacity/zero-mass behavior,
+background versus unknown labels, long text/all mentions, role/member masks,
+permutation invariance, no GT inputs, rank-gradient isolation, train/inference
+score equality, coarse tail/self-exclusion, cache resume/reuse/provenance, and a
+full disk-cache → warmup/train → mine → retrieve → evaluate smoke run. A tiny
+same-identity condition task verifies that the reasoner can overfit synthetic
+features. Optional real CLIP/DINO implementation tests use randomly initialized
+small models, not downloaded pretrained weights.
 
-| Directory | Contents | Usage |
-| --- | --- | --- |
-| `data.dino_cache` | DINO scenes, detections, identities, DINO crops/index | Shared immutable source; may be read-only Kaggle input |
-| `data.cache` with FAFA | FAFA `index.pt` (persons + FP32 scene means) | References source ID; does not copy scene patches |
-| `data.cache` with DINO controls | The existing DINO directory | Reuses DINO crops/scenes without FAFA |
-
-Both builders skip a completed compatible cache before loading models. A
-completed cache with different encoders, gallery order or source ID fails
-explicitly; choose a new output directory for new settings. DINO feature files are
-checked when read, without scanning the entire directory on every reuse. A
-missing DINO file raises an I/O error; it does not silently trigger a rebuild.
-For FAFA, the completed `index.pt` owns the person features; per-image FAFA
-shards are temporary extraction checkpoints and are removed after finalization.
-The loader reads the same indexed person features for coarse and fine scoring.
-`--force` remains an asset-preparation option.
-
-Each unfinished directory has its own `.building` marker and `.build.pt`
-manifest. Feature files and final indexes are published atomically. Repeating
-the same stage preserves its cache ID and skips saved compatible images.
-Different resume settings fail. Training/retrieval reject incomplete source or
-person caches. After publishing the index, the marker is removed. An older
-interrupted build without a resume manifest starts that incomplete stage again;
-completed legacy DINO files remain untouched.
-
-Large padded indexes are memory-mapped when loaded. FAFA index assembly uses a
-padded tensor in CPU RAM and writes `index.pt.tmp` before publishing `index.pt`.
-RAM must hold that padded tensor. The finalizer estimates disk needs plus a
-margin; when necessary it removes already-consumed FAFA shards before writing.
-If interrupted after such removal, resume re-extracts those images. DINO source
-files are never deleted. FAFA stores FP32 scene means so later runs need not
-repool all legacy scene files.
-
-The default `all` stage builds/reuses DINO, then builds/reuses FAFA persons.
-Native FAFA assets are loaded only by the person worker when extraction is
-needed; there is no extra preflight subprocess. Use `prepare` first when assets
-are missing. Complete caches can be reused without a FAFA environment or raw
-images. The saved FAFA YAML is still needed by `build-cache` to compare extraction
-settings.
-
-Old DINO checkpoints still need new training for the FAFA/dual architecture.
-Source/cache IDs and separate feature widths are checked against the training
-checkpoint. Keep historical run directories separately.
-
-After a successful build, training/retrieval read cached features only. They do
-not need native FAFA weights, its YAML or raw crop images. Training checks the
-requested person backend against the saved cache metadata; retrieval compares
-cache ID, feature widths and encoder metadata with the checkpoint. Encoder
-environment paths are used only in prepare and cache extraction.
-
-## Outputs and diagnostics
-
-`runs/proposed` contains config, tokenizer, `last.pt`, `best.pt`, history,
-training-data diagnostics and per-epoch train/val metrics. Split runs save
-`rankings.pt`, `run.json`, `metrics.json`; `run` writes `summary.csv`.
-Saved-result evaluation checks the recorded split fingerprint before writing
-metrics, rejecting changed query text, labels, gallery records or head annotations.
-Older results without a fingerprint retain the existing gallery/sample checks.
-Use a new retrieval run to evaluate changed benchmark inputs.
-
-W&B retains loss/metric keys and adds `train/binding_scale` and
-`epoch/binding_scale`; its cache config records both feature widths and encoder
-provenance. It closes on exceptions. Nonfinite loss aborts before
-backward/optimizer updates and writes `nonfinite_batch.json`. Model parameters,
-geometry attention and losses stay FP32; CUDA training uses existing AMP/scaler.
-Mining and evaluation use FP32. LRU, deduplication and one-batch prefetch remain.
-Fine scores must be finite even when `fine_coarse_weight=0`; a failed reranker
-cannot publish NaN-based rankings or enter validation calibration.
-
-Training state loss needs eligible same-identity positive/negative pairs. A tiny
-smoke run without them must set `loss.state_weight=0` and identity-only coarse.
-Standalone query-limited retrieval/evaluation use matching `--max-queries`; normal
-`run` and ablation suites evaluate complete requested query splits.
-
-## New experiments
-
-See [the ablation guide](ablations.md). Calibration now lives in
-`configs/calibration.yaml`; the old coarse/loss/sampling/identity-amplitude
-ablation configurations have been removed.
+The patch does not provide measured RCR mAP, trained v2 weights, full-backbone
+integration results, T4 FP16 validation or CUDA latency/memory benchmarks. CPU
+BF16 autocast tests are not a substitute for a T4 FP16 run. Native FAFA extraction
+is exercised with a deterministic fake image-only trunk in the CPU suite.

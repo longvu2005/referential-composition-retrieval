@@ -105,8 +105,10 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     backend = cfg.get("person_encoder", {}).get("backend", "dino")
     if backend not in ("dino", "fafa"):
         raise ValueError("person_encoder.backend must be dino or fafa")
-    if stage not in ("all", "dino", "persons"):
-        raise ValueError("cache stage must be all, dino or persons")
+    if stage not in ("all", "dino", "persons", "clip"):
+        raise ValueError("cache stage must be all, dino, persons or clip")
+    if stage in ("all", "clip") and backend != "fafa":
+        raise ValueError("the proposed model requires person_encoder.backend=fafa")
     if stage == "persons" and backend != "fafa":
         raise ValueError("persons stage requires person_encoder.backend=fafa")
     data_cfg = cfg["data"]
@@ -119,15 +121,22 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     if source is not None:
         source.validate_gallery(data.gallery_ids)
         print(f"Using existing DINO cache: {root}", flush=True)
-    elif stage == "persons":
+    elif stage in ("persons", "clip"):
         raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
+    ready = None
     if backend == "fafa" and stage != "dino" and source is not None:
         ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
         if ready is not None:
             ready.validate_gallery(data.gallery_ids)
             print(f"Using existing FAFA cache: {data_cfg['cache']}", flush=True)
-            return
     if source is None:
         _prepare_dino(cfg, data, root)
     if backend == "fafa" and stage != "dino":
-        run_person_worker(cfg)
+        if ready is None and stage != "clip":
+            run_person_worker(cfg)
+        if stage in ("all", "clip"):
+            from rcr.proposed.cache.clip import build_clip_cache
+
+            source = GalleryCache(data_cfg["cache"], scene_root=root)
+            check_cache_config(source, cfg)
+            build_clip_cache(cfg, data, source)

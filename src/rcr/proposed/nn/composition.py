@@ -1,145 +1,57 @@
-"""Compose grounded person semantics with the requested change."""
+"""Full-condition composition retaining every Subject/person and text token."""
 
 import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import nn
 
-
-def composed_query_mask(
-    change: Tensor,
-    grounding_logits: Tensor,
-    change_mask: Tensor | None = None,
-    subject_mask: Tensor | None = None,
-) -> Tensor:
-    """Valid CLS, text and Subject-person tokens in composition output order."""
-
-    batch, length = change.shape[:2]
-    text = (
-        torch.ones(batch, length, device=change.device, dtype=torch.bool)
-        if change_mask is None
-        else change_mask.bool()
-    )
-    identities = torch.isfinite(grounding_logits)
-    if subject_mask is not None:
-        identities = identities & subject_mask[:, :, None].bool()
-    cls = torch.ones(batch, 1, device=change.device, dtype=torch.bool)
-    return torch.cat((cls, text, identities.flatten(1)), dim=1)
-
-
-def reference_key_bias(
-    change: Tensor,
-    grounding_logits: Tensor,
-    change_mask: Tensor | None = None,
-    subject_mask: Tensor | None = None,
-) -> Tensor:
-    """Soft membership prior aligned with [CLS, change, Subject persons]."""
-    b, length = change.shape[:2]
-    prior = F.logsigmoid(grounding_logits.float())
-    if subject_mask is not None:
-        prior = prior.masked_fill(~subject_mask[:, :, None], -torch.inf)
-    neutral = change.new_zeros(b, 1 + length)
-    bias = torch.cat((neutral, prior.flatten(1)), dim=1)
-    return bias.masked_fill(
-        ~composed_query_mask(change, grounding_logits, change_mask, subject_mask),
-        -torch.inf,
-    )
+from rcr.proposed.nn.attention import AttentionBlock, geometry, position_encoding
 
 
 class StructuredComposition(nn.Module):
-    """Ground each Subject with person features, then compose the full query."""
-
-    def __init__(
-        self,
-        dim: int,
-        person_dim: int,
-        num_heads: int,
-        max_subjects: int = 2,
-        mlp_ratio: int = 2,
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self, clip_dim, text_dim, dim, heads, max_subjects=16, dropout=0.0):
         super().__init__()
-        self.num_heads = num_heads
-
-        self.person_proj = (
-            nn.Identity() if person_dim == dim else nn.Linear(person_dim, dim)
-        )
+        self.person = nn.Linear(clip_dim, dim)
+        self.text = nn.Linear(text_dim, dim)
+        self.box = nn.Linear(4, dim)
         self.role = nn.Embedding(max_subjects, dim)
-        self.cls = nn.Parameter(torch.zeros(1, 1, dim))
+        self.sentinel = nn.Parameter(torch.zeros(1, 1, dim))
+        self.block = AttentionBlock(dim, heads, dropout)
 
-        self.bind_norm = nn.LayerNorm(dim)
-
-        self.attn = nn.MultiheadAttention(
-            dim, num_heads, dropout=dropout, batch_first=True
+    def forward(self, visual, text, membership):
+        b, s, k = membership.shape
+        subjects = text["subject_mask"]
+        if (text["subject_ids"] > self.role.num_embeddings).any():
+            raise ValueError("text Subject ID exceeds model.max_subjects")
+        role = self.role((text["subject_ids"] - 1).clamp_min(0)) * subjects[..., None]
+        change = self.text(text["change"])
+        change = change + position_encoding(
+            change.shape[1], change.shape[2], change.device
         )
-        self.dropout = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * mlp_ratio),
-            nn.Sequential(nn.GELU(), nn.Dropout(dropout)),
-            nn.Linear(dim * mlp_ratio, dim),
-            nn.Dropout(dropout),
+        change = change + torch.einsum(
+            "bsl,bsd->bld", text["subject_token_mask"].float(), role
         )
-
-    def forward(
-        self,
-        change: Tensor,
-        persons: Tensor,
-        grounding_logits: Tensor,
-        subject_pos: Tensor,
-        change_mask: Tensor | None = None,
-        subject_mask: Tensor | None = None,
-        subject_token_mask: Tensor | None = None,
-        subject_ids: Tensor | None = None,
-    ) -> Tensor:
-        """Return composed tokens [B, 1+L+S*K, D]."""
-
-        b, s, k = grounding_logits.shape
-        d = change.shape[-1]
-
-        active = (
-            torch.ones(b, s, device=change.device, dtype=torch.bool)
-            if subject_mask is None
-            else subject_mask.bool()
+        member = self.person(visual["clip_pooled"]) + self.box(
+            geometry(visual["boxes"])
         )
-        membership = grounding_logits.float().sigmoid()
-        membership = membership.masked_fill(~active[:, :, None], 0)
-        weight = membership / membership.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-
-        if subject_ids is None:
-            subject_ids = torch.arange(1, s + 1, device=change.device)[None].expand(
-                b, -1
-            )
-        role = self.role(subject_ids.long().clamp_min(1) - 1)
-        projected = self.person_proj(persons)
-        ids = projected[:, None] + role[:, :, None]
-
-        grounded = torch.sum(weight[..., None] * ids, dim=2)
-        if subject_token_mask is None:
-            subject_token_mask = F.one_hot(subject_pos, change.shape[1]).bool()
-        mentions = subject_token_mask.bool() & active[:, :, None]
-        if change_mask is not None:
-            mentions = mentions & change_mask[:, None, :].bool()
-        injection = torch.einsum("bsl,bsd->bld", mentions.to(change.dtype), grounded)
-        bound = self.bind_norm(change + injection)
-        change = torch.where(mentions.any(dim=1)[..., None], bound, change)
-
-        ids = ids.reshape(b, s * k, d)
-        tokens = torch.cat((self.cls.expand(b, -1, -1), change, ids), dim=1)
-        key_bias = reference_key_bias(
-            change, grounding_logits, change_mask, subject_mask
+        member = member[:, None] + role[:, :, None]
+        member_mask = subjects[:, :, None] & visual["person_mask"][:, None]
+        mask = torch.cat(
+            (subjects.new_ones(b, 1), text["change_mask"], member_mask.flatten(1)), 1
         )
-
-        n = tokens.shape[1]
-        attn_mask = key_bias[:, None, :].expand(-1, n, -1)
-        attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
-
-        update, _ = self.attn(
-            tokens,
-            tokens,
-            tokens,
-            attn_mask=attn_mask,
-            need_weights=False,
+        prior = torch.cat(
+            (
+                change.new_zeros(b, 1 + change.shape[1]),
+                membership.clamp_min(1e-8).log().flatten(1),
+            ),
+            1,
         )
-        tokens = self.norm1(tokens + self.dropout(update))
-        return self.norm2(tokens + self.ffn(tokens))
+        tokens = torch.cat(
+            (self.sentinel.expand(b, -1, -1), change, member.flatten(1, 2)), 1
+        )
+        reference = self.block(tokens, mask, prior)
+        return (
+            reference,
+            mask,
+            prior,
+            reference[:, 1 + change.shape[1] :].reshape(b, s, k, change.shape[-1]),
+            role,
+        )

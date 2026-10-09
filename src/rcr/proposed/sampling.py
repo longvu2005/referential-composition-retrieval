@@ -1,50 +1,45 @@
-"""Case-balanced batches and train-only positive/negative sampling."""
+"""Uniform batches and train-only positive/negative sampling."""
 
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 import torch
 
 
-def case_sampling_weights(samples: list[dict]) -> torch.Tensor:
-    """Per-row 1/sqrt(N_case), giving each case total mass sqrt(N_case)."""
-    counts = Counter(sample["case_type"] for sample in samples)
-    return torch.tensor(
-        [1 / math.sqrt(counts[sample["case_type"]]) for sample in samples],
-        dtype=torch.double,
-    )
-
-
-def training_batches(
-    samples: list[dict],
-    batch_size: int,
-    generator: torch.Generator,
-    *,
-    case_balanced: bool = True,
-) -> list[list[dict]]:
-    """Draw one epoch, then group by Subject count without dropping any draw."""
+def training_batches(samples, batch_size, generator):
+    """Uniform permutation, no case or annotation-cardinality routing."""
     if batch_size < 1 or not samples:
         raise ValueError("training requires samples and a positive batch_size")
-    if case_balanced:
-        order = torch.multinomial(
-            case_sampling_weights(samples),
-            len(samples),
-            replacement=True,
-            generator=generator,
-        )
-    else:
-        order = torch.randperm(len(samples), generator=generator)
-    groups = defaultdict(list)
-    for index in order.tolist():
-        sample = samples[index]
-        groups[len(sample["subjects"])].append(sample)
-    batches = [
-        rows[start : start + batch_size]
-        for rows in groups.values()
-        for start in range(0, len(rows), batch_size)
+    order = torch.randperm(len(samples), generator=generator).tolist()
+    return [
+        [samples[i] for i in order[start : start + batch_size]]
+        for start in range(0, len(order), batch_size)
     ]
-    order = torch.randperm(len(batches), generator=generator).tolist()
-    return [batches[index] for index in order]
+
+
+def negative_exclusions(samples):
+    """Ignore disputed negatives across equivalent identity/condition queries.
+
+    Case is intentionally absent from equivalence and training decisions.
+    """
+    groups = defaultdict(list)
+    for sample in samples:
+        key = (
+            tuple(
+                (s["subject_id"], tuple(sorted(map(str, s["identity_ids"]))))
+                for s in sample["subjects"]
+            ),
+            sample["final_change"],
+        )
+        groups[key].append(sample)
+    result = {}
+    for rows in groups.values():
+        positives = set().union(*(set(r["positive_image_ids"]) for r in rows))
+        for row in rows:
+            result[row["sample_id"]] = (
+                positives - set(row["positive_image_ids"]) - {row["query_image_id"]}
+            )
+    return result
 
 
 def identity_candidate_pools(data, samples, gallery_image_ids):
@@ -80,7 +75,6 @@ def sampling_settings(cfg: dict) -> dict:
         "positives_per_query": 2,
         "identity_fraction": 0.5,
         "hard_fraction": 0.0,
-        "warmup_epochs": 1,
         "refresh_every_epochs": 2,
         "pool_size": 100,
         **cfg,
@@ -91,9 +85,9 @@ def sampling_settings(cfg: dict) -> dict:
         or sum(fractions) > 1
     ):
         raise ValueError("sampling fractions must be in [0,1] and sum to at most 1")
-    for key in ("warmup_epochs", "refresh_every_epochs", "pool_size"):
+    for key in ("refresh_every_epochs", "pool_size"):
         value = settings[key]
-        if not isinstance(value, int) or value < (0 if key == "warmup_epochs" else 1):
+        if not isinstance(value, int) or value < 1:
             raise ValueError(f"invalid sampling.{key}")
     positives = settings["positives_per_query"]
     if isinstance(positives, bool) or not isinstance(positives, int) or positives < 1:
@@ -215,11 +209,27 @@ def sample_candidates(
             stats["sampled_positive"] = (
                 stats.get("sampled_positive", 0) + positive_count
             )
+        wrong_identity = (
+            set(index.gallery)
+            - set((identity_pools or {}).get(sample_id, ()))
+            - forbidden
+        )
+        if wrong_identity:
+            available = [x for x in index.gallery if x in wrong_identity]
+            chosen_wrong = available[
+                int(torch.randint(len(available), (1,), generator=generator))
+            ]
+            row.append(chosen_wrong)
+            forbidden.add(chosen_wrong)
+            if stats is not None:
+                stats["sampled_wrong_identity"] = (
+                    stats.get("sampled_wrong_identity", 0) + 1
+                )
         for pool, fraction, kind in (
             (identity, identity_fraction, "sampled_identity"),
             ((hard_pools or {}).get(sample_id, ()), hard_fraction, "sampled_hard"),
         ):
-            quota = int(need * fraction)
+            quota = min(int(need * fraction), num_candidates - len(row))
             if not quota:
                 available = []
             elif kind == "sampled_identity":

@@ -19,6 +19,7 @@ def main():
     data = load_rcr_data(args.final_dir)
     report = audit_data(data)
     report["detection"] = None
+    report["oracle_diagnostics"] = True  # GT audit only; never primary retrieval.
     if args.cache:
         from rcr.proposed.cache.store import GalleryCache
 

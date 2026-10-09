@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build/reuse caches, train on train, select coefficients on val, freeze for test.
+# Build/reuse all three caches, select best.pt on val, freeze config for test.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -12,9 +12,6 @@ python_bin="${PYTHON:-.venv-proposed/bin/python}"
 if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py run --config configs/proposed.yaml \
         --prepare --build-cache --train --splits val
-    "$python_bin" tools/run.py ablate --config configs/calibration.yaml --splits val
-    # Publish the chosen model's validation result under the same root as test.
-    "$python_bin" tools/run.py run --config runs/calibration/selected.yaml --splits val
 else
-    "$python_bin" tools/run.py run --config runs/calibration/selected.yaml --splits test
+    "$python_bin" tools/run.py run --config runs/proposed-v2/run_config.yaml --splits test
 fi
