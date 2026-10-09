@@ -1,1 +1,1 @@
-"""Baseline methods; each solution has its own declared environment."""
+"""Baseline methods; install the selected method in the notebook runtime."""

@@ -22,7 +22,7 @@ bash scripts/data/prepare_review.bash
 Run:
 
 ```bash
-.venv-dataset/bin/python -m labelstudio.review.app
+python -m labelstudio.review.app
 ```
 
 Open:
@@ -49,8 +49,8 @@ Prepare or refresh the cumulative positive catalog after text/Subject review:
 bash scripts/data/prepare_positives.bash
 ```
 
-For optional CLIP ordering, install `requirements/dataset-clip.txt` and set
-`PYTHON=.venv-dataset-clip/bin/python` on the preparation workflow.
+For optional CLIP ordering, install `requirements/dataset-clip.txt` in the
+current Python and use it for the preparation workflow.
 Add `--clip-rerank` to rank only newly reviewed tasks with CLIP. Existing tasks
 are never reranked. With no new task, CLIP is not loaded. Stop this UI before
 running the finalization command because that launcher validates and may
@@ -62,7 +62,7 @@ image tree.
 Run:
 
 ```bash
-.venv-dataset/bin/python -m labelstudio.positives.app
+python -m labelstudio.positives.app
 ```
 
 Open:

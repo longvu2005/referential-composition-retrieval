@@ -8,33 +8,45 @@ Scripts locate the repository root themselves. Direct `tools/*.py` commands
 must run from that root after an editable package install. Use the tools when
 you need a custom YAML, `--set` overrides, a smoke run or an individual stage.
 
-## Environments
+## Notebook setup
 
 ```bash
-PYTHON=python3.11 bash scripts/setup.bash clip
+bash scripts/setup.bash proposed
 ```
 
-Replace `clip` with `proposed`, `fafa`, `dataset`, `dataset-clip`, `evaluation` or
-`dev`. This creates `.venv-<name>` and installs the matching requirements file.
-The host needs Python 3.11/3.12 and pip 22.3+ for `pip --python`. The bootstrap
-pins preserve upstream CLIP/FAFA installation support. Dependencies are declared
-once in `pyproject.toml`; each requirements file chooses the corresponding extra.
-Install only the environments you use. A base install with `requirements.txt`
-supports deterministic annotation and JSON reports without Torch.
+Replace `proposed` with the selected profile: `clip`, `fafa`, `dataset`,
+`dataset-clip`, `evaluation` or `dev`. The script installs into the current
+Python; it creates no venvs. One notebook installs and runs one method.
+Dependencies are declared in `pyproject.toml`; requirements files select extras.
+Proposed includes FAFA cache extraction in the same runtime, with Transformers
+4.57.6 shared by FAFA and DINOv3. FAFA's legacy utility imports are bridged in
+`baselines/fafa.py` without editing the authors' source or model computations.
 
-Proposed requires a separate FAFA environment only to extract FAFA person
-features. Configure `person_encoder.python` in `configs/proposed.yaml`.
-Training/retrieval from completed caches need only the proposed environment.
+In Colab/Kaggle, run this before shell setup/workflows:
+
+```python
+import os
+import sys
+
+os.environ["PYTHON"] = sys.executable
+```
+
+Run `!bash scripts/setup.bash proposed` from the repository root. Install before
+importing models; restart the kernel if packages were already imported. Bootstrap
+pins preserve OpenAI CLIP's `pkg_resources` build support. `requirements.txt`
+provides deterministic annotation and JSON reports without model dependencies.
+The FAFA cache subprocess uses `sys.executable` from the caller; it runs in the
+same runtime and ends before CLIP extraction to release GPU/library state.
 
 ## Dataset
 
 ```bash
 bash scripts/setup.bash dataset
 bash scripts/data/prepare_review.bash
-.venv-dataset/bin/python -m labelstudio.review.app
+python -m labelstudio.review.app
 # After saving reviews and stopping the review UI:
 bash scripts/data/prepare_positives.bash
-.venv-dataset/bin/python -m labelstudio.positives.app
+python -m labelstudio.positives.app
 # After saving positives and stopping the positive UI:
 bash scripts/data/finalize.bash --version 0.2.0
 ```
@@ -58,12 +70,9 @@ bash scripts/methods/fafa.bash val
 bash scripts/methods/proposed.bash val
 ```
 
-Each workflow defaults to its `.venv-<method>/bin/python`. Set `PYTHON` to reuse
-another matching environment, for example:
-
-```bash
-PYTHON=/path/to/clip-env/bin/python bash scripts/methods/clip.bash test
-```
+Each workflow uses the current `python` from PATH, or `PYTHON` when set.
+For notebook kernels, use the `sys.executable` binding above. Run validation
+first, then the same method's test workflow in that notebook.
 
 Test never trains or selects parameters. Run validation first. Proposed's val
 recipe uses `configs/proposed.yaml` and saves the exact run config; it includes
@@ -75,14 +84,14 @@ and model assets must be available as described in the method guides.
 
 ## Reports
 
-Use any base/method environment to export already evaluated JSON:
+Use the notebook Python to export already evaluated JSON:
 
 ```bash
-.venv-dataset/bin/python tools/report.py --split val \
+python tools/report.py --split val \
   --run proposed=runs/proposed-v2/val
-.venv-dataset/bin/python tools/report.py --split test \
+python tools/report.py --split test \
   --run proposed=runs/proposed-v2/test
 ```
 
-To evaluate saved `rankings.pt` first, use a method environment or install
+To evaluate saved `rankings.pt` first, use a method profile or install
 `requirements/evaluation.txt`; this needs Torch but no encoder libraries.

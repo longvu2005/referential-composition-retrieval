@@ -3,5 +3,5 @@
 pip==24.3.1
 setuptools==78.1.0
 wheel>=0.43,<1
-# Startup hooks such as Kaggle's sitecustomize may run in isolated environments.
+# Notebook startup hooks such as Kaggle's sitecustomize can require wrapt.
 wrapt>=1.16,<3

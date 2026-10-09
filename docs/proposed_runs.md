@@ -1,30 +1,32 @@
 # Proposed v2 runs
 
-Use the repository root and the separate proposed/FAFA environments described in
-README. DINO/CLIP may need Hugging Face model access. No pretrained model assets or
-raw dataset images are distributed in this patch.
+Use the repository root. DINO/CLIP may need Hugging Face model access. Raw
+images and pretrained weights are not distributed in this patch.
 
-## Environments
+## Notebook setup
 
-```bash
-PYTHON=python3.11 bash scripts/setup.bash proposed
-PYTHON=python3.11 bash scripts/setup.bash fafa
+```python
+import os
+import sys
+
+os.environ["PYTHON"] = sys.executable
 ```
 
-The setup scripts support notebook images without `ensurepip`; the host pip
-needs 22.3+. Set `person_encoder.python` to the FAFA environment. Direct commands
-below use `python` from the proposed environment; on Kaggle use its full venv
-Python path in each cell. Windows uses `.venv-fafa/Scripts/python.exe`.
+Then run `!bash scripts/setup.bash proposed` in Colab/Kaggle. This installs the
+complete proposed method, including its FAFA cache stage, into the kernel's
+runtime. There is no additional Python path to configure. Install before model
+imports; restart the kernel if those packages were already imported. Direct
+commands below use the same Python (`{sys.executable}` in notebook shell cells).
 
 ## Build or reuse frozen features
 
 Set `data.image_root`, `data.final_dir`, `data.dino_cache`, `data.cache` (FAFA),
-`data.clip_cache` and `person_encoder.python` in `configs/proposed.yaml`.
+`data.clip_cache` in `configs/proposed.yaml`.
 `data.clip_cache` must be writable and different from both source directories.
 The CLIP image/text model and processor share the pinned revision in this config.
 
 ```bash
-# Prepare official FAFA source/checkpoint in its separate environment.
+# Prepare official FAFA source/checkpoint in the current runtime.
 python tools/run.py prepare --config configs/proposed.yaml
 
 # Full build: reuse completed compatible stages; resume interrupted shards.
@@ -127,7 +129,10 @@ score equality, coarse tail/self-exclusion, cache resume/reuse/provenance, and a
 full disk-cache → warmup/train → mine → retrieve → evaluate smoke run. A tiny
 same-identity condition task verifies that the reasoner can overfit synthetic
 features. Optional real CLIP/DINO implementation tests use randomly initialized
-small models, not downloaded pretrained weights.
+small models, not downloaded pretrained weights. If the pinned FAFA source is
+prepared, optional tests also import its native API, run image/composed
+extraction with tiny backbones, and roundtrip a tiny Q-Former safetensors model
+under the same Transformers runtime used by DINOv3.
 
 The patch does not provide measured RCR mAP, trained v2 weights, full-backbone
 integration results, T4 FP16 validation or CUDA latency/memory benchmarks. CPU

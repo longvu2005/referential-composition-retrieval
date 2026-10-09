@@ -20,9 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 proposed = [
-    "torch>=2.4,<3",
-    "transformers>=4.56,<5",
-    "torchvision>=0.19,<1",
+    "referential-composition-retrieval[fafa]",
     "wandb>=0.18,<1",
 ]
 clip = [
@@ -31,11 +29,11 @@ clip = [
     "torchvision>=0.19,<1",
 ]
 # Official FAFA is imported from the pinned source, not a PyPI LAVIS fork.
-# Keep this extra in its own environment: its Transformers pin conflicts with proposed.
+# Proposed reuses this native runtime for its FAFA cache stage in the same notebook.
 fafa = [
     "torch==2.5.1",
     "torchvision==0.20.1",
-    "transformers==4.39.3",
+    "transformers==4.57.6",
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
     "scipy>=1.11,<2",
     "gdown>=5.2,<7",

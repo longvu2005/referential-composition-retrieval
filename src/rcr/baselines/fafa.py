@@ -92,6 +92,18 @@ def runtime_cache(cfg: dict, *, offline: bool) -> Path:
 
 
 def official_api(directory: Path):
+    # Upstream Qformer/med import these helpers from their former module.
+    # Restore import aliases only; keep the pinned native model code unchanged.
+    from transformers import modeling_utils, pytorch_utils
+
+    for name in (
+        "apply_chunking_to_forward",
+        "find_pruneable_heads_and_indices",
+        "prune_linear_layer",
+    ):
+        if not hasattr(modeling_utils, name):
+            setattr(modeling_utils, name, getattr(pytorch_utils, name))
+
     sys.dont_write_bytecode = True
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     src = str(directory / "src")

@@ -63,28 +63,36 @@ selects the checkpoint. See [equations and contracts](docs/proposed_method.md).
 
 ## Setup and run
 
-Use Python 3.11/3.12. Each environment installs only its own requirements file.
-Dependency versions live in `pyproject.toml`; the requirements files select one
-extra without duplicating version lists. `requirements.txt` installs the shared
-package only. Keep proposed and native FAFA separate because their Transformers
-versions conflict:
+Use Python 3.11/3.12 and install the selected method in the notebook's current
+Python. Each notebook runs one method. Requirements files select dependency
+profiles from `pyproject.toml`; the setup script installs them without creating
+virtual environments. Proposed includes the FAFA runtime needed for its person
+cache, plus DINOv3/CLIP and training dependencies.
 
 ```bash
-PYTHON=python3.11 bash scripts/setup.bash proposed
-PYTHON=python3.11 bash scripts/setup.bash fafa
-# Only needed when running CLIP baselines:
-PYTHON=python3.11 bash scripts/setup.bash clip
+# Proposed notebook (includes its FAFA person encoder):
+bash scripts/setup.bash proposed
+# In a CLIP or FAFA baseline notebook, choose clip or fafa instead.
 ```
 
-The setup workflow creates `.venv-<name>`, bootstraps pip from the host (which
-needs pip 22.3+), then installs `requirements/<name>.txt`. It supports notebook
-images without `ensurepip`. Run standalone `tools/*.py` commands from the repo
-root; Bash workflows locate that root themselves. Set `PYTHON` to an existing
-environment's Python to use it with a workflow instead of the default venv.
+In Colab/Kaggle, bind Bash workflows to the kernel's Python before setup:
+
+```python
+import os
+import sys
+
+os.environ["PYTHON"] = sys.executable
+```
+
+Then run `!bash scripts/setup.bash proposed` from the repository root. Install
+before importing model packages; restart the kernel if those packages were
+already imported. Bash workflows use `PYTHON` when set, otherwise `python` from
+PATH. Direct notebook commands can use `{sys.executable}`. Tools never install
+packages during cache building, training or retrieval.
 
 | Install | Purpose |
 | --- | --- |
-| `requirements/proposed.txt` | Proposed training, DINO cache and retrieval |
+| `requirements/proposed.txt` | Complete proposed method: DINO/FAFA/CLIP caches, training and retrieval |
 | `requirements/clip.txt` | All four OpenAI CLIP variants |
 | `requirements/fafa.txt` | Native FAFA baseline or proposed person-feature worker |
 | `requirements/dataset.txt` | Annotation preparation and local UIs; no model libraries |
@@ -92,9 +100,9 @@ environment's Python to use it with a workflow instead of the default venv.
 | `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
 | `requirements/dev.txt` | CPU tests and linting |
 
-Set `data.dino_cache`, `data.cache` (FAFA), `data.clip_cache`, image paths and
-`person_encoder.python` in the proposed YAML. Completed compatible DINO/FAFA
-caches are reused; the new CLIP stage builds only missing frozen semantics.
+Set `data.dino_cache`, `data.cache` (FAFA), `data.clip_cache` and image paths in
+the proposed YAML. Completed compatible DINO/FAFA caches are reused; the CLIP
+stage builds only missing frozen semantics.
 `build-cache --cache-stage dino|persons|clip` runs a single stage; default `all`
 runs all three. Interrupted builds resume completed image shards.
 
@@ -103,7 +111,7 @@ runs all three. Interrupted builds resume completed image shards.
 bash scripts/methods/proposed.bash val
 
 # Fixed checkpoint, coarse / top-500 fine / full-gallery fine controls.
-.venv-proposed/bin/python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
+python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
 
 # CLIP and official FAFA baselines keep their workflows.
 bash scripts/methods/clip.bash val
@@ -145,9 +153,9 @@ See [Kaggle commands and limitations](docs/proposed_runs.md),
 ## Tests
 
 ```bash
-.venv-proposed/bin/python -m pip install -r requirements/dev.txt
-.venv-proposed/bin/python -m pytest -q
-.venv-proposed/bin/python -m ruff check src tools tests labelstudio
+python -m pip install -r requirements/dev.txt
+python -m pytest -q
+python -m ruff check src tools tests labelstudio
 ```
 
 The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
@@ -161,11 +169,11 @@ pipeline. A tiny synthetic overfit checks learning, not real retrieval quality.
 Optional real CLIP/DINO implementation checks use small random models. Real T4
 FP16, pretrained-backbone integration, RCR mAP and speed/memory remain to be measured.
 
-For an isolated CLIP environment, see [baseline setup](docs/baselines.md).
+For baseline notebook setup, see [baseline setup](docs/baselines.md).
 The deterministic dataset pipeline uses `requirements/dataset.txt`; optional
 candidate ordering uses `requirements/dataset-clip.txt`. Report generation reads
 JSON and works with the base package; decoding saved rankings needs the
-evaluation environment. No model client is required for annotation preparation.
+evaluation profile. No model client is required for annotation preparation.
 
 ## Current dataset snapshot
 

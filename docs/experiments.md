@@ -1,7 +1,7 @@
 # Experiment workflow
 
-Each method retains its own environment/config, retrieval runner and the shared
-evaluator. Baseline definitions, fusion validation and metrics are unchanged;
+Run one method per notebook, using its own config and the shared evaluator.
+Install that method profile into the notebook Python before running workflows. Baseline definitions, fusion validation and metrics are unchanged;
 see [baselines](baselines.md). Proposed v2 uses the architecture in
 [proposed_method.md](proposed_method.md) and commands in
 [proposed_runs.md](proposed_runs.md).
@@ -63,11 +63,11 @@ Legacy metrics need a run/evaluation binding. Re-evaluate saved rankings with
 the same root/config/mode/split, without inference:
 
 ```bash
-.venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --splits val \
+python tools/run.py evaluate --config configs/clip.yaml --splits val \
   --modes clip_image clip_text early_fusion late_fusion
-.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --splits val
+python tools/run.py evaluate --config configs/fafa.yaml --splits val
 # For old proposed rankings, use their saved historical config and output root:
-.venv-proposed/bin/python tools/run.py evaluate --config runs/proposed/config.yaml --splits val
+python tools/run.py evaluate --config runs/proposed/config.yaml --splits val
 python tools/report.py --split val
 ```
 
@@ -85,8 +85,8 @@ export before test. An explicitly requested current test smoke check uses the
 same frozen policy:
 
 ```bash
-.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
+python tools/run.py run --config configs/clip.yaml --splits test
+python tools/run.py run --config configs/fafa.yaml --splits test
 bash scripts/methods/proposed.bash test
 python tools/report.py --split test
 ```

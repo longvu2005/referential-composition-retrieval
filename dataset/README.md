@@ -142,8 +142,8 @@ The text parser/validator lives in `src/rcr/dataset/text.py`.
 Individual stages can also be run from the repo root:
 
 ```bash
-.venv-dataset/bin/python tools/data/select_samples.py
-.venv-dataset/bin/python tools/data/prepare_review.py
+python tools/data/select_samples.py
+python tools/data/prepare_review.py
 ```
 
 After review edits, prepare or refresh the Full Positive catalog:
@@ -164,13 +164,13 @@ For CLIP ordering of **new** tasks only, use:
 
 ```bash
 bash scripts/setup.bash dataset-clip
-PYTHON=.venv-dataset-clip/bin/python bash scripts/data/prepare_positives.bash --clip-rerank
+bash scripts/data/prepare_positives.bash --clip-rerank
 ```
 
 Without this flag, new non-seed candidates use deterministic image-ID order.
 Existing tasks and their candidate order are preserved in either mode. CLIP is
 not loaded when there are no new reviewed tasks. It requires local images and
-downloads its model weights on first use. The default annotation environment
+downloads its model weights on first use. The default annotation profile
 does not install OpenCLIP or other model libraries.
 
 The finalization launcher checks and normalizes positive-list ordering. Stop

@@ -17,7 +17,6 @@ image_encoder:
   person_size: [256, 128]
 person_encoder:
   backend: fafa
-  python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
   batch_size: 4
 clip_encoder:

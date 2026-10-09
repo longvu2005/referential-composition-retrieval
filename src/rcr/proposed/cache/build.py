@@ -1,6 +1,7 @@
-"""Select cache stages and run the isolated FAFA worker."""
+"""Select cache stages; the FAFA worker uses the current Python interpreter."""
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,14 +33,14 @@ def fafa_spec(cfg: dict) -> dict:
 
 
 def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) -> None:
-    """Share files only; native FAFA stays in its own dependency environment."""
+    """Use this runtime in a fresh process to release FAFA before the CLIP stage."""
     if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
         return
     worker = Path(__file__).resolve().parents[4] / "tools/cache_fafa.py"
     with tempfile.TemporaryDirectory(prefix="rcr-person-") as directory:
         path = Path(directory) / "config.yaml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-        command = [cfg["person_encoder"]["python"], str(worker), "--config", str(path)]
+        command = [sys.executable, str(worker), "--config", str(path)]
         if prepare:
             command.append("--prepare")
         if force:

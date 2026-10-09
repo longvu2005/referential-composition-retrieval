@@ -10,11 +10,11 @@ to that working directory.
 | --- | --- |
 | Commands and existing-key overrides | `tools/run.py`, `src/rcr/common/config.py` |
 | Reproduction workflows | `scripts/data/`, `scripts/methods/` |
-| Isolated dependency installation | `scripts/setup.bash`, `requirements/`, `pyproject.toml` |
+| Notebook dependency installation | `scripts/setup.bash`, `requirements/`, `pyproject.toml` |
 | Dataset/split protocol | `src/rcr/common/data.py` (unchanged) |
 | Primary metrics and result validation | `src/rcr/evaluation/` (unchanged) |
 | Frozen DINO extraction and letterbox transforms | `src/rcr/proposed/cache/dino.py` |
-| Frozen FAFA extraction in isolated environment | `src/rcr/proposed/cache/fafa.py`, `tools/cache_fafa.py` |
+| Frozen FAFA extraction in current runtime | `src/rcr/proposed/cache/fafa.py`, `tools/cache_fafa.py` |
 | Source cache storage / LRU | `src/rcr/proposed/cache/store.py` |
 | CLIP cache, resume, provenance and separate labels | `src/rcr/proposed/cache/clip.py` |
 | Stage selection | `src/rcr/proposed/cache/build.py` |
@@ -48,8 +48,10 @@ contain no model or annotation logic. Models/losses never import tools.
 `common/` provides configuration, data, I/O, vision and device utilities; data
 loading uses the shared annotation parser in `dataset/text.py`.
 `evaluation/` evaluates complete split-gallery rankings without model weights.
-Native FAFA remains in its own environment; cached training/retrieval never
-launch its worker. The base package supports annotation and JSON reports without
+Proposed and native FAFA use the same Python/runtime. The FAFA cache worker
+uses the caller's `sys.executable`; cached training/retrieval never launch it.
+`baselines/fafa.py` restores three legacy Transformers utility import aliases
+before loading the unchanged pinned native source. The base package supports annotation and JSON reports without
 Torch; method extras, optional candidate ordering and saved-ranking evaluation
 have separate requirements files.
 

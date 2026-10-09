@@ -324,7 +324,7 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
         encoder_metadata={"image_encoder": image_cfg, "detector": detector_cfg},
     )
 
-    # Release DINO/detector GPU storage before starting the isolated FAFA worker.
+    # Release DINO/detector GPU storage before starting the FAFA worker.
     del detector, image_encoder, backbone
     gc.collect()
     if device.type == "cuda":

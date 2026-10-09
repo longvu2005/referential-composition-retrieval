@@ -9,25 +9,36 @@ Read the [benchmark protocol](benchmark_protocol.md), detailed
 [experiments/reporting](experiments.md). Baseline `run` defaults to val only;
 request test explicitly after locking validation settings.
 
-## Environments
+## Notebook setup
 
-Use separate environments for proposed, CLIP and FAFA. FAFA uses its pinned
-upstream source and `transformers==4.39.3`; proposed uses Transformers 4.56+.
-Do not install both extras in one environment or substitute a PyPI LAVIS fork.
-Each method has its own requirements file. The complete setup workflow is
-`PYTHON=python3.11 bash scripts/setup.bash clip` (replace `clip` with `fafa` for
-FAFA). The equivalent manual installation is:
+Use one method per notebook. Install that method into the kernel's runtime:
 
-```bash
-python3.11 -m venv .venv-clip
-source .venv-clip/bin/activate
-python -m pip install -r requirements/bootstrap.txt
-python -m pip install --no-build-isolation -r requirements/clip.txt
+```python
+import os
+import sys
+
+os.environ["PYTHON"] = sys.executable
 ```
 
-The bootstrap pin retains `pkg_resources` needed by upstream CLIP. On Kaggle,
-call `.venv-clip/bin/python` or `.venv-fafa/bin/python` directly. The runtime
-never creates environments or installs packages.
+```bash
+bash scripts/setup.bash clip
+# In a FAFA baseline notebook, choose fafa instead.
+```
+
+In Colab/Kaggle prefix Bash commands with `!`. The equivalent `%pip` installation
+from the repository root is:
+
+```python
+%pip install -r requirements/bootstrap.txt
+%pip install --no-build-isolation -r requirements/clip.txt
+```
+
+Choose `requirements/fafa.txt` for FAFA. Install before model imports; restart
+if those packages were already loaded. Bootstrap retains `pkg_resources` needed
+by OpenAI CLIP. FAFA uses the pinned official source and Transformers 4.57.6;
+its loader restores the three legacy utility import aliases. Model/weight
+computations stay native. The runtime never creates environments or installs
+packages during retrieval.
 
 For the default reproduction sequence, use `bash scripts/methods/clip.bash val`
 or `bash scripts/methods/fafa.bash val`. Each prepares assets, retrieves, evaluates

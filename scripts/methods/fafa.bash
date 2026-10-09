@@ -8,7 +8,7 @@ if [[ "$#" -gt 1 || ( "$split" != val && "$split" != test ) ]]; then
     echo "Usage: $0 [val|test]" >&2
     exit 1
 fi
-python_bin="${PYTHON:-.venv-fafa/bin/python}"
+python_bin="${PYTHON:-python}"
 if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py prepare --config configs/fafa.yaml
 fi

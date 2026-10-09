@@ -1,1 +1,3 @@
+# Full proposed runtime, including FAFA cache extraction in this notebook.
+# Install bootstrap.txt first, then use pip install --no-build-isolation.
 -e .[proposed]
