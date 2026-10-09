@@ -24,8 +24,8 @@ The benchmark uses four case types:
 
 ## Code layout
 
-- `scripts/run.py`: the single experiment CLI.
-- `scripts/report.py`: validate saved JSON and export overall/by-case paper tables.
+- `tools/run.py`: the single experiment CLI.
+- `tools/report.py`: validate saved JSON and export overall/by-case paper tables.
 - `configs/{proposed,clip,fafa}.yaml`: one config per method.
 - `configs/ablations/*.yaml`: explicit experiments.
 - `src/rcr/proposed/`: training, losses, ranking and experiments; `nn/` holds
@@ -33,8 +33,10 @@ The benchmark uses four case types:
 - `src/rcr/baselines/`: CLIP, official FAFA adapter and val tuning.
 - `src/rcr/common/`: shared data loading, runtime, I/O and detection utilities.
 - `src/rcr/evaluation/`: shared benchmark protocol and metrics.
-- `dataset/`, `src/rcr/dataset/`, `scripts/data/`, `labelstudio/`: dataset pipeline.
-- `scripts/`: experiment CLI, isolated FAFA worker and dataset launchers.
+- `dataset/`, `src/rcr/dataset/`, `tools/data/`, `labelstudio/`: dataset pipeline.
+- `tools/`: Python commands for individual stages, reports and the FAFA worker.
+- `scripts/`: Bash workflows that sequence those commands for reproduction.
+- `requirements/`: separate installations for methods, annotation and evaluation.
 
 See [where to edit and module responsibilities](docs/code_structure.md).
 
@@ -61,17 +63,34 @@ protocol remain. See [equations and limitations](docs/proposed_method.md).
 
 ## Setup and run
 
-Use Python 3.11/3.12. Run commands from the repository root. Keep proposed and
-native FAFA in separate environments because they need different Transformers:
+Use Python 3.11/3.12. Each environment installs only its own requirements file.
+Dependency versions live in `pyproject.toml`; the requirements files select one
+extra without duplicating version lists. `requirements.txt` installs the shared
+package only. Keep proposed and native FAFA separate because their Transformers
+versions conflict:
 
 ```bash
-python3.11 -m venv .venv-proposed
-.venv-proposed/bin/python -m pip install -r requirements/bootstrap.txt
-.venv-proposed/bin/python -m pip install --no-build-isolation -r requirements/proposed.txt
-python3.11 -m venv .venv-fafa
-.venv-fafa/bin/python -m pip install -r requirements/bootstrap.txt
-.venv-fafa/bin/python -m pip install --no-build-isolation -r requirements/fafa.txt
+PYTHON=python3.11 bash scripts/setup.bash proposed
+PYTHON=python3.11 bash scripts/setup.bash fafa
+# Only needed when running CLIP baselines:
+PYTHON=python3.11 bash scripts/setup.bash clip
 ```
+
+The setup workflow creates `.venv-<name>`, bootstraps pip from the host (which
+needs pip 22.3+), then installs `requirements/<name>.txt`. It supports notebook
+images without `ensurepip`. Run standalone `tools/*.py` commands from the repo
+root; Bash workflows locate that root themselves. Set `PYTHON` to an existing
+environment's Python to use it with a workflow instead of the default venv.
+
+| Install | Purpose |
+| --- | --- |
+| `requirements/proposed.txt` | Proposed training, DINO cache and retrieval |
+| `requirements/clip.txt` | All four OpenAI CLIP variants |
+| `requirements/fafa.txt` | Native FAFA baseline or proposed person-feature worker |
+| `requirements/dataset.txt` | Annotation preparation and local UIs; no model libraries |
+| `requirements/dataset-clip.txt` | Optional OpenCLIP ordering of new positive tasks |
+| `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
+| `requirements/dev.txt` | CPU tests and linting |
 
 Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
 in the proposed YAML. DINO scenes/detections and FAFA person features live in
@@ -82,20 +101,26 @@ builds resume saved images. Training/retrieval join both caches without FAFA.
 See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash
-# Main model: build/reuse caches, train, validation.
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
+# Main model: prepare, build/reuse caches, train, then calibrate on validation.
+bash scripts/methods/proposed.bash val
 
 # Joint 2D validation calibration; only the selected pair reaches test.
-.venv-proposed/bin/python scripts/run.py ablate --config configs/calibration.yaml --splits val test
+.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
 
 # Score-term removals from the same calibrated checkpoint/shortlist.
-.venv-proposed/bin/python scripts/run.py ablate --config configs/ablations/binding.yaml --splits val test
+.venv-proposed/bin/python tools/run.py ablate --config configs/ablations/binding.yaml --splits val test
 
-# CLIP and native FAFA baselines use their respective environments/configs.
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --prepare --splits val
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --prepare --splits val
-python scripts/report.py --split val
+# CLIP and native FAFA: prepare assets, retrieve and evaluate validation.
+bash scripts/methods/clip.bash val
+bash scripts/methods/fafa.bash val
+.venv-proposed/bin/python tools/report.py --split val \
+  --run proposed=runs/calibration/selected/val
 ```
+
+For a frozen test run, use `bash scripts/methods/<method>.bash test`. Proposed
+loads `runs/calibration/selected.yaml`; CLIP/FAFA reuse their validation selections.
+The test workflows never train or select weights. For a custom config, stage or
+override, call `tools/run.py` directly. See [workflow contracts](scripts/README.md).
 
 The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only
 FAFA person features need extraction. Legacy files require the explicit
@@ -128,9 +153,9 @@ have been removed. Calibration lives separately in `configs/calibration.yaml`.
 ## Tests
 
 ```bash
-.venv-proposed/bin/python -m pip install -e '.[dev]'
+.venv-proposed/bin/python -m pip install -r requirements/dev.txt
 .venv-proposed/bin/python -m pytest -q
-.venv-proposed/bin/python -m ruff check src scripts tests labelstudio
+.venv-proposed/bin/python -m ruff check src tools tests labelstudio
 ```
 
 The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
@@ -144,9 +169,10 @@ do not download full weights or claim PIPA quality/CUDA throughput. Optional
 CLIP integration and CUDA tests require their corresponding dependencies/device.
 
 For an isolated CLIP environment, see [baseline setup](docs/baselines.md).
-`requirements.txt` installs the proposed method. The deterministic dataset
-pipeline uses the base package; optional candidate ordering with OpenCLIP needs
-`pip install -e '.[dataset]'`. No Gemini client is required by the current pipeline.
+The deterministic dataset pipeline uses `requirements/dataset.txt`; optional
+candidate ordering uses `requirements/dataset-clip.txt`. Report generation reads
+JSON and works with the base package; decoding saved rankings needs the
+evaluation environment. No model client is required for annotation preparation.
 
 ## Current dataset snapshot
 
@@ -205,13 +231,21 @@ be available under the configured `image_root`.
 ### Dataset reconstruction
 
 The accepted Stage-2 text is treated as immutable input. The normal rebuild
-sequence is:
+sequence is below. The source export currently contains 8,001 tasks. Review and
+positive completion counts are reported by the preparation tools. A full rebuild
+requires every selected task's labels; use `--allow-partial` during annotation.
+The checked-in final snapshot remains unchanged.
 
 ```bash
-bash scripts/data/phase1_rewrite.bash prepare
-python scripts/data/prepare_handoffs.py positives
-bash scripts/data/phase2_finalize.bash --version 0.2.0
+bash scripts/setup.bash dataset
+bash scripts/data/prepare_review.bash
+# Complete or correct human reviews, then prepare positive tasks:
+bash scripts/data/prepare_positives.bash
+# Complete positive decisions, stop the UI, then export:
+bash scripts/data/finalize.bash --version 0.2.0
 ```
 
-`phase2_finalize.bash` validates positive decisions and writes the deterministic
-final export. It does not call Gemini for already accepted Stage-2 samples.
+Review preparation attaches image/Subject context directly to accepted Stage 2
+text. It preserves completed reviews and never creates completed labels for new
+tasks. `finalize.bash` validates positive decisions and writes the deterministic
+final export. See the [dataset workflow](dataset/README.md).

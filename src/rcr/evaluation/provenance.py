@@ -11,8 +11,6 @@ from pathlib import Path
 from platform import machine, python_version, release, system
 from subprocess import DEVNULL, PIPE, Popen
 
-import torch
-
 from rcr.common.data import split_fingerprint
 from rcr.dataset.cases import CASE_TYPES
 
@@ -76,6 +74,8 @@ def benchmark_metadata(data, split, output) -> dict:
 
 def runtime_metadata(device) -> dict:
     """Record the checkout and installed versions without importing models."""
+    import torch
+
     root = Path(__file__).resolve().parents[3]
 
     def git(*args):

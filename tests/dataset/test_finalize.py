@@ -225,7 +225,7 @@ def test_build_final_dataset_rejects_malformed_positive_set() -> None:
         )
 
 
-def test_build_final_dataset_revalidates_reviewed_rewrite() -> None:
+def test_build_final_dataset_revalidates_reviewed_text() -> None:
     reviewed = _reviewed()
     reviewed[0]["final_change"] = "Subject 1 is smiling"
 

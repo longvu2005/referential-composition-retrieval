@@ -10,9 +10,9 @@ import yaml
 
 from rcr.proposed import experiments as ablation
 from rcr.proposed import retrieve as inference
-from scripts import run as cli
 from tests.proposed.test_runner import experiment as experiment
 from tests.proposed.test_runner import local_stages as local_stages
+from tools import run as cli
 
 
 def test_representation_suite_has_factorial_controls():

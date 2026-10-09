@@ -1,2 +1,2 @@
-# Default: proposed method. Dataset CLIP reranking is optional: pip install -e ".[dataset]"
--e .[proposed]
+# Shared package only. Choose requirements/{proposed,clip,fafa}.txt for a method.
+-e .

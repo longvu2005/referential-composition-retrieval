@@ -19,6 +19,11 @@ def _selected() -> list[dict]:
             "query_image_path": "train/1_1.jpg",
             "target_image_path": "train/1_2.jpg",
             "case_type": "DUAL",
+            "final_desc": "Identify Subject 1 as the man and Subject 2 as the woman",
+            "final_change": (
+                "then retrieve target images where Subject 1 is smiling and "
+                "Subject 2 is waving"
+            ),
             "subjects": [
                 {"subject_id": 1, "identity_ids": ["7"]},
                 {"subject_id": 2, "identity_ids": ["8"]},
@@ -102,10 +107,7 @@ def _reviewed() -> list[dict]:
 
 
 def test_prepare_review_inputs_adds_labeling_context() -> None:
-    outputs = prepare_review_inputs(
-        selected=_selected(),
-        rewrite_outputs=_reviewed(),
-    )
+    outputs = prepare_review_inputs(selected=_selected())
 
     output = outputs[0]
     assert output["query_image_url"] == "/images/train/1_1.jpg"
@@ -195,20 +197,16 @@ def test_select_unfinished_records_skips_completed_ids() -> None:
     assert outputs == [{"sample_id": "new"}]
 
 
-def test_prepare_review_inputs_requires_complete_unique_accepted_rows() -> None:
-    with pytest.raises(ValueError, match="do not match selected samples"):
-        prepare_review_inputs(selected=_selected(), rewrite_outputs=[])
+def test_prepare_review_inputs_requires_unique_selected_rows() -> None:
     with pytest.raises(ValueError, match="duplicate sample_id"):
-        prepare_review_inputs(
-            selected=_selected(), rewrite_outputs=_reviewed() + _reviewed()
-        )
+        prepare_review_inputs(selected=_selected() + _selected())
 
 
 def test_prepare_review_inputs_rejects_unaccepted_text() -> None:
-    incomplete = _reviewed()
+    incomplete = _selected()
     incomplete[0]["final_change"] = None
     with pytest.raises(ValueError, match="final_change must be a string"):
-        prepare_review_inputs(selected=_selected(), rewrite_outputs=incomplete)
+        prepare_review_inputs(selected=incomplete)
 
 
 def test_prepare_positive_set_inputs_requires_completed_review() -> None:

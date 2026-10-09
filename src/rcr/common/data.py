@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from rcr.common.io import load_jsonl
-from rcr.dataset.rewrite import parse_selection_texts
+from rcr.dataset.text import parse_selection_texts
 
 SPLIT_NAMES = ("train", "val", "test")
 

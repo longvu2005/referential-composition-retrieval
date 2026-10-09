@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from rcr.dataset.gallery import indexed_image_ids
 from rcr.dataset.review import normalize_review_assignment
-from rcr.dataset.rewrite import validate_review_output
+from rcr.dataset.text import validate_review_output
 
 PAIR_SPLITS = frozenset({"TRAIN", "VAL", "TEST"})
 

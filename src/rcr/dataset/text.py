@@ -1,7 +1,6 @@
-"""Project and validate accepted Stage 2 final text."""
+"""Parse and validate canonical Subject descriptions and target conditions."""
 
 import re
-from collections.abc import Iterable
 
 from rcr.dataset.cases import subject_ids_for_case
 
@@ -9,22 +8,6 @@ SELECT_PREFIX = "Identify "
 CHANGE_PREFIX = "then retrieve target images where "
 SUBJECT_RE = re.compile(r"\bSubject\s+(\d+)\b")
 TERMINAL_PUNCTUATION = ".;:!?"
-
-
-def prepare_rewrite_inputs(records: Iterable[dict]) -> list[dict]:
-    """Project accepted final text into the canonical rewrite handoff."""
-    outputs = []
-    for record in records:
-        outputs.append(
-            {
-                "sample_id": record["sample_id"],
-                "case_type": record["case_type"],
-                "subjects": record["subjects"],
-                "final_desc": record["final_desc"],
-                "final_change": record["final_change"],
-            }
-        )
-    return outputs
 
 
 def _field(output: dict, name: str) -> str:

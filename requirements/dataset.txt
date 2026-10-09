@@ -1,0 +1,2 @@
+# Deterministic annotation tools and local UIs; no model libraries.
+-e .

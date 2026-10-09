@@ -14,7 +14,9 @@ request test explicitly after locking validation settings.
 Use separate environments for proposed, CLIP and FAFA. FAFA uses its pinned
 upstream source and `transformers==4.39.3`; proposed uses Transformers 4.56+.
 Do not install both extras in one environment or substitute a PyPI LAVIS fork.
-Example for CLIP (replace `clip` with `fafa` for FAFA):
+Each method has its own requirements file. The complete setup workflow is
+`PYTHON=python3.11 bash scripts/setup.bash clip` (replace `clip` with `fafa` for
+FAFA). The equivalent manual installation is:
 
 ```bash
 python3.11 -m venv .venv-clip
@@ -27,17 +29,22 @@ The bootstrap pin retains `pkg_resources` needed by upstream CLIP. On Kaggle,
 call `.venv-clip/bin/python` or `.venv-fafa/bin/python` directly. The runtime
 never creates environments or installs packages.
 
+For the default reproduction sequence, use `bash scripts/methods/clip.bash val`
+or `bash scripts/methods/fafa.bash val`. Each prepares assets, retrieves, evaluates
+and freezes validation settings. Use the same workflow with `test` afterwards.
+Call `tools/run.py` directly for custom YAML, stages or overrides.
+
 ## CLIP
 
 ```bash
-python scripts/run.py run --config configs/clip.yaml --prepare
+python tools/run.py run --config configs/clip.yaml --prepare
 # Reuse prepared weights/cache:
-python scripts/run.py run --config configs/clip.yaml
+python tools/run.py run --config configs/clip.yaml
 # Split the experiment into val selection and frozen test:
-python scripts/run.py run --config configs/clip.yaml --splits val
-python scripts/run.py run --config configs/clip.yaml --splits test
+python tools/run.py run --config configs/clip.yaml --splits val
+python tools/run.py run --config configs/clip.yaml --splits test
 # Run only image/text baselines:
-python scripts/run.py run --config configs/clip.yaml --modes clip_image clip_text
+python tools/run.py run --config configs/clip.yaml --modes clip_image clip_text
 ```
 
 One official OpenAI CLIP checkpoint contains both encoders. There is no separate
@@ -75,10 +82,10 @@ selection file with that mode; select both if both will be tested later.
 For a fixed-weight ablation or retrieval smoke check:
 
 ```bash
-python scripts/run.py retrieve --config configs/clip.yaml \
+python tools/run.py retrieve --config configs/clip.yaml \
   --modes early_fusion --splits val --max-queries 2 \
   --set fusion.image_weight=0.4 fusion.text_weight=0.6
-python scripts/run.py evaluate --config configs/clip.yaml \
+python tools/run.py evaluate --config configs/clip.yaml \
   --modes early_fusion --splits val --max-queries 2
 ```
 
@@ -88,8 +95,8 @@ Use the same mode/split/subset when evaluating saved results.
 ## FAFA
 
 ```bash
-python scripts/run.py run --config configs/fafa.yaml --prepare
-python scripts/run.py run --config configs/fafa.yaml
+python tools/run.py run --config configs/fafa.yaml --prepare
+python tools/run.py run --config configs/fafa.yaml
 ```
 
 `prepare` gets the pinned official source, released checkpoint, CLIP selector,
@@ -132,7 +139,7 @@ the proposed method. Saved-result evaluation rejects changed benchmark inputs;
 older rankings without this metadata still use gallery/sample consistency checks.
 
 New runs add dataset/sample/gallery digests, case counts, Git/runtime metadata.
-Evaluations bind metrics to `run.json`. `scripts/report.py --split val` exports
+Evaluations bind metrics to `run.json`. `tools/report.py --split val` exports
 the two paper tables without inference. Re-evaluate legacy rankings to attach
 the binding first. Replacements preserve prior run files/selections/reports in
 `.history/` and retain the active output layout.

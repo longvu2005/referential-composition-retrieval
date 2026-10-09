@@ -11,10 +11,10 @@ from rcr.proposed.losses import compute_loss, retrieval_loss
 from rcr.proposed.nn.binding import EvidenceBinding
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.nn.reasoning import FineReasoner
-from scripts import run as cli
 from tests.proposed.test_runner import experiment as experiment
 from tests.proposed.test_runner import local_stages as local_stages
 from tests.proposed.test_training import _batch
+from tools import run as cli
 
 DEVICES = [
     "cpu",

@@ -1,0 +1,2 @@
+# Optional OpenCLIP ordering of new Full Positive tasks.
+-e .[dataset]

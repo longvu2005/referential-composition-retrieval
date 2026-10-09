@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from rcr.baselines import prepare as prepare_baseline
-from scripts import run as cli
+from tools import run as cli
 
 
 @pytest.mark.parametrize("name", ["ViT-L/14", "ViT-B/32"])

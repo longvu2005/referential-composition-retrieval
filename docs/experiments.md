@@ -7,11 +7,11 @@ assets and historical run outputs are not included in the repository.
 ## Validation first
 
 ```bash
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --prepare --splits val
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --prepare --splits val
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --prepare --splits val
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --prepare --splits val
 # Proposed architecture/training is unchanged; use its prepared checkpoint/cache:
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --splits val
-python scripts/report.py --split val
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits val
+python tools/report.py --split val
 ```
 
 CLIP selects fusion weights on Full-mAP. FAFA evaluates/locks the supplied adapter
@@ -37,10 +37,10 @@ writing any table; previous tables are preserved in `.history/`.
 
 ```bash
 # Use the experiment name recorded in calibration/selection.json:
-python scripts/report.py --split val --run proposed=runs/calibration/CHOSEN_EXPERIMENT/val
+python tools/report.py --split val --run proposed=runs/calibration/CHOSEN_EXPERIMENT/val
 # Explicitly request a smaller table or alternative formats:
-python scripts/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
-python scripts/report.py --split val --formats csv tex --decimals 3
+python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
+python tools/report.py --split val --formats csv tex --decimals 3
 ```
 
 `--run METHOD=DIRECTORY` takes a split result folder; `--runs-root` changes the
@@ -55,11 +55,11 @@ Legacy metrics need a run/evaluation binding. Re-evaluate saved rankings with
 the same root/config/mode/split, without inference:
 
 ```bash
-.venv-clip/bin/python scripts/run.py evaluate --config configs/clip.yaml --splits val \
+.venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --splits val \
   --modes clip_image clip_text early_fusion late_fusion
-.venv-fafa/bin/python scripts/run.py evaluate --config configs/fafa.yaml --splits val
-.venv-proposed/bin/python scripts/run.py evaluate --config configs/proposed.yaml --splits val
-python scripts/report.py --split val
+.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --splits val
+.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --splits val
+python tools/report.py --split val
 ```
 
 Use `--set output.dir=...` for historical roots. Evaluation preserves old metrics
@@ -76,10 +76,10 @@ export before test. An explicitly requested current test smoke check uses the
 same frozen policy:
 
 ```bash
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --splits test
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --splits test
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --splits test
-python scripts/report.py --split test
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits test
+python tools/report.py --split test
 ```
 
 Report sample/case counts alongside such tables. CPU tests use tiny local fixtures;

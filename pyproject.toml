@@ -14,18 +14,19 @@ dependencies = [
     "numpy>=1.26,<2.0",
     "Pillow>=10,<13",
     "PyYAML>=6.0",
-    "torch>=2.4,<3",
     "tqdm>=4.66",
 ]
 
 
 [project.optional-dependencies]
 proposed = [
+    "torch>=2.4,<3",
     "transformers>=4.56,<5",
     "torchvision>=0.19,<1",
     "wandb>=0.18,<1",
 ]
 clip = [
+    "torch>=2.4,<3",
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
     "torchvision>=0.19,<1",
 ]
@@ -57,9 +58,14 @@ fafa = [
     "huggingface-hub>=0.20,<1",
 ]
 dataset = [
+    "torch>=2.4,<3",
     "open-clip-torch>=3.3,<4",
 ]
+evaluation = [
+    "torch>=2.4,<3",  # Decode saved rankings.pt; no model encoders needed.
+]
 dev = [
+    "torch>=2.4,<3",  # CPU contracts for all methods.
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "scipy>=1.11,<2",  # CPU FAFA adapter contract tests (no native weights).
@@ -92,4 +98,4 @@ select = ["E", "F", "I", "B", "UP"]
 
 
 [tool.ruff.lint.isort]
-known-first-party = ["labelstudio", "rcr"]
+known-first-party = ["labelstudio", "rcr", "tools"]

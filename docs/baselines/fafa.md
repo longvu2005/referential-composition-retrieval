@@ -92,10 +92,10 @@ Record `rcr_training=false`.
 Use the isolated FAFA environment in [baselines](../baselines.md):
 
 ```bash
-.venv-fafa/bin/python scripts/run.py prepare --config configs/fafa.yaml
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --splits val
+.venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits val
 # Once the test protocol is eligible:
-.venv-fafa/bin/python scripts/run.py run --config configs/fafa.yaml --splits test
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
 ```
 
 Preparation obtains pinned source, released checkpoint, detector, CLIP selector

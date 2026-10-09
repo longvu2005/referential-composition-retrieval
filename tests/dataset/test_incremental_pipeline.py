@@ -9,9 +9,8 @@ import pytest
 from PIL import Image
 
 from rcr.common.io import load_jsonl, write_jsonl
-from rcr.dataset.rewrite import prepare_rewrite_inputs
 from rcr.dataset.selection import select_samples
-from scripts.data import build_final, prepare_handoffs, prepare_rewrite
+from tools.data import build_final, prepare_positives, prepare_review
 
 
 def _source(query, target, identity, split):
@@ -34,6 +33,12 @@ def _source(query, target, identity, split):
         final_change=change,
         final_instruction=f"{desc}; {change}.",
     )
+
+
+def _review_rows(rows):
+    # Fixture for labels explicitly saved by a human in the review UI.
+    fields = ("sample_id", "case_type", "subjects", "final_desc", "final_change")
+    return [{field: row[field] for field in fields} for row in rows]
 
 
 def test_append_only_pipeline_with_optional_clip(tmp_path, monkeypatch):
@@ -59,39 +64,40 @@ def test_append_only_pipeline_with_optional_clip(tmp_path, monkeypatch):
     for i in range(1, 9):
         identity = "7" if i in (1, 2, 5, 7) else "8"
         split = "train" if identity == "7" else "val"
-        path = prepare_handoffs.IMAGE_ROOT / split / f"1_{i}.jpg"
+        path = prepare_positives.IMAGE_ROOT / split / f"1_{i}.jpg"
         path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (10, 10)).save(path)
         lines.append(f"1 {i} 1 1 2 2 {identity} 1")
-    prepare_handoffs.INDEX.parent.mkdir(parents=True)
-    prepare_handoffs.INDEX.write_text("\n".join(lines) + "\n")
+    prepare_positives.INDEX.parent.mkdir(parents=True)
+    prepare_positives.INDEX.write_text("\n".join(lines) + "\n")
     build_final.PAIR_DATA.write_text(json.dumps(pair_data))
 
     def prepare(rows):
-        write_jsonl(prepare_handoffs.SELECTED, select_samples(rows, pair_data))
-        prepare_rewrite.main()
-        monkeypatch.setattr(sys, "argv", ["prepare_handoffs.py", "review"])
-        prepare_handoffs.main()
+        write_jsonl(prepare_positives.SELECTED, select_samples(rows, pair_data))
+        prepare_review.main([])
 
     def positives(clip=False):
-        args = ["prepare_handoffs.py", "positives"]
+        args = []
         if clip:
             args.append("--clip-rerank")
-        monkeypatch.setattr(sys, "argv", args)
-        prepare_handoffs.main()
+        prepare_positives.main(args)
 
     prepare([old])
-    old_review = prepare_rewrite_inputs([old])
-    write_jsonl(prepare_handoffs.REVIEWED, old_review)
+    old_review = _review_rows([old])
+    write_jsonl(prepare_positives.REVIEWED, old_review)
     positives()
-    old_catalog = load_jsonl(prepare_handoffs.POSITIVE_INPUT)
+    old_catalog = load_jsonl(prepare_positives.POSITIVE_INPUT)
     old_decision = {"sample_id": old["sample_id"], "positive_image_ids": ["1_2"]}
-    write_jsonl(prepare_handoffs.POSITIVE_SETS, [old_decision])
+    write_jsonl(prepare_positives.POSITIVE_SETS, [old_decision])
 
     # Appending raw data does not invent completed review/positive decisions.
     prepare([old, new])
-    assert len(load_jsonl(prepare_handoffs.REVIEW_INPUT)) == 2
-    assert load_jsonl(prepare_handoffs.REVIEWED) == old_review
+    assert len(load_jsonl(prepare_review.REVIEW_INPUT)) == 2
+    assert not (tmp_path / "dataset/data/work/rewrite").exists()
+    before_review = prepare_review.REVIEW_INPUT.read_bytes()
+    prepare([old, new])
+    assert prepare_review.REVIEW_INPUT.read_bytes() == before_review
+    assert load_jsonl(prepare_positives.REVIEWED) == old_review
     calls = []
 
     class FakeRanker:
@@ -116,20 +122,20 @@ def test_append_only_pipeline_with_optional_clip(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="reviewed samples do not match"):
         build_final.main()
 
-    write_jsonl(prepare_handoffs.REVIEWED, prepare_rewrite_inputs([old, new]))
+    write_jsonl(prepare_positives.REVIEWED, _review_rows([old, new]))
     positives(clip=True)
-    catalog = load_jsonl(prepare_handoffs.POSITIVE_INPUT)
+    catalog = load_jsonl(prepare_positives.POSITIVE_INPUT)
     assert catalog[:1] == old_catalog
     assert calls == ["loaded", ["1_6", "1_8"]]
     assert [x["image_id"] for x in catalog[1]["candidates"]] == ["1_4", "1_8", "1_6"]
-    assert load_jsonl(prepare_handoffs.POSITIVE_SETS) == [old_decision]
-    before = prepare_handoffs.POSITIVE_INPUT.read_bytes()
+    assert load_jsonl(prepare_positives.POSITIVE_SETS) == [old_decision]
+    before = prepare_positives.POSITIVE_INPUT.read_bytes()
     positives(clip=True)
-    assert prepare_handoffs.POSITIVE_INPUT.read_bytes() == before
+    assert prepare_positives.POSITIVE_INPUT.read_bytes() == before
     assert calls == ["loaded", ["1_6", "1_8"]]
 
     write_jsonl(
-        prepare_handoffs.POSITIVE_SETS,
+        prepare_positives.POSITIVE_SETS,
         [
             old_decision,
             {
@@ -148,9 +154,9 @@ def test_append_only_pipeline_with_optional_clip(tmp_path, monkeypatch):
     assert (build_final.OUTPUT / "samples.jsonl").read_bytes() == before
 
     # Existing-label protection still fires after a reviewed text edit.
-    changed = deepcopy(prepare_rewrite_inputs([old, new]))
+    changed = deepcopy(_review_rows([old, new]))
     changed[0]["final_change"] += " and waving"
-    write_jsonl(prepare_handoffs.REVIEWED, changed)
+    write_jsonl(prepare_positives.REVIEWED, changed)
     with pytest.raises(ValueError, match="inspect its labels"):
         positives(clip=True)
     monkeypatch.setattr(sys, "argv", ["build_final.py"])

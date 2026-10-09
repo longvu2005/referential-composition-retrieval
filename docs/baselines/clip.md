@@ -70,10 +70,10 @@ Test labels cannot affect selection or its provenance.
 Use the CLIP environment in [baselines](../baselines.md), from the repo root:
 
 ```bash
-.venv-clip/bin/python scripts/run.py prepare --config configs/clip.yaml
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --splits val
+.venv-clip/bin/python tools/run.py prepare --config configs/clip.yaml
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits val
 # Once the test protocol is eligible and settings are frozen:
-.venv-clip/bin/python scripts/run.py run --config configs/clip.yaml --splits test
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
 ```
 
 Outputs: `runs/clip/<mode>/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.

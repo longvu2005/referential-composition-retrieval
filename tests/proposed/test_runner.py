@@ -13,7 +13,6 @@ from PIL import Image
 
 from rcr.proposed import experiments as runner
 from rcr.proposed import train as training_cli
-from scripts import run as cli
 from tests.proposed.test_build_cache import (
     Backbone as ImageBackbone,
 )
@@ -24,6 +23,7 @@ from tests.proposed.test_build_cache import (
 from tests.proposed.test_retrieval import _sample
 from tests.proposed.test_train_cli import Backbone as TextBackbone
 from tests.proposed.test_train_cli import Tokenizer
+from tools import run as cli
 
 
 @pytest.fixture

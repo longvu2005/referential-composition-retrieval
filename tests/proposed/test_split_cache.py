@@ -10,9 +10,9 @@ from rcr.proposed.cache import fafa as fafa_cache
 from rcr.proposed.cache.build import check_cache_config
 from rcr.proposed.cache.dino import boxes_to_scene
 from rcr.proposed.cache.store import GalleryCache
-from scripts import run as cli
 from tests.proposed.test_person_representation import FakeFAFA
 from tests.proposed.test_runner import experiment, local_stages  # noqa: F401
+from tools import run as cli
 
 
 @pytest.fixture
@@ -262,7 +262,7 @@ def test_person_worker_uses_the_new_script_and_passes_config(
         assert check
         calls.append(command)
         assert yaml.safe_load(Path(command[3]).read_text()) == cfg
-        assert Path(command[1]) == Path("scripts/cache_fafa.py").resolve()
+        assert Path(command[1]) == Path("tools/cache_fafa.py").resolve()
 
     monkeypatch.setattr(builder.subprocess, "run", execute)
     builder.run_person_worker(cfg, prepare=True, force=True)

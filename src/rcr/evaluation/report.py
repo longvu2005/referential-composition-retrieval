@@ -163,7 +163,7 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
     if not isinstance(provenance, dict):
         raise ReportError(
             f"{label}: missing evaluation provenance; evaluate saved rankings "
-            "with scripts/run.py evaluate (no inference)"
+            "with tools/run.py evaluate (no inference)"
         )
     from rcr.common.io import sha256_file
 

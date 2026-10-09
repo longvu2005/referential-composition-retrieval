@@ -17,7 +17,7 @@ from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.provenance import BENCHMARK_FIELDS, benchmark_metadata
 from rcr.evaluation.report import METHODS, ReportError, generate_report, load_run
 from rcr.evaluation.runner import evaluate_run
-from scripts import report as cli
+from tools import report as cli
 
 
 def saved_runs(tmp_path, split="val", cases=None):
@@ -318,7 +318,7 @@ def test_report_cli_reads_saved_json_without_rankings_or_models(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/report.py",
+            "tools/report.py",
             "--split",
             "val",
             "--runs-root",

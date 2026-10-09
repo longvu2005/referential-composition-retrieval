@@ -1,8 +1,8 @@
-"""Tests for canonical Stage 2 text projection and validation."""
+"""Tests for canonical Stage 2 text validation."""
 
 import pytest
 
-from rcr.dataset.rewrite import prepare_rewrite_inputs, validate_review_output
+from rcr.dataset.text import validate_review_output
 
 
 def _row() -> dict:
@@ -22,22 +22,6 @@ def _row() -> dict:
             "then retrieve target images where Subject 1 is beside Subject 2."
         ),
     }
-
-
-def test_prepare_rewrite_inputs_uses_accepted_stage2_text() -> None:
-    record = _row()
-    assert prepare_rewrite_inputs([record]) == [
-        {
-            k: record[k]
-            for k in (
-                "sample_id",
-                "case_type",
-                "subjects",
-                "final_desc",
-                "final_change",
-            )
-        }
-    ]
 
 
 def test_validate_review_output_accepts_two_subjects() -> None:

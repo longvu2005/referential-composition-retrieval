@@ -1,4 +1,4 @@
-"""Tests for the minimal identity-synchronized rewrite review UI backend."""
+"""Tests for the minimal identity-synchronized review UI backend."""
 
 import pytest
 

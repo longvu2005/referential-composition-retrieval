@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from rcr.dataset.review import normalize_review_assignment
-from rcr.dataset.rewrite import SUBJECT_RE, validate_review_output
+from rcr.dataset.text import SUBJECT_RE, validate_review_output
 
 STAGE2_FIELDS = {
     "sample_id",

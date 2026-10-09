@@ -13,8 +13,8 @@ from torch import nn
 from rcr.evaluation import runner as evaluate_proposed
 from rcr.proposed import retrieve as retrieve_proposed
 from rcr.proposed import train as train_proposed
-from scripts import run as cli
 from tests.proposed.test_retrieval import _Cache, _sample, _Tokenizer
+from tools import run as cli
 
 
 class Tokenizer(_Tokenizer):

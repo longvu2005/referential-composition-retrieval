@@ -16,6 +16,10 @@ python3.11 -m venv .venv-fafa
 The proposed extra includes Torchvision, required by DINOv3's fast image
 processor. Reinstall `requirements/proposed.txt` when updating an existing venv.
 
+Alternatively, `PYTHON=python3.11 bash scripts/setup.bash proposed` and
+`PYTHON=python3.11 bash scripts/setup.bash fafa` create the isolated environments,
+including on notebook images without `ensurepip`. The host pip needs 22.3+.
+
 Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`, and
 `person_encoder.python` in `configs/proposed.yaml`. All relative paths are
 relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
@@ -23,41 +27,48 @@ For Kaggle, use venv Python paths explicitly in every cell.
 
 ## Main workflow
 
+`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses both
+caches, trains, calibrates coefficients on validation and writes the selected
+validation result to `runs/calibration/selected/val`. Run
+`bash scripts/methods/proposed.bash test` later to use the frozen selected YAML.
+The val recipe includes training. Use the individual tools below when reusing a
+checkpoint, changing configs/seeds or running only one cache stage.
+
 ```bash
 # Download only FAFA source, checkpoint and runtime assets needed by person encoding.
 # Uses person_encoder.python; no baseline CLIP selector/detector is prepared.
-.venv-proposed/bin/python scripts/run.py prepare --config configs/proposed.yaml
+.venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
 
 # Stream 1: DINO scenes/detections/crops; no FAFA environment required.
-.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage dino
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
 
 # Stream 2: FAFA persons from the completed DINO source.
-.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage persons
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
 
 # Or ensure both caches; compatible completed stages are skipped.
-.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
 
 # Select both inference coefficients jointly on val; only that pair reaches test.
-.venv-proposed/bin/python scripts/run.py ablate --config configs/calibration.yaml --splits val test
+.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
 
 # A later test run uses the same frozen selection.
-.venv-proposed/bin/python scripts/run.py run --config runs/calibration/selected.yaml --splits test
+.venv-proposed/bin/python tools/run.py run --config runs/calibration/selected.yaml --splits test
 ```
 
 Equivalent one-command initial pipeline:
 
 ```bash
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
 ```
 
 For training another seed, reuse the cache and use a separate output directory.
 `run --train` sets its checkpoint to that directory's `best.pt` automatically:
 
 ```bash
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val \
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val \
   --set train.seed=1 output.dir=runs/proposed_seed1
 ```
 
@@ -81,9 +92,9 @@ are needed to extract FAFA crops; the DINO source supplies detections, so this
 stage does not load DINO or rerun the detector:
 
 ```bash
-.venv-proposed/bin/python scripts/run.py prepare --config configs/proposed.yaml
-.venv-proposed/bin/python scripts/run.py build-cache --config configs/proposed.yaml --cache-stage persons
-.venv-proposed/bin/python scripts/run.py run --config configs/proposed.yaml --train --splits val
+.venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
 ```
 
 The supplied legacy cache has a 14 x 14 patch grid, 768 feature channels, FP16

@@ -2,14 +2,17 @@
 
 The method YAML describes an experiment. Functions implement its stages directly;
 there is no registry, recursive config inheritance or trainer framework.
-Run scripts from the repository root after installing the package in editable mode.
-Relative YAML paths are resolved from that working directory.
+Run Python tools from the repository root after installing the package in editable
+mode. Bash workflows find the root before running tools. Relative YAML paths are
+resolved from that working directory.
 
 ## Where to change behavior
 
 | Change | Start here |
 | --- | --- |
-| Experiment commands and dispatch | `scripts/run.py` |
+| Experiment commands and dispatch | `tools/run.py` |
+| Reproduction workflows | `scripts/data/`, `scripts/methods/` |
+| Isolated dependency installation | `scripts/setup.bash`, `requirements/`, `pyproject.toml` |
 | YAML loading and dotted overrides | `src/rcr/common/config.py` |
 | Device selection | `src/rcr/common/runtime.py` |
 | Final data loading and split gallery | `src/rcr/common/data.py` |
@@ -23,20 +26,21 @@ Relative YAML paths are resolved from that working directory.
 | Checkpoint loading and result metadata | `src/rcr/proposed/retrieve.py` |
 | Stage coordination, ablations and validation calibration | `src/rcr/proposed/experiments.py` |
 | DINO extraction | `src/rcr/proposed/cache/dino.py` |
-| FAFA extraction in its own environment | `src/rcr/proposed/cache/fafa.py`, `scripts/cache_fafa.py` |
+| FAFA extraction in its own environment | `src/rcr/proposed/cache/fafa.py`, `tools/cache_fafa.py` |
 | Cache stage selection and provenance checks | `src/rcr/proposed/cache/build.py` |
 | Cache loading used by both coarse and fine | `src/rcr/proposed/cache/store.py` |
 | CLIP/FAFA baselines and validation tuning | `src/rcr/baselines/` |
 | Saved/in-memory evaluation orchestration | `src/rcr/evaluation/runner.py` |
 | Official protocol and metric definitions | `src/rcr/evaluation/evaluate.py`, `metrics.py` |
-| Dataset construction and annotation | `src/rcr/dataset/`, `scripts/data/`, `labelstudio/` |
+| Dataset construction and annotation | `src/rcr/dataset/`, `tools/data/`, `labelstudio/` |
 
 ## Boundaries
 
-- Scripts parse arguments and call stage functions. Models/losses never import scripts.
+- Tools parse arguments and call stage functions. Bash scripts sequence tools;
+  they contain no model or annotation logic. Models/losses never import tools.
 - `common/` provides configuration, data, I/O, vision and device utilities.
   It does not import evaluation or either retrieval method. Data loading uses the
-  shared annotation parser in `dataset/rewrite.py` to interpret Subject descriptions.
+  shared annotation parser in `dataset/text.py` to interpret Subject descriptions.
 - `evaluation/` evaluates complete split-gallery rankings from any method. It
   does not load model weights. Both proposed and baseline workflows call it.
 - Proposed inference constructs its model from the saved checkpoint config.
@@ -46,6 +50,9 @@ Relative YAML paths are resolved from that working directory.
   validation Full-mAP; test never selects them.
 - Native FAFA dependencies stay in their own environment. Training and retrieval
   consume its frozen features and do not launch the FAFA worker.
+- The base package supports deterministic annotation and JSON reports without
+  Torch. Method extras install their own runtime; optional OpenCLIP candidate
+  ordering and saved-ranking evaluation have separate requirements files.
 - Tests follow the owning modules. CPU tests use small local fake backbones;
   optional native CLIP/Transformers and CUDA checks may skip without those extras.
 

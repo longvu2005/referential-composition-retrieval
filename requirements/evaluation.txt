@@ -1,0 +1,2 @@
+# Evaluate saved rankings and export tables; no CLIP/FAFA/Transformers encoders.
+-e .[evaluation]

@@ -1,4 +1,4 @@
-"""Minimal local UI for RCR rewrite review.
+"""Minimal local UI for RCR text and Subject review.
 
 The review state is identity-based: selecting one box assigns the same identity
 in both images. Bounding-box geometry is metadata and is never editable.
@@ -20,7 +20,7 @@ from rcr.common.io import image_relative_path as _image_relative_path
 from rcr.common.io import load_jsonl, write_jsonl
 from rcr.dataset.cases import CASE_TYPES, EDITABLE_CASE_TYPES, ONE_SUBJECT_CASES
 from rcr.dataset.review import normalize_review_assignment
-from rcr.dataset.rewrite import validate_review_output
+from rcr.dataset.text import validate_review_output
 
 INPUT = Path("dataset/data/work/review/review_input.jsonl")
 OUTPUT = Path("dataset/data/work/review/reviewed.jsonl")
@@ -317,7 +317,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the local RCR rewrite-review UI.")
+    parser = argparse.ArgumentParser(description="Run the local RCR review UI.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     args = parser.parse_args()
@@ -325,7 +325,7 @@ def main() -> None:
     state = ReviewState()
     handler = type("BoundReviewHandler", (ReviewHandler,), {"state": state})
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(f"RCR rewrite review: http://{args.host}:{args.port}")
+    print(f"RCR review: http://{args.host}:{args.port}")
     print(f"Input:  {INPUT}")
     print(f"Output: {OUTPUT}")
     try:

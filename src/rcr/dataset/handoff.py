@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 
 from rcr.dataset.review import normalize_review_assignment
-from rcr.dataset.rewrite import validate_review_output
+from rcr.dataset.text import validate_review_output
 
 CandidateRanker = Callable[[str, list[tuple[str, str]]], list[str]]
 
@@ -59,28 +59,20 @@ def merge_handoff_catalog(
     return merged
 
 
-def prepare_review_inputs(
-    selected: list[dict],
-    rewrite_outputs: list[dict],
-) -> list[dict]:
-    selected_by_id = {x["sample_id"]: x for x in selected}
-    if len(selected_by_id) != len(selected):
+def prepare_review_inputs(selected: list[dict]) -> list[dict]:
+    """Attach image/identity context directly to accepted Stage 2 text."""
+    sample_ids = [row["sample_id"] for row in selected]
+    if len(set(sample_ids)) != len(sample_ids):
         raise ValueError("selected contains duplicate sample_id")
-    rewrite_by_id = {x["sample_id"]: x for x in rewrite_outputs}
-    if len(rewrite_by_id) != len(rewrite_outputs):
-        raise ValueError("rewrite_outputs contains duplicate sample_id")
-    if set(rewrite_by_id) != set(selected_by_id):
-        raise ValueError("rewrite outputs do not match selected samples")
     outputs = []
 
-    for rewrite in rewrite_outputs:
-        sample_id = rewrite["sample_id"]
-        source = selected_by_id[sample_id]
+    for source in selected:
+        sample_id = source["sample_id"]
         final_desc, final_change = validate_review_output(
             source["case_type"],
             {
-                "final_desc": rewrite["final_desc"],
-                "final_change": rewrite["final_change"],
+                "final_desc": source["final_desc"],
+                "final_change": source["final_change"],
             },
         )
         query_id, target_id = source["query_image_id"], source["target_image_id"]

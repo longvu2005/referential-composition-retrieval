@@ -1,0 +1,2 @@
+# CPU contract tests and linting; no pretrained weights or native FAFA runtime.
+-e .[dev]

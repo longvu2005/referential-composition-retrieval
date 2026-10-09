@@ -20,7 +20,7 @@ from PIL import Image
 from rcr.baselines import clip, fafa, fafa_adapter
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.common.io import output_directory
-from scripts import run as cli
+from tools import run as cli
 
 
 def preprocess(image):
@@ -672,7 +672,7 @@ def test_cli_runner_with_native_clip(fusion_benchmark, tmp_path):
         result = subprocess.run(
             [
                 sys.executable,
-                "scripts/run.py",
+                "tools/run.py",
                 "run",
                 "--config",
                 str(config),

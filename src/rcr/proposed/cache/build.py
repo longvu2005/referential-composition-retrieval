@@ -35,7 +35,7 @@ def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) 
     """Share files only; native FAFA stays in its own dependency environment."""
     if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
         return
-    worker = Path(__file__).resolve().parents[4] / "scripts/cache_fafa.py"
+    worker = Path(__file__).resolve().parents[4] / "tools/cache_fafa.py"
     with tempfile.TemporaryDirectory(prefix="rcr-person-") as directory:
         path = Path(directory) / "config.yaml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")

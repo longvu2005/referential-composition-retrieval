@@ -2,24 +2,27 @@
 
 This directory contains two repo-local, file-backed annotation interfaces:
 
-- `review/` for rewrite and Subject review;
+- `review/` for accepted text and Subject review;
 - `positives/` for Full Positive selection.
 
 Neither interface requires Label Studio. Canonical data remains under
 `dataset/data/work/`, and both UIs write canonical JSONL directly.
 
-## Rewrite review
+Install `requirements/dataset.txt` with `bash scripts/setup.bash dataset` first.
+These UIs need neither model weights nor model libraries.
+
+## Text and Subject review
 
 Prepare or refresh the cumulative review catalog:
 
 ```bash
-python scripts/data/prepare_handoffs.py review
+bash scripts/data/prepare_review.bash
 ```
 
 Run:
 
 ```bash
-python -m labelstudio.review.app
+.venv-dataset/bin/python -m labelstudio.review.app
 ```
 
 Open:
@@ -40,24 +43,26 @@ Subject assignment but cannot be moved, resized, created, or deleted.
 
 ## Full Positive selection
 
-Prepare or refresh the cumulative positive catalog after rewrite review:
+Prepare or refresh the cumulative positive catalog after text/Subject review:
 
 ```bash
-python scripts/data/prepare_handoffs.py positives
+bash scripts/data/prepare_positives.bash
 ```
 
+For optional CLIP ordering, install `requirements/dataset-clip.txt` and set
+`PYTHON=.venv-dataset-clip/bin/python` on the preparation workflow.
 Add `--clip-rerank` to rank only newly reviewed tasks with CLIP. Existing tasks
 are never reranked. With no new task, CLIP is not loaded. Stop this UI before
 running the finalization command because that launcher validates and may
 rewrite the saved positive decisions. For example,
-`bash scripts/data/phase2_finalize.bash --version 0.2.0` builds a new export after
+`bash scripts/data/finalize.bash --version 0.2.0` builds a new export after
 the checked-in version `0.1.0`; this command also requires a working local
 image tree.
 
 Run:
 
 ```bash
-python -m labelstudio.positives.app
+.venv-dataset/bin/python -m labelstudio.positives.app
 ```
 
 Open:

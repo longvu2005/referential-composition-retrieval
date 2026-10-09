@@ -14,7 +14,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import numpy as np
-import torch
 
 JsonObject = dict[str, Any]
 
@@ -161,6 +160,8 @@ def scores_to_rankings(
     samples: Sequence[dict], gallery_ids: Sequence[str], scores: np.ndarray
 ) -> dict:
     """Rank all split images, excluding self; ties follow canonical gallery order."""
+    import torch
+
     gallery_ids = list(gallery_ids)
     sample_ids = [sample["sample_id"] for sample in samples]
     if not sample_ids or len(sample_ids) != len(set(sample_ids)):
@@ -188,6 +189,8 @@ def scores_to_rankings(
 
 
 def save_results(directory: str | Path, output: dict, metadata: Mapping) -> None:
+    import torch
+
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     # Baselines archive before writing scores; Proposed publishes rankings here.

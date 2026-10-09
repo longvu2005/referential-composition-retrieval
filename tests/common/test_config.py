@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from rcr.common.config import load_config, override_config, parse_overrides
-from scripts import run as cli
+from tools import run as cli
 
 
 def test_overrides_are_typed_and_leave_original_unchanged():
@@ -55,7 +55,7 @@ def test_help_and_config_parsing_do_not_import_model_runtime():
             """
 import sys
 sys.path[:0] = ['src', '.']
-from scripts.run import main
+from tools.run import main
 try:
     main(['--help'])
 except SystemExit as error:
