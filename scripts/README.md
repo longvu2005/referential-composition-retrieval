@@ -18,6 +18,11 @@ Replace `proposed` with the selected profile: `clip`, `fafa`, `dataset`,
 `dataset-clip`, `evaluation` or `dev`. The script installs into the current
 Python; it creates no venvs. One notebook installs and runs one method.
 Dependencies are declared in `pyproject.toml`; requirements files select extras.
+Supported Python versions are 3.11, 3.12 and 3.13. Python 3.13 selects NumPy
+2.1/2.2 and spaCy 3.8 using dependency markers; older Python versions retain
+NumPy 1.26 and spaCy 3.7. Setup checks Python before changing packages and
+installs NumPy from a wheel. Installing `meson-python` does not make NumPy
+1.26 compatible with Python 3.13.
 Proposed includes FAFA cache extraction in the same runtime, with Torch 2.6.0,
 torchvision 0.21.0 and Transformers 4.57.6 shared by FAFA, CLIP and DINOv3.
 Torch 2.6 is required by Transformers for the pinned CLIP revision's `.bin`
@@ -41,6 +46,11 @@ pins preserve OpenAI CLIP's `pkg_resources` build support. `requirements.txt`
 provides deterministic annotation and JSON reports without model dependencies.
 The FAFA cache subprocess uses `sys.executable` from the caller; it runs in the
 same runtime and ends before CLIP extraction to release GPU/library state.
+Run setup in its own cell and verify it succeeds before starting model stages.
+If NumPy, Torch or other binary packages were already imported, restart the
+kernel after setup, then set `PYTHON=sys.executable` again before shell workflows.
+`ModuleNotFoundError: rcr` after a failed setup means the editable installation
+did not complete; adding `PYTHONPATH` alone does not install the dependencies.
 
 Setup passes `--no-cache-dir` to pip so large wheels are not retained alongside
 installed packages. This does not remove an older pip cache; use

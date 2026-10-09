@@ -16,9 +16,16 @@ Then run `!bash scripts/setup.bash proposed` in Colab/Kaggle. This installs the
 complete proposed method, including its FAFA cache stage, into the kernel's
 runtime: Torch 2.6.0, torchvision 0.21.0 and Transformers 4.57.6. Transformers
 requires Torch >= 2.6 for the pinned CLIP revision's `pytorch_model.bin`;
-that revision does not contain safetensors. There is no additional Python
+that revision does not contain safetensors. Python 3.11/3.12 use NumPy 1.26 and
+spaCy 3.7; Python 3.13 uses NumPy 2.1/2.2 and spaCy 3.8. Setup selects these
+dependencies from the current Python version and requires a NumPy wheel.
+There is no additional Python
 path to configure. Install before model imports; restart the kernel after
-upgrading an already loaded Torch runtime. Direct
+upgrading already loaded NumPy/Torch packages, then bind `PYTHON` again. Run
+setup in its own cell and check it succeeds before invoking a method workflow.
+`mesonpy` during a NumPy 1.26 source build on Python 3.13 indicates an old
+dependency configuration; installing a build backend alone does not fix it.
+Direct
 commands below use the same Python (`{sys.executable}` in notebook shell cells).
 
 ## Build or reuse frozen features

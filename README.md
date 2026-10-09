@@ -63,11 +63,14 @@ selects the checkpoint. See [equations and contracts](docs/proposed_method.md).
 
 ## Setup and run
 
-Use Python 3.11/3.12 and install the selected method in the notebook's current
+Use Python 3.11/3.12/3.13 and install the selected method in the notebook's current
 Python. Each notebook runs one method. Requirements files select dependency
 profiles from `pyproject.toml`; the setup script installs them without creating
 virtual environments. Proposed includes the FAFA runtime needed for its person
 cache, plus DINOv3/CLIP and training dependencies.
+Python 3.13 uses NumPy 2.1/2.2 and spaCy 3.8; Python 3.11/3.12 retain NumPy
+1.26 and spaCy 3.7. Setup checks Python before installing and requires a NumPy
+wheel, avoiding unsupported NumPy source builds.
 
 ```bash
 # Proposed notebook (includes its FAFA person encoder):
@@ -159,7 +162,7 @@ python -m pytest -q
 python -m ruff check src tools tests labelstudio
 ```
 
-The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
+The CPU contract suite also runs in GitHub Actions on Python 3.11, 3.12 and 3.13.
 `dev` includes SciPy for the FAFA matching adapter tests; native FAFA weights
 are not needed.
 

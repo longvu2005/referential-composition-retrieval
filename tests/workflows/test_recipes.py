@@ -97,6 +97,7 @@ def test_setup_installs_into_notebook_python(tmp_path, recorder, profile):
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls == [
+        [str(root), ["-"]],
         [
             str(root),
             [
@@ -107,8 +108,35 @@ def test_setup_installs_into_notebook_python(tmp_path, recorder, profile):
         [
             str(root),
             [
-                "-m", "pip", "install", "--no-cache-dir", "--no-build-isolation", "-r",
+                "-m", "pip", "install", "--no-cache-dir", "--no-build-isolation",
+                "--only-binary=numpy", "-r",
                 f"requirements/{profile}.txt",
             ],
         ],
+        [
+            str(root),
+            ["-c", 'import rcr; print("Installed rcr:", rcr.__file__)'],
+        ],
     ]
+
+
+@pytest.mark.parametrize("version", [(3, 10, 0), (3, 14, 0)])
+def test_setup_rejects_unsupported_python_before_installing(tmp_path, version):
+    root = Path(__file__).resolve().parents[2]
+    command = tmp_path / "unsupported python"
+    command.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "assert sys.argv[1:] == ['-'], 'pip/install was reached'\n"
+        f"sys.version_info = {version!r}\n"
+        "exec(sys.stdin.read())\n"
+    )
+    command.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(root / "scripts/setup.bash"), "proposed"],
+        cwd=tmp_path, env={**os.environ, "PYTHON": str(command)},
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Unsupported Python" in result.stderr
+    assert "pip/install was reached" not in result.stderr

@@ -8,10 +8,13 @@ name = "referential-composition-retrieval"
 version = "0.1.0"
 description = "Research code and benchmark for Referential Composition Retrieval."
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 
 dependencies = [
-    "numpy>=1.26,<2.0",
+    # NumPy 1.26 has no Python 3.13 wheels. Keep the tested legacy branch on
+    # older notebooks; use the Python 3.13-compatible NumPy branch there.
+    "numpy>=1.26,<2.0; python_version < '3.13'",
+    "numpy>=2.1,<2.3; python_version >= '3.13'",
     "Pillow>=10,<13",
     "PyYAML>=6.0",
     "tqdm>=4.66",
@@ -49,7 +52,8 @@ fafa = [
     "fairscale>=0.4.13,<0.5",
     "einops>=0.6,<1",
     "scikit-image>=0.22,<1",
-    "spacy>=3.7,<3.8",
+    "spacy>=3.7,<3.8; python_version < '3.13'",
+    "spacy>=3.8.7,<3.9; python_version >= '3.13'",
     "prettytable>=3,<4",
     "webdataset>=0.2,<1",
     "pycocoevalcap>=1.2,<2",
