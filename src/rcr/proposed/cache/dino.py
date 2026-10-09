@@ -1,7 +1,6 @@
 """Build reference-free gallery features for coarse and fine retrieval."""
 
 import gc
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +10,7 @@ from torch import nn
 from tqdm import tqdm
 
 from rcr.common.runtime import resolve_device
+from rcr.common.storage import atomic_torch_save, remove_cache_temporaries
 from rcr.common.vision import detect, match_heads_to_persons
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import ImageEncoder
@@ -121,10 +121,9 @@ def build_cache(
         cache_id = manifest["cache_id"]
     else:
         cache_id = uuid4().hex
-        temporary_manifest = manifest_path.with_suffix(".pt.tmp")
-        torch.save({"cache_id": cache_id, "signature": signature}, temporary_manifest)
-        temporary_manifest.replace(manifest_path)
+        atomic_torch_save({"cache_id": cache_id, "signature": signature}, manifest_path)
     building.write_text(cache_id, encoding="utf-8")
+    remove_cache_temporaries(root)
 
     detector.eval()
     image_encoder.eval()
@@ -208,7 +207,7 @@ def build_cache(
         # Match training/legacy pooling exactly, including storage rounding.
         all_global.append(cached_scene.float().mean(dim=0))
 
-        torch.save(
+        atomic_torch_save(
             {
                 "cache_id": cache_id,
                 "image_id": image_id,
@@ -219,9 +218,8 @@ def build_cache(
                 "boxes_pixel": compact_cpu(persons, torch.float32),
                 "patch_hw": current_hw,
             },
-            feature_path.with_suffix(".pt.tmp"),
+            feature_path,
         )
-        feature_path.with_suffix(".pt.tmp").replace(feature_path)
         all_persons.append(cached_persons)
 
     if patch_hw is None:
@@ -236,8 +234,7 @@ def build_cache(
         mask[i, : value.shape[0]] = True
 
     index_path = root / "index.pt"
-    temporary_index = root / "index.pt.tmp"
-    torch.save(
+    atomic_torch_save(
         {
             "format_version": 2,
             "cache_id": cache_id,
@@ -252,9 +249,8 @@ def build_cache(
             "storage_dtype": storage_dtype,
             "global_features": torch.stack(all_global),
         },
-        temporary_index,
+        index_path,
     )
-    os.replace(temporary_index, index_path)
     building.unlink()
     manifest_path.unlink(missing_ok=True)
 

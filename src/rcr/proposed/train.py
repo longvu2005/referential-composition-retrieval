@@ -2,7 +2,6 @@
 
 import json
 import math
-import shutil
 from pathlib import Path
 
 import torch
@@ -18,6 +17,7 @@ from rcr.common.data import (
 )
 from rcr.common.io import write_json
 from rcr.common.runtime import resolve_device
+from rcr.common.storage import atomic_copy, atomic_torch_save
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.proposed.batch import build_batch, prefetch_batches, to_device
 from rcr.proposed.cache.clip import CACHE_VERSION, FeatureCache, source_signature
@@ -299,13 +299,11 @@ def train(cfg):
                 "best_full_map": best_score,
                 "best_epoch": best_epoch,
             }
-            temporary = output / "last.pt.tmp"
-            torch.save(checkpoint, temporary)
-            temporary.replace(output / "last.pt")
+            atomic_torch_save(checkpoint, output / "last.pt")
             if warmup and epoch + 1 == train_cfg["warmup_epochs"]:
-                shutil.copyfile(output / "last.pt", output / "warmup.pt")
+                atomic_copy(output / "last.pt", output / "warmup.pt")
             if is_best:
-                shutil.copyfile(output / "last.pt", output / "best.pt")
+                atomic_copy(output / "last.pt", output / "best.pt")
     finally:
         if run is not None:
             run.finish()

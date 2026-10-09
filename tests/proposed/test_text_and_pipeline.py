@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from PIL import Image
 from torch import nn
 
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.common.storage import DISK_RESERVE_BYTES
 from rcr.proposed.batch import build_batch, query_inputs
 from rcr.proposed.cache import build as builder
 from rcr.proposed.cache import fafa as fafa_cache
@@ -83,15 +85,19 @@ class VisionBackbone(nn.Module):
         )
 
 
+def tiny_clip_config():
+    return SimpleNamespace(
+        text_config=SimpleNamespace(max_position_embeddings=8, hidden_size=8),
+        vision_config=SimpleNamespace(image_size=8, patch_size=4, hidden_size=8),
+        projection_dim=8,
+        _commit_hash="tiny-test-only",
+    )
+
+
 class TinyCLIP(nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = SimpleNamespace(
-            text_config=SimpleNamespace(max_position_embeddings=8, hidden_size=8),
-            vision_config=SimpleNamespace(image_size=8, patch_size=4, hidden_size=8),
-            projection_dim=8,
-            _commit_hash="tiny-test-only",
-        )
+        self.config = tiny_clip_config()
         self.text_model = TextBackbone()
         self.vision_model = VisionBackbone()
         self.visual_projection = nn.Linear(8, 8)
@@ -135,6 +141,7 @@ def tiny_clip(monkeypatch):
         sys.modules,
         "transformers",
         SimpleNamespace(
+            CLIPConfig=factory(tiny_clip_config),
             CLIPModel=factory(TinyCLIP),
             CLIPTokenizerFast=factory(Tokenizer),
             CLIPImageProcessor=factory(PixelProcessor),
@@ -379,6 +386,89 @@ def experiment(tmp_path, tiny_clip, monkeypatch):
     )
     fafa_cache.finish_fafa_cache(cfg)
     return cfg, data
+
+
+def test_clip_budget_stops_before_gallery_inference(experiment, monkeypatch):
+    import transformers
+
+    cfg, data = experiment
+    source = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
+    indexes = [source.root / "index.pt", source._scene_cache.root / "index.pt"]
+    before = [path.read_bytes() for path in indexes]
+    # Enough for the small manifest, but not for all future features/sidecars.
+    monkeypatch.setattr(
+        "rcr.common.storage.shutil.disk_usage",
+        lambda p: SimpleNamespace(free=DISK_RESERVE_BYTES + 128 * 1024),
+    )
+    monkeypatch.setattr(
+        CLIPFeatures, "image", lambda *a: pytest.fail("gallery inference started")
+    )
+    monkeypatch.setattr(
+        CLIPFeatures, "text", lambda *a: pytest.fail("text inference started")
+    )
+    monkeypatch.setattr(
+        transformers.CLIPModel,
+        "from_pretrained",
+        lambda *a, **kw: pytest.fail("model weights loaded before disk check"),
+    )
+    with pytest.raises(RuntimeError, match="remaining CLIP cache"):
+        build_clip_cache(cfg, data, source)
+    root = Path(cfg["data"]["clip_cache"])
+    assert (root / ".building").exists() and (root / ".build.pt").exists()
+    assert not list((root / "features").iterdir())
+    assert [path.read_bytes() for path in indexes] == before
+
+
+def test_clip_disk_guard_preserves_shards_and_resumes(experiment, monkeypatch):
+    import transformers
+
+    cfg, data = experiment
+    source = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
+    root = Path(cfg["data"]["clip_cache"])
+    first = root / "features/0.pt"
+    indexes = [source.root / "index.pt", source._scene_cache.root / "index.pt"]
+    before = [path.read_bytes() for path in indexes]
+    monkeypatch.setenv("DISABLE_SAFETENSORS_CONVERSION", "false")
+    load_model = transformers.CLIPModel.from_pretrained
+
+    def load_without_conversion(*args, **kwargs):
+        assert os.environ["DISABLE_SAFETENSORS_CONVERSION"] == "true"
+        return load_model(*args, **kwargs)
+
+    monkeypatch.setattr(
+        transformers.CLIPModel, "from_pretrained", load_without_conversion
+    )
+    monkeypatch.setattr(
+        "rcr.common.storage.shutil.disk_usage",
+        lambda p: SimpleNamespace(
+            free=DISK_RESERVE_BYTES if first.exists() else 100 * 1024**3
+        ),
+    )
+    with pytest.raises(RuntimeError, match="writing 1.pt"):
+        build_clip_cache(cfg, data, source)
+    assert os.environ["DISABLE_SAFETENSORS_CONVERSION"] == "false"
+    shard = first.read_bytes()
+    cache_id = (root / ".building").read_text()
+    assert not list(root.rglob("*.pt.tmp"))
+    monkeypatch.setattr(
+        "rcr.common.storage.shutil.disk_usage",
+        lambda p: SimpleNamespace(free=100 * 1024**3),
+    )
+    builder.prepare_cache(cfg, stage="clip")
+    assert os.environ["DISABLE_SAFETENSORS_CONVERSION"] == "false"
+    cache = FeatureCache(cfg, data)
+    assert cache.cache_id == cache_id
+    assert first.read_bytes() == shard
+    assert torch.isfinite(cache.load(torch.tensor([0]))["clip_tokens"]).all()
+    assert [path.read_bytes() for path in indexes] == before
+    assert not (root / ".building").exists()
+    # Already completed caches also remain reusable on a full read-only volume.
+    monkeypatch.setattr(
+        "rcr.common.storage.shutil.disk_usage", lambda p: SimpleNamespace(free=0)
+    )
+    monkeypatch.setattr(CLIPFeatures, "image", lambda *a: pytest.fail("CLIP rebuilt"))
+    builder.prepare_cache(cfg, stage="clip")
+    assert first.read_bytes() == shard
 
 
 def test_cache_resume_reuse_and_provenance(experiment, monkeypatch):

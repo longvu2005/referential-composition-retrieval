@@ -55,6 +55,52 @@ being used. Text/annotation changes refresh their sidecars through the clip stag
 vision checkpoint/preprocessing/source mismatches require a new cache directory.
 Model training/retrieval use cached tensors and do not import native FAFA.
 
+### Notebook disk space
+
+`OSError: [Errno 28] No space left on device` during Papermill autosave means
+the output filesystem could not accept the notebook write. A subsequent
+`NotJSONError` with an empty notebook is a consequence of that failed save.
+The traceback alone does not identify which directory filled the disk.
+
+Setup uses `--no-cache-dir` to avoid retaining a second copy of large pip wheels.
+Cache/checkpoint/ranking writes check available bytes and reserve 1 GiB for
+notebook saves and other small outputs. Failed writes remove their temporary
+file and preserve the published file. Interrupted builds remove only known
+cache temporary files after validating their build settings.
+
+Before downloading CLIP weights or running gallery inference, the builder
+estimates missing vision features, text replacement peaks and sidecars. Estimates
+use the actual pinned model config and detected-person counts, including every
+raw visual token. Compatible completed shards are reused. For the default
+ViT-B/32 in FP16, the vision tensors alone take about 76 KiB per person;
+the gallery size alone cannot predict the number of people or total cache size.
+CLIP loading temporarily disables Transformers' optional background safetensors
+conversion/download, which can retain an extra checkpoint. Normal format selection,
+the pinned revision, safety checks and cache signatures are unchanged.
+
+Check the notebook filesystem and pip cache before restarting a failed run:
+
+```bash
+df -h /kaggle/working
+df -i /kaggle/working
+du -xhd1 /kaggle/working /root/.cache 2>/dev/null || true
+du -xhd1 cache checkpoints dataset runs 2>/dev/null || true
+python -m pip cache info
+# Clears downloaded pip artifacts; installed packages are retained.
+python -m pip cache purge
+```
+
+Keep existing feature shards, build manifests, FAFA runtime assets and trained
+checkpoints. Use read-only inputs for already completed compatible caches and
+pretrained weights instead of copying them into the writable output volume.
+Keep paths/settings fixed when resuming an unfinished build. Once sufficient
+space is available, rerun `build-cache` with the saved run config and the same
+cache paths; completed stages will be reused. The 1 GiB reserve is a guard on
+these repository writes, not a guarantee against other processes, model downloads
+or filesystem quotas. It does not make an oversized full cache fit a smaller disk.
+Restore a damaged output notebook from the editor or a valid earlier version;
+an empty `.ipynb` contains no recoverable cells.
+
 If a previous run stopped while loading CLIP, apply the runtime fix, rerun
 setup and restart the kernel. Retain the existing cache directories: the model
 revision and cache signatures are unchanged. To finish only that stage, using

@@ -15,6 +15,8 @@ from uuid import uuid4
 
 import numpy as np
 
+from rcr.common.storage import estimate_torch_bytes, require_free_space
+
 JsonObject = dict[str, Any]
 
 
@@ -193,19 +195,28 @@ def save_results(directory: str | Path, output: dict, metadata: Mapping) -> None
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / "rankings.pt.tmp"
+    metadata_temporary = directory / "run.json.tmp"
+    temporary.unlink(missing_ok=True)
+    metadata_temporary.unlink(missing_ok=True)
+    require_free_space(
+        directory, estimate_torch_bytes(output), context="saving retrieval rankings"
+    )
     # Baselines archive before writing scores; Proposed publishes rankings here.
     if any((directory / name).is_file() for name in ("rankings.pt", "run.json")):
         preserve_run(directory)
     else:
         preserve_file(directory / "metrics.json")
-    temporary = directory / "rankings.pt.tmp"
-    metadata_temporary = directory / "run.json.tmp"
-    torch.save(output, temporary)
-    metadata_temporary.write_text(
-        json.dumps(dict(metadata), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    # Reusing a run directory must not leave metrics for the previous rankings.
-    (directory / "metrics.json").unlink(missing_ok=True)
-    temporary.replace(directory / "rankings.pt")
-    metadata_temporary.replace(directory / "run.json")
+    try:
+        torch.save(output, temporary)
+        metadata_temporary.write_text(
+            json.dumps(dict(metadata), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        # Reusing a run directory must not leave metrics for the previous rankings.
+        (directory / "metrics.json").unlink(missing_ok=True)
+        temporary.replace(directory / "rankings.pt")
+        metadata_temporary.replace(directory / "run.json")
+    finally:
+        temporary.unlink(missing_ok=True)
+        metadata_temporary.unlink(missing_ok=True)

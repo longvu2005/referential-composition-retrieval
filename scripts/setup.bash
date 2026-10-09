@@ -13,6 +13,7 @@ case "$1" in
 esac
 
 python_bin="${PYTHON:-python}"
-"$python_bin" -m pip install -r requirements/bootstrap.txt
-"$python_bin" -m pip install --no-build-isolation -r "requirements/$1.txt"
+# Notebook disks need room for features, not another copy of large Torch wheels.
+"$python_bin" -m pip install --no-cache-dir -r requirements/bootstrap.txt
+"$python_bin" -m pip install --no-cache-dir --no-build-isolation -r "requirements/$1.txt"
 echo "Ready: $python_bin ($1)"

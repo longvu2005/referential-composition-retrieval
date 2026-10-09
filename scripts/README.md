@@ -42,6 +42,13 @@ provides deterministic annotation and JSON reports without model dependencies.
 The FAFA cache subprocess uses `sys.executable` from the caller; it runs in the
 same runtime and ends before CLIP extraction to release GPU/library state.
 
+Setup passes `--no-cache-dir` to pip so large wheels are not retained alongside
+installed packages. This does not remove an older pip cache; use
+`python -m pip cache info` and `python -m pip cache purge` if notebook disk space
+is tight. Proposed checks cache/checkpoint/ranking writes with a 1 GiB reserve
+and estimates remaining CLIP cache space before downloading its weights.
+See [disk-space recovery](../docs/proposed_runs.md#notebook-disk-space).
+
 When combining stages in one notebook cell, stop the outer shell on errors too:
 
 ```bash

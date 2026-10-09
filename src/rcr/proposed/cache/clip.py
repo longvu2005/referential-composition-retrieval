@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +12,12 @@ from tqdm import tqdm
 
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
+from rcr.common.storage import atomic_torch_save as atomic_save
+from rcr.common.storage import (
+    format_bytes,
+    remove_cache_temporaries,
+    require_free_space,
+)
 from rcr.common.vision import match_heads_to_persons
 from rcr.proposed.cache.dino import boxes_to_scene
 from rcr.proposed.nn.encoders import CLIPFeatures, QueryTextCache, parse_subjects
@@ -61,11 +68,48 @@ def source_signature(source):
     return source._v2_signature
 
 
-def atomic_save(value, path):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(value, temporary)
-    temporary.replace(path)
+def check_clip_disk_budget(root, source, config, tokenizer, texts, dtype, cache_id):
+    """Estimate remaining raw features before starting gallery inference."""
+    vision = config.vision_config
+    token_count = (vision.image_size // vision.patch_size) ** 2 + 1
+    element_size = torch.empty((), dtype=dtype).element_size()
+    person_bytes = (
+        token_count * vision.hidden_size + config.projection_dim
+    ) * element_size + 4 * 4
+    vision_bytes = 0
+    for i, count in enumerate(source.mask.sum(1).tolist()):
+        path = root / "features" / f"{i}.pt"
+        if path.is_file():
+            # Read only metadata through mmap; do not scan the tensor contents.
+            saved = torch.load(path, weights_only=True, map_location="cpu", mmap=True)
+            if (
+                saved.get("cache_id") == cache_id
+                and saved.get("image_id") == source.image_ids[i]
+                and saved["clip_tokens"].shape
+                == (count, token_count, vision.hidden_size)
+                and saved["clip_pooled"].shape
+                == (count, config.projection_dim)
+                and saved["clip_tokens"].dtype == dtype
+                and saved["clip_pooled"].dtype == dtype
+            ):
+                continue
+        vision_bytes += count * person_bytes + 8 * 1024
+    text_bytes = 64 * 1024
+    for text in texts:
+        ids = tokenizer(text, add_special_tokens=False, truncation=False)["input_ids"]
+        text_bytes += len(ids) * (
+            config.text_config.hidden_size * element_size + 192
+        ) + len(text.encode("utf-8")) + 2048
+    # Periodic text saves keep the previous sidecar while writing its replacement.
+    sidecar_bytes = len(source.image_ids) * 2048 + 1024**2
+    additional_bytes = vision_bytes + 2 * text_bytes + sidecar_bytes
+    print(
+        f"CLIP disk estimate: remaining vision={format_bytes(vision_bytes)}, "
+        f"text write peak={format_bytes(2 * text_bytes)}, "
+        f"other sidecars={format_bytes(sidecar_bytes)}",
+        flush=True,
+    )
+    require_free_space(root, additional_bytes, context="remaining CLIP cache")
 
 
 def align_identities(boxes_scene, heads, image_size, scene_size):
@@ -97,7 +141,12 @@ def align_identities(boxes_scene, heads, image_size, scene_size):
 
 def build_clip_cache(cfg, data, source):
     """Resume frozen vision shards; text and annotation sidecars publish atomically."""
-    from transformers import CLIPImageProcessor, CLIPModel, CLIPTokenizerFast
+    from transformers import (
+        CLIPConfig,
+        CLIPImageProcessor,
+        CLIPModel,
+        CLIPTokenizerFast,
+    )
 
     from rcr.proposed.cache.dino import boxes_to_pixels
 
@@ -150,14 +199,33 @@ def build_clip_cache(cfg, data, source):
         cache_id = old["cache_id"] if old else uuid4().hex
         atomic_save({"signature": signature, "cache_id": cache_id}, manifest)
     (root / ".building").write_text(cache_id)
+    remove_cache_temporaries(root)
     device = resolve_device(cfg)
     kwargs = {"revision": clip_cfg["revision"]}
     tokenizer = CLIPTokenizerFast.from_pretrained(clip_cfg["model"], **kwargs)
     processor = CLIPImageProcessor.from_pretrained(clip_cfg["model"], **kwargs)
-    backbone = CLIPModel.from_pretrained(clip_cfg["model"], **kwargs).to(device)
+    model_config = CLIPConfig.from_pretrained(clip_cfg["model"], **kwargs)
+    dtype = getattr(torch, cfg["cache"]["storage_dtype"])
+    check_clip_disk_budget(
+        root, source, model_config, tokenizer, texts, dtype, cache_id
+    )
+    # Transformers 4.57 can download a second, converted checkpoint in a
+    # background thread even when the original pinned .bin has already loaded.
+    # Disable only this optional task; keep normal format selection/safety checks.
+    flag = "DISABLE_SAFETENSORS_CONVERSION"
+    previous = os.environ.get(flag)
+    os.environ[flag] = "true"
+    try:
+        backbone = CLIPModel.from_pretrained(
+            clip_cfg["model"], config=model_config, **kwargs
+        ).to(device)
+    finally:
+        if previous is None:
+            os.environ.pop(flag, None)
+        else:
+            os.environ[flag] = previous
     encoder = CLIPFeatures(backbone, tokenizer)
     resolved_revision = getattr(backbone.config, "_commit_hash", None)
-    dtype = getattr(torch, cfg["cache"]["storage_dtype"])
     batch_size = clip_cfg["batch_size"]
     height, width = cfg["image_encoder"]["scene_size"]
     labels = {}

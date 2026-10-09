@@ -97,11 +97,17 @@ def test_setup_installs_into_notebook_python(tmp_path, recorder, profile):
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls == [
-        [str(root), ["-m", "pip", "install", "-r", "requirements/bootstrap.txt"]],
         [
             str(root),
             [
-                "-m", "pip", "install", "--no-build-isolation", "-r",
+                "-m", "pip", "install", "--no-cache-dir", "-r",
+                "requirements/bootstrap.txt",
+            ],
+        ],
+        [
+            str(root),
+            [
+                "-m", "pip", "install", "--no-cache-dir", "--no-build-isolation", "-r",
                 f"requirements/{profile}.txt",
             ],
         ],
