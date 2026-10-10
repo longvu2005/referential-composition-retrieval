@@ -115,21 +115,38 @@ subject to nonnegative X, row sums w, real-column sums at most one and unrestric
 null capacity. This is soft capacity-constrained matching, not hard one-to-one
 assignment, independent row softmax or balanced Sinkhorn.
 
-The FP32 log-domain solver minimizes the convex dual by alternating exact row
-and column updates. With \(L=\ell/\tau_A\), row log scalings u and column log
-scalings v:
+The solver initializes with up to eight alternating exact row and column
+updates. With \(L=\ell/\tau_A\), row log scalings u and column log scalings v:
 
 \[
 u_i=\log w_i-\operatorname{LSE}_j(L_{ij}+v_j),\qquad
 v_j=\min(0,-\operatorname{LSE}_i(L_{ij}+u_i)),\quad v_0=0.
 \]
 
-A final row update restores the row equalities. Stop only when the row residual,
-real-column violation and dual update residual all meet tolerance. Otherwise
-raise an error; never return a violating solution as converged. Updates remain
-in the autograd graph. Invalid rows/columns use finite masked log values to avoid
-undefined all-masked logsumexp derivatives, then are explicitly zeroed. Empty
-targets send all relevant mass to null. \(P=X/(w+10^{-8})\); zero rows give zero P.
+Near-balanced masses and capacities can make those block updates converge very
+slowly. The solver then eliminates u and uses projected, damped Newton updates
+on the same convex dual:
+
+\[
+f(v)=\sum_i w_i\operatorname{LSE}_j(L_{ij}+v_j)-\sum_{j>0}v_j,
+\qquad v_j\leq0,\quad v_0=0.
+\]
+
+The dual gradient for each valid real column is \(\sum_iX_{ij}-1\).
+Newton steps use an active set, a bounded step and a backtracking line search;
+an unaccepted step falls back to the original block update. Hessian damping
+stabilizes the step without modifying the objective, temperature or capacities.
+Row shifts reduce cancellation in the line search. This small transport problem
+uses FP64 internally and returns FP32 to the model; FP64 inputs retain FP64 outputs.
+All accepted updates remain in the autograd graph.
+
+Stop only when row residual, real-column violation and projected dual-gradient
+residual meet tolerance. A column with \(v_j<0\) must have unit mass; at
+\(v_j=0\) its mass may be below one. Otherwise raise an error. Diagnostics refer
+to the internal solve; casting to FP32 adds ordinary FP32 rounding. Invalid
+columns have zero probability; null is always valid, so softmax never receives
+an all-masked row. Empty targets send all relevant mass to null.
+\(P=X/(w+10^{-8})\); zero rows give zero P.
 
 ## Target binding and joint condition reasoning
 

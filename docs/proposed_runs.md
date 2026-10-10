@@ -193,7 +193,8 @@ optimizer resume. For a warmup-only diagnostic, set `train.epochs=2`,
 `train.warmup_epochs=2` and a separate `output.dir`; it is not a retrieval model.
 
 Kaggle T4 starting settings are batch size 2, 8 candidates, 8 training pairs per
-chunk, fine batch 16, FP16 CUDA autocast and FP32 transport/attention regions.
+chunk, fine batch 16 and FP16 CUDA autocast. Matching/attention use FP32; the
+small transport dual solve uses FP64 internally and returns FP32 to the model.
 These are conservative initial settings, not a measured T4 memory or speed claim.
 Reduce batch/candidates if needed; long texts or many people increase memory.
 There is no truncation or hidden cardinality cap. `model.max_subjects` bounds
@@ -211,6 +212,17 @@ stops training before an optimizer update and records the epoch, sample IDs,
 precision attempts and bad parameter names (for bad gradients) in
 `nonfinite_batch.json`. Do not disable `error_if_nonfinite` or replace gradients
 with zeros. Use `--set train.amp=false` for a full FP32 diagnostic if needed.
+
+Transport starts during main training, after warmup. Its original alternating
+updates can converge slowly when row mass is close to total real-column capacity.
+The hybrid solver keeps `transport_tau=0.2`, tolerance `1e-5` and the same
+constraints/objective; projected Newton steps accelerate convergence within the
+existing iteration budget. `transport_dual_residual` now measures the projected
+dual gradient (the capacity KKT condition), rather than the last log-scaling
+update. An unconverged solve still stops training before the optimizer update.
+`transport_batch.json` records epoch, sample IDs, solver settings, residuals,
+logits, row masses and masks so that the precise small transport problem can be
+replayed without feature extraction.
 
 After applying a training fix, reuse the completed feature caches and start a
 fresh training output; this does not resume the interrupted optimizer. In a
@@ -256,7 +268,8 @@ again before paper reporting. Oracle/GT coverage is a separate diagnostic file,
 never a primary model input, score or checkpoint criterion.
 
 The synthetic suite checks the transport optimum against an independent SLSQP
-solution, gradients through active capacities, null/capacity/zero-mass behavior,
+solution, near-balanced capacity convergence, finite-difference gradients of
+logits and masses through active capacities, null/capacity/zero-mass behavior,
 background versus unknown labels, long text/all mentions, role/member masks,
 permutation invariance, no GT inputs, rank-gradient isolation, train/inference
 score equality, coarse tail/self-exclusion, cache resume/reuse/provenance, and a

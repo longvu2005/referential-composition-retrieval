@@ -22,6 +22,7 @@ from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.proposed.batch import build_batch, prefetch_batches, to_device
 from rcr.proposed.cache.clip import CACHE_VERSION, FeatureCache, source_signature
 from rcr.proposed.losses import compute_loss
+from rcr.proposed.nn.matching import TransportConvergenceError
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
 from rcr.proposed.optimization import NonfiniteStepError, train_step
 from rcr.proposed.ranking import mine_hard_negatives, retrieve_rankings
@@ -202,9 +203,14 @@ def train(cfg):
                             amp=amp,
                             max_grad_norm=train_cfg["max_grad_norm"],
                         )
-                    except NonfiniteStepError as error:
+                    except (NonfiniteStepError, TransportConvergenceError) as error:
+                        report = (
+                            "transport_batch.json"
+                            if isinstance(error, TransportConvergenceError)
+                            else "nonfinite_batch.json"
+                        )
                         write_json(
-                            output / "nonfinite_batch.json",
+                            output / report,
                             {
                                 "epoch": epoch + 1,
                                 "warmup": warmup,
