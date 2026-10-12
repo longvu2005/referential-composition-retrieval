@@ -8,84 +8,33 @@ Scripts locate the repository root themselves. Direct `tools/*.py` commands
 must run from that root after an editable package install. Use the tools when
 you need a custom YAML, `--set` overrides, a smoke run or an individual stage.
 
-## Notebook setup
+## Environments
 
 ```bash
-bash scripts/setup.bash proposed
+PYTHON=python3.11 bash scripts/setup.bash clip
 ```
 
-Replace `proposed` with the selected profile: `clip`, `fafa`, `dataset`,
-`dataset-clip`, `evaluation` or `dev`. The script installs into the current
-Python; it creates no venvs. One notebook installs and runs one method.
-Dependencies are declared in `pyproject.toml`; requirements files select extras.
-Supported Python versions are 3.11, 3.12 and 3.13. Python 3.13 selects NumPy
-2.1/2.2 and spaCy 3.8 using dependency markers; older Python versions retain
-NumPy 1.26 and spaCy 3.7. Setup checks Python before changing packages and
-installs NumPy from a wheel. Installing `meson-python` does not make NumPy
-1.26 compatible with Python 3.13.
-Proposed includes FAFA cache extraction in the same runtime, with Torch 2.6.0,
-torchvision 0.21.0 and Transformers 4.57.6 shared by FAFA, CLIP and DINOv3.
-Torch 2.6 is required by Transformers for the pinned CLIP revision's `.bin`
-checkpoint. FAFA's legacy utility imports are bridged in
-`baselines/fafa.py` without editing the authors' source or model computations.
-The loader also restores the native Q-former prediction-bias tie before
-`from_pretrained` and vocabulary resizing for BLIP-2's extra `[DEC]` token.
+Replace `clip` with `proposed`, `fafa`, `dataset`, `dataset-clip`, `evaluation` or
+`dev`. This creates `.venv-<name>` and installs the matching requirements file.
+The host needs Python 3.11/3.12 and pip 22.3+ for `pip --python`. The bootstrap
+pins preserve upstream CLIP/FAFA installation support. Dependencies are declared
+once in `pyproject.toml`; each requirements file chooses the corresponding extra.
+Install only the environments you use. A base install with `requirements.txt`
+supports deterministic annotation and JSON reports without Torch.
 
-In Colab/Kaggle, run this before shell setup/workflows:
-
-```python
-import os
-import sys
-
-os.environ["PYTHON"] = sys.executable
-```
-
-Run `!bash scripts/setup.bash proposed` from the repository root. Install before
-importing models; restart the kernel if packages were already imported. Bootstrap
-pins preserve OpenAI CLIP's `pkg_resources` build support. `requirements.txt`
-provides deterministic annotation and JSON reports without model dependencies.
-The FAFA cache subprocess uses `sys.executable` from the caller; it runs in the
-same runtime and ends before CLIP extraction to release GPU/library state.
-Run setup in its own cell and verify it succeeds before starting model stages.
-If NumPy, Torch or other binary packages were already imported, restart the
-kernel after setup, then set `PYTHON=sys.executable` again before shell workflows.
-`ModuleNotFoundError: rcr` after a failed setup means the editable installation
-did not complete; adding `PYTHONPATH` alone does not install the dependencies.
-
-Setup passes `--no-cache-dir` to pip so large wheels are not retained alongside
-installed packages. This does not remove an older pip cache; use
-`python -m pip cache info` and `python -m pip cache purge` if notebook disk space
-is tight. Proposed checks cache/checkpoint/ranking writes with a 1 GiB reserve
-and estimates remaining CLIP cache space before downloading its weights.
-See [disk-space recovery](../docs/proposed_runs.md#notebook-disk-space).
-Once compatible frozen FAFA features are complete, proposed preparation skips
-native FAFA downloads. The default config releases its recorded downloadable
-base assets before the CLIP stage; set `cache.release_fafa_assets=false` to retain
-them. Tuned checkpoints and feature caches are retained.
-
-When combining stages in one notebook cell, stop the outer shell on errors too:
-
-```bash
-%%bash
-set -euo pipefail
-bash scripts/setup.bash proposed
-bash scripts/methods/proposed.bash val
-python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
-```
-
-Pip may report conflicts with unused packages preinstalled by Colab/Kaggle.
-Those warnings are distinct from a failed model/cache stage; do not continue
-to retrieval or ablation when setup or training actually exits with an error.
+Proposed requires a separate FAFA environment only to extract FAFA person
+features. Configure `person_encoder.python` in `configs/proposed.yaml`.
+Training/retrieval from completed caches need only the proposed environment.
 
 ## Dataset
 
 ```bash
 bash scripts/setup.bash dataset
 bash scripts/data/prepare_review.bash
-python -m labelstudio.review.app
+.venv-dataset/bin/python -m labelstudio.review.app
 # After saving reviews and stopping the review UI:
 bash scripts/data/prepare_positives.bash
-python -m labelstudio.positives.app
+.venv-dataset/bin/python -m labelstudio.positives.app
 # After saving positives and stopping the positive UI:
 bash scripts/data/finalize.bash --version 0.2.0
 ```
@@ -101,7 +50,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build DINO, FAFA and CLIP caches, train/select best.pt, evaluate val | Use `runs/proposed-v2/run_config.yaml` and selected best.pt |
+| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, calibrate and publish selected val results | Use `runs/calibration/selected.yaml` |
 
 ```bash
 bash scripts/methods/clip.bash val
@@ -109,28 +58,29 @@ bash scripts/methods/fafa.bash val
 bash scripts/methods/proposed.bash val
 ```
 
-Each workflow uses the current `python` from PATH, or `PYTHON` when set.
-For notebook kernels, use the `sys.executable` binding above. Run validation
-first, then the same method's test workflow in that notebook.
+Each workflow defaults to its `.venv-<method>/bin/python`. Set `PYTHON` to reuse
+another matching environment, for example:
+
+```bash
+PYTHON=/path/to/clip-env/bin/python bash scripts/methods/clip.bash test
+```
 
 Test never trains or selects parameters. Run validation first. Proposed's val
-recipe uses `configs/proposed.yaml` and saves the exact run config; it includes
-training and requires a new output directory if `last.pt` exists. Its test recipe
-loads that saved config and selected checkpoint. For cache reuse without
-retraining, another seed/config, or fixed coarse/top-500/full-gallery controls
-with `configs/ablations/shortlist.yaml`, call `tools/run.py` directly. Raw images
-and model assets must be available as described in the method guides.
+recipe uses `configs/proposed.yaml` and `configs/calibration.yaml`; it includes
+training even if a prior checkpoint exists. For cache reuse without retraining,
+or another seed/config, call `tools/run.py` directly. Raw images and model assets
+must be available as described in the method guides.
 
 ## Reports
 
-Use the notebook Python to export already evaluated JSON:
+Use any base/method environment to export already evaluated JSON:
 
 ```bash
-python tools/report.py --split val \
-  --run proposed=runs/proposed-v2/val
-python tools/report.py --split test \
-  --run proposed=runs/proposed-v2/test
+.venv-dataset/bin/python tools/report.py --split val \
+  --run proposed=runs/calibration/selected/val
+.venv-dataset/bin/python tools/report.py --split test \
+  --run proposed=runs/calibration/selected/test
 ```
 
-To evaluate saved `rankings.pt` first, use a method profile or install
+To evaluate saved `rankings.pt` first, use a method environment or install
 `requirements/evaluation.txt`; this needs Torch but no encoder libraries.

@@ -27,15 +27,11 @@ def recorder(tmp_path):
 
 @pytest.mark.parametrize("method", ["clip", "fafa", "proposed"])
 @pytest.mark.parametrize("split", ["val", "test"])
-@pytest.mark.parametrize("python_source", ["kernel", "path"])
 def test_method_recipe_uses_validation_then_frozen_test(
-    tmp_path, recorder, method, split, python_source
+    tmp_path, recorder, method, split
 ):
     root = Path(__file__).resolve().parents[2]
     env, log = recorder
-    if python_source == "path":
-        (tmp_path / "python").symlink_to(env.pop("PYTHON"))
-        env["PATH"] = str(tmp_path) + os.pathsep + env["PATH"]
     subprocess.run(
         ["bash", str(root / f"scripts/methods/{method}.bash"), split],
         cwd=tmp_path,
@@ -54,18 +50,18 @@ def test_method_recipe_uses_validation_then_frozen_test(
         assert commands[0][-2:] == ["--splits", "test"]
         assert "--train" not in commands[0] and "--prepare" not in commands[0]
         expected = (
-            "runs/proposed-v2/run_config.yaml"
+            "runs/calibration/selected.yaml"
             if method == "proposed"
             else f"configs/{method}.yaml"
         )
         assert commands[0][3] == expected
     elif method == "proposed":
-        assert [args[1] for args in commands] == ["run"]
+        assert [args[1] for args in commands] == ["run", "ablate", "run"]
         assert all(
             flag in commands[0] for flag in ("--prepare", "--build-cache", "--train")
         )
         assert all(args[-2:] == ["--splits", "val"] for args in commands)
-        assert commands[0][3] == "configs/proposed.yaml"
+        assert commands[-1][3] == "runs/calibration/selected.yaml"
     else:
         assert [args[1] for args in commands] == ["prepare", "run"]
         assert commands[-1][-2:] == ["--splits", "val"]
@@ -82,61 +78,3 @@ def test_failed_stage_stops_workflow(tmp_path, recorder):
     )
     assert result.returncode == 9
     assert len(log.read_text().splitlines()) == 1
-
-
-@pytest.mark.parametrize("profile", ["proposed", "clip", "fafa"])
-def test_setup_installs_into_notebook_python(tmp_path, recorder, profile):
-    root = Path(__file__).resolve().parents[2]
-    env, log = recorder
-    subprocess.run(
-        ["bash", str(root / "scripts/setup.bash"), profile],
-        cwd=tmp_path,
-        env=env,
-        check=True,
-        capture_output=True,
-    )
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert calls == [
-        [str(root), ["-"]],
-        [
-            str(root),
-            [
-                "-m", "pip", "install", "--no-cache-dir", "-r",
-                "requirements/bootstrap.txt",
-            ],
-        ],
-        [
-            str(root),
-            [
-                "-m", "pip", "install", "--no-cache-dir", "--no-build-isolation",
-                "--only-binary=numpy", "-r",
-                f"requirements/{profile}.txt",
-            ],
-        ],
-        [
-            str(root),
-            ["-c", 'import rcr; print("Installed rcr:", rcr.__file__)'],
-        ],
-    ]
-
-
-@pytest.mark.parametrize("version", [(3, 10, 0), (3, 14, 0)])
-def test_setup_rejects_unsupported_python_before_installing(tmp_path, version):
-    root = Path(__file__).resolve().parents[2]
-    command = tmp_path / "unsupported python"
-    command.write_text(
-        f"#!{sys.executable}\n"
-        "import sys\n"
-        "assert sys.argv[1:] == ['-'], 'pip/install was reached'\n"
-        f"sys.version_info = {version!r}\n"
-        "exec(sys.stdin.read())\n"
-    )
-    command.chmod(0o755)
-    result = subprocess.run(
-        ["bash", str(root / "scripts/setup.bash"), "proposed"],
-        cwd=tmp_path, env={**os.environ, "PYTHON": str(command)},
-        capture_output=True, text=True,
-    )
-    assert result.returncode != 0
-    assert "Unsupported Python" in result.stderr
-    assert "pip/install was reached" not in result.stderr

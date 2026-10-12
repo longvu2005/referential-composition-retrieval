@@ -49,53 +49,42 @@ when that method/stage is used.
 
 ## Architecture
 
-The proposed v2 model uses frozen **FAFA identity features**, **CLIP image/text
-features from one checkpoint**, and **DINO scene patches**. Its trainable path is
-categorical Subject/background grounding → structured full-condition composition
-→ identity-guided soft partial transport → bound target evidence → joint reasoning.
-Each Subject can retain several members; case labels and GT cardinalities never
-enter inference. Final score is `S_id + logsigmoid(condition_logit)`.
+The proposed model uses frozen **DINO scene patches** and a frozen **FAFA
+image-only person trunk**. Mean hidden Q-Former tokens produce each cached crop
+feature. Separate trainable heads produce normalized identity (128) and semantic
+(384) embeddings. Identity is trained only by supervised contrastive loss;
+semantic features feed selection grounding and instruction composition.
 
-Default retrieval fine-scores identity top-500 and appends the coarse tail;
-`retrieval.mode=full` is the full-gallery control. There is no global-state score,
-z-score fusion or coarse/fine weighted sum. Only overall validation Full-mAP
-selects the checkpoint. See [equations and contracts](docs/proposed_method.md).
+Fine scoring combines identity and composed semantics on the SAME target person,
+then pools soft Subject memberships. Its learned positive scale adds that binding
+score to the existing context/set reasoner. Scene/geometry reasoning handles
+conditions outside crops. Global-state coarse scoring and the official evaluation
+protocol remain. See [equations and limitations](docs/proposed_method.md).
 
 ## Setup and run
 
-Use Python 3.11/3.12/3.13 and install the selected method in the notebook's current
-Python. Each notebook runs one method. Requirements files select dependency
-profiles from `pyproject.toml`; the setup script installs them without creating
-virtual environments. Proposed includes the FAFA runtime needed for its person
-cache, plus DINOv3/CLIP and training dependencies.
-Python 3.13 uses NumPy 2.1/2.2 and spaCy 3.8; Python 3.11/3.12 retain NumPy
-1.26 and spaCy 3.7. Setup checks Python before installing and requires a NumPy
-wheel, avoiding unsupported NumPy source builds.
+Use Python 3.11/3.12. Each environment installs only its own requirements file.
+Dependency versions live in `pyproject.toml`; the requirements files select one
+extra without duplicating version lists. `requirements.txt` installs the shared
+package only. Keep proposed and native FAFA separate because their Transformers
+versions conflict:
 
 ```bash
-# Proposed notebook (includes its FAFA person encoder):
-bash scripts/setup.bash proposed
-# In a CLIP or FAFA baseline notebook, choose clip or fafa instead.
+PYTHON=python3.11 bash scripts/setup.bash proposed
+PYTHON=python3.11 bash scripts/setup.bash fafa
+# Only needed when running CLIP baselines:
+PYTHON=python3.11 bash scripts/setup.bash clip
 ```
 
-In Colab/Kaggle, bind Bash workflows to the kernel's Python before setup:
-
-```python
-import os
-import sys
-
-os.environ["PYTHON"] = sys.executable
-```
-
-Then run `!bash scripts/setup.bash proposed` from the repository root. Install
-before importing model packages; restart the kernel if those packages were
-already imported. Bash workflows use `PYTHON` when set, otherwise `python` from
-PATH. Direct notebook commands can use `{sys.executable}`. Tools never install
-packages during cache building, training or retrieval.
+The setup workflow creates `.venv-<name>`, bootstraps pip from the host (which
+needs pip 22.3+), then installs `requirements/<name>.txt`. It supports notebook
+images without `ensurepip`. Run standalone `tools/*.py` commands from the repo
+root; Bash workflows locate that root themselves. Set `PYTHON` to an existing
+environment's Python to use it with a workflow instead of the default venv.
 
 | Install | Purpose |
 | --- | --- |
-| `requirements/proposed.txt` | Complete proposed method: DINO/FAFA/CLIP caches, training and retrieval |
+| `requirements/proposed.txt` | Proposed training, DINO cache and retrieval |
 | `requirements/clip.txt` | All four OpenAI CLIP variants |
 | `requirements/fafa.txt` | Native FAFA baseline or proposed person-feature worker |
 | `requirements/dataset.txt` | Annotation preparation and local UIs; no model libraries |
@@ -103,81 +92,87 @@ packages during cache building, training or retrieval.
 | `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
 | `requirements/dev.txt` | CPU tests and linting |
 
-Set `data.dino_cache`, `data.cache` (FAFA), `data.clip_cache` and image paths in
-the proposed YAML. Completed compatible DINO/FAFA caches are reused; the CLIP
-stage builds only missing frozen semantics.
-`build-cache --cache-stage dino|persons|clip` runs a single stage; default `all`
-runs all three. Interrupted builds resume completed image shards.
+Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
+in the proposed YAML. DINO scenes/detections and FAFA person features live in
+separate directories. `build-cache --cache-stage dino` builds/reuses the DINO
+source; `--cache-stage persons` builds/reuses FAFA only. The default runs both.
+Completed compatible caches are skipped before model/worker loading; interrupted
+builds resume saved images. Training/retrieval join both caches without FAFA.
+See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash
-# Build/reuse caches, warm up grounding/identity, train, validate.
+# Main model: prepare, build/reuse caches, train, then calibrate on validation.
 bash scripts/methods/proposed.bash val
 
-# Fixed checkpoint, coarse / top-500 fine / full-gallery fine controls.
-python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
+# Joint 2D validation calibration; only the selected pair reaches test.
+.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
 
-# CLIP and official FAFA baselines keep their workflows.
+# Score-term removals from the same calibrated checkpoint/shortlist.
+.venv-proposed/bin/python tools/run.py ablate --config configs/ablations/binding.yaml --splits val test
+
+# CLIP and native FAFA: prepare assets, retrieve and evaluate validation.
 bash scripts/methods/clip.bash val
 bash scripts/methods/fafa.bash val
-python tools/report.py --split val --run proposed=runs/proposed-v2/val
+.venv-proposed/bin/python tools/report.py --split val \
+  --run proposed=runs/calibration/selected/val
 ```
 
 For a frozen test run, use `bash scripts/methods/<method>.bash test`. Proposed
-loads `runs/proposed-v2/run_config.yaml`, saved by the validation workflow, and
-its selected `best.pt`; CLIP/FAFA reuse their validation selections. Test
-workflows never train or select weights. For a custom config, stage or override,
-call `tools/run.py` directly. See [workflow contracts](scripts/README.md).
+loads `runs/calibration/selected.yaml`; CLIP/FAFA reuse their validation selections.
+The test workflows never train or select weights. For a custom config, stage or
+override, call `tools/run.py` directly. See [workflow contracts](scripts/README.md).
 
-The new architecture requires training from scratch. Source IDs/checksums,
-per-image detector boxes, gallery order, encoder/preprocessing metadata and
-checkpoint/cache versions are checked. The example proposed config sets
-`cache.allow_legacy_dino=true` to reuse the existing published DINO cache with
-known original settings; use `false` when those settings are unknown. This
-permits legacy DINO scene features, never DINO person features in place of FAFA.
+The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only
+FAFA person features need extraction. Legacy files require the explicit
+`cache.allow_legacy_dino` setting and matching original preprocessing. Train new
+heads for the new architecture. Cache/source IDs, gallery order, encoder metadata
+and checkpoint identity are checked. Keep historical run directories separately.
 
 | Command | Purpose |
 | --- | --- |
-| `prepare` | Prepare official FAFA or baseline assets |
-| `build-cache` | Build/reuse DINO, FAFA and CLIP stages |
-| `train` | Integrated warmup/main training; overall validation Full-mAP selects best.pt |
-| `retrieve` | Save complete split-gallery rankings and runtime metadata |
-| `evaluate` | Evaluate saved rankings without loading a model |
+| `prepare` | Prepare proposed person encoder or baseline assets |
+| `build-cache` | Build/reuse DINO and/or FAFA caches (`--cache-stage`) |
+| `train` | Train from cache; validation selects best.pt |
+| `retrieve` | Save complete split-gallery rankings |
+| `evaluate` | Evaluate saved rankings without a model |
 | `run` | Coordinate prepare/build/train/retrieve/evaluate |
-| `ablate` | Compare explicit v2 retrieval policies |
+| `ablate` | Explicit training/inference suites or validation calibration |
 
-`--set key=value ...` overrides existing fields. `--splits` selects query splits.
-`--max-queries` is for matching retrieve/evaluate smoke subsets. Training writes
-`warmup.pt`, `last.pt`, selected `best.pt`, config, history and per-epoch metrics;
-retrieval writes rankings and provenance. Train into a new output directory;
-optimizer resume is not implemented. W&B is optional and disabled by default.
+`--set key=value ...` overrides existing YAML fields. `--splits` selects splits.
+`--max-queries` is only for matching retrieve/evaluate smoke runs. Normal run and
+ablation use complete requested query splits. Outputs contain checkpoints,
+config/tokenizer, history, per-epoch metrics, rankings, run metadata and summaries.
+W&B retains its metrics and additionally logs the learned binding scale.
 
-See [Kaggle commands and limitations](docs/proposed_runs.md),
-[baseline workflow](docs/baselines.md), and [retrieval controls](docs/ablations.md).
+Detailed [proposed workflow](docs/proposed_runs.md),
+[baseline workflow](docs/baselines.md), and [new ablations](docs/ablations.md).
+Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
+retraining. The old identity-amplitude, coarse-only, loss and sampling suites
+have been removed. Calibration lives separately in `configs/calibration.yaml`.
 
 ## Tests
 
 ```bash
-python -m pip install -r requirements/dev.txt
-python -m pytest -q
-python -m ruff check src tools tests labelstudio
+.venv-proposed/bin/python -m pip install -r requirements/dev.txt
+.venv-proposed/bin/python -m pytest -q
+.venv-proposed/bin/python -m ruff check src tools tests labelstudio
 ```
 
-The CPU contract suite also runs in GitHub Actions on Python 3.11, 3.12 and 3.13.
+The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
 `dev` includes SciPy for the FAFA matching adapter tests; native FAFA weights
 are not needed.
 
-Tests cover categorical grounding, long text/all mentions, transport constraints
-and an independent optimum, null handling, gradient ownership, permutation
-invariance, AMP edge cases, cache resume/reuse and the full train/retrieve/evaluate
-pipeline. A tiny synthetic overfit checks learning, not real retrieval quality.
-Optional real CLIP/DINO implementation checks use small random models. Real T4
-FP16, pretrained-backbone integration, RCR mAP and speed/memory remain to be measured.
+Tests use tiny local encoders/caches, including gradient isolation, same-person
+binding, separate scene/person widths, empty sets, padding and the train/retrieve
+pipeline. The FAFA extraction contract is tested with a fake native trunk; tests
+do not download full weights or claim PIPA quality/CUDA throughput. Optional
+CLIP integration and CUDA tests require their corresponding dependencies/device.
 
-For baseline notebook setup, see [baseline setup](docs/baselines.md).
+For an isolated CLIP environment, see [baseline setup](docs/baselines.md).
 The deterministic dataset pipeline uses `requirements/dataset.txt`; optional
 candidate ordering uses `requirements/dataset-clip.txt`. Report generation reads
 JSON and works with the base package; decoding saved rankings needs the
-evaluation profile. No model client is required for annotation preparation.
+evaluation environment. No model client is required for annotation preparation.
 
 ## Current dataset snapshot
 

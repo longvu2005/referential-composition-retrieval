@@ -1,33 +1,24 @@
-# Experiment workflow
+# Baseline experiments and paper reports
 
-Run one method per notebook, using its own config and the shared evaluator.
-Install that method profile into the notebook Python before running workflows. Baseline definitions, fusion validation and metrics are unchanged;
-see [baselines](baselines.md). Proposed v2 uses the architecture in
-[proposed_method.md](proposed_method.md) and commands in
-[proposed_runs.md](proposed_runs.md).
+Use a clean committed checkout and separate environments from [baselines](baselines.md).
+Follow the [benchmark protocol](benchmark_protocol.md). Original images, pretrained
+assets and historical run outputs are not included in the repository.
+
+## Validation first
 
 ```bash
-bash scripts/methods/clip.bash val
-bash scripts/methods/fafa.bash val
-bash scripts/methods/proposed.bash val
-python tools/run.py ablate --config configs/ablations/shortlist.yaml --splits val
-bash scripts/methods/proposed.bash test
-python tools/report.py --split val --run proposed=runs/proposed-v2/val
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --prepare --splits val
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --prepare --splits val
+# Proposed architecture/training is unchanged; use its prepared checkpoint/cache:
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits val
+python tools/report.py --split val
 ```
 
-Only overall validation Full-mAP selects the proposed checkpoint. Case metrics
-are reporting groups only. Warmup/legacy/oracle results never select a primary
-checkpoint. Keep each variant in a separate output directory, especially full
-fine versus shortlist approximation. Train outputs are not overwritten if they
-already contain `last.pt`.
-
-The repository's evaluator requires a complete gallery permutation excluding
-self. Proposed shortlisting reorders its first M items with the exact fine score,
-then appends the coarse tail. Full fine uses the same positives and denominator.
-Use matching `--max-queries` for retrieve/evaluate environment smoke runs; these
-are labelled subsets and should not be reported as full split experiments.
-
-## Reports
+CLIP selects fusion weights on Full-mAP. FAFA evaluates/locks the supplied adapter
+configuration; tune manually on val if needed. Use separate output roots for
+trials: `--set output.dir=runs/<experiment-name>`. Check hashes, fingerprints,
+query/gallery/case counts, truncation/fallback statistics and Git state before
+interpreting results. Never select methods/configs using test metrics.
 
 Reporting defaults to all four CLIP variants, FAFA and Proposed. It reads only
 saved `metrics.json`/`run.json` and exports:
@@ -45,17 +36,18 @@ best-method selection are excluded. All selected runs must validate before
 writing any table; previous tables are preserved in `.history/`.
 
 ```bash
-# Use the selected v2 checkpoint output:
-python tools/report.py --split val --run proposed=runs/proposed-v2/val
+# Use the experiment name recorded in calibration/selection.json:
+python tools/report.py --split val --run proposed=runs/calibration/CHOSEN_EXPERIMENT/val
 # Explicitly request a smaller table or alternative formats:
 python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
 python tools/report.py --split val --formats csv tex --decimals 3
 ```
 
 `--run METHOD=DIRECTORY` takes a split result folder; `--runs-root` changes the
-default run root. Missing selected methods are errors. Use the same selected
-checkpoint and fixed retrieval policy for validation and test. Proposed test
-outputs are in `runs/proposed-v2/test`, which can be passed with `--run proposed=...`.
+default run root. Missing selected methods are errors. Do not replace a selected
+calibrated model with an unselected run.
+Calibration keeps val outputs in each experiment folder; its frozen test output
+is `runs/calibration/selected/test`, which can be passed with `--run proposed=...`.
 
 ## Historical saved results
 
@@ -63,11 +55,10 @@ Legacy metrics need a run/evaluation binding. Re-evaluate saved rankings with
 the same root/config/mode/split, without inference:
 
 ```bash
-python tools/run.py evaluate --config configs/clip.yaml --splits val \
+.venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --splits val \
   --modes clip_image clip_text early_fusion late_fusion
-python tools/run.py evaluate --config configs/fafa.yaml --splits val
-# For old proposed rankings, use their saved historical config and output root:
-python tools/run.py evaluate --config runs/proposed/config.yaml --splits val
+.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --splits val
+.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --splits val
 python tools/report.py --split val
 ```
 
@@ -85,9 +76,9 @@ export before test. An explicitly requested current test smoke check uses the
 same frozen policy:
 
 ```bash
-python tools/run.py run --config configs/clip.yaml --splits test
-python tools/run.py run --config configs/fafa.yaml --splits test
-bash scripts/methods/proposed.bash test
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits test
 python tools/report.py --split test
 ```
 
@@ -96,5 +87,5 @@ they are not pretrained validation/test experiments:
 
 ```bash
 python -m pytest -q
-python -m ruff check src tools tests labelstudio
+python -m ruff check src scripts tests labelstudio
 ```

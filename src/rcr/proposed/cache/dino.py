@@ -1,6 +1,7 @@
 """Build reference-free gallery features for coarse and fine retrieval."""
 
 import gc
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,7 +11,6 @@ from torch import nn
 from tqdm import tqdm
 
 from rcr.common.runtime import resolve_device
-from rcr.common.storage import atomic_torch_save, remove_cache_temporaries
 from rcr.common.vision import detect, match_heads_to_persons
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import ImageEncoder
@@ -32,29 +32,6 @@ def boxes_to_scene(
     offset = boxes.new_tensor([left, top, left, top])
     size = boxes.new_tensor([scene_width, scene_height] * 2)
     return ((boxes * factors + offset) / size).clamp(0, 1)
-
-
-def boxes_to_pixels(
-    boxes: torch.Tensor,
-    image_size: tuple[int, int],
-    scene_size: tuple[int, int],
-) -> torch.Tensor:
-    """Invert the legacy ImageOps.pad box transform; no detector is rerun."""
-    width, height = image_size
-    scene_width, scene_height = scene_size
-    scale = min(scene_width / width, scene_height / height)
-    resized_width = min(scene_width, round(width * scale))
-    resized_height = min(scene_height, round(height * scale))
-    left = round((scene_width - resized_width) * 0.5)
-    top = round((scene_height - resized_height) * 0.5)
-    size = boxes.new_tensor([scene_width, scene_height] * 2)
-    offset = boxes.new_tensor([left, top, left, top])
-    factors = boxes.new_tensor([resized_width / width, resized_height / height] * 2)
-    return (
-        ((boxes * size - offset) / factors)
-        .clamp(min=0)
-        .minimum(boxes.new_tensor([width, height] * 2))
-    )
 
 
 @torch.inference_mode()
@@ -121,9 +98,10 @@ def build_cache(
         cache_id = manifest["cache_id"]
     else:
         cache_id = uuid4().hex
-        atomic_torch_save({"cache_id": cache_id, "signature": signature}, manifest_path)
+        temporary_manifest = manifest_path.with_suffix(".pt.tmp")
+        torch.save({"cache_id": cache_id, "signature": signature}, temporary_manifest)
+        temporary_manifest.replace(manifest_path)
     building.write_text(cache_id, encoding="utf-8")
-    remove_cache_temporaries(root)
 
     detector.eval()
     image_encoder.eval()
@@ -207,7 +185,7 @@ def build_cache(
         # Match training/legacy pooling exactly, including storage rounding.
         all_global.append(cached_scene.float().mean(dim=0))
 
-        atomic_torch_save(
+        torch.save(
             {
                 "cache_id": cache_id,
                 "image_id": image_id,
@@ -218,8 +196,9 @@ def build_cache(
                 "boxes_pixel": compact_cpu(persons, torch.float32),
                 "patch_hw": current_hw,
             },
-            feature_path,
+            feature_path.with_suffix(".pt.tmp"),
         )
+        feature_path.with_suffix(".pt.tmp").replace(feature_path)
         all_persons.append(cached_persons)
 
     if patch_hw is None:
@@ -234,7 +213,8 @@ def build_cache(
         mask[i, : value.shape[0]] = True
 
     index_path = root / "index.pt"
-    atomic_torch_save(
+    temporary_index = root / "index.pt.tmp"
+    torch.save(
         {
             "format_version": 2,
             "cache_id": cache_id,
@@ -249,8 +229,9 @@ def build_cache(
             "storage_dtype": storage_dtype,
             "global_features": torch.stack(all_global),
         },
-        index_path,
+        temporary_index,
     )
+    os.replace(temporary_index, index_path)
     building.unlink()
     manifest_path.unlink(missing_ok=True)
 
@@ -320,7 +301,7 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
         encoder_metadata={"image_encoder": image_cfg, "detector": detector_cfg},
     )
 
-    # Release DINO/detector GPU storage before starting the FAFA worker.
+    # Release DINO/detector GPU storage before starting the isolated FAFA worker.
     del detector, image_encoder, backbone
     gc.collect()
     if device.type == "cuda":

@@ -1,4 +1,4 @@
-"""FAFA cache worker using the same Python as the proposed experiment CLI."""
+"""Isolated FAFA worker, normally invoked by the proposed experiment CLI."""
 
 import argparse
 

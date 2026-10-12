@@ -67,13 +67,13 @@ Test labels cannot affect selection or its provenance.
 
 ## 7. Reproduction
 
-Install the CLIP profile in this notebook as described in [baselines](../baselines.md), then run from the repo root:
+Use the CLIP environment in [baselines](../baselines.md), from the repo root:
 
 ```bash
-python tools/run.py prepare --config configs/clip.yaml
-python tools/run.py run --config configs/clip.yaml --splits val
+.venv-clip/bin/python tools/run.py prepare --config configs/clip.yaml
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits val
 # Once the test protocol is eligible and settings are frozen:
-python tools/run.py run --config configs/clip.yaml --splits test
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
 ```
 
 Outputs: `runs/clip/<mode>/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.

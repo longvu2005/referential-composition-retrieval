@@ -21,7 +21,7 @@ def main(argv=None):
     prepare.add_argument("--force", action="store_true")
     cache = commands.add_parser("build-cache", parents=[shared])
     cache.add_argument(
-        "--cache-stage", choices=("all", "dino", "persons", "clip"), default="all"
+        "--cache-stage", choices=("all", "dino", "persons"), default="all"
     )
     commands.add_parser("train", parents=[shared])
     for name in ("retrieve", "evaluate", "run"):
@@ -81,9 +81,9 @@ def main(argv=None):
 
     if command == "prepare" or getattr(args, "prepare", False):
         if method == "proposed":
-            from rcr.proposed.cache.build import prepare_person_assets
+            from rcr.proposed.cache.build import run_person_worker
 
-            prepare_person_assets(cfg, force=args.force)
+            run_person_worker(cfg, prepare=True, force=args.force)
         else:
             from rcr.baselines.prepare import prepare
 

@@ -92,18 +92,6 @@ def runtime_cache(cfg: dict, *, offline: bool) -> Path:
 
 
 def official_api(directory: Path):
-    # Upstream Qformer/med import these helpers from their former module.
-    # Restore import aliases only; keep the pinned native model code unchanged.
-    from transformers import modeling_utils, pytorch_utils
-
-    for name in (
-        "apply_chunking_to_forward",
-        "find_pruneable_heads_and_indices",
-        "prune_linear_layer",
-    ):
-        if not hasattr(modeling_utils, name):
-            setattr(modeling_utils, name, getattr(pytorch_utils, name))
-
     sys.dont_write_bytecode = True
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     src = str(directory / "src")
@@ -111,15 +99,6 @@ def official_api(directory: Path):
         sys.path.insert(0, src)
     from data_utils import squarepad_transform_test
     from lavis.models import load_model_and_preprocess
-    from lavis.models.blip2_models.Qformer import BertLMPredictionHead
-
-    # Modern from_pretrained can materialize these aliases as separate
-    # Parameters. Restore BERT's bias tie before FAFA adds its [DEC] token;
-    # otherwise only decoder.bias grows and the BLIP-2 checkpoint cannot load.
-    def tie_prediction_bias(self):
-        self.decoder.bias = self.bias
-
-    BertLMPredictionHead._tie_weights = tie_prediction_bias
 
     return squarepad_transform_test, load_model_and_preprocess
 

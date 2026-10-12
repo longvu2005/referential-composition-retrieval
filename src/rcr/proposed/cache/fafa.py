@@ -1,6 +1,7 @@
 """Frozen FAFA person features layered over an immutable DINO scene cache."""
 
 import gc
+import math
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -13,14 +14,7 @@ from rcr.baselines.fafa import load_fafa
 from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
-from rcr.common.storage import (
-    atomic_torch_save,
-    estimate_torch_bytes,
-    remove_cache_temporaries,
-)
-from rcr.common.storage import format_bytes as _format_bytes
 from rcr.proposed.cache.build import check_cache_config, fafa_spec, load_fafa_config
-from rcr.proposed.cache.dino import boxes_to_pixels
 from rcr.proposed.cache.store import GalleryCache
 
 
@@ -31,6 +25,38 @@ def extract_person_features(model, pixels: torch.Tensor) -> torch.Tensor:
     if features.ndim != 3:
         raise ValueError("FAFA image_embeds must be [B,query_tokens,hidden_dim]")
     return features.float().mean(dim=1)
+
+
+def boxes_to_pixels(
+    boxes: torch.Tensor,
+    image_size: tuple[int, int],
+    scene_size: tuple[int, int],
+) -> torch.Tensor:
+    """Invert the legacy ImageOps.pad box transform; no detector is rerun."""
+    width, height = image_size
+    scene_width, scene_height = scene_size
+    scale = min(scene_width / width, scene_height / height)
+    resized_width = min(scene_width, round(width * scale))
+    resized_height = min(scene_height, round(height * scale))
+    left = round((scene_width - resized_width) * 0.5)
+    top = round((scene_height - resized_height) * 0.5)
+    size = boxes.new_tensor([scene_width, scene_height] * 2)
+    offset = boxes.new_tensor([left, top, left, top])
+    factors = boxes.new_tensor([resized_width / width, resized_height / height] * 2)
+    return (
+        ((boxes * size - offset) / factors)
+        .clamp(min=0)
+        .minimum(boxes.new_tensor([width, height] * 2))
+    )
+
+
+def _format_bytes(value: int) -> str:
+    value = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    raise AssertionError("unreachable")
 
 
 @torch.inference_mode()
@@ -94,13 +120,14 @@ def finish_fafa_cache(cfg: dict) -> None:
         cache_id = manifest["cache_id"]
     else:
         cache_id = uuid4().hex
-        atomic_torch_save(
+        temporary_manifest = manifest_path.with_suffix(".pt.tmp")
+        torch.save(
             {"cache_id": cache_id, "signature": signature},
-            manifest_path,
+            temporary_manifest,
         )
+        temporary_manifest.replace(manifest_path)
 
     marker.write_text(cache_id, encoding="utf-8")
-    remove_cache_temporaries(root)
 
     device = resolve_device(cfg)
     model, _, preprocess, _ = load_fafa(native_cfg, device)
@@ -175,15 +202,17 @@ def finish_fafa_cache(cfg: dict) -> None:
 
                     features[start : start + len(selected)] = stored
 
-        atomic_torch_save(
+        temporary_feature = feature_path.with_suffix(".pt.tmp")
+        torch.save(
             {
                 "cache_id": cache_id,
                 "source_cache_id": source.cache_id,
                 "image_id": image_id,
                 "persons": features,
             },
-            feature_path,
+            temporary_feature,
         )
+        temporary_feature.replace(feature_path)
 
     # FAFA is no longer needed. Release it before allocating the padded CPU index.
     del model
@@ -244,7 +273,12 @@ def finish_fafa_cache(cfg: dict) -> None:
     # Estimate the final write size and keep a safety margin. If disk is tight,
     # delete only as many already-consumed shards as needed. Their data is now
     # resident in persons_index, so this avoids keeping a second full copy on disk.
-    estimated_index_bytes = estimate_torch_bytes(index)
+    persons_bytes = math.prod(shape) * persons_index.element_size()
+    auxiliary_bytes = (
+        global_features.numel() * global_features.element_size()
+        + source.mask.numel() * source.mask.element_size()
+    )
+    estimated_index_bytes = persons_bytes + auxiliary_bytes
     safety_margin = max(1024**3, estimated_index_bytes // 10)
     required_free = estimated_index_bytes + safety_margin
 
@@ -289,7 +323,13 @@ def finish_fafa_cache(cfg: dict) -> None:
             flush=True,
         )
 
-    atomic_torch_save(index, root / "index.pt")
+    temporary = root / "index.pt.tmp"
+    try:
+        torch.save(index, temporary)
+        temporary.replace(root / "index.pt")
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
     # The published index now owns all FAFA person features. Remove any
     # remaining per-image shards and build metadata.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install one method/tool profile into the notebook's current Python.
+# Install exactly one method/tool environment from its requirements file.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,24 +9,14 @@ if [[ "$#" != 1 ]]; then
 fi
 case "$1" in
     proposed|clip|fafa|dataset|dataset-clip|evaluation|dev) ;;
-    *) echo "Unknown profile: $1" >&2; exit 1 ;;
+    *) echo "Unknown environment: $1" >&2; exit 1 ;;
 esac
 
-python_bin="${PYTHON:-python}"
-# Check before changing pip/packages or resolving unsupported source builds.
-"$python_bin" - <<'PY'
-import sys
-
-if not (3, 11) <= sys.version_info[:2] < (3, 14):
-    raise SystemExit(
-        f"Unsupported Python {sys.version.split()[0]}; use Python 3.11, 3.12 or 3.13 "
-        "and set PYTHON to that notebook interpreter."
-    )
-print(f"Installing into Python {sys.version.split()[0]}: {sys.executable}")
-PY
-# Notebook disks need room for features, not another copy of large Torch wheels.
-"$python_bin" -m pip install --no-cache-dir -r requirements/bootstrap.txt
-"$python_bin" -m pip install --no-cache-dir --no-build-isolation --only-binary=numpy \
-    -r "requirements/$1.txt"
-"$python_bin" -c 'import rcr; print("Installed rcr:", rcr.__file__)'
-echo "Ready: $python_bin ($1)"
+env_dir=".venv-$1"
+python_bin="${PYTHON:-python3}"
+# --without-pip also works on notebook images without ensurepip. Bootstrap
+# through the host pip, then use the environment's pip for the actual install.
+"$python_bin" -m venv --without-pip "$env_dir"
+"$python_bin" -m pip --python "$env_dir/bin/python" install -r requirements/bootstrap.txt
+"$env_dir/bin/python" -m pip install --no-build-isolation -r "requirements/$1.txt"
+echo "Ready: $env_dir/bin/python"
