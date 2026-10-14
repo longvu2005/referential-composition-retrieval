@@ -72,6 +72,12 @@ For training another seed, reuse the cache and use a separate output directory.
   --set train.seed=1 output.dir=runs/proposed_seed1
 ```
 
+For the same-condition `dual`–`shared_person` comparison, use
+`configs/ablations/shared_person.yaml` or the individual commands in
+[the shared-person run guide](shared_person.md). It reuses these same caches and
+keeps the schedule, losses, sampler and retrieval settings from the base YAML.
+Each representation trains from scratch in its own output directory.
+
 ## Reuse the existing Kaggle DINO cache
 
 Add [rcr-proposed-cache](https://www.kaggle.com/datasets/phmhunhlongv/rcr-proposed-cache)
@@ -151,6 +157,12 @@ V1/DINO checkpoints need training for `person-id-sem-partial-match-v2`.
 Compatible DINO/FAFA caches are reused; matching needs no cache rebuild.
 Source/cache IDs and separate feature widths are checked against the training
 checkpoint. Keep historical run directories separately.
+
+`shared_person` checkpoints use `shared-person-partial-match-v1` and record the
+representation explicitly. Existing dual V2 checkpoints, including ones without
+the new top-level representation field, still load as dual. Retrieval constructs
+the saved architecture and rejects a requested representation that differs;
+changing a YAML field cannot convert a dual checkpoint into shared_person.
 
 After a successful build, training/retrieval read cached features only. They do
 not need native FAFA weights, its YAML or raw crop images. Training checks the

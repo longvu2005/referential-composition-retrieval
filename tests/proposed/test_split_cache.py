@@ -50,8 +50,13 @@ def _bytes(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-def test_persons_only_reuses_dino_then_train_and_retrieve(split_cache, monkeypatch):
+@pytest.mark.parametrize("representation", ["dual", "shared_person"])
+def test_persons_only_reuses_dino_then_train_and_retrieve(
+    split_cache, monkeypatch, representation,
+):
     cfg, path, source, _, worker_calls = split_cache
+    cfg["model"]["representation"] = representation
+    path.write_text(yaml.safe_dump(cfg))
     before = _bytes(source)
     monkeypatch.setattr(
         builder, "_prepare_dino", lambda *args: pytest.fail("built DINO")
@@ -67,6 +72,7 @@ def test_persons_only_reuses_dino_then_train_and_retrieve(split_cache, monkeypat
     assert [row["split"] for row in rows] == ["val", "test"]
     checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
     assert checkpoint["input_dim"] == 6 and checkpoint["person_input_dim"] == 5
+    assert checkpoint["representation"] == representation
     root = Path(cfg["data"]["cache"])
     saved = _bytes(root)
     worker_calls.clear()

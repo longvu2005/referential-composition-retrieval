@@ -37,6 +37,12 @@ Results are written to `runs/ablations/binding/summary.csv`, together with ranki
 
 ## 3. Backbone × representation: train from scratch
 
+For the isolated `dual`–`shared_person` experiment, use
+[configs/ablations/shared_person.yaml](../configs/ablations/shared_person.yaml)
+and the [shared-person run guide](shared_person.md). Both variants keep `both`
+binding and the same routing/scoring. The legacy suite below measures a broader
+representation/routing/binding change and remains available separately.
+
 The same DINO scene/detection cache is shared by every variant. It also holds the
 DINO crop features for the DINO controls. FAFA variants add the separate person
 cache built by the main pipeline. Reuse your existing DINO cache or build it once:

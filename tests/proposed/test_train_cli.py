@@ -43,8 +43,9 @@ class Backbone(nn.Module):
 
 @pytest.mark.parametrize("prefetch", [0, 1])
 @pytest.mark.parametrize("enabled,train_queries", [(True, 1), (True, 0), (False, 0)])
+@pytest.mark.parametrize("representation", ["dual", "shared_person"])
 def test_train_checkpoints_metrics_and_retrieve(
-    monkeypatch, tmp_path, enabled, train_queries, prefetch
+    monkeypatch, tmp_path, enabled, train_queries, prefetch, representation
 ):
     samples = [
         _sample("train1"),
@@ -83,6 +84,7 @@ def test_train_checkpoints_metrics_and_retrieve(
         monkeypatch.setattr(module, "GalleryCache", lambda path, **kwargs: cache)
     real_retrieve = train_proposed.retrieve_rankings
     evaluation_calls = []
+    validation_outputs = []
     real_sample = train_proposed.sample_candidates
     real_evaluate = train_proposed.evaluate_retrieval_output
     val_calls = []
@@ -127,9 +129,12 @@ def test_train_checkpoints_metrics_and_retrieve(
         assert kwargs["gallery_ids"] == expected_gallery
         assert all("left" not in row["positive_image_ids"] for row in samples)
         evaluation_calls.append(expected_gallery)
-        return real_retrieve(
+        result = real_retrieve(
             samples, cache, tokenizer, text_encoder, model, *args, **kwargs
         )
+        if samples[0]["sample_id"] == "val1":
+            validation_outputs.append(result)
+        return result
 
     monkeypatch.setattr(train_proposed, "retrieve_rankings", retrieve_after_training)
     monkeypatch.setitem(
@@ -158,6 +163,7 @@ def test_train_checkpoints_metrics_and_retrieve(
         "candidate_ks": [1, 2],
         "data": {"final_dir": "unused", "image_root": "unused", "cache": "unused"},
         "model": {
+            "representation": representation,
             "text_model": "tiny",
             "dim": 6,
             "dropout": 0.1,
@@ -214,6 +220,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     output = tmp_path / "run"
     last = torch.load(output / "last.pt", weights_only=True)
     assert last["epoch"] == 3
+    assert last["representation"] == representation
     assert last["scaler"] == {}  # Disabled on CPU.
     mined = json.loads((output / "hard_negatives.json").read_text())
     assert mined["model_epoch"] == 1 and mined["split"] == "train"
@@ -262,13 +269,28 @@ def test_train_checkpoints_metrics_and_retrieve(
 
     # Reload the saved checkpoint through the public retrieval and evaluation CLIs.
     cfg["checkpoint"] = str(output / ("best.pt" if enabled else "last.pt"))
+    if representation == "dual":
+        legacy = torch.load(cfg["checkpoint"], weights_only=True)
+        legacy.pop("representation")  # Existing V2 checkpoint format still loads.
+        torch.save(legacy, cfg["checkpoint"])
     cfg["split"] = "val"
     config_path.write_text(yaml.safe_dump(cfg))
     cli.main(["retrieve", *sys.argv[1:]])
     saved = torch.load(output / "val/rankings.pt", weights_only=True)
+    metadata = json.loads((output / "val/run.json").read_text())
+    assert metadata["representation"] == representation
+    assert metadata["architecture_version"] == last["architecture_version"]
     assert saved["sample_ids"] == ["val1"]
     assert saved["gallery_ids"] == ["val_n", "val_q", "val_a"]
     assert set(saved["rankings"][0].tolist()) == {0, 2}
+    if enabled:
+        # Epoch 3 is selected above. Standalone retrieval must reproduce every
+        # ranking branch of the train-time validation with that exact state.
+        for key, expected in validation_outputs[-1].items():
+            if isinstance(expected, torch.Tensor):
+                torch.testing.assert_close(saved[key], expected, rtol=0, atol=0)
+            else:
+                assert saved[key] == expected
 
     cfg["candidate_ks"] = [1, 2]
     config_path.write_text(yaml.safe_dump(cfg))

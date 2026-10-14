@@ -8,8 +8,14 @@ person crops for BOTH query and target images:
 
 ```text
 crop -> FAFA visual encoder -> image-only Q-Former hidden tokens -> mean pool h
+# model.representation: dual (default)
 z_id  = normalize(P_id(h))       # 128 dimensions
 z_sem = normalize(P_sem(h))      # 384 dimensions
+
+# model.representation: shared_person (retrain)
+u     = LayerNorm(W_u h + b_u)   # model.dim, separate from scene projection
+z_id  = normalize(W_id u + b_id) # 128 dimensions
+z_sem = u                       # existing semantic API; no independent head
 ```
 
 Use the official pinned FAFA checkpoint and preprocessing from
@@ -66,6 +72,12 @@ individual members remain available. Fine composition receives detached
 `logit(m_si)` (unselected slots are masked), giving a `log(m_si)` key prior.
 Person-token outputs are normalized into `z_comp_si`. Roles remain distinct
 in one common composition, without branching on case.
+
+In `shared_person`, every person-semantic input above is the unnormalized `u`,
+including both grounding and composition. Target evidence/context also reads
+aligned `u`; cosine scoring alone L2-normalizes it. Query and target share the
+same person projection and LayerNorm. Scene projection remains independent and
+can have a different raw input width. No composition residual gate is added.
 
 ## Coarse retrieval
 
@@ -156,6 +168,11 @@ L = L_ground + 0.1 L_id + L_ret + L_global_state
   BOTH identity inputs. With identity loss disabled, AdamW also leaves this head
   untouched. Pose/clothing/background invariance requires suitable cross-image
   supervision and empirical verification.
+- In `shared_person`, `L_id` trains both the person projection and identity
+  head. `L_ground` and `L_ret` also train that person projection. Fine still
+  detaches both identity inputs; `L_ret` does not directly train the identity
+  head. The target semantic/context path retains autograd. No identity/state
+  orthogonality loss or identity removal is introduced.
 - Grounding trains raw logits using the existing masked BCE. Retrieval cannot
   lower membership weights to avoid missing penalties. Both losses train shared
   semantic/evidence modules through their respective paths. Retrieval trains
@@ -177,6 +194,11 @@ LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
 
 ## Architecture controls
 
+`shared_person` isolates the shared person representation while retaining dual's
+composition, target routing, binding scale, coverage/context scoring, partial
+matching and all four binding modes. It uses a separate retrained checkpoint.
+See [the paired representation experiment](shared_person.md).
+
 `model.representation: shared` is a retrained shared-head control: one identity
 head feeds identity loss/coarse, instruction composition and the target-token
 identity addition. It requires `model.binding_mode: none`. It uses the same
@@ -192,7 +214,11 @@ CandidateRecall@500 as well as ID-mAP/Full-mAP. See [ablations](ablations.md).
 
 ## Configuration and checkpoints
 
-Architecture version: `person-id-sem-partial-match-v2`. V1 checkpoints are
+Architecture version for `dual`/legacy `shared`:
+`person-id-sem-partial-match-v2`; for `shared_person`:
+`shared-person-partial-match-v1`. Existing dual V2 checkpoints remain compatible.
+Representation mismatches are rejected before loading caches/backbones.
+V1 checkpoints are
 rejected before loading weights; retraining is required. Existing compatible
 DINO/FAFA caches need no rebuild. Main outputs default to `runs/proposed-a`.
 

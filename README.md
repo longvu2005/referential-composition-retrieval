@@ -52,8 +52,18 @@ when that method/stage is used.
 The proposed model uses frozen **DINO scene patches** and a frozen **FAFA
 image-only person trunk**. Mean hidden Q-Former tokens produce each cached crop
 feature. Separate trainable heads produce normalized identity (128) and semantic
-(384) embeddings. Identity is trained only by supervised contrastive loss;
+(384) embeddings in the default `dual` mode. Identity is trained only by
+supervised contrastive loss in that mode;
 semantic features feed selection grounding and instruction composition.
+
+`model.representation: shared_person` instead learns
+`u = LayerNorm(Linear(h))` and `z_id = normalize(Linear(u))`. Grounding,
+composition and target semantic/context evidence read the same `u`. Identity
+loss and fine retrieval therefore train the same person projection; fine still
+detaches identity matching/binding and does not train the identity head directly.
+All matching, scoring and loss definitions stay as in `dual`. This mode requires
+fresh training and reuses existing feature caches. See the
+[paired experiment and checkpoint rules](docs/shared_person.md).
 
 Fine uses one partial one-to-one identity assignment across all query Subjects,
 with explicit null matches. State and context read those same assigned people;
@@ -152,6 +162,9 @@ Detailed [proposed workflow](docs/proposed_runs.md),
 Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
 retraining. The old identity-amplitude, coarse-only, loss and sampling suites
 have been removed. Calibration lives separately in `configs/calibration.yaml`.
+The isolated `dual`–`shared_person` comparison is in
+`configs/ablations/shared_person.yaml`; legacy `shared` changes routing/binding
+and is a separate control.
 
 ## Tests
 

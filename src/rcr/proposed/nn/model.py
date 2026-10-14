@@ -25,6 +25,16 @@ from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import BINDING_MODES, binding_scores
 
 ARCHITECTURE_VERSION = "person-id-sem-partial-match-v2"
+SHARED_PERSON_ARCHITECTURE_VERSION = "shared-person-partial-match-v1"
+
+
+def architecture_version(representation: str) -> str:
+    """Keep dual/legacy shared checkpoints compatible; shared_person retrains."""
+    if representation == "shared_person":
+        return SHARED_PERSON_ARCHITECTURE_VERSION
+    if representation in ("dual", "shared"):
+        return ARCHITECTURE_VERSION
+    raise ValueError("representation must be dual, shared_person or shared")
 
 
 @dataclass
@@ -58,7 +68,7 @@ class QueryEncoding:
 
 
 class RCRModel(nn.Module):
-    """Separate person heads; shared representation is a retrained control only."""
+    """Dual heads or a jointly learned person representation, with common scoring."""
 
     def __init__(
         self,
@@ -78,8 +88,7 @@ class RCRModel(nn.Module):
         fine_matching: dict | None = None,
     ) -> None:
         super().__init__()
-        if representation not in ("dual", "shared"):
-            raise ValueError("representation must be dual or shared")
+        architecture_version(representation)
         if binding_mode not in BINDING_MODES:
             raise ValueError(f"unknown binding mode: {binding_mode}")
         if representation == "shared" and binding_mode != "none":
@@ -95,12 +104,17 @@ class RCRModel(nn.Module):
         self.binding_mode = binding_mode
         self.coarse_beta = float(coarse_beta)
         self.fine_matching = matching_settings(fine_matching)
-        # Scene/state only in the dual model; shared control reuses it for crops.
+        # Scene/state only; only the legacy shared control reuses this for crops.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
         )
         self.state_text_proj = nn.Linear(dim, state_dim)
         self.state_image_proj = nn.Linear(dim, state_dim)
+        self.person_proj = (
+            nn.Sequential(nn.Linear(person_input_dim, dim), nn.LayerNorm(dim))
+            if representation == "shared_person"
+            else None
+        )
         self.identity_head = IdentityHead(
             person_input_dim if representation == "dual" else dim, identity_dim
         )
@@ -109,14 +123,14 @@ class RCRModel(nn.Module):
         )
         self.binding_log_scale = (
             nn.Parameter(torch.tensor(math.log(math.expm1(1.0))))
-            if representation == "dual"
+            if representation != "shared"
             else None
         )
         binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim, dropout)
         self.grounding = SubjectGrounding(binding, dim)
         self.composition = StructuredComposition(
             dim,
-            dim if representation == "dual" else identity_dim,
+            identity_dim if representation == "shared" else dim,
             num_heads,
             max_subjects,
             mlp_ratio,
@@ -129,17 +143,27 @@ class RCRModel(nn.Module):
         self.null_person = nn.Parameter(torch.zeros(dim))
 
     @property
+    def architecture_version(self) -> str:
+        return architecture_version(self.representation)
+
+    @property
     def binding_scale(self) -> Tensor:
         if self.binding_log_scale is None:
             return self.state_text_proj.weight.new_zeros(())
         return F.softplus(self.binding_log_scale.float())
 
     def encode_identity(self, persons: Tensor) -> Tensor:
-        if self.representation == "shared":
+        if self.person_proj is not None:
+            persons = self.person_proj(persons)
+        elif self.representation == "shared":
             persons = self.visual_proj(persons)
         return self.identity_head(persons)
 
     def encode_semantic(self, persons: Tensor) -> Tensor:
+        if self.person_proj is not None:
+            # u remains unnormalized for grounding/composition/context. Cosine
+            # normalization stays in binding_scores, with its FP32 protection.
+            return self.person_proj(persons)
         if self.semantic_proj is None:
             return self.visual_proj(persons)
         return F.normalize(self.semantic_proj(persons).float(), dim=-1)
@@ -219,7 +243,11 @@ class RCRModel(nn.Module):
             query_persons = query_persons.masked_fill(~query_person_mask[..., None], 0)
             query_boxes = query_boxes.masked_fill(~query_person_mask[..., None], 0)
         semantic = self.encode_semantic(query_persons)
-        identity = self.encode_identity(query_persons)
+        identity = (
+            self.identity_head(semantic)
+            if self.representation == "shared_person"
+            else self.encode_identity(query_persons)
+        )
         logits = self.grounding(
             self.visual_proj(query_scene),
             semantic,
@@ -248,7 +276,7 @@ class RCRModel(nn.Module):
         )
         reference = self.composition(
             change,
-            semantic if self.representation == "dual" else identity,
+            identity if self.representation == "shared" else semantic,
             member_logits,
             subject_pos,
             change_mask,
@@ -287,15 +315,21 @@ class RCRModel(nn.Module):
         selection_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Coarse/mining path: no instruction composition or fine reasoning."""
+        semantic = self.encode_semantic(persons)
         logits = self.grounding(
             self.visual_proj(scene),
-            self.encode_semantic(persons),
+            semantic,
             boxes,
             selections,
             patch_hw,
             selection_mask,
         )
-        return logits, self.encode_identity(persons)
+        identity = (
+            self.identity_head(semantic)
+            if self.representation == "shared_person"
+            else self.encode_identity(persons)
+        )
+        return logits, identity
 
     def score_target(
         self,
@@ -326,9 +360,15 @@ class RCRModel(nn.Module):
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
-        if self.representation == "dual":
+        if self.representation != "shared":
+            # Only identity matching/binding is detached. The target person
+            # projection above retains the semantic/context autograd paths.
             with torch.no_grad():
-                target_identity = self.encode_identity(persons)
+                target_identity = (
+                    self.identity_head(semantic)
+                    if self.representation == "shared_person"
+                    else self.encode_identity(persons)
+                )
         else:
             target_identity = self.encode_identity(persons)
         matching = partial_identity_matching(
@@ -394,11 +434,11 @@ class RCRModel(nn.Module):
             missing_penalty=self.fine_matching["missing_penalty"],
         )
         gated_context = matching.coverage * context
-        scale = self.binding_scale if self.representation == "dual" else 1.0
+        scale = 1.0 if self.representation == "shared" else self.binding_scale
         components = {
             name: gated_context + scale * value
             for name, value in binding.items()
-            if self.representation == "dual" or name == "none"
+            if self.representation != "shared" or name == "none"
         }
         if return_details:
             return {

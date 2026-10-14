@@ -26,7 +26,7 @@ from rcr.proposed.batch import (
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
-from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
+from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.ranking import (
     mine_hard_negatives,
     retrieve_rankings,
@@ -621,7 +621,8 @@ def train(cfg: dict) -> Path:
                 "person_input_dim": person_input_dim,
                 "encoder_metadata": getattr(cache, "encoder_metadata", None),
                 "cache_id": cache.cache_id,
-                "architecture_version": ARCHITECTURE_VERSION,
+                "architecture_version": model.architecture_version,
+                "representation": model.representation,
                 "best_full_map": best_full_map,
                 "best_macro_full_map": best_macro_full_map,
                 "best_score": best_score,

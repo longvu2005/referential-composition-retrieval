@@ -15,6 +15,42 @@ from tests.proposed.test_runner import local_stages as local_stages
 from tools import run as cli
 
 
+def test_shared_person_suite_changes_only_representation_and_outputs():
+    suite = yaml.safe_load(Path("configs/ablations/shared_person.yaml").read_text())
+    variants = ablation.expand_experiments(suite)
+    configs = [copy.deepcopy(v["config"]) for v in variants]
+    assert {cfg["model"]["representation"] for cfg in configs} == {
+        "dual", "shared_person"
+    }
+    assert len({cfg["checkpoint"] for cfg in configs}) == 2
+    for cfg in configs:
+        assert cfg["person_encoder"]["backend"] == "fafa"
+        assert cfg["model"]["binding_mode"] == "both"
+        assert cfg["retrieval"]["binding_mode"] is None
+        cfg["model"].pop("representation")
+        cfg.pop("checkpoint")
+        cfg["output"].pop("dir")
+        cfg["wandb"].pop("name")
+    assert configs[0] == configs[1]
+
+
+def test_shared_person_paired_suite_runs_from_same_cache(
+    experiment, local_stages, tmp_path,
+):
+    cfg, path = experiment
+    cli.main(["build-cache", "--config", str(path)])
+    suite = yaml.safe_load(Path("configs/ablations/shared_person.yaml").read_text())
+    suite.update(base_config=str(path), output_dir=str(tmp_path / "paired"))
+    rows = ablation.run_ablation(suite, Path(cli.__file__), splits=["val"])
+    assert {row["representation"] for row in rows} == {"dual", "shared_person"}
+    assert {row["binding_mode"] for row in rows} == {"both"}
+    runs = [run for stage, run in local_stages if stage == "train"]
+    assert len(runs) == 2
+    assert all(run["data"] == cfg["data"] for run in runs)
+    assert all(run["train"] == cfg["train"] for run in runs)
+    assert all(run["loss"] == cfg["loss"] for run in runs)
+
+
 def test_representation_suite_has_factorial_controls():
     suite = yaml.safe_load(Path("configs/ablations/representation.yaml").read_text())
     variants = ablation.expand_experiments(suite)

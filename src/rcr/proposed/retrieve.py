@@ -20,7 +20,7 @@ from rcr.common.runtime import resolve_device
 from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import TextEncoder
-from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
+from rcr.proposed.nn.model import RCRModel, architecture_version
 from rcr.proposed.ranking import (
     retrieval_settings,
     retrieve_variants,
@@ -59,10 +59,21 @@ def retrieve_experiments(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     train_cfg = checkpoint["config"]
     model_cfg = train_cfg["model"]
-    if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
+    representation = model_cfg.get("representation", "dual")
+    if checkpoint.get("representation", representation) != representation:
+        raise ValueError("checkpoint representation differs from its saved config")
+    if checkpoint.get("architecture_version") != architecture_version(representation):
         raise ValueError(
             "legacy checkpoint: retrain the partial-matching architecture; "
             "existing compatible DINO/FAFA feature caches can be reused"
+        )
+    if any(
+        other.get("model", {}).get("representation", representation) != representation
+        for other in configs.values()
+    ):
+        raise ValueError(
+            f"representation mismatch: checkpoint uses {representation}; "
+            "retrain the requested representation in a separate output directory"
         )
     dim = checkpoint["dim"]
     state_untrained = (
@@ -128,7 +139,7 @@ def retrieve_experiments(
         state_dim=model_cfg.get("state_dim"),
         coarse_beta=model_cfg.get("coarse_beta", 0.3),
         person_input_dim=checkpoint["person_input_dim"],
-        representation=model_cfg.get("representation", "dual"),
+        representation=representation,
         binding_mode=model_cfg.get("binding_mode", "both"),
         input_dim=checkpoint.get("input_dim", dim),
         dropout=model_cfg.get("dropout", 0.0),
@@ -166,7 +177,7 @@ def retrieve_experiments(
                 "validation_sha256": validation_sha256,
                 **benchmark_metadata(data, cfg["split"], output),
                 **runtime_metadata(device),
-                "architecture_version": ARCHITECTURE_VERSION,
+                "architecture_version": model.architecture_version,
                 "representation": model.representation,
                 "binding_mode": settings[name]["binding_mode"] or model.binding_mode,
                 "binding_scale": model.binding_scale.item(),

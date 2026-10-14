@@ -349,13 +349,14 @@ def test_matching_config_rejects_invalid_settings(config):
         matching_settings(config)
 
 
-def test_retrieval_does_not_read_case_identities_or_positive_labels():
+@pytest.mark.parametrize("representation", ["dual", "shared_person"])
+def test_retrieval_does_not_read_case_identities_or_positive_labels(representation):
     from rcr.proposed.ranking import retrieve_rankings
     from tests.proposed.test_retrieval import _Cache, _sample, _TextEncoder, _Tokenizer
 
     torch.manual_seed(14)
     cache, encoder = _Cache(), _TextEncoder()
-    model = RCRModel(8, 6, 2)
+    model = RCRModel(8, 6, 2, representation=representation)
     sample = _sample()
     unlabeled = {
         key: value

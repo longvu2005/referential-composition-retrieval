@@ -29,9 +29,9 @@ cache:
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
-  dim: 384                   # semantic, scene and text width; identity is separate
+  dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
-  representation: dual       # dual | shared (retrained old-style control)
+  representation: dual       # dual | shared_person | shared (legacy control)
   binding_mode: both          # both | identity | semantic | none
   identity_dim: 128
   state_dim: 128

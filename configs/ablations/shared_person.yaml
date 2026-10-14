@@ -1,0 +1,12 @@
+# Isolate the jointly learned person representation; reuse the same FAFA/DINO
+# caches and every training/retrieval setting from the base config.
+base_config: configs/proposed.yaml
+stage: train
+output_dir: runs/ablations/shared_person
+experiments:
+  - name: dual
+    overrides:
+      model.representation: dual
+  - name: shared_person
+    overrides:
+      model.representation: shared_person
