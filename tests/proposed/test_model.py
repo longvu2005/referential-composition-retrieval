@@ -108,7 +108,7 @@ def test_binding_order_and_composed_reference_are_shared() -> None:
     assert captured["reference"].shape[1] == 1 + change.shape[1] + 2
 
 
-def test_target_score_changes_with_membership_prior() -> None:
+def test_empty_query_cannot_gain_context_from_reference_prior() -> None:
     torch.manual_seed(4)
     model = RCRModel(8, 6, 2).eval()
     ref = torch.randn(1, 5, 8)
@@ -129,7 +129,8 @@ def test_target_score_changes_with_membership_prior() -> None:
     a = model.score_target(query, scene, persons, boxes, (2, 2))
     query.prior = torch.tensor([[0.0, 0.0, 0.0, -15.0, 0.0]])
     b = model.score_target(query, scene, persons, boxes, (2, 2))
-    assert not torch.allclose(a, b)
+    torch.testing.assert_close(a, b)
+    torch.testing.assert_close(a, -2.5 * model.binding_scale[None])
 
 
 def test_empty_query_and_target_are_finite() -> None:

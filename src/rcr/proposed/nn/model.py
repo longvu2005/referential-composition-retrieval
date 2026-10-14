@@ -7,6 +7,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from rcr.proposed.matching import (
+    exclusive_membership,
+    gather_matched,
+    matching_settings,
+    partial_identity_matching,
+)
 from rcr.proposed.nn.binding import EvidenceBinding
 from rcr.proposed.nn.composition import (
     StructuredComposition,
@@ -18,7 +24,7 @@ from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import BINDING_MODES, binding_scores
 
-ARCHITECTURE_VERSION = "person-id-sem-v1"
+ARCHITECTURE_VERSION = "person-id-sem-partial-match-v2"
 
 
 @dataclass
@@ -69,6 +75,7 @@ class RCRModel(nn.Module):
         dropout: float = 0.0,
         representation: str = "dual",
         binding_mode: str = "both",
+        fine_matching: dict | None = None,
     ) -> None:
         super().__init__()
         if representation not in ("dual", "shared"):
@@ -87,6 +94,7 @@ class RCRModel(nn.Module):
         self.representation = representation
         self.binding_mode = binding_mode
         self.coarse_beta = float(coarse_beta)
+        self.fine_matching = matching_settings(fine_matching)
         # Scene/state only in the dual model; shared control reuses it for crops.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
@@ -118,6 +126,7 @@ class RCRModel(nn.Module):
             dim, identity_dim if representation == "shared" else None
         )
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
+        self.null_person = nn.Parameter(torch.zeros(dim))
 
     @property
     def binding_scale(self) -> Tensor:
@@ -219,17 +228,24 @@ class RCRModel(nn.Module):
             patch_hw,
             selection_mask,
         )
-        member_logits = logits
-        if query_person_mask is not None:
-            member_logits = logits.masked_fill(
-                ~query_person_mask[:, None].bool(), -torch.inf
-            )
         subjects = (
             torch.ones(logits.shape[:2], device=logits.device, dtype=torch.bool)
             if subject_mask is None
             else subject_mask.bool()
         )
-        member_logits = member_logits.masked_fill(~subjects[:, :, None], -torch.inf)
+        membership = exclusive_membership(
+            logits,
+            subjects,
+            query_person_mask,
+            query_boxes,
+            selection_threshold=self.fine_matching["selection_threshold"],
+            duplicate_iou=self.fine_matching["duplicate_iou"],
+        )
+        # The fine reference contains only selected, uniquely owned people.
+        # Detaching its weights prevents retrieval from hiding difficult members.
+        member_logits = torch.logit(membership.clamp(1e-6, 1 - 1e-6)).masked_fill(
+            membership == 0, -torch.inf
+        )
         reference = self.composition(
             change,
             semantic if self.representation == "dual" else identity,
@@ -257,7 +273,7 @@ class RCRModel(nn.Module):
             mask,
             prior,
             composed,
-            member_logits.float().sigmoid(),
+            membership,
             subjects,
         )
 
@@ -292,8 +308,15 @@ class RCRModel(nn.Module):
         *,
         binding_mode: str | None = None,
         return_components: bool = False,
+        return_details: bool = False,
     ) -> Tensor | dict[str, Tensor]:
-        """Context + positive learned scale * same-person binding, in train/eval."""
+        """Shared identity matching -> aligned state/context -> null-aware score.
+
+        Case labels, GT identities and GT cardinalities never enter this path.
+        ``return_details`` is a diagnostic view of this very same forward pass.
+        """
+        if return_components and return_details:
+            raise ValueError("choose return_components or return_details, not both")
         mode = self.binding_mode if binding_mode is None else binding_mode
         if mode not in BINDING_MODES:
             raise ValueError(f"unknown binding mode: {mode}")
@@ -303,26 +326,62 @@ class RCRModel(nn.Module):
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
+        if self.representation == "dual":
+            with torch.no_grad():
+                target_identity = self.encode_identity(persons)
+        else:
+            target_identity = self.encode_identity(persons)
+        matching = partial_identity_matching(
+            query.identity,
+            target_identity,
+            query.membership,
+            query.subjects,
+            person_mask,
+            boxes,
+            identity_threshold=self.fine_matching["identity_threshold"],
+            duplicate_iou=self.fine_matching["duplicate_iou"],
+        )
+        b, s, k = matching.membership.shape
+        selected = matching.membership > 0
+        matched = selected & matching.matched[:, None]
+
+        def align(values):
+            width = values.shape[-1]
+            values = gather_matched(values, matching)
+            values = values[:, None].expand(-1, s, -1, -1)
+            return values.masked_fill(~matched[..., None], 0).reshape(b, s * k, width)
+
+        aligned_boxes = align(boxes)
         evidence = self.grounding.binding(
             self.visual_proj(scene),
-            semantic,
-            boxes,
+            align(semantic),
+            aligned_boxes,
             query.reference,
             patch_hw,
             query.mask,
             query.prior,
         )
-        target_identity = None
-        if self.representation == "shared":
-            target_identity = self.encode_identity(persons)
-        target = self.target_builder(evidence, boxes, target_identity)
+        # Null/unselected persons cannot acquire substitute evidence from scene.
+        evidence = evidence.masked_fill(~matched.flatten(1)[..., None], 0)
+        target = self.target_builder(
+            evidence,
+            aligned_boxes,
+            align(target_identity) if self.representation == "shared" else None,
+        )
+        target = torch.where(
+            matched.flatten(1)[..., None], target, self.null_person[None, None]
+        )
+        offset = query.reference.shape[1] - s * k
         context = self.reasoner(
-            query.reference, target, person_mask, query.mask, query.prior
+            query.reference,
+            target,
+            selected.flatten(1),
+            query.mask,
+            query.prior,
+            aligned_offset=offset,
+            aligned_boxes=aligned_boxes,
+            matched_mask=matched.flatten(1),
         ).float()
-        if self.representation == "shared":
-            return {"none": context} if return_components else context
-        with torch.no_grad():
-            target_identity = self.encode_identity(persons)
         binding = binding_scores(
             query.identity,
             target_identity,
@@ -331,10 +390,27 @@ class RCRModel(nn.Module):
             query.membership,
             query.subjects,
             person_mask,
+            matching=matching,
+            missing_penalty=self.fine_matching["missing_penalty"],
         )
-        if return_components:
+        gated_context = matching.coverage * context
+        scale = self.binding_scale if self.representation == "dual" else 1.0
+        components = {
+            name: gated_context + scale * value
+            for name, value in binding.items()
+            if self.representation == "dual" or name == "none"
+        }
+        if return_details:
             return {
-                name: context + self.binding_scale * value
-                for name, value in binding.items()
+                "score": components[mode],
+                "context": context,
+                "gated_context": gated_context,
+                "binding": binding[mode],
+                "coverage": matching.coverage,
+                "subject_coverage": matching.subject_coverage,
+                "matched_indices": matching.indices,
+                "membership": matching.membership,
             }
-        return context + self.binding_scale * binding[mode]
+        if return_components:
+            return components
+        return components[mode]

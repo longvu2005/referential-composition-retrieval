@@ -40,6 +40,12 @@ model:
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
+  fine_matching:
+    # Common to every query: no case label or GT member count at inference.
+    selection_threshold: 0.5
+    identity_threshold: 0.2   # starting value; calibrate on val, never test
+    missing_penalty: 2.5     # > 2, below the minimum of ID + semantic cosines
+    duplicate_iou: 0.9       # suppress near-identical boxes; 1 disables
 train:
   epochs: 20
   batch_size: 14
@@ -95,7 +101,7 @@ wandb:
   log_every_steps: 20
 runtime:
   device: auto
-checkpoint: runs/proposed/best.pt
+checkpoint: runs/proposed-a/best.pt
 output:
   # Root only; the runner appends each split.
-  dir: runs/proposed
+  dir: runs/proposed-a

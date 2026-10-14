@@ -33,7 +33,7 @@ class TargetPersonBuilder(nn.Module):
 
 
 class FineReasoner(nn.Module):
-    """Reason from composed query tokens over a target person set."""
+    """Reason over query tokens and their aligned target evidence/null tokens."""
 
     def __init__(
         self, dim: int, num_heads: int, mlp_ratio: int = 2, dropout: float = 0.0
@@ -61,6 +61,8 @@ class FineReasoner(nn.Module):
             nn.GELU(),
             nn.Linear(dim, 1),
         )
+        # Ordered pair geometry: dx, dy, log width/height ratios, IoU.
+        self.relation_geo = nn.Linear(5, num_heads, bias=False)
 
     def forward(
         self,
@@ -69,13 +71,28 @@ class FineReasoner(nn.Module):
         target_mask: Tensor | None = None,
         query_mask: Tensor | None = None,
         query_key_bias: Tensor | None = None,
+        *,
+        aligned_offset: int | None = None,
+        aligned_boxes: Tensor | None = None,
+        matched_mask: Tensor | None = None,
     ) -> Tensor:
         """Return one fine retrieval score per query-target pair."""
 
         target_padding = None if target_mask is None else ~target_mask.bool()
         query_padding = None if query_mask is None else ~query_mask.bool()
 
-        if target.shape[1] == 0:
+        if aligned_offset is not None:
+            if query.shape[1] != aligned_offset + target.shape[1]:
+                raise ValueError(
+                    "aligned target tokens must match the query person tail"
+                )
+            if target_mask is not None:
+                target = target.masked_fill(~target_mask.bool()[..., None], 0)
+            # Each person token receives ONLY its assigned person's evidence.
+            # CLS/text learn relations in self-attention after role ownership is
+            # established. They do not select a fresh person from the target set.
+            update = torch.cat((torch.zeros_like(query[:, :aligned_offset]), target), 1)
+        elif target.shape[1] == 0:
             # An undetected target contributes no person evidence.
             update = torch.zeros_like(query)
         else:
@@ -107,14 +124,82 @@ class FineReasoner(nn.Module):
             attn_mask = prior[:, None, :].expand(-1, query.shape[1], -1)
             attn_mask = attn_mask.repeat_interleave(self.self_attn.num_heads, dim=0)
             query_padding = None
-        update, _ = self.self_attn(
-            query,
-            query,
-            query,
-            key_padding_mask=query_padding,
-            attn_mask=attn_mask,
-            need_weights=False,
-        )
+        if aligned_boxes is not None:
+            if aligned_offset is None or matched_mask is None:
+                raise ValueError(
+                    "aligned geometry requires token offset and matched mask"
+                )
+            with torch.autocast(query.device.type, enabled=False):
+                pair_bias = self._relation_bias(aligned_boxes, matched_mask)
+                b, length = query.shape[:2]
+                if attn_mask is None:
+                    attn_mask = query.new_zeros(
+                        b * self.self_attn.num_heads,
+                        length,
+                        length,
+                        dtype=torch.float32,
+                    )
+                    if query_padding is not None:
+                        attn_mask = attn_mask.masked_fill(
+                            query_padding.repeat_interleave(
+                                self.self_attn.num_heads, 0
+                            )[:, None],
+                            -torch.inf,
+                        )
+                        query_padding = None
+                else:
+                    attn_mask = attn_mask.float().clone()
+                attn_mask[:, aligned_offset:, aligned_offset:] += pair_bias
+                # Geometry attention is FP32, as in EvidenceBinding, including AMP.
+                update, _ = self.self_attn(
+                    query.float(),
+                    query.float(),
+                    query.float(),
+                    key_padding_mask=query_padding,
+                    attn_mask=attn_mask,
+                    need_weights=False,
+                )
+                # First update the member tokens with directed pair evidence;
+                # a second round lets CLS/text read those updated members.
+                # A single round would leave pair geometry invisible to CLS.
+                query = self.norm_self(query + self.dropout(update))
+                update, _ = self.self_attn(
+                    query.float(),
+                    query.float(),
+                    query.float(),
+                    key_padding_mask=query_padding,
+                    attn_mask=attn_mask,
+                    need_weights=False,
+                )
+        else:
+            update, _ = self.self_attn(
+                query,
+                query,
+                query,
+                key_padding_mask=query_padding,
+                attn_mask=attn_mask,
+                need_weights=False,
+            )
         query = self.norm_self(query + self.dropout(update))
         query = self.norm_out(query + self.ffn(query))
         return self.score(query[:, 0]).squeeze(-1)
+
+    def _relation_bias(self, boxes: Tensor, mask: Tensor) -> Tensor:
+        """Directed target geometry; null/unselected rows have neutral geometry."""
+        boxes = boxes.float().masked_fill(~mask[..., None], 0)
+        size = (boxes[..., 2:] - boxes[..., :2]).clamp_min(1e-6)
+        center = (boxes[..., 2:] + boxes[..., :2]) / 2
+        delta = center[:, None] - center[:, :, None]
+        ratio = size[:, None].log() - size[:, :, None].log()
+        low = torch.maximum(boxes[:, :, None, :2], boxes[:, None, :, :2])
+        high = torch.minimum(boxes[:, :, None, 2:], boxes[:, None, :, 2:])
+        intersection = (high - low).clamp_min(0).prod(-1)
+        area = size.prod(-1)
+        union = area[:, :, None] + area[:, None] - intersection
+        iou = intersection / union.clamp_min(1e-6)
+        geometry = torch.cat((delta, ratio, iou[..., None]), -1)
+        bias = self.relation_geo(geometry)
+        valid = mask[:, :, None] & mask[:, None]
+        bias = bias.masked_fill(~valid[..., None], 0)
+        b, k = mask.shape
+        return bias.permute(0, 3, 1, 2).reshape(b * self.self_attn.num_heads, k, k)

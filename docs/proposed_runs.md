@@ -147,7 +147,8 @@ are missing. Complete caches can be reused without a FAFA environment or raw
 images. The saved FAFA YAML is still needed by `build-cache` to compare extraction
 settings.
 
-Old DINO checkpoints still need new training for the FAFA/dual architecture.
+V1/DINO checkpoints need training for `person-id-sem-partial-match-v2`.
+Compatible DINO/FAFA caches are reused; matching needs no cache rebuild.
 Source/cache IDs and separate feature widths are checked against the training
 checkpoint. Keep historical run directories separately.
 
@@ -159,7 +160,7 @@ environment paths are used only in prepare and cache extraction.
 
 ## Outputs and diagnostics
 
-`runs/proposed` contains config, tokenizer, `last.pt`, `best.pt`, history,
+`runs/proposed-a` contains config, tokenizer, `last.pt`, `best.pt`, history,
 training-data diagnostics and per-epoch train/val metrics. Split runs save
 `rankings.pt`, `run.json`, `metrics.json`; `run` writes `summary.csv`.
 Saved-result evaluation checks the recorded split fingerprint before writing
@@ -168,7 +169,8 @@ Older results without a fingerprint retain the existing gallery/sample checks.
 Use a new retrieval run to evaluate changed benchmark inputs.
 
 W&B retains loss/metric keys and adds `train/binding_scale` and
-`epoch/binding_scale`; its cache config records both feature widths and encoder
+`epoch/binding_scale`; fine coverage/member/empty-selection diagnostics are also
+logged. Its cache config records both feature widths and encoder
 provenance. It closes on exceptions. Nonfinite loss aborts before
 backward/optimizer updates and writes `nonfinite_batch.json`. Model parameters,
 geometry attention and losses stay FP32; CUDA training uses existing AMP/scaler.

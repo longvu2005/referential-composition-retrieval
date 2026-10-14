@@ -26,10 +26,10 @@ Run this after calibration:
 
 | Variant | Explicit person binding | Components that remain active |
 | --- | --- | --- |
-| `full` | max_j(ID + semantic), followed by soft membership pooling | Semantic context and coarse ID/global state |
-| `without_identity_binding` | max_j(semantic) | Coarse retrieval still uses identity |
-| `without_semantic_binding` | max_j(ID) | Context still receives person semantics/instruction |
-| `context_only` | 0 | Context reasoner and coarse retrieval |
+| `full` | ID + semantic on one partial identity assignment | Aligned context, null penalties, coverage and coarse ID/global state |
+| `without_identity_binding` | Semantic on that same assignment | Identity still determines matching and coarse retrieval |
+| `without_semantic_binding` | ID on that same assignment | Context still receives semantics/instruction |
+| `context_only` | Matched terms are 0; null penalties remain | Aligned context, identity matching, coverage and coarse retrieval |
 
 This is an **inference-time term removal**, not removal of the entire head. All variants use the same checkpoint, gamma, coarse scores/order/Top-M, and the selected fusion coefficients. Query features, target context, and pair scores are reused; the fine network is not run separately for each variant. Do not retune coefficients for individual term-removal variants in this table.
 
@@ -56,7 +56,8 @@ cache built by the main pipeline. Reuse your existing DINO cache or build it onc
 | `dino_dual` | DINO | Two separate heads + identity detach + same-person binding |
 | `fafa_dual` | FAFA image-only pooled hidden tokens | Main architecture |
 
-`shared` is a control that is retrained using the previous shared structure; it does not reuse an old checkpoint.
+`shared` is a retrained shared-head control. It also uses partial assignment,
+aligned context and missing-evidence penalties, and does not reuse old checkpoints.
 
 All variants use the same seed, schedule, sampling strategy, loss weights, and default inference coefficients of 0.4/0.4; no variant-specific calibration is performed for this comparison. Each run selects its epoch using the same validation rule and has its own checkpoint.
 
@@ -93,7 +94,9 @@ Semantic context and coarse identity remain active in all four variants.
 ## Limitations and interpretation of results
 
 - The FAFA cache mean-pools hidden tokens; it does not reproduce the native multi-token FDA representation.
-- Binding retains soft membership and an optimistic max operation; it does not yet use one-to-one assignment or guarantee that all GROUP members are covered.
+- Fine uses partial one-to-one assignment on the predicted member set. Grounding
+  mistakes, detector misses and residual duplicate boxes can still affect coverage;
+  assignment does not guarantee that all real required people were detected.
 - Separate dual heads and contrastive supervision do not by themselves guarantee clothing invariance.
 - Local tests verify gradients, masks, cache behavior, and execution flow; PIPA quality, CUDA T4 behavior, and FAFA cache-building cost must be measured in the actual experimental environment.
 - The current test export contains only 14 queries. Report results by case and avoid treating fluctuations of only a few queries as general conclusions.

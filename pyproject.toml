@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 proposed = [
     "torch>=2.4,<3",
+    "scipy>=1.11,<2",  # Fine partial one-to-one identity assignment.
     "transformers>=4.56,<5",
     "torchvision>=0.19,<1",
     "wandb>=0.18,<1",

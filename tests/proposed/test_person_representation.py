@@ -83,8 +83,9 @@ def test_identity_and_state_must_match_the_same_target_person():
         torch.ones(1, 1, 1),
         torch.ones(1, 1, dtype=torch.bool),
     )
-    assert result["both"].item() == 1.0  # max(ID+SEM), never max(ID)+max(SEM)=2.
-    assert result["identity"].item() == result["semantic"].item() == 1.0
+    assert result["both"].item() == 1.0  # ID selects A; state also reads A.
+    assert result["identity"].item() == 1.0
+    assert result["semantic"].item() == 0.0  # No new matching in semantic ablation.
     assert result["none"].item() == 0.0
 
 
@@ -98,7 +99,7 @@ def test_binding_respects_member_masks_and_empty_targets():
     subjects = torch.tensor([[True, False]] * 2)
     mask = torch.tensor([[True, False], [False, False]])
     result = binding_scores(qid, tid, comp, semantic, members, subjects, mask)
-    assert all(value[1] == 0 for value in result.values())
+    assert all(value[1] == -2.5 for value in result.values())
     result["both"].sum().backward()
     assert qid.grad is tid.grad is None
     assert semantic.grad[:, 1].count_nonzero() == 0

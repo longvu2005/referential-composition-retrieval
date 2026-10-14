@@ -135,6 +135,16 @@ def _diagnostics(counts: dict) -> dict:
         "state_pairs": counts.get("state_pairs", 0),
         "state_active_query_rate": counts.get("state_active_queries", 0)
         / max(counts.get("queries", 0), 1),
+        "fine_coverage": counts.get("fine_coverage_sum", 0)
+        / max(counts.get("fine_pairs", 0), 1),
+        "fine_members_per_pair": counts.get("fine_members", 0)
+        / max(counts.get("fine_pairs", 0), 1),
+        "fine_unmatched_member_rate": (
+            counts.get("fine_members", 0) - counts.get("fine_matched_members", 0)
+        )
+        / max(counts.get("fine_members", 0), 1),
+        "fine_empty_selection_rate": counts.get("fine_empty_pairs", 0)
+        / max(counts.get("fine_pairs", 0), 1),
         "sampled_positives_per_query": counts.get("sampled_positive", 0)
         / max(counts.get("queries", 0), 1),
         **{
@@ -280,6 +290,7 @@ def train(cfg: dict) -> Path:
         binding_mode=model_cfg.get("binding_mode", "both"),
         input_dim=input_dim,
         dropout=model_cfg.get("dropout", 0.0),
+        fine_matching=model_cfg.get("fine_matching"),
     ).to(device)
 
     optimizer = torch.optim.AdamW(

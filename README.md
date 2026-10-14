@@ -55,11 +55,14 @@ feature. Separate trainable heads produce normalized identity (128) and semantic
 (384) embeddings. Identity is trained only by supervised contrastive loss;
 semantic features feed selection grounding and instruction composition.
 
-Fine scoring combines identity and composed semantics on the SAME target person,
-then pools soft Subject memberships. Its learned positive scale adds that binding
-score to the existing context/set reasoner. Scene/geometry reasoning handles
-conditions outside crops. Global-state coarse scoring and the official evaluation
-protocol remain. See [equations and limitations](docs/proposed_method.md).
+Fine uses one partial one-to-one identity assignment across all query Subjects,
+with explicit null matches. State and context read those same assigned people;
+unmatched members stay in the score and coverage gates context. Subject roles
+come from query text; case labels and GT member counts are not used at inference.
+Scene/ordered geometry supports conditions outside crops. Global-state coarse
+and evaluation remain. See [equations and limitations](docs/proposed_method.md).
+The new architecture requires retraining; compatible feature caches can be
+reused. Default training outputs are `runs/proposed-a`.
 
 ## Setup and run
 
@@ -159,11 +162,12 @@ have been removed. Calibration lives separately in `configs/calibration.yaml`.
 ```
 
 The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
-`dev` includes SciPy for the FAFA matching adapter tests; native FAFA weights
+`proposed` and `dev` include SciPy for partial assignment; native FAFA weights
 are not needed.
 
-Tests use tiny local encoders/caches, including gradient isolation, same-person
-binding, separate scene/person widths, empty sets, padding and the train/retrieve
+Tests use tiny local encoders/caches, including assignment-versus-brute-force,
+no target reuse, aligned evidence ownership, null penalties, gradient isolation,
+separate scene/person widths, empty sets, padding and the train/retrieve
 pipeline. The FAFA extraction contract is tested with a fake native trunk; tests
 do not download full weights or claim PIPA quality/CUDA throughput. Optional
 CLIP integration and CUDA tests require their corresponding dependencies/device.

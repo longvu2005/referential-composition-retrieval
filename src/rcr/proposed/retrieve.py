@@ -61,7 +61,8 @@ def retrieve_experiments(
     model_cfg = train_cfg["model"]
     if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
-            "legacy checkpoint: rebuild cache and retrain the person architecture"
+            "legacy checkpoint: retrain the partial-matching architecture; "
+            "existing compatible DINO/FAFA feature caches can be reused"
         )
     dim = checkpoint["dim"]
     state_untrained = (
@@ -131,6 +132,7 @@ def retrieve_experiments(
         binding_mode=model_cfg.get("binding_mode", "both"),
         input_dim=checkpoint.get("input_dim", dim),
         dropout=model_cfg.get("dropout", 0.0),
+        fine_matching=model_cfg.get("fine_matching"),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
@@ -168,6 +170,7 @@ def retrieve_experiments(
                 "representation": model.representation,
                 "binding_mode": settings[name]["binding_mode"] or model.binding_mode,
                 "binding_scale": model.binding_scale.item(),
+                "fine_matching": model.fine_matching,
                 "encoder_metadata": checkpoint.get("encoder_metadata"),
                 "checkpoint_epoch": checkpoint.get("epoch"),
                 "checkpoint_seed": train_cfg.get("train", {}).get("seed"),

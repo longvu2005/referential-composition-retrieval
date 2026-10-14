@@ -1,9 +1,16 @@
-"""Coarse scores and explicit same-person fine binding."""
+"""Coarse scores and fine scores on one shared partial person assignment."""
 
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
+
+from rcr.proposed.matching import (
+    PersonMatching,
+    gather_matched,
+    partial_identity_matching,
+)
 
 
 def identity_scores(
@@ -177,44 +184,59 @@ def binding_scores(
     membership: Tensor,
     subject_mask: Tensor,
     target_mask: Tensor | None = None,
+    *,
+    matching: PersonMatching | None = None,
+    identity_threshold: float = 0.2,
+    missing_penalty: float = 2.5,
 ) -> dict[str, Tensor]:
-    """Return [B] scores; max follows pairwise fusion, then soft set pooling.
+    """All score removals use the SAME identity assignment, with missing evidence.
 
-    composed/membership are [B,S,Kq,D] / [B,S,Kq]. Identities are [B,K,Di].
-    Identity is detached here, at the only identity input to dual fine scoring.
-    Empty person sets contribute zero. This optimistic match permits reuse of a
-    target person; it is not a one-to-one assignment or an all-members guarantee.
+    Pool all predicted members, including nulls. An active Subject with no query
+    member also contributes the null penalty rather than disappearing. The
+    context-only control removes matched cosine terms but keeps missingness.
+    No gradient flows through identity, assignment or membership weights.
     """
-    with torch.autocast(composed.device.type, enabled=False):
-        zero = composed.float().sum(dim=(1, 2, 3)) * 0
-        if composed.shape[2] == 0 or target_semantic.shape[1] == 0:
-            return dict.fromkeys(BINDING_MODES, zero)
-        identity = torch.einsum(
-            "bqd,btd->bqt",
-            query_identity.detach().float(),
-            target_identity.detach().float(),
-        )[:, None]
-        semantic = torch.einsum(
-            "bsqd,btd->bsqt", composed.float(), target_semantic.float()
+    if not math.isfinite(missing_penalty) or missing_penalty <= 2:
+        raise ValueError("missing_penalty must exceed 2 for normalized cosine scores")
+    if matching is None:
+        matching = partial_identity_matching(
+            query_identity,
+            target_identity,
+            membership,
+            subject_mask,
+            target_mask,
+            identity_threshold=identity_threshold,
         )
-        weights = membership.float()
-        weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-6)
-        active = subject_mask.bool()
+    with torch.autocast(composed.device.type, enabled=False):
+        member = matching.membership
+        selected = member > 0
+        aligned_id = gather_matched(target_identity.detach().float(), matching)
+        query_id = (
+            query_identity.detach().float().masked_fill(~selected.any(1)[..., None], 0)
+        )
+        identity = (
+            F.normalize(query_id, dim=-1) * F.normalize(aligned_id, dim=-1)
+        ).sum(-1)[:, None]
+        aligned_semantic = F.normalize(
+            gather_matched(target_semantic.float(), matching), dim=-1
+        )
+        composed = composed.float().masked_fill(~selected[..., None], 0)
+        semantic = (F.normalize(composed, dim=-1) * aligned_semantic[:, None]).sum(-1)
+        denominator = member.sum(-1)
+        weights = member / denominator[..., None].clamp_min(1e-6)
+        active = matching.subjects
 
-        def pool(scores):
-            if target_mask is not None:
-                scores = scores.masked_fill(
-                    ~target_mask[:, None, None].bool(), -torch.inf
-                )
-            best = scores.amax(-1)
-            # All-masked targets must not produce -inf * zero or NaN gradients.
-            best = best.masked_fill(~torch.isfinite(best), 0)
-            per_subject = (best * weights).sum(-1).masked_fill(~active, 0)
-            return per_subject.sum(-1) / active.sum(-1).clamp_min(1)
+        def pool(value):
+            value = value.masked_fill(~matching.matched[:, None], -missing_penalty)
+            per_subject = (value * weights).sum(-1)
+            per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
+            per_subject = per_subject.masked_fill(~active, 0)
+            result = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
+            return result.masked_fill(~active.any(-1), -missing_penalty)
 
         return {
             "both": pool(identity + semantic),
             "identity": pool(identity.expand_as(semantic)),
             "semantic": pool(semantic),
-            "none": zero,
+            "none": pool(semantic * 0),
         }

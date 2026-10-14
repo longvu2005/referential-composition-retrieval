@@ -138,14 +138,23 @@ def compute_loss(
     if target_mask is not None:
         target_mask = target_mask.flatten(0, 1)
 
-    scores = model.score_target(
+    fine = model.score_target(
         query.repeat_candidates(c),
         batch["target_scene"].flatten(0, 1),
         batch["target_persons"].flatten(0, 1),
         batch["target_boxes"].flatten(0, 1),
         patch_hw,
         target_mask,
-    ).reshape(b, c)
+        return_details=True,
+    )
+    scores = fine["score"].reshape(b, c)
+    eligible = batch.get("candidate_mask", torch.ones_like(batch["positive_mask"]))
+    eligible = eligible.bool().flatten()
+    selected = fine["membership"].sum(1) > 0
+    matched = fine["matched_indices"] >= 0
+    fine_coverage = fine["coverage"].masked_fill(~eligible, 0).sum().detach()
+    fine_members = (selected & eligible[:, None]).sum()
+    fine_matched = (selected & matched & eligible[:, None]).sum()
 
     logits, query_identity = query.logits, query.identity
     person_mask = torch.ones_like(logits, dtype=torch.bool)
@@ -248,4 +257,9 @@ def compute_loss(
         "state_pairs": state_pairs,
         "state_active_queries": state_queries,
         "queries": scores.new_tensor(b, dtype=torch.long),
+        "fine_pairs": eligible.sum(),
+        "fine_coverage_sum": fine_coverage,
+        "fine_members": fine_members,
+        "fine_matched_members": fine_matched,
+        "fine_empty_pairs": (~selected.any(-1) & eligible).sum(),
     }

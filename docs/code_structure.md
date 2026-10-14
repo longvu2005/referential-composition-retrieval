@@ -19,6 +19,7 @@ resolved from that working directory.
 | Model architecture | `src/rcr/proposed/nn/model.py`, then the component in `nn/` |
 | Loss terms and weights | `src/rcr/proposed/losses.py`, `configs/proposed.yaml` |
 | Identity, state and binding scores | `src/rcr/proposed/scores.py` |
+| Case-free selection and shared partial matching | `src/rcr/proposed/matching.py` |
 | Training and checkpoint selection | `src/rcr/proposed/train.py` |
 | Candidate sampling and hard negatives | `src/rcr/proposed/sampling.py`, `ranking.py` |
 | Batch assembly and prefetch | `src/rcr/proposed/batch.py` |
