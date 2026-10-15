@@ -7,6 +7,7 @@ import yaml
 
 from rcr.proposed.cache import build as builder
 from rcr.proposed.cache import fafa as fafa_cache
+from rcr.proposed.cache import native_build
 from rcr.proposed.cache.build import check_cache_config
 from rcr.proposed.cache.dino import boxes_to_scene
 from rcr.proposed.cache.store import GalleryCache
@@ -39,7 +40,10 @@ def split_cache(experiment, local_stages, tmp_path, monkeypatch):  # noqa: F811
 
     def worker(cfg, **options):
         worker_calls.append(options)
-        fafa_cache.finish_fafa_cache(cfg)
+        if options.get("native"):
+            native_build.finish_native_cache(cfg)
+        else:
+            fafa_cache.finish_fafa_cache(cfg)
 
     monkeypatch.setattr(builder, "run_person_worker", worker)
     return cfg, path, source, model, worker_calls
@@ -62,6 +66,7 @@ def test_persons_only_reuses_dino_then_train_and_retrieve(
     cli.main(["build-cache", "--config", str(path), "--cache-stage", "persons"])
     assert worker_calls == [{}]
     assert _bytes(source) == before
+    cli.main(["build-cache", "--config", str(path), "--cache-stage", "native"])
     native_path = Path(cfg["person_encoder"]["fafa_config"])
     native_config = native_path.read_bytes()
     native_path.unlink()
@@ -215,7 +220,7 @@ def test_complete_person_index_needs_only_dino_shards(split_cache, monkeypatch):
     monkeypatch.setattr(
         builder, "run_person_worker", lambda *args, **kw: pytest.fail("FAFA")
     )
-    builder.prepare_cache(cfg)
+    builder.prepare_cache(cfg, stage="persons")
     cache = GalleryCache(root, scene_root=source)
     _, persons, _, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(persons[0], cache.persons[0, cache.mask[0]].float())

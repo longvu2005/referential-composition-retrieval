@@ -10,6 +10,7 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--native", action="store_true")
     args = parser.parse_args(argv)
     if args.force and not args.prepare:
         parser.error("--force requires --prepare")
@@ -19,6 +20,10 @@ def main(argv=None):
         from rcr.proposed.cache.build import load_fafa_config
 
         prepare_fafa_model(load_fafa_config(cfg), force=args.force)
+    elif args.native:
+        from rcr.proposed.cache.native_build import finish_native_cache
+
+        finish_native_cache(cfg)
     else:
         from rcr.proposed.cache.fafa import finish_fafa_cache
 

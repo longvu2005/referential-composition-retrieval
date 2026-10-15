@@ -160,7 +160,12 @@ def test_train_checkpoints_metrics_and_retrieve(
             "coarse_batch_size": 2,
         },
         "candidate_ks": [1, 2],
-        "data": {"final_dir": "unused", "image_root": "unused", "cache": "unused"},
+        "data": {
+            "final_dir": "unused",
+            "image_root": "unused",
+            "cache": "unused",
+            "native_cache": "unused",
+        },
         "model": {
             "text_model": "tiny",
             "dim": 6,

@@ -129,6 +129,7 @@ def prepare_visual_batch(
     batch = {
         "query_scene": q_scene,
         "query_persons": q_persons,
+        "fafa_query": cache.native_queries(samples, q_persons.shape[1]),
         "query_boxes": q_boxes,
         "query_person_mask": q_mask,
         "query_identity_labels": identity_labels,
@@ -136,6 +137,7 @@ def prepare_visual_batch(
         "grounding_targets": grounding_targets,
         "target_scene": t_scene.reshape(b, c, *t_scene.shape[1:]),
         "target_persons": t_persons.reshape(b, c, k_t, t_persons.shape[-1]),
+        "fafa_targets": cache.native_targets(target_idx, k_t).unflatten(0, (b, c)),
         "target_boxes": t_boxes.reshape(b, c, k_t, 4),
         "target_mask": t_mask.reshape(b, c, k_t),
         "target_identity_labels": target_identity_labels.reshape(b, c, k_t),

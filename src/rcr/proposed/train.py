@@ -241,8 +241,10 @@ def train(cfg: dict) -> Path:
         data_cfg["cache"],
         scene_root=data_cfg.get("dino_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
+        native_root=data_cfg["native_cache"],
     )
     cache.validate_gallery(data.gallery_ids)
+    cache.native.validate_samples([*samples, *val_samples])
     expected_backend = "fafa" if "person_encoder" in cfg else None
     actual_backend = (cache.encoder_metadata.get("person_encoder") or {}).get(
         "backend", "dino"
@@ -616,6 +618,7 @@ def train(cfg: dict) -> Path:
                 "person_input_dim": person_input_dim,
                 "encoder_metadata": getattr(cache, "encoder_metadata", None),
                 "cache_id": cache.cache_id,
+                "native_cache": cache.native.metadata,
                 "architecture_version": model.architecture_version,
                 "representation": "shared_person",
                 "best_full_map": best_full_map,

@@ -53,6 +53,7 @@ def _query(model, batch):
         selection_mask=batch["selection_mask"],
         change_mask=batch["change_mask"],
         query_person_mask=batch["query_person_mask"],
+        fafa_query=batch["fafa_query"],
     )
 
 
@@ -65,6 +66,7 @@ def _fine(model, batch, query):
         (2, 3),
         batch["target_mask"].flatten(0, 1),
         return_details=True,
+        fafa_targets=batch["fafa_targets"].flatten(0, 1),
     )
 
 
@@ -105,7 +107,7 @@ def test_grounding_loss_updates_shared_person_without_identity_head():
     assert all(p.grad is None for p in model.identity_head.parameters())
 
 
-@pytest.mark.parametrize("branch", ["semantic", "context", "retrieval"])
+@pytest.mark.parametrize("branch", ["context", "retrieval"])
 def test_fine_gradients_reach_query_and_target_person_but_not_identity(branch):
     torch.manual_seed(92)
     model, batch = _model(), _inputs()
@@ -127,7 +129,7 @@ def test_fine_gradients_reach_query_and_target_person_but_not_identity(branch):
             batch["candidate_mask"],
         )
     else:
-        loss = details["binding" if branch == "semantic" else "context"].sum()
+        loss = details["context"].sum()
     loss.backward()
     _assert_person_gradient(model)
     assert query.identity.grad is None
@@ -231,14 +233,16 @@ def test_zero_person_images_keep_null_penalties_and_finite_backward(
     model, batch = _model(), _inputs()
     for key in ("query_persons", "query_boxes", "query_person_mask"):
         batch[key] = batch[key][:, :query_people]
+    batch["fafa_query"] = batch["fafa_query"][:, :, :query_people]
     for key in ("target_persons", "target_boxes", "target_mask"):
         batch[key] = batch[key][:, :, :target_people]
+    batch["fafa_targets"] = batch["fafa_targets"][:, :, :target_people]
     query = _query(model, batch)
     details = _fine(model, batch, query)
     assert details["coverage"].count_nonzero() == 0
-    torch.testing.assert_close(details["binding"], torch.full((6,), -2.5))
+    torch.testing.assert_close(details["binding"], torch.full((6,), -1.1))
     torch.testing.assert_close(details["gated_context"], torch.zeros(6))
-    torch.testing.assert_close(details["score"], -2.5 * model.binding_scale.expand(6))
+    torch.testing.assert_close(details["score"], -1.1 * model.binding_scale.expand(6))
     details["score"].sum().backward()
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None

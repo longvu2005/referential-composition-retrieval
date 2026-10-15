@@ -1,5 +1,5 @@
 # One source of truth for cache, training, retrieval and evaluation.
-# Current model: FAFA persons, shared projection, identity + semantic binding.
+# Current model: frozen FAFA multimodal + FDA; learned relational context.
 # Coarse fusion uses gallery z-scores; fine scoring reranks the Top-M shortlist.
 method: proposed
 split: val
@@ -8,6 +8,7 @@ data:
   image_root: dataset/data/raw/images
   cache: cache/proposed-fafa
   dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
+  native_cache: cache/proposed-fafa-native  # new; reuse both existing caches above
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
@@ -33,6 +34,7 @@ model:
   dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
   identity_dim: 128
+  fda_k: 6                  # native top-k target tokens; no learned semantic cosine
   state_dim: 128
   # Training default; inference overrides live in retrieval.
   coarse_beta: 0.4
@@ -43,7 +45,7 @@ model:
     # Common to every query: no case label or GT member count at inference.
     selection_threshold: 0.5
     identity_threshold: 0.2   # starting value; calibrate on val, never test
-    missing_penalty: 2.5     # > 2, below the minimum of ID + semantic cosines
+    missing_penalty: 1.1     # > 1 for FDA in [-1,1]; starting value, tune on val
     duplicate_iou: 0.9       # suppress near-identical boxes; 1 disables
 train:
   epochs: 20
@@ -96,7 +98,7 @@ wandb:
   log_every_steps: 20
 runtime:
   device: auto
-checkpoint: runs/proposed-a/best.pt
+checkpoint: runs/proposed-fafa-native/best.pt
 output:
   # Root only; the runner appends each split.
-  dir: runs/proposed-a
+  dir: runs/proposed-fafa-native

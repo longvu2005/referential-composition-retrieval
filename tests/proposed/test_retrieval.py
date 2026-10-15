@@ -15,6 +15,7 @@ from rcr.proposed.ranking import (
     retrieve_rankings,
 )
 from rcr.proposed.scores import identity_scores
+from tests.proposed.native_fixtures import NativeFixture
 
 
 def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
@@ -111,7 +112,7 @@ class _TextEncoder(nn.Module):
         return self.embedding(input_ids), attention_mask.bool()
 
 
-class _Cache:
+class _Cache(NativeFixture):
     def __init__(self, image_ids=None) -> None:
         generator = torch.Generator().manual_seed(3)
         self.image_ids = image_ids or ["q", "a", "b"]
@@ -580,6 +581,7 @@ def test_batched_mining_matches_single_query_rankings_without_composition(
     torch.manual_seed(31)
     ids = write_cache(tmp_path, counts=(0, 3, 1, 2, 4, 0, 2, 3, 2))
     cache = GalleryCache(tmp_path, lru_mib=1)
+    cache.native = NativeFixture()
     # Non-contiguous/reordered train gallery: exclude a simulated validation image.
     gallery = [ids[i] for i in (4, 1, 0, 6, 2, 3, 5, 7)]
     samples = []

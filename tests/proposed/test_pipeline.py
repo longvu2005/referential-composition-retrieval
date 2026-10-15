@@ -16,6 +16,7 @@ from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.encoders import QueryTextCache, TextEncoder
 from rcr.proposed.nn.model import RCRModel
+from tests.proposed.native_fixtures import NativeFixture
 from tests.proposed.test_batch import _samples, _TextEncoder, _Tokenizer
 
 
@@ -278,6 +279,7 @@ def test_amp_training_finite_with_empty_images_and_padded_boxes(
     torch.manual_seed(5)
     ids = write_cache(tmp_path, counts=counts, dim=8, patches=14)
     cache = GalleryCache(tmp_path, lru_mib=1)
+    cache.native = NativeFixture()
     samples = []
     for i, sample in enumerate(_samples()):
         samples.append(

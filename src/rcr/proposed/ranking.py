@@ -292,6 +292,10 @@ def rank_weight_grid(
                     "coarse_rankings",
                     "coarse_topm",
                     "fine_rankings",
+                    "fafa_rankings",
+                    "fafa_binding",
+                    "context",
+                    "coverage",
                 )
             }
             for _ in weights
@@ -310,6 +314,9 @@ def rank_weight_grid(
                 q_boxes.to(device),
                 patch_hw=cache.patch_hw,
                 query_person_mask=q_mask,
+                fafa_query=cache.native_queries([sample], q_persons.shape[1]).to(
+                    device
+                ),
                 **text,
             )
             identity = _coarse_scores_chunked(
@@ -332,6 +339,10 @@ def rank_weight_grid(
                     ]
                 )
             fine_scores = torch.empty(len(gallery_ids), device=device)
+            components = {
+                key: torch.empty_like(fine_scores)
+                for key in ("binding", "context", "coverage")
+            }
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             coarse_orders = {}
             for output, (beta, fine_coarse_weight) in zip(
@@ -359,16 +370,43 @@ def rank_weight_grid(
                         image_indices[local.cpu()]
                     )
                     count = len(local)
-                    fine_scores[local] = model.score_target(
+                    details = model.score_target(
                         query.repeat_candidates(count),
                         scene.to(device),
                         persons.to(device),
                         boxes.to(device),
                         cache.patch_hw,
                         mask.to(device),
+                        fafa_targets=cache.native_targets(
+                            image_indices[local.cpu()], persons.shape[1]
+                        ).to(device),
+                        return_details=True,
                     )
+                    fine_scores[local] = details["score"]
+                    for key in components:
+                        components[key][local] = details[key]
                     fine_done[local] = True
                 scores = fine_scores
+                # Diagnostics use exactly this shortlist and identity assignment.
+                # They do not claim an unconstrained full-gallery FAFA baseline.
+                fafa_only = top_indices[
+                    torch.argsort(
+                        components["binding"][top_indices], descending=True, stable=True
+                    )
+                ]
+                output["fafa_rankings"].append(
+                    torch.cat((fafa_only, order[len(top_indices) :]))[:ranking_limit]
+                    .to(torch.int32)
+                    .cpu()
+                )
+                for field, key in (
+                    ("fafa_binding", "binding"),
+                    ("context", "context"),
+                    ("coverage", "coverage"),
+                ):
+                    output[field].append(
+                        components[key][top_indices][:ranking_limit].cpu()
+                    )
                 fine_only = top_indices[
                     torch.argsort(scores[top_indices], descending=True, stable=True)
                 ]

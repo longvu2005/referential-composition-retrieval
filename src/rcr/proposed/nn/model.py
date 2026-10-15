@@ -22,9 +22,9 @@ from rcr.proposed.nn.composition import (
 from rcr.proposed.nn.encoders import IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
-from rcr.proposed.scores import binding_scores
+from rcr.proposed.scores import fafa_binding_scores
 
-ARCHITECTURE_VERSION = "shared-person-partial-match-v1"
+ARCHITECTURE_VERSION = "fafa-native-partial-match-v1"
 
 
 @dataclass
@@ -36,7 +36,7 @@ class QueryEncoding:
     reference: Tensor
     mask: Tensor
     prior: Tensor
-    composed: Tensor
+    fafa: Tensor
     membership: Tensor
     subjects: Tensor
 
@@ -76,6 +76,7 @@ class RCRModel(nn.Module):
         person_input_dim: int | None = None,
         dropout: float = 0.0,
         fine_matching: dict | None = None,
+        fda_k: int = 6,
     ) -> None:
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
@@ -85,6 +86,9 @@ class RCRModel(nn.Module):
             raise ValueError("invalid state dimension or coarse beta")
         self.coarse_beta = float(coarse_beta)
         self.fine_matching = matching_settings(fine_matching)
+        if type(fda_k) is not int or fda_k < 1:
+            raise ValueError("fda_k must be a positive integer")
+        self.fda_k = fda_k
         # DINO scene/state features have their own projection.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
@@ -117,7 +121,7 @@ class RCRModel(nn.Module):
         return self.identity_head(self.person_proj(persons))
 
     def encode_semantic(self, persons: Tensor) -> Tensor:
-        # Keep unnormalized features for attention; binding cosines use FP32.
+        # Shared person tokens for grounding/composition/context, not FDA scoring.
         return self.person_proj(persons)
 
     def encode_text_state(
@@ -155,6 +159,9 @@ class RCRModel(nn.Module):
         subject_mask: Tensor | None = None,
         subject_token_mask: Tensor | None = None,
         subject_ids: Tensor | None = None,
+        *,
+        fafa_query: Tensor,
+        fafa_targets: Tensor,
     ) -> tuple[Tensor, Tensor]:
         query = self.encode_query(
             query_scene,
@@ -170,9 +177,16 @@ class RCRModel(nn.Module):
             subject_mask,
             subject_token_mask,
             subject_ids,
+            fafa_query=fafa_query,
         )
         return query.logits, self.score_target(
-            query, target_scene, target_persons, target_boxes, patch_hw, target_mask
+            query,
+            target_scene,
+            target_persons,
+            target_boxes,
+            patch_hw,
+            target_mask,
+            fafa_targets=fafa_targets,
         )
 
     def encode_query(
@@ -190,7 +204,15 @@ class RCRModel(nn.Module):
         subject_mask: Tensor | None = None,
         subject_token_mask: Tensor | None = None,
         subject_ids: Tensor | None = None,
+        *,
+        fafa_query: Tensor,
     ) -> QueryEncoding:
+        if fafa_query.ndim != 4 or fafa_query.shape[:3] != (
+            query_persons.shape[0],
+            selections.shape[1],
+            query_persons.shape[1],
+        ):
+            raise ValueError("fafa_query must be [B,S,Kq,D_fafa]")
         if query_person_mask is not None:
             query_persons = query_persons.masked_fill(~query_person_mask[..., None], 0)
             query_boxes = query_boxes.masked_fill(~query_person_mask[..., None], 0)
@@ -234,21 +256,13 @@ class RCRModel(nn.Module):
         )
         mask = composed_query_mask(change, member_logits, change_mask, subjects)
         prior = reference_key_bias(change, member_logits, change_mask, subjects)
-        b, s, k = logits.shape
-        composed = (
-            F.normalize(
-                reference[:, 1 + change.shape[1] :].float().reshape(b, s, k, -1), dim=-1
-            )
-            if k
-            else reference.new_empty(b, s, 0, reference.shape[-1])
-        )
         return QueryEncoding(
             logits,
             identity,
             reference,
             mask,
             prior,
-            composed,
+            fafa_query.detach(),
             membership,
             subjects,
         )
@@ -284,6 +298,7 @@ class RCRModel(nn.Module):
         patch_hw: tuple[int, int],
         person_mask: Tensor | None = None,
         *,
+        fafa_targets: Tensor,
         return_details: bool = False,
     ) -> Tensor | dict[str, Tensor]:
         """Shared identity matching -> aligned state/context -> null-aware score.
@@ -295,7 +310,8 @@ class RCRModel(nn.Module):
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
-        # Matching/identity binding stay detached; semantic/context keep gradients.
+        # Identity determines the assignment; only context and fusion are learned
+        # by retrieval. Native FAFA features remain frozen in both directions.
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
         matching = partial_identity_matching(
@@ -345,15 +361,13 @@ class RCRModel(nn.Module):
             aligned_boxes=aligned_boxes,
             matched_mask=matched.flatten(1),
         ).float()
-        binding = binding_scores(
-            query.identity,
-            target_identity,
-            query.composed,
-            semantic,
-            query.membership,
-            query.subjects,
-            person_mask,
+        if fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
+            raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
+        binding = fafa_binding_scores(
+            query.fafa,
+            fafa_targets,
             matching=matching,
+            k=self.fda_k,
             missing_penalty=self.fine_matching["missing_penalty"],
         )
         gated_context = matching.coverage * context

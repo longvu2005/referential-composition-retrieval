@@ -31,7 +31,9 @@ def fafa_spec(cfg: dict) -> dict:
     }
 
 
-def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) -> None:
+def run_person_worker(
+    cfg: dict, *, prepare: bool = False, force: bool = False, native: bool = False
+) -> None:
     """Share files only; native FAFA stays in its own dependency environment."""
     worker = Path(__file__).resolve().parents[4] / "tools/cache_fafa.py"
     with tempfile.TemporaryDirectory(prefix="rcr-person-") as directory:
@@ -42,6 +44,8 @@ def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) 
             command.append("--prepare")
         if force:
             command.append("--force")
+        if native:
+            command.append("--native")
         subprocess.run(command, check=True)
 
 
@@ -99,8 +103,8 @@ def existing_cache(
 
 def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     """Build DINO and/or FAFA independently; completed caches stay immutable."""
-    if stage not in ("all", "dino", "persons"):
-        raise ValueError("cache stage must be all, dino or persons")
+    if stage not in ("all", "dino", "persons", "native"):
+        raise ValueError("cache stage must be all, dino, persons or native")
     data_cfg = cfg["data"]
     root = Path(data_cfg["dino_cache"])
     if root.resolve() == Path(data_cfg["cache"]).resolve():
@@ -110,15 +114,30 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     if source is not None:
         source.validate_gallery(data.gallery_ids)
         print(f"Using existing DINO cache: {root}", flush=True)
-    elif stage == "persons":
+    elif stage in ("persons", "native"):
         raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
-    if stage != "dino" and source is not None:
-        ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
-        if ready is not None:
-            ready.validate_gallery(data.gallery_ids)
-            print(f"Using existing FAFA cache: {data_cfg['cache']}", flush=True)
-            return
     if source is None:
         _prepare_dino(cfg, data, root)
-    if stage != "dino":
+    if stage == "dino":
+        return
+    ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
+    if ready is None:
+        if stage == "native":
+            raise ValueError(
+                "FAFA person cache missing; run --cache-stage persons first"
+            )
         run_person_worker(cfg)
+        ready = GalleryCache(data_cfg["cache"], scene_root=root)
+    ready.validate_gallery(data.gallery_ids)
+    if stage == "persons":
+        return
+    from rcr.proposed.cache.native import NativeFAFACache
+
+    native_root = Path(data_cfg["native_cache"])
+    if (native_root / "index.pt").is_file() and not (
+        native_root / ".building"
+    ).exists():
+        NativeFAFACache(native_root, ready).validate_samples(data.samples)
+        print(f"Using existing native FAFA cache: {native_root}", flush=True)
+        return
+    run_person_worker(cfg, native=True)

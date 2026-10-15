@@ -19,6 +19,7 @@ def _batch() -> dict[str, torch.Tensor]:
     return {
         "query_scene": torch.randn(b, 6, d),
         "query_persons": torch.randn(b, 3, d),
+        "fafa_query": torch.randn(b, 2, 3, 5),
         "query_boxes": _boxes(b, 3),
         "query_identity_labels": torch.tensor([[0, 1, -1], [0, 2, -1]]),
         "query_person_mask": torch.tensor([[True, True, False], [True, True, False]]),
@@ -35,6 +36,7 @@ def _batch() -> dict[str, torch.Tensor]:
         "subject_pos": torch.tensor([[0, 3], [1, 4]]),
         "target_scene": torch.randn(b, c, 6, d),
         "target_persons": torch.randn(b, c, 4, d),
+        "fafa_targets": torch.randn(b, c, 4, 7, 5),
         "target_boxes": _boxes(b, c, 4),
         "target_mask": torch.ones(b, c, 4, dtype=torch.bool),
         "target_identity_labels": torch.tensor(
@@ -164,6 +166,7 @@ def test_empty_target_detections_have_finite_loss_and_gradients(zero_length):
             "target_boxes",
             "target_mask",
             "target_identity_labels",
+            "fafa_targets",
         ):
             batch[key] = batch[key][:, :, :0]
     else:
@@ -183,11 +186,13 @@ def test_zero_query_people_and_all_zero_target_people() -> None:
         batch[key] = batch[key][:, :0]
     for key in ("query_person_mask", "query_identity_labels", "grounding_targets"):
         batch[key] = batch[key][..., :0]
+    batch["fafa_query"] = batch["fafa_query"][:, :, :0]
     for key in (
         "target_persons",
         "target_boxes",
         "target_mask",
         "target_identity_labels",
+        "fafa_targets",
     ):
         batch[key] = batch[key][:, :, :0]
     model = RCRModel(8, 6, 2)

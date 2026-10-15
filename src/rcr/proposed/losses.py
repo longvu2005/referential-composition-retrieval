@@ -129,6 +129,7 @@ def compute_loss(
         subject_mask=subject_mask,
         subject_token_mask=batch.get("subject_token_mask"),
         subject_ids=batch.get("subject_ids"),
+        fafa_query=batch["fafa_query"],
     )
 
     # Score B queries against C candidates as B*C independent pairs.
@@ -145,6 +146,7 @@ def compute_loss(
         batch["target_boxes"].flatten(0, 1),
         patch_hw,
         target_mask,
+        fafa_targets=batch["fafa_targets"].flatten(0, 1),
         return_details=True,
     )
     scores = fine["score"].reshape(b, c)

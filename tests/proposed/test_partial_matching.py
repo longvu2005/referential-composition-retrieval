@@ -13,7 +13,7 @@ from rcr.proposed.matching import (
 )
 from rcr.proposed.nn.model import QueryEncoding, RCRModel
 from rcr.proposed.nn.reasoning import FineReasoner
-from rcr.proposed.scores import binding_scores
+from rcr.proposed.scores import fafa_binding_scores
 
 
 def test_selection_supports_multiple_members_and_exclusive_roles():
@@ -69,17 +69,13 @@ def test_target_person_cannot_satisfy_two_query_people(separate_subjects):
     result = partial_identity_matching(query, target, membership, subjects)
     assert result.matched.sum() == 1
     torch.testing.assert_close(result.coverage, torch.tensor([0.5]))
-    scores = binding_scores(
-        query,
-        target,
+    scores = fafa_binding_scores(
         query[:, None].expand(-1, subjects.shape[1], -1, -1),
-        target,
-        membership,
-        subjects,
+        target[:, :, None],
         matching=result,
     )
-    # One complete ID+state match scores 2, one missing member scores -2.5.
-    torch.testing.assert_close(scores, torch.tensor([-0.25]))
+    # One FDA match scores 1, one missing member scores -1.1.
+    torch.testing.assert_close(scores, torch.tensor([-0.05]))
 
 
 def test_duplicate_target_detections_cannot_inflate_coverage():
@@ -93,21 +89,19 @@ def test_duplicate_target_detections_cannot_inflate_coverage():
 
 
 @pytest.mark.parametrize("target_people", [0, 2])
-def test_null_is_penalized_and_empty_targets_have_finite_gradients(target_people):
+def test_null_is_penalized_and_native_features_stay_frozen(target_people):
     query = torch.tensor([[[1.0, 0.0]]], requires_grad=True)
     target = torch.tensor([[[-1.0, 0.0]] * target_people]).reshape(1, target_people, 2)
     composed = query.detach()[:, None].clone().requires_grad_()
     semantic = target.clone().requires_grad_()
-    result = binding_scores(
-        query, target, composed, semantic, torch.ones(1, 1, 1), torch.tensor([[True]])
+    matching = partial_identity_matching(
+        query, target, torch.ones(1, 1, 1), torch.tensor([[True]])
     )
-    assert result.item() == -2.5
-    result.sum().backward()
+    result = fafa_binding_scores(composed, semantic[:, :, None], matching=matching)
+    assert result.item() == pytest.approx(-1.1)
+    assert not result.requires_grad
     assert query.grad is None
-    assert all(
-        x.grad is not None and torch.isfinite(x.grad).all()
-        for x in (composed, semantic)
-    )
+    assert all(x.grad is None for x in (composed, semantic))
 
 
 def test_semantic_scoring_cannot_switch_the_identity_assignment():
@@ -115,10 +109,11 @@ def test_semantic_scoring_cannot_switch_the_identity_assignment():
     target = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
     composed = query[:, None]
     semantic = torch.tensor([[[0.0, 1.0], [1.0, 0.0]]])
-    scores = binding_scores(
-        query, target, composed, semantic, torch.ones(1, 1, 1), torch.tensor([[True]])
+    matching = partial_identity_matching(
+        query, target, torch.ones(1, 1, 1), torch.tensor([[True]])
     )
-    assert scores.item() == 1
+    scores = fafa_binding_scores(composed, semantic[:, :, None], matching=matching)
+    assert scores.item() == 0
 
 
 def test_active_subject_with_no_grounded_member_remains_missing():
@@ -128,16 +123,12 @@ def test_active_subject_with_no_grounded_member_remains_missing():
     match = partial_identity_matching(query, query, members, subjects)
     assert match.subject_coverage.tolist() == [[1.0, 0.0]]
     assert match.coverage.item() == 0.5
-    scores = binding_scores(
-        query,
-        query,
+    scores = fafa_binding_scores(
         query[:, None].expand(-1, 2, -1, -1),
-        query,
-        members,
-        subjects,
+        query[:, :, None],
         matching=match,
     )
-    torch.testing.assert_close(scores, torch.tensor([-0.25]))
+    torch.testing.assert_close(scores, torch.tensor([-0.05]))
 
 
 def test_assignment_matches_bruteforce_on_small_sets():
@@ -210,14 +201,26 @@ def _controlled_pair():
 def test_unmatched_target_person_is_invisible_to_state_and_context():
     model, query, scene, persons, boxes = _controlled_pair()
     first = model.score_target(
-        query, scene, persons, boxes, (2, 2), return_details=True
+        query,
+        scene,
+        persons,
+        boxes,
+        (2, 2),
+        return_details=True,
+        fafa_targets=persons[:, :, None],
     )
     assert first["matched_indices"].tolist() == [[0, 1]]
     changed = persons.clone()
     changed[:, 2, 2:] = 1000
     changed.requires_grad_()
     actual = model.score_target(
-        query, scene, changed, boxes, (2, 2), return_details=True
+        query,
+        scene,
+        changed,
+        boxes,
+        (2, 2),
+        return_details=True,
+        fafa_targets=changed[:, :, None],
     )
     for key in ("score", "context", "binding", "coverage"):
         torch.testing.assert_close(first[key], actual[key])
@@ -245,7 +248,13 @@ def test_binding_and_context_share_one_assignment(monkeypatch):
         lambda *a, **k: pytest.fail("fresh target selection"),
     )
     result = model.score_target(
-        query, scene, persons, boxes, (2, 2), return_details=True
+        query,
+        scene,
+        persons,
+        boxes,
+        (2, 2),
+        return_details=True,
+        fafa_targets=persons[:, :, None],
     )
     assert torch.isfinite(result["score"]).all()
     assert calls == [1]
@@ -254,7 +263,13 @@ def test_binding_and_context_share_one_assignment(monkeypatch):
 def test_missing_member_cannot_read_scene_as_a_substitute():
     model, query, scene, persons, boxes = _controlled_pair()
     details = model.score_target(
-        query, scene, persons[:, :1], boxes[:, :1], (2, 2), return_details=True
+        query,
+        scene,
+        persons[:, :1],
+        boxes[:, :1],
+        (2, 2),
+        return_details=True,
+        fafa_targets=persons[:, :1, None],
     )
     assert details["matched_indices"].tolist() == [[0, -1]]
     assert details["coverage"].item() == 0.5
@@ -266,12 +281,18 @@ def test_all_null_pair_has_no_context_rescue():
     model, query, scene, persons, boxes = _controlled_pair()
     persons[:, :, :2] = -1
     details = model.score_target(
-        query, scene, persons, boxes, (2, 2), return_details=True
+        query,
+        scene,
+        persons,
+        boxes,
+        (2, 2),
+        return_details=True,
+        fafa_targets=persons[:, :, None],
     )
     assert details["coverage"].item() == 0
     assert details["gated_context"].item() == 0
-    assert details["binding"].item() == -2.5
-    torch.testing.assert_close(details["score"], -2.5 * model.binding_scale[None])
+    assert details["binding"].item() == pytest.approx(-1.1)
+    torch.testing.assert_close(details["score"], -1.1 * model.binding_scale[None])
 
 
 def test_grounding_weights_cannot_be_lowered_by_retrieval_gradients():
@@ -287,10 +308,13 @@ def test_grounding_weights_cannot_be_lowered_by_retrieval_gradients():
         torch.randn(1, 3, 8),
         torch.tensor([[1]]),
         (2, 2),
+        fafa_query=torch.randn(1, 1, 2, 8),
     )
     assert query.membership.count_nonzero() == 2
     assert not query.membership.requires_grad
-    model.score_target(query, scene, persons, boxes, (2, 2)).sum().backward()
+    model.score_target(
+        query, scene, persons, boxes, (2, 2), fafa_targets=persons[:, :, None]
+    ).sum().backward()
     assert model.grounding.score.weight.grad is None
     assert model.person_proj[0].weight.grad.abs().sum() > 0
 
@@ -338,7 +362,7 @@ def test_relation_geometry_reaches_cls_score_and_receives_gradients():
     [
         {"selection_threshold": 0},
         {"identity_threshold": 2},
-        {"missing_penalty": 2},
+        {"missing_penalty": 1},
         {"duplicate_iou": 0},
         {"unknown": 1},
         {"missing_penalty": float("nan")},

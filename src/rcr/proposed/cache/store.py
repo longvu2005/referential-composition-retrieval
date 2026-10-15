@@ -18,6 +18,7 @@ class GalleryCache:
         *,
         scene_root: str | Path | None = None,
         lru_mib: int = 0,
+        native_root: str | Path | None = None,
     ) -> None:
         if not isinstance(lru_mib, int) or lru_mib < 0:
             raise ValueError("cache.lru_mib must be a nonnegative integer")
@@ -75,6 +76,21 @@ class GalleryCache:
             self.image_ids
         ):
             raise ValueError("cache index persons/mask/gallery shape mismatch")
+        from rcr.proposed.cache.native import NativeFAFACache
+
+        self.native = (
+            None if native_root is None else NativeFAFACache(native_root, self)
+        )
+
+    def native_queries(self, samples, max_people: int) -> Tensor:
+        if self.native is None:
+            raise ValueError("data.native_cache is required; run build-cache")
+        return self.native.load_queries(samples, max_people)
+
+    def native_targets(self, indices: Tensor, max_people: int) -> Tensor:
+        if self.native is None:
+            raise ValueError("data.native_cache is required; run build-cache")
+        return self.native.load_targets(indices, max_people)
 
     def validate_gallery(self, image_ids: list[str]) -> None:
         """Require the cached image order to match the finalized benchmark."""

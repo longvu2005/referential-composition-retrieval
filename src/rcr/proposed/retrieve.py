@@ -60,15 +60,13 @@ def _retrieve(
     model_cfg = train_cfg["model"]
     if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
-            "checkpoint architecture is incompatible; train the current shared_person "
-            "model in a separate output directory; DINO/FAFA caches can be reused"
+            "checkpoint architecture is incompatible; train FAFA-native V1 "
+            "in a new output directory after building data.native_cache"
         )
     if checkpoint.get("representation", "shared_person") != "shared_person":
         raise ValueError("checkpoint representation differs from its architecture")
     if model_cfg.get("representation", "shared_person") != "shared_person":
         raise ValueError("checkpoint representation differs from its architecture")
-    if model_cfg.get("binding_mode", "both") != "both":
-        raise ValueError("checkpoint was trained with a different binding score")
     dim = checkpoint["dim"]
     state_untrained = (
         train_cfg.get("loss", {}).get("state_weight", 1.0) == 0
@@ -99,8 +97,12 @@ def _retrieve(
         data_cfg["cache"],
         scene_root=data_cfg.get("dino_cache"),
         lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
+        native_root=data_cfg["native_cache"],
     )
     cache.validate_gallery(data.gallery_ids)
+    cache.native.validate_samples(samples)
+    if cache.native.metadata != checkpoint.get("native_cache"):
+        raise ValueError("native FAFA cache differs from training")
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")
     if (cache.scene_dim, cache.person_dim) != (
@@ -134,6 +136,7 @@ def _retrieve(
         input_dim=checkpoint.get("input_dim", dim),
         dropout=model_cfg.get("dropout", 0.0),
         fine_matching=model_cfg.get("fine_matching"),
+        fda_k=model_cfg.get("fda_k", 6),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
@@ -197,6 +200,7 @@ def _retrieve(
                 "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
                 "best_val_checkpoint_score": checkpoint.get("best_score"),
                 "cache_id": cache.cache_id,
+                "native_cache": cache.native.metadata,
                 "num_queries": len(samples),
                 "num_gallery": len(output["gallery_ids"]),
                 "query_subset": len(samples) != full_num_queries,

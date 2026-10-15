@@ -6,6 +6,7 @@ from rcr.proposed.batch import build_batch, build_supervision
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.model import RCRModel
+from tests.proposed.native_fixtures import NativeFixture
 
 
 class _Tokenizer:
@@ -40,7 +41,7 @@ class _TextEncoder(nn.Module):
         return self.embedding(ids), mask.bool()
 
 
-class _Cache:
+class _Cache(NativeFixture):
     def __init__(self) -> None:
         self.image_ids = ["q1", "q2", "p1", "n1", "p2", "n2"]
         self.patch_hw = (1, 2)
@@ -281,6 +282,7 @@ def test_cached_precision_supports_batch_training(tmp_path, dtype) -> None:
             tmp_path / "features" / f"{i}.pt",
         )
     cache = GalleryCache(tmp_path)
+    cache.native = NativeFixture()
     batch = build_batch(
         [_samples()[0]],
         [["p1", "n1"]],

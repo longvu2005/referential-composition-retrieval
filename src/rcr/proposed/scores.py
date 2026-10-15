@@ -9,7 +9,6 @@ from torch import Tensor
 from rcr.proposed.matching import (
     PersonMatching,
     gather_matched,
-    partial_identity_matching,
 )
 
 
@@ -119,58 +118,54 @@ def combine_scores(
     return result
 
 
-def binding_scores(
-    query_identity: Tensor,
-    target_identity: Tensor,
-    composed: Tensor,
-    target_semantic: Tensor,
-    membership: Tensor,
-    subject_mask: Tensor,
-    target_mask: Tensor | None = None,
+def fafa_binding_scores(
+    query: Tensor,
+    targets: Tensor,
     *,
-    matching: PersonMatching | None = None,
-    identity_threshold: float = 0.2,
-    missing_penalty: float = 2.5,
+    matching: PersonMatching,
+    k: int = 6,
+    missing_penalty: float = 1.1,
 ) -> Tensor:
-    """Pool identity + semantic cosines over the same partial identity assignment.
+    """Native FDA on identity-assigned pairs, pooled equally across Subjects.
 
-    Pool all predicted members, including nulls. An active Subject with no query
-    member also contributes the null penalty rather than disappearing.
-    No gradient flows through identity, assignment or membership weights.
+    query [B,S,Kq,D] and targets [B,Kt,L,D] come from frozen FAFA. The
+    learned Composition supplies reference tokens only to the Context Reasoner.
+    Null members and empty active Subjects keep their contribution to the mean.
     """
-    if not math.isfinite(missing_penalty) or missing_penalty <= 2:
-        raise ValueError("missing_penalty must exceed 2 for normalized cosine scores")
-    if matching is None:
-        matching = partial_identity_matching(
-            query_identity,
-            target_identity,
-            membership,
-            subject_mask,
-            target_mask,
-            identity_threshold=identity_threshold,
-        )
-    with torch.autocast(composed.device.type, enabled=False):
+    if not math.isfinite(missing_penalty) or missing_penalty <= 1:
+        raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
+    if type(k) is not int or k < 1:
+        raise ValueError("fda_k must be a positive integer")
+    if (
+        query.ndim != 4
+        or targets.ndim != 4
+        or query.shape[:3] != matching.membership.shape
+        or query.shape[0] != targets.shape[0]
+        or query.shape[-1] != targets.shape[-1]
+        or targets.shape[2] < 1
+    ):
+        raise ValueError("incompatible FAFA query/target/matching shapes")
+    with torch.no_grad(), torch.autocast(query.device.type, enabled=False):
         member = matching.membership
         selected = member > 0
-        aligned_id = gather_matched(target_identity.detach().float(), matching)
-        query_id = (
-            query_identity.detach().float().masked_fill(~selected.any(1)[..., None], 0)
+        length, dim = targets.shape[-2:]
+        # Gather first: unused/padded detections (even NaN/Inf) cannot enter FDA.
+        flat = targets.detach().float().flatten(2)
+        aligned = gather_matched(flat, matching).reshape(
+            targets.shape[0], query.shape[2], length, dim
         )
-        identity = (
-            F.normalize(query_id, dim=-1) * F.normalize(aligned_id, dim=-1)
-        ).sum(-1)[:, None]
-        aligned_semantic = F.normalize(
-            gather_matched(target_semantic.float(), matching), dim=-1
+        query = query.detach().float().masked_fill(~selected[..., None], 0)
+        similarity = torch.einsum(
+            "bsqd,bqld->bsql",
+            F.normalize(query, dim=-1),
+            F.normalize(aligned, dim=-1),
         )
-        composed = composed.float().masked_fill(~selected[..., None], 0)
-        semantic = (F.normalize(composed, dim=-1) * aligned_semantic[:, None]).sum(-1)
+        fda = similarity.topk(min(k, length), dim=-1).values.mean(-1)
         denominator = member.sum(-1)
         weights = member / denominator[..., None].clamp_min(1e-6)
         active = matching.subjects
 
-        value = (identity + semantic).masked_fill(
-            ~matching.matched[:, None], -missing_penalty
-        )
+        value = fda.masked_fill(~matching.matched[:, None], -missing_penalty)
         per_subject = (value * weights).sum(-1)
         per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
         per_subject = per_subject.masked_fill(~active, 0)

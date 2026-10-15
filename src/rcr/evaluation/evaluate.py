@@ -78,7 +78,11 @@ def evaluate_retrieval_output(
     )
     # New proposed outputs retain a full coarse order as well as the shortlist.
     # Reuse the exact same protocol so coarse/fine mAP have the same denominator.
-    for field, prefix in (("coarse_rankings", "coarse"), ("fine_rankings", "fine")):
+    for field, prefix in (
+        ("coarse_rankings", "coarse"),
+        ("fine_rankings", "fine"),
+        ("fafa_rankings", "fafa"),
+    ):
         if field not in output:
             continue
         branch_result = evaluate_rankings(

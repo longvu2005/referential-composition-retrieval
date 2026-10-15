@@ -48,26 +48,23 @@ only when that method/stage is used.
 
 ## Architecture
 
-The proposed model uses frozen **DINO scene patches** and a frozen **FAFA
-image-only person trunk**. Mean hidden Q-Former tokens produce each cached crop
-feature. The single person path learns `u = LayerNorm(Linear(h))` and
-`z_id = normalize(Linear(u))`. Grounding, composition and target evidence read
-the same `u`. Identity loss and fine retrieval train this person projection;
-fine matching/binding detach identity embeddings and do not directly train the
-identity head. DINO scene features have a separate projection.
+The proposed model keeps DINO scenes, learned Subject grounding, the shared
+FAFA image-only person projection, global-state coarse retrieval and the Context
+Reasoner. Fine matching uses one partial one-to-one **identity** assignment with
+nulls across every Subject.
 
-FAFA, the shared person path, identity + semantic binding, z-score coarse fusion
-and Top-M reranking are fixed in code. The YAML controls dimensions, loss weights,
-training, matching thresholds and runtime settings.
+The semantic retrieval branch now uses **frozen native FAFA multimodal queries**
+and **projected target Q-Former tokens**, scored with native FDA (top-6 token
+similarities). Its binding score is FDA only; identity cosine determines matching
+but is not added to binding. `StructuredComposition` still creates reference
+tokens for the Context Reasoner. Fine score is
+`softplus(binding_log_scale) * B_FAFA + coverage * S_context`.
 
-Fine uses one partial one-to-one identity assignment across all query Subjects,
-with explicit null matches. State and context read those same assigned people;
-unmatched members stay in the score and coverage gates context. Subject roles
-come from query text; case labels and GT member counts are not used at inference.
-Scene/ordered geometry supports conditions outside crops. Global-state coarse
-and evaluation remain. See [equations and limitations](docs/proposed_method.md).
-Existing `shared-person-partial-match-v1` checkpoints and compatible caches
-remain usable. Earlier architectures require training the current model. Default training outputs are `runs/proposed-a`.
+There is one architecture: `fafa-native-partial-match-v1`. Earlier checkpoints
+require retraining in a new run directory; compatible DINO and image-only FAFA
+caches remain reusable. Build the additional native cache before training.
+Default outputs are `runs/proposed-fafa-native`. See
+[equations and limitations](docs/proposed_method.md).
 
 ## Setup and run
 
@@ -100,12 +97,13 @@ environment's Python to use it with a workflow instead of the default venv.
 | `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
 | `requirements/dev.txt` | CPU tests and linting |
 
-Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
-in the proposed YAML. DINO scenes/detections and FAFA person features live in
-separate directories. `build-cache --cache-stage dino` builds/reuses the DINO
-source; `--cache-stage persons` builds/reuses FAFA only. The default runs both.
-Completed compatible caches are skipped before model/worker loading; interrupted
-builds resume saved images. Training/retrieval join both caches without FAFA.
+Set `data.dino_cache`, `data.cache`, `data.native_cache`, raw-image paths and
+`person_encoder.python` in the proposed YAML. Keep the three directories
+separate. `--cache-stage dino` builds scenes/detections; `persons` builds pooled
+image-only features; `native` adds multimodal queries for all Subject/crop
+candidates and target tokens. The default `all` ensures all three caches.
+Complete compatible stages are reused; interrupted native extraction resumes
+saved shards. Train/retrieve read caches without loading native FAFA.
 See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash

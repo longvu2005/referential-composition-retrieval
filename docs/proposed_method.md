@@ -1,4 +1,4 @@
-# Proposed method: shared partial matching without case labels
+# Proposed method: native FAFA composition with relational context
 
 ## Frozen features
 
@@ -65,12 +65,13 @@ mentions and the complete change text. It keeps one token per Subject/person,
 plus CLS/change tokens. Subject summaries are injected into marker tokens, while
 individual members remain available. Fine composition receives detached
 `logit(m_si)` (unselected slots are masked), giving a `log(m_si)` key prior.
-Person-token outputs are normalized into `z_comp_si`. Roles remain distinct
-in one common composition, without branching on case.
+The output is the reference for the Context Reasoner only. It no longer
+creates a semantic retrieval embedding. Roles remain distinct without branching
+on case.
 
 Every person-semantic input above is the unnormalized `u`,
 including both grounding and composition. Target evidence/context also reads
-aligned `u`; cosine scoring alone L2-normalizes it. Query and target share the
+aligned `u`; native FDA uses a separate frozen FAFA representation. Query and target share the
 same person projection and LayerNorm. Scene projection remains independent and
 can have a different raw input width. No composition residual gate is added.
 
@@ -109,22 +110,45 @@ is detached in both train/retrieve. Semantic scores never change the assignment.
 No identity label is used. Normalization balances Subjects of different predicted
 sizes, without consulting GT member counts.
 
-## Aligned state, context and missing evidence
+## Native composition, aligned FDA and missing evidence
 
-Let `pi(i)` denote the assigned target or null. State reads that target only:
+For each public Subject slot and **every** detected query crop:
 
 ```text
-e_si = cosine(z_comp_si, z_sem_t,pi(i))
-E_si = d_i,pi(i) + e_si                    # matched
-E_si = -missing_penalty                   # null
-B_s = sum_i w_si E_si                     # includes null members
-B_s = -missing_penalty                   # active Subject with no query member
-B = mean_active_subjects B_s
+z_F_si = FAFA.extract_features(crop_qi, condition_s, mode="multimodal")
+         .multimodal_embeds
+V_F_tj = FAFA.extract_target_features(crop_tj, mode="mean")[0]
+a_F_si,j = mean(topk(dot(normalize(z_F_si), normalize(V_F_tj[l])), k=6))
 ```
 
-Both cosine terms are normalized. `missing_penalty > 2` keeps null below the
-minimum two-term score; its default is 2.5. Missing members stay in the pooling
-denominator. This is graded evidence, not hard rejection by detector counts.
+The pinned FAFA code performs image/text interaction inside its multimodal
+Q-Former, then projects the first text-position fusion token using `text_proj`.
+The target path keeps every Q-Former token after `vision_proj` and normalization.
+There is no learned projection between these native query and target features.
+Target cache uses `cache.storage_dtype`; query cache stays FP32. FDA arithmetic
+renormalizes cached features in FP32, including under AMP.
+
+`subject_conditions` splits a change only when each explicit Subject clause
+mentions its own Subject and every Subject has a clause. Ambiguous/group/relation
+text is retained, with the current role expressed as “the reference person”.
+It never reads case labels, GT identities or member counts. Complete original
+change text still enters the Context Reasoner. Independent crop composition
+alone does not enforce group/relation correctness.
+
+Let `pi(i)` be the unchanged identity assignment or null:
+
+```text
+E_si = a_F_si,pi(i)                        # matched
+E_si = -missing_penalty                    # null
+B_s = sum_i w_si E_si                      # includes null members
+B_s = -missing_penalty                     # active Subject with no member
+B_FAFA = mean_active_subjects B_s
+```
+
+Identity cosine is not added again. FDA lies in [-1,1], so the initial penalty
+is 1.1 and must exceed 1. This is an uncalibrated starting value. Missing members
+stay in the pooling denominator. An empty selection still blocks contextual
+retrieval gradients; V1 deliberately preserves grounding/matching behavior.
 
 `EvidenceBinding` conditions scene patches on the composed reference, but its
 person inputs are gathered using `pi`. Target evidence and geometry are injected
@@ -143,7 +167,7 @@ a proof of correct semantic ownership.
 ```text
 C_s = sum_i w_si [pi(i) is not null]       # zero for an empty query Subject
 C = mean_active_subjects C_s
-S_fine = softplus(binding_log_scale) * B + C * S_context
+S_fine = softplus(binding_log_scale) * B_FAFA + C * S_context
 ```
 
 The scale starts at 1. An entirely unmatched query has zero context contribution
@@ -162,7 +186,10 @@ L = L_ground + 0.1 L_id + L_ret + L_global_state
 - `L_id` trains both the person projection and identity
   head. `L_ground` and `L_ret` also train that person projection. Fine still
   detaches both identity inputs; `L_ret` does not directly train the identity
-  head. The target semantic/context path retains autograd. No identity/state
+  head. The target context path retains autograd. Native FAFA/FDA is frozen; retrieval
+  trains the binding scale and Context Reasoner, including its reference
+  composition, person/scene/text projections. It does not train a new composed
+  embedding space or backpropagate through selection/assignment. No identity/state
   orthogonality loss or identity removal is introduced.
 - Grounding trains raw logits using the existing masked BCE. Retrieval cannot
   lower membership weights to avoid missing penalties. Both losses train shared
@@ -185,10 +212,15 @@ LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
 
 ## Configuration and checkpoints
 
-There is one architecture, with tag `shared-person-partial-match-v1`. Existing
-checkpoints from this path keep their parameter keys, scoring and loss formulas.
-Earlier architectures require training the current model. Compatible DINO/FAFA
-caches need no rebuild. Main outputs default to `runs/proposed-a`.
+There is one architecture, `fafa-native-partial-match-v1`. Older checkpoints
+are explicitly rejected: train V1 in `runs/proposed-fafa-native` or another new
+run directory. Keep compatible DINO/image-only FAFA caches and build only the
+new `data.native_cache` if they already exist. The native manifest binds the
+person cache ID, encoder metadata, checkpoint hash, crop order and public
+instruction/Subject order. Query text changes require a new native cache.
+All train/val/test query features are frozen, label-free preprocessing; no
+validation/test labels are used to build native features. Training accesses
+only train candidates; validation selects checkpoints and fusion coefficients.
 
 `model.fine_matching` defines selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
@@ -202,3 +234,10 @@ Subject/overall coverage, binding, raw/gated context and final score from the sa
 forward pass. Training logs fine coverage, member count, unmatched-member rate
 and empty-selection rate to expose early hard-grounding starvation. Tiny tests
 verify structure and numerics, not benchmark mAP.
+
+Saved rankings include `fafa_rankings` in addition to coarse/fine/fused rankings.
+This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
+order outside it; it is not the full-gallery FAFA + SetMatch baseline.
+`fafa_binding`, `context` and `coverage` are aligned with `coarse_topm` in each
+saved output. The evaluator reports `fafa_*` metrics with its existing official
+protocol. These scores separate embedding quality from context/fusion effects.

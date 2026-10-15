@@ -13,9 +13,10 @@ from rcr.proposed.cache.build import check_cache_config
 from rcr.proposed.cache.dino import build_cache
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss, identity_loss
+from rcr.proposed.matching import partial_identity_matching
 from rcr.proposed.nn.encoders import ImageEncoder
 from rcr.proposed.nn.model import RCRModel
-from rcr.proposed.scores import binding_scores
+from rcr.proposed.scores import fafa_binding_scores
 from tests.proposed.test_build_cache import (
     Backbone,
     Detector,
@@ -64,15 +65,18 @@ def test_shared_person_supports_different_person_and_scene_widths():
 
 def test_identity_and_state_must_match_the_same_target_person():
     # Person A has identity=1, semantics=0. Person B has identity=0, semantics=1.
-    result = binding_scores(
+    matching = partial_identity_matching(
         torch.tensor([[[1.0, 0.0]]]),
-        torch.tensor([[[1.0, 0.0], [0.0, 1.0]]]),
-        torch.tensor([[[[1.0, 0.0]]]]),
-        torch.tensor([[[0.0, 1.0], [1.0, 0.0]]]),
+        torch.eye(2)[None],
         torch.ones(1, 1, 1),
         torch.ones(1, 1, dtype=torch.bool),
     )
-    assert result.item() == 1.0  # ID selects A; state also reads A.
+    result = fafa_binding_scores(
+        torch.tensor([[[[1.0, 0.0]]]]),
+        torch.tensor([[[[0.0, 1.0]], [[1.0, 0.0]]]]),
+        matching=matching,
+    )
+    assert result.item() == 0.0  # ID selects A; FDA reads A's tokens.
 
 
 def test_binding_respects_member_masks_and_empty_targets():
@@ -84,13 +88,11 @@ def test_binding_respects_member_masks_and_empty_targets():
     members = torch.tensor([[[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]] * 2)
     subjects = torch.tensor([[True, False]] * 2)
     mask = torch.tensor([[True, False], [False, False]])
-    result = binding_scores(qid, tid, comp, semantic, members, subjects, mask)
-    assert result[1] == -2.5
-    result.sum().backward()
-    assert qid.grad is tid.grad is None
-    assert semantic.grad[:, 1].count_nonzero() == 0
-    assert comp.grad[:, 1].count_nonzero() == 0
-    assert all(torch.isfinite(x.grad).all() for x in (comp, semantic))
+    matching = partial_identity_matching(qid, tid, members, subjects, mask)
+    result = fafa_binding_scores(comp, semantic[:, :, None], matching=matching)
+    assert result[1].item() == pytest.approx(-1.1)
+    assert not result.requires_grad
+    assert all(x.grad is None for x in (qid, tid, comp, semantic))
 
 
 class FakeFAFA(nn.Module):
@@ -98,10 +100,27 @@ class FakeFAFA(nn.Module):
         super().__init__()
         self.Qformer = SimpleNamespace(config=SimpleNamespace(hidden_size=5))
         self.weight = nn.Parameter(torch.ones(1))
+        self.vision_proj = nn.Linear(5, 3)
+        self.query_tokens = nn.Parameter(torch.ones(1, 7, 5))
+
+    def extract_target_features(self, pixels, mode):
+        assert mode == "mean"
+        assert not self.training and not self.weight.requires_grad
+        features = torch.nn.functional.normalize(
+            torch.arange(21.0).reshape(1, 7, 3).expand(len(pixels), -1, -1), dim=-1
+        )
+        return features, None
 
     def extract_features(self, samples, mode):
-        assert mode == "image" and set(samples) == {"image"}
         assert not self.training and not self.weight.requires_grad
+        if mode == "multimodal":
+            assert len(samples["text_input"]) == len(samples["image"])
+            return SimpleNamespace(
+                multimodal_embeds=torch.tensor(
+                    [[0.6, 0.8, 0.0]] * len(samples["image"])
+                )
+            )
+        assert mode == "image" and set(samples) == {"image"}
         # Hidden tokens differ from the projected features on purpose.
         tokens = (
             torch.arange(10.0).reshape(1, 2, 5).expand(len(samples["image"]), -1, -1)

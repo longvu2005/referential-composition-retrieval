@@ -46,6 +46,8 @@ def test_model_forward_shape_and_grad() -> None:
         target_persons=target_persons,
         target_boxes=_boxes(2, 4),
         patch_hw=(2, 3),
+        fafa_query=torch.randn(2, 2, 3, 5),
+        fafa_targets=torch.randn(2, 4, 7, 5),
     )
 
     assert logits.shape == (2, 2, 3)
@@ -101,6 +103,8 @@ def test_binding_order_and_composed_reference_are_shared() -> None:
         torch.randn(1, 2, 8),
         _boxes(1, 2),
         (2, 2),
+        fafa_query=torch.randn(1, 1, 2, 5),
+        fafa_targets=torch.randn(1, 2, 7, 5),
     )
     a.remove()
     b.remove()
@@ -122,15 +126,16 @@ def test_empty_query_cannot_gain_context_from_reference_prior() -> None:
         reference=ref,
         mask=mask,
         prior=torch.zeros(1, 5),
-        composed=torch.empty(1, 1, 0, 8),
+        fafa=torch.empty(1, 1, 0, 5),
         membership=torch.empty(1, 1, 0),
         subjects=torch.ones(1, 1, dtype=torch.bool),
     )
-    a = model.score_target(query, scene, persons, boxes, (2, 2))
+    native = torch.randn(1, 2, 7, 5)
+    a = model.score_target(query, scene, persons, boxes, (2, 2), fafa_targets=native)
     query.prior = torch.tensor([[0.0, 0.0, 0.0, -15.0, 0.0]])
-    b = model.score_target(query, scene, persons, boxes, (2, 2))
+    b = model.score_target(query, scene, persons, boxes, (2, 2), fafa_targets=native)
     torch.testing.assert_close(a, b)
-    torch.testing.assert_close(a, -2.5 * model.binding_scale[None])
+    torch.testing.assert_close(a, -1.1 * model.binding_scale[None])
 
 
 def test_empty_query_and_target_are_finite() -> None:
@@ -146,6 +151,8 @@ def test_empty_query_and_target_are_finite() -> None:
         torch.empty(1, 0, 8),
         torch.empty(1, 0, 4),
         (2, 2),
+        fafa_query=torch.empty(1, 1, 0, 5),
+        fafa_targets=torch.empty(1, 0, 7, 5),
     )
     assert logits.shape == (1, 1, 0)
     assert torch.isfinite(score).all()
@@ -174,12 +181,16 @@ def test_batched_scores_equal_independent_pairs() -> None:
         t_box,
         (2, 2),
     )
-    both = model(*args)[1]
+    native = dict(
+        fafa_query=torch.randn(2, 1, 2, 5), fafa_targets=torch.randn(2, 3, 7, 5)
+    )
+    both = model(*args, **native)[1]
     one = torch.stack(
         [
-            model(*[x[i : i + 1] if isinstance(x, torch.Tensor) else x for x in args])[
-                1
-            ][0]
+            model(
+                *[x[i : i + 1] if isinstance(x, torch.Tensor) else x for x in args],
+                **{key: value[i : i + 1] for key, value in native.items()},
+            )[1][0]
             for i in range(2)
         ]
     )
@@ -213,6 +224,8 @@ def test_model_ignores_padded_change_and_people() -> None:
         change_mask=torch.tensor([[True, True, True, False, False]]),
         query_person_mask=torch.tensor([[True, True, False]]),
         target_mask=torch.tensor([[True, True, False]]),
+        fafa_query=torch.randn(1, 2, 3, 5),
+        fafa_targets=torch.randn(1, 3, 7, 5),
     )
 
     _, expected = model(**kwargs)
@@ -244,6 +257,8 @@ def test_inference_ignores_padded_subject_and_supports_repeated_mentions() -> No
         target_boxes=_boxes(1, 3),
         patch_hw=(2, 3),
         subject_mask=torch.tensor([[True, False]]),
+        fafa_query=torch.randn(1, 2, 3, 5),
+        fafa_targets=torch.randn(1, 3, 7, 5),
         subject_token_mask=torch.tensor(
             [[[True, False, False, True, False], [False] * 5]]
         ),
@@ -256,7 +271,13 @@ def test_inference_ignores_padded_subject_and_supports_repeated_mentions() -> No
     torch.testing.assert_close(actual, expected)
     # Removing the padded Subject entirely must produce the same score.
     trimmed = dict(kwargs)
-    for key in ("selections", "subject_pos", "subject_mask", "subject_token_mask"):
+    for key in (
+        "selections",
+        "subject_pos",
+        "subject_mask",
+        "subject_token_mask",
+        "fafa_query",
+    ):
         trimmed[key] = kwargs[key][:, :1]
     _, actual = model(**trimmed)
     torch.testing.assert_close(actual, expected)

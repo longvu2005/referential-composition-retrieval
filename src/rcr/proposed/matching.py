@@ -14,7 +14,7 @@ def matching_settings(config: dict | None = None) -> dict[str, float]:
     defaults = {
         "selection_threshold": 0.5,
         "identity_threshold": 0.2,
-        "missing_penalty": 2.5,
+        "missing_penalty": 1.1,
         "duplicate_iou": 0.9,
     }
     config = {} if config is None else config
@@ -28,9 +28,9 @@ def matching_settings(config: dict | None = None) -> dict[str, float]:
         raise ValueError("selection_threshold must be in (0, 1]")
     if not -1 <= settings["identity_threshold"] <= 1:
         raise ValueError("identity_threshold must be in [-1, 1]")
-    # Both active cosine terms lie in [-1, 1]. Null must be worse than -2.
-    if settings["missing_penalty"] <= 2:
-        raise ValueError("missing_penalty must exceed 2 for the two cosine terms")
+    # Native FDA is a mean of normalized dot products in [-1, 1].
+    if settings["missing_penalty"] <= 1:
+        raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
     if not 0 < settings["duplicate_iou"] <= 1:
         raise ValueError("duplicate_iou must be in (0, 1]; 1 disables deduplication")
     return settings
