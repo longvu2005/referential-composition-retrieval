@@ -31,7 +31,7 @@ model:
   text_model: google-bert/bert-base-uncased
   dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
-  representation: dual       # dual | shared_person | shared (legacy control)
+  representation: shared_person      # dual | shared_person | shared (legacy control)
   binding_mode: both          # both | identity | semantic | none
   identity_dim: 128
   state_dim: 128
