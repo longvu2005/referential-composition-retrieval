@@ -33,8 +33,6 @@ def fafa_spec(cfg: dict) -> dict:
 
 def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) -> None:
     """Share files only; native FAFA stays in its own dependency environment."""
-    if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
-        return
     worker = Path(__file__).resolve().parents[4] / "tools/cache_fafa.py"
     with tempfile.TemporaryDirectory(prefix="rcr-person-") as directory:
         path = Path(directory) / "config.yaml"
@@ -47,17 +45,16 @@ def run_person_worker(cfg: dict, *, prepare: bool = False, force: bool = False) 
         subprocess.run(command, check=True)
 
 
-def check_cache_config(cache: GalleryCache, cfg: dict) -> None:
+def check_cache_config(
+    cache: GalleryCache, cfg: dict, *, person_backend: str = "fafa"
+) -> None:
     """Check encoder provenance only when building or explicitly reusing a cache."""
-    expected = cfg.get("person_encoder")
-    if expected is None:
+    if "person_encoder" not in cfg:
         return  # Small in-memory test configs have no external encoder spec.
     if cache._scene_cache is not None:
-        check_cache_config(
-            cache._scene_cache, {**cfg, "person_encoder": {"backend": "dino"}}
-        )
+        check_cache_config(cache._scene_cache, cfg, person_backend="dino")
     if cache.format_version == 1:
-        if expected["backend"] != "dino" or not cfg.get("cache", {}).get(
+        if person_backend != "dino" or not cfg.get("cache", {}).get(
             "allow_legacy_dino", False
         ):
             raise ValueError("legacy DINO cache requires cache.allow_legacy_dino=true")
@@ -70,13 +67,13 @@ def check_cache_config(cache: GalleryCache, cfg: dict) -> None:
     if cache.format_version not in (2, 3):
         raise ValueError("unsupported cache format")
     actual = cache.encoder_metadata["person_encoder"] or {}
-    if actual.get("backend") != expected["backend"]:
+    if actual.get("backend") != person_backend:
         raise ValueError("cache person encoder differs; use a matching cache directory")
     if cache.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
         raise ValueError("cache image encoder/preprocessing differs from config")
     if cache.encoder_metadata["detector"] != cfg["detector"]:
         raise ValueError("cache detector differs from config")
-    if expected["backend"] == "fafa":
+    if person_backend == "fafa":
         native_cfg = load_fafa_config(cfg)
         if actual.get("spec") != fafa_spec(native_cfg):
             raise ValueError("cache FAFA checkpoint/source/preprocessing spec differs")
@@ -86,42 +83,36 @@ def check_cache_config(cache: GalleryCache, cfg: dict) -> None:
                 raise ValueError("cache FAFA checkpoint weights differ")
 
 
-def dino_root(cfg: dict) -> Path:
-    if cfg.get("person_encoder", {}).get("backend", "dino") == "dino":
-        return Path(cfg["data"]["cache"])
-    return Path(cfg["data"]["dino_cache"])
-
-
-def existing_cache(cfg: dict, root: Path, *, scene_root: Path | None = None):
+def existing_cache(
+    cfg: dict,
+    root: Path,
+    *,
+    scene_root: Path | None = None,
+    person_backend: str = "fafa",
+):
     if not (root / "index.pt").is_file() or (root / ".building").exists():
         return None
     cache = GalleryCache(root, scene_root=scene_root)
-    check_cache_config(cache, cfg)
+    check_cache_config(cache, cfg, person_backend=person_backend)
     return cache
 
 
 def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     """Build DINO and/or FAFA independently; completed caches stay immutable."""
-    backend = cfg.get("person_encoder", {}).get("backend", "dino")
-    if backend not in ("dino", "fafa"):
-        raise ValueError("person_encoder.backend must be dino or fafa")
     if stage not in ("all", "dino", "persons"):
         raise ValueError("cache stage must be all, dino or persons")
-    if stage == "persons" and backend != "fafa":
-        raise ValueError("persons stage requires person_encoder.backend=fafa")
     data_cfg = cfg["data"]
-    root = dino_root(cfg)
-    if backend == "fafa" and root.resolve() == Path(data_cfg["cache"]).resolve():
+    root = Path(data_cfg["dino_cache"])
+    if root.resolve() == Path(data_cfg["cache"]).resolve():
         raise ValueError("data.dino_cache and data.cache must be separate directories")
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
-    dino_cfg = {**cfg, "person_encoder": {"backend": "dino"}}
-    source = existing_cache(dino_cfg, root)
+    source = existing_cache(cfg, root, person_backend="dino")
     if source is not None:
         source.validate_gallery(data.gallery_ids)
         print(f"Using existing DINO cache: {root}", flush=True)
     elif stage == "persons":
         raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
-    if backend == "fafa" and stage != "dino" and source is not None:
+    if stage != "dino" and source is not None:
         ready = existing_cache(cfg, Path(data_cfg["cache"]), scene_root=root)
         if ready is not None:
             ready.validate_gallery(data.gallery_ids)
@@ -129,5 +120,5 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
             return
     if source is None:
         _prepare_dino(cfg, data, root)
-    if backend == "fafa" and stage != "dino":
+    if stage != "dino":
         run_person_worker(cfg)

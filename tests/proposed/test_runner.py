@@ -11,7 +11,7 @@ import torch
 import yaml
 from PIL import Image
 
-from rcr.proposed import experiments as runner
+from rcr.proposed import runner
 from rcr.proposed import train as training_cli
 from tests.proposed.test_build_cache import (
     Backbone as ImageBackbone,
@@ -73,10 +73,17 @@ def experiment(tmp_path):
         "final_dir": str(final),
         "image_root": str(images),
         "cache": str(tmp_path / "cache"),
+        "dino_cache": str(tmp_path / "dino"),
     }
     cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
     cfg["data"] = data
-    cfg["person_encoder"]["backend"] = "dino"
+    native = yaml.safe_load(Path("configs/fafa.yaml").read_text())
+    weights = tmp_path / "native.pt"
+    weights.write_bytes(b"fixture weights")
+    native["checkpoint"]["path"] = str(weights)
+    native_path = tmp_path / "native.yaml"
+    native_path.write_text(yaml.safe_dump(native))
+    cfg["person_encoder"]["fafa_config"] = str(native_path)
     cfg["runtime"]["device"] = "cpu"
     cfg["image_encoder"].update(
         model="tiny-image", scene_size=[8, 8], person_size=[8, 4]
@@ -84,6 +91,7 @@ def experiment(tmp_path):
     cfg["detector"]["model"] = "tiny-detector"
     cfg["model"].update(
         text_model="tiny-text",
+        dim=8,
         identity_dim=6,
         state_dim=4,
         num_heads=2,
@@ -129,6 +137,19 @@ def local_stages(monkeypatch):
             AutoProcessor=factory(DetectorProcessor),
             AutoModelForZeroShotObjectDetection=factory(Detector),
         ),
+    )
+    from rcr.proposed.cache import build, fafa
+    from tests.proposed.test_person_representation import FakeFAFA
+
+    monkeypatch.setattr(
+        fafa,
+        "load_fafa",
+        lambda *a: (FakeFAFA(), {}, lambda crop: torch.ones(3, 4, 4), {}),
+    )
+    monkeypatch.setattr(
+        build,
+        "run_person_worker",
+        lambda cfg, **kw: None if kw.get("prepare") else fafa.finish_fafa_cache(cfg),
     )
     calls = []
 
@@ -315,7 +336,7 @@ def test_training_rejects_wrong_person_backend_without_native_assets(
 ):
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path)])
-    cfg["person_encoder"].update(backend="fafa", fafa_config="missing-fafa.yaml")
+    cfg["data"]["cache"] = cfg["data"]["dino_cache"]
     path.write_text(yaml.safe_dump(cfg))
     with pytest.raises(ValueError, match="cache person encoder differs"):
         cli.main(["train", "--config", str(path)])

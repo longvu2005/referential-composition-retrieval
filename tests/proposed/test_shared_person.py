@@ -1,10 +1,9 @@
-"""Contracts for the isolated jointly learned person representation."""
+"""Contracts for the jointly learned person representation."""
 
 import copy
 
 import pytest
 import torch
-from torch import nn
 
 from rcr.proposed import retrieve as inference
 from rcr.proposed.losses import (
@@ -24,7 +23,6 @@ def _model(*, selected=True):
         2,
         input_dim=10,
         person_input_dim=12,
-        representation="shared_person",
         fine_matching={"identity_threshold": -1.0, "duplicate_iou": 1.0},
     )
     if selected:
@@ -58,7 +56,7 @@ def _query(model, batch):
     )
 
 
-def _fine(model, batch, query, mode="both"):
+def _fine(model, batch, query):
     return model.score_target(
         query.repeat_candidates(batch["positive_mask"].shape[1]),
         batch["target_scene"].flatten(0, 1),
@@ -66,7 +64,6 @@ def _fine(model, batch, query, mode="both"):
         batch["target_boxes"].flatten(0, 1),
         (2, 3),
         batch["target_mask"].flatten(0, 1),
-        binding_mode=mode,
         return_details=True,
     )
 
@@ -89,7 +86,6 @@ def test_identity_loss_updates_shared_person_and_identity_head_only():
     _assert_person_gradient(model)
     assert all(p.grad.abs().sum() > 0 for p in model.identity_head.parameters())
     assert all(p.grad is None for p in model.visual_proj.parameters())
-    assert model.semantic_proj is None
     optimizer.step()
     for name, parameter in model.named_parameters():
         if name.startswith(("person_proj.", "identity_head.")):
@@ -117,7 +113,7 @@ def test_fine_gradients_reach_query_and_target_person_but_not_identity(branch):
     batch["target_persons"].requires_grad_()
     query = _query(model, batch)
     query.identity.retain_grad()
-    details = _fine(model, batch, query, "semantic")
+    details = _fine(model, batch, query)
     assert details["coverage"].gt(0).all()
     assert not query.membership.requires_grad
     assert not query.prior.requires_grad
@@ -194,8 +190,6 @@ def test_grounding_composition_identity_and_target_evidence_read_same_u():
     assert identity[1] is projected[1]
     # LayerNorm u is not L2-normalized before evidence/composition.
     assert not torch.allclose(projected[0].norm(dim=-1), torch.ones(2, 3))
-    assert isinstance(model.composition.person_proj, nn.Identity)
-    assert model.target_builder.identity_proj is None
     assert model.binding_log_scale is not None
     assert model.person_proj[0].in_features == 12
     assert model.visual_proj.in_features == 10
@@ -240,14 +234,11 @@ def test_zero_person_images_keep_null_penalties_and_finite_backward(
     for key in ("target_persons", "target_boxes", "target_mask"):
         batch[key] = batch[key][:, :, :target_people]
     query = _query(model, batch)
-    for mode in ("both", "identity", "semantic", "none"):
-        details = _fine(model, batch, query, mode)
-        assert details["coverage"].count_nonzero() == 0
-        torch.testing.assert_close(details["binding"], torch.full((6,), -2.5))
-        torch.testing.assert_close(details["gated_context"], torch.zeros(6))
-        torch.testing.assert_close(
-            details["score"], -2.5 * model.binding_scale.expand(6)
-        )
+    details = _fine(model, batch, query)
+    assert details["coverage"].count_nonzero() == 0
+    torch.testing.assert_close(details["binding"], torch.full((6,), -2.5))
+    torch.testing.assert_close(details["gated_context"], torch.zeros(6))
+    torch.testing.assert_close(details["score"], -2.5 * model.binding_scale.expand(6))
     details["score"].sum().backward()
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
@@ -313,49 +304,6 @@ def test_checkpoint_roundtrip_reproduces_query_and_all_fine_details(tmp_path):
     actual = _fine(restored, batch, actual_query)
     for name in expected:
         torch.testing.assert_close(expected[name], actual[name], rtol=0, atol=0)
-    with pytest.raises(RuntimeError):
-        RCRModel(8, 6, 2, input_dim=10, person_input_dim=12).load_state_dict(
-            torch.load(path, weights_only=True)
-        )
-
-
-@pytest.mark.parametrize(
-    "saved,requested",
-    [
-        ("dual", "shared_person"),
-        ("shared_person", "dual"),
-        ("shared", "shared_person"),
-    ],
-)
-def test_representation_mismatch_rejected_before_data_or_backbones(
-    tmp_path,
-    monkeypatch,
-    saved,
-    requested,
-):
-    kwargs = {"binding_mode": "none"} if saved == "shared" else {}
-    model = RCRModel(8, 6, 2, representation=saved, **kwargs)
-    path = tmp_path / "checkpoint.pt"
-    # Older dual/shared checkpoints have no top-level representation field.
-    torch.save(
-        {
-            "config": {"model": {"representation": saved}},
-            "architecture_version": model.architecture_version,
-            "model": model.state_dict(),
-        },
-        path,
-    )
-    monkeypatch.setattr(
-        inference, "load_rcr_data", lambda *a: pytest.fail("loaded data")
-    )
-    with pytest.raises(ValueError, match="representation mismatch"):
-        inference.retrieve(
-            {
-                "checkpoint": str(path),
-                "runtime": {"device": "cpu"},
-                "model": {"representation": requested},
-            }
-        )
 
 
 def test_checkpoint_representation_metadata_cannot_disagree(tmp_path):
@@ -368,5 +316,5 @@ def test_checkpoint_representation_metadata_cannot_disagree(tmp_path):
         },
         path,
     )
-    with pytest.raises(ValueError, match="differs from its saved config"):
+    with pytest.raises(ValueError, match="differs from its architecture"):
         inference.retrieve({"checkpoint": str(path), "runtime": {"device": "cpu"}})

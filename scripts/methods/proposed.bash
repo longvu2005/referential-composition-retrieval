@@ -12,7 +12,7 @@ python_bin="${PYTHON:-.venv-proposed/bin/python}"
 if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py run --config configs/proposed.yaml \
         --prepare --build-cache --train --splits val
-    "$python_bin" tools/run.py ablate --config configs/calibration.yaml --splits val
+    "$python_bin" tools/run.py calibrate --config configs/calibration.yaml
     # Publish the chosen model's validation result under the same root as test.
     "$python_bin" tools/run.py run --config runs/calibration/selected.yaml --splits val
 else

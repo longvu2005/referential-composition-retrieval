@@ -79,7 +79,7 @@ def test_target_person_cannot_satisfy_two_query_people(separate_subjects):
         matching=result,
     )
     # One complete ID+state match scores 2, one missing member scores -2.5.
-    torch.testing.assert_close(scores["both"], torch.tensor([-0.25]))
+    torch.testing.assert_close(scores, torch.tensor([-0.25]))
 
 
 def test_duplicate_target_detections_cannot_inflate_coverage():
@@ -101,8 +101,8 @@ def test_null_is_penalized_and_empty_targets_have_finite_gradients(target_people
     result = binding_scores(
         query, target, composed, semantic, torch.ones(1, 1, 1), torch.tensor([[True]])
     )
-    assert all(value.item() == -2.5 for value in result.values())
-    result["both"].sum().backward()
+    assert result.item() == -2.5
+    result.sum().backward()
     assert query.grad is None
     assert all(
         x.grad is not None and torch.isfinite(x.grad).all()
@@ -118,10 +118,7 @@ def test_semantic_scoring_cannot_switch_the_identity_assignment():
     scores = binding_scores(
         query, target, composed, semantic, torch.ones(1, 1, 1), torch.tensor([[True]])
     )
-    assert scores["identity"].item() == 1
-    assert scores["semantic"].item() == 0
-    assert scores["both"].item() == 1
-    assert scores["none"].item() == 0
+    assert scores.item() == 1
 
 
 def test_active_subject_with_no_grounded_member_remains_missing():
@@ -140,7 +137,7 @@ def test_active_subject_with_no_grounded_member_remains_missing():
         subjects,
         matching=match,
     )
-    torch.testing.assert_close(scores["both"], torch.tensor([-0.25]))
+    torch.testing.assert_close(scores, torch.tensor([-0.25]))
 
 
 def test_assignment_matches_bruteforce_on_small_sets():
@@ -181,6 +178,9 @@ def _controlled_pair():
     torch.manual_seed(28)
     model = RCRModel(8, 2, 2).eval()
     with torch.no_grad():
+        model.person_proj[0].weight.copy_(torch.eye(8))
+        model.person_proj[0].bias.zero_()
+        model.person_proj[1] = torch.nn.Identity()
         model.identity_head.proj.weight.zero_()
         model.identity_head.proj.weight[:, :2] = torch.eye(2)
         model.identity_head.proj.bias.zero_()
@@ -227,7 +227,7 @@ def test_unmatched_target_person_is_invisible_to_state_and_context():
     assert model.identity_head.proj.weight.grad is None
 
 
-def test_all_score_modes_share_one_assignment_and_aligned_context(monkeypatch):
+def test_binding_and_context_share_one_assignment(monkeypatch):
     from rcr.proposed.nn import model as model_module
 
     model, query, scene, persons, boxes = _controlled_pair()
@@ -245,9 +245,9 @@ def test_all_score_modes_share_one_assignment_and_aligned_context(monkeypatch):
         lambda *a, **k: pytest.fail("fresh target selection"),
     )
     result = model.score_target(
-        query, scene, persons, boxes, (2, 2), return_components=True
+        query, scene, persons, boxes, (2, 2), return_details=True
     )
-    assert set(result) == {"both", "identity", "semantic", "none"}
+    assert torch.isfinite(result["score"]).all()
     assert calls == [1]
 
 
@@ -292,7 +292,7 @@ def test_grounding_weights_cannot_be_lowered_by_retrieval_gradients():
     assert not query.membership.requires_grad
     model.score_target(query, scene, persons, boxes, (2, 2)).sum().backward()
     assert model.grounding.score.weight.grad is None
-    assert model.semantic_proj.weight.grad.abs().sum() > 0
+    assert model.person_proj[0].weight.grad.abs().sum() > 0
 
 
 def test_geometry_preserves_direction_and_masks_nulls():
@@ -349,14 +349,13 @@ def test_matching_config_rejects_invalid_settings(config):
         matching_settings(config)
 
 
-@pytest.mark.parametrize("representation", ["dual", "shared_person"])
-def test_retrieval_does_not_read_case_identities_or_positive_labels(representation):
+def test_retrieval_does_not_read_case_identities_or_positive_labels():
     from rcr.proposed.ranking import retrieve_rankings
     from tests.proposed.test_retrieval import _Cache, _sample, _TextEncoder, _Tokenizer
 
     torch.manual_seed(14)
     cache, encoder = _Cache(), _TextEncoder()
-    model = RCRModel(8, 6, 2, representation=representation)
+    model = RCRModel(8, 6, 2)
     sample = _sample()
     unlabeled = {
         key: value

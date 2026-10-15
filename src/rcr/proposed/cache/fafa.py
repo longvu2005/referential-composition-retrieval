@@ -67,7 +67,7 @@ def finish_fafa_cache(cfg: dict) -> None:
         raise ValueError("FAFA output must differ from the DINO source directory")
 
     source = GalleryCache(source_root)
-    check_cache_config(source, {**cfg, "person_encoder": {"backend": "dino"}})
+    check_cache_config(source, cfg, person_backend="dino")
     if source.cache_id is None:
         raise ValueError("DINO source requires a cache_id to bind FAFA features safely")
 

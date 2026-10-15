@@ -52,7 +52,7 @@ checkpoint, changing configs/seeds or running only one cache stage.
 .venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
 
 # Select both inference coefficients jointly on val; only that pair reaches test.
-.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
+.venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
 
 # A later test run uses the same frozen selection.
 .venv-proposed/bin/python tools/run.py run --config runs/calibration/selected.yaml --splits test
@@ -71,12 +71,6 @@ For training another seed, reuse the cache and use a separate output directory.
 .venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val \
   --set train.seed=1 output.dir=runs/proposed_seed1
 ```
-
-For the same-condition `dual`–`shared_person` comparison, use
-`configs/ablations/shared_person.yaml` or the individual commands in
-[the shared-person run guide](shared_person.md). It reuses these same caches and
-keeps the schedule, losses, sampler and retrieval settings from the base YAML.
-Each representation trains from scratch in its own output directory.
 
 ## Reuse the existing Kaggle DINO cache
 
@@ -117,8 +111,7 @@ DINO caches store explicit metadata and pixel boxes.
 | Directory | Contents | Usage |
 | --- | --- | --- |
 | `data.dino_cache` | DINO scenes, detections, identities, DINO crops/index | Shared immutable source; may be read-only Kaggle input |
-| `data.cache` with FAFA | FAFA `index.pt` (persons + FP32 scene means) | References source ID; does not copy scene patches |
-| `data.cache` with DINO controls | The existing DINO directory | Reuses DINO crops/scenes without FAFA |
+| `data.cache` | FAFA `index.pt` (persons + FP32 scene means) | References source ID; does not copy scene patches |
 
 Both builders skip a completed compatible cache before loading models. A
 completed cache with different encoders, gallery order or source ID fails
@@ -153,20 +146,17 @@ are missing. Complete caches can be reused without a FAFA environment or raw
 images. The saved FAFA YAML is still needed by `build-cache` to compare extraction
 settings.
 
-V1/DINO checkpoints need training for `person-id-sem-partial-match-v2`.
-Compatible DINO/FAFA caches are reused; matching needs no cache rebuild.
-Source/cache IDs and separate feature widths are checked against the training
-checkpoint. Keep historical run directories separately.
-
-`shared_person` checkpoints use `shared-person-partial-match-v1` and record the
-representation explicitly. Existing dual V2 checkpoints, including ones without
-the new top-level representation field, still load as dual. Retrieval constructs
-the saved architecture and rejects a requested representation that differs;
-changing a YAML field cannot convert a dual checkpoint into shared_person.
+The model uses architecture tag `shared-person-partial-match-v1`. Existing
+checkpoints with that tag load with the same parameter keys and scores. Use the
+updated method YAML. Regenerate earlier calibration YAMLs with the new
+`calibrate` command because the old selector fields were removed. Earlier
+architectures are rejected before loading caches/backbones. Train the current
+model in a separate run directory; compatible DINO/FAFA caches remain reusable.
+Source/cache IDs and both feature widths are checked against the checkpoint.
 
 After a successful build, training/retrieval read cached features only. They do
-not need native FAFA weights, its YAML or raw crop images. Training checks the
-requested person backend against the saved cache metadata; retrieval compares
+not need native FAFA weights, its YAML or raw crop images. Training requires FAFA
+person features when an external person-encoder config is supplied; retrieval compares
 cache ID, feature widths and encoder metadata with the checkpoint. Encoder
 environment paths are used only in prepare and cache extraction.
 
@@ -191,12 +181,18 @@ Fine scores must be finite even when `fine_coarse_weight=0`; a failed reranker
 cannot publish NaN-based rankings or enter validation calibration.
 
 Training state loss needs eligible same-identity positive/negative pairs. A tiny
-smoke run without them must set `loss.state_weight=0` and identity-only coarse.
+smoke run without them must set `loss.state_weight=0` and `retrieval.coarse_beta=0`.
 Standalone query-limited retrieval/evaluation use matching `--max-queries`; normal
-`run` and ablation suites evaluate complete requested query splits.
+`run` evaluates complete requested query splits; calibration always uses complete val.
 
-## New experiments
+## Development
 
-See [the ablation guide](ablations.md). Calibration now lives in
-`configs/calibration.yaml`; the old coarse/loss/sampling/identity-amplitude
-ablation configurations have been removed.
+The method config describes the current architecture and its hyperparameters.
+Edit the owning module directly (see [code structure](code_structure.md)); use a
+separate branch and output directory for a new idea. Keep the commit/config/seed
+and measurements, then retain successful changes in the main model.
+
+`configs/calibration.yaml` selects only `coarse_beta` and `fine_coarse_weight` on
+validation. It saves `selected.yaml`, `selection.json` and grid metrics. Ties keep
+the first weight pair in YAML order. Selected checkpoint and validation hashes
+must still match during later retrieval; test never selects parameters.

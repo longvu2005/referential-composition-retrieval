@@ -82,53 +82,11 @@ def identity_scores_batched(
     return scores.masked_fill(empty, -torch.inf)
 
 
-def coarse_scores(
-    query_identity: Tensor,
-    grounding_logits: Tensor,
-    gallery_identity: Tensor,
-    gallery_mask: Tensor | None = None,
-    query_mask: Tensor | None = None,
-    subject_mask: Tensor | None = None,
-    eps: float = 1e-6,
-    *,
-    query_state: Tensor | None = None,
-    gallery_state: Tensor | None = None,
-    beta: float = 0.0,
-) -> Tensor:
-    """S_id + beta * dot(z_text, z_image), with normalized state inputs.
-
-    State inputs are [Ds] and [G,Ds]. beta=0 preserves the original identity
-    path exactly, including its empty-query/empty-target policy.
-    """
-    scores = identity_scores(
-        query_identity,
-        grounding_logits,
-        gallery_identity,
-        gallery_mask,
-        query_mask,
-        subject_mask,
-        eps,
-    )
-    if beta == 0:
-        return scores
-    if query_state is None or gallery_state is None:
-        raise ValueError("nonzero beta requires both text and image state embeddings")
-    if (
-        query_state.ndim != 1
-        or gallery_state.ndim != 2
-        or gallery_state.shape != (scores.shape[0], query_state.shape[0])
-    ):
-        raise ValueError("state embedding shapes must be [Ds] and [G,Ds]")
-    return scores + beta * (gallery_state @ query_state)
-
-
 def combine_scores(
-    identity: Tensor | None,
+    identity: Tensor,
     state: Tensor | None,
     *,
-    mode: str = "identity_state",
     beta: float = 0.4,
-    normalization: str = "zscore",
     exclude_index: int | None = None,
     eps: float = 1e-6,
 ) -> Tensor:
@@ -136,23 +94,14 @@ def combine_scores(
 
     Z-scores use population standard deviation on the same eligible images for
     both branches. Self and non-finite scores do not enter the statistics.
-    Identity modes retain the missing-target-person policy (-inf); state_only
-    ignores identity entirely, including that mask. Constant branches become 0.
+    Missing target persons retain the identity policy (-inf).
+    Constant branches become 0. beta=0 skips the state branch.
     """
-    if mode not in ("identity_only", "state_only", "identity_state"):
-        raise ValueError(f"unknown coarse mode: {mode}")
-    if normalization not in ("none", "zscore"):
-        raise ValueError(f"unknown coarse normalization: {normalization}")
     if not math.isfinite(beta) or beta < 0:
         raise ValueError("coarse_beta must be finite and nonnegative")
-    branches = (
-        [(state, 1.0)]
-        if mode == "state_only"
-        else [(identity, 1.0)]
-        + ([(state, beta)] if mode == "identity_state" and beta != 0 else [])
-    )
+    branches = [(identity, 1.0)] + ([(state, beta)] if beta != 0 else [])
     if any(scores is None for scores, _ in branches):
-        raise ValueError(f"{mode} requires its active score branches")
+        raise ValueError("coarse scoring requires its active score branches")
     first = branches[0][0]
     valid = torch.ones_like(first, dtype=torch.bool)
     for scores, _ in branches:
@@ -165,15 +114,9 @@ def combine_scores(
     result[valid] = 0
     for scores, weight in branches:
         values = scores[valid].float()
-        if normalization == "zscore":
-            values = (values - values.mean()) / values.std(unbiased=False).clamp_min(
-                eps
-            )
+        values = (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
         result[valid] += weight * values
     return result
-
-
-BINDING_MODES = ("both", "identity", "semantic", "none")
 
 
 def binding_scores(
@@ -188,12 +131,11 @@ def binding_scores(
     matching: PersonMatching | None = None,
     identity_threshold: float = 0.2,
     missing_penalty: float = 2.5,
-) -> dict[str, Tensor]:
-    """All score removals use the SAME identity assignment, with missing evidence.
+) -> Tensor:
+    """Pool identity + semantic cosines over the same partial identity assignment.
 
     Pool all predicted members, including nulls. An active Subject with no query
-    member also contributes the null penalty rather than disappearing. The
-    context-only control removes matched cosine terms but keeps missingness.
+    member also contributes the null penalty rather than disappearing.
     No gradient flows through identity, assignment or membership weights.
     """
     if not math.isfinite(missing_penalty) or missing_penalty <= 2:
@@ -226,17 +168,11 @@ def binding_scores(
         weights = member / denominator[..., None].clamp_min(1e-6)
         active = matching.subjects
 
-        def pool(value):
-            value = value.masked_fill(~matching.matched[:, None], -missing_penalty)
-            per_subject = (value * weights).sum(-1)
-            per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
-            per_subject = per_subject.masked_fill(~active, 0)
-            result = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
-            return result.masked_fill(~active.any(-1), -missing_penalty)
-
-        return {
-            "both": pool(identity + semantic),
-            "identity": pool(identity.expand_as(semantic)),
-            "semantic": pool(semantic),
-            "none": pool(semantic * 0),
-        }
+        value = (identity + semantic).masked_fill(
+            ~matching.matched[:, None], -missing_penalty
+        )
+        per_subject = (value * weights).sum(-1)
+        per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
+        per_subject = per_subject.masked_fill(~active, 0)
+        result = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
+        return result.masked_fill(~active.any(-1), -missing_penalty)

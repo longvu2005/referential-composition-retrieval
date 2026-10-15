@@ -11,10 +11,10 @@ from rcr.proposed.ranking import (
     _coarse_scores_chunked,
     _encode_gallery_identity,
     mine_hard_negatives,
+    rank_weight_grid,
     retrieve_rankings,
-    retrieve_variants,
 )
-from rcr.proposed.scores import coarse_scores
+from rcr.proposed.scores import identity_scores
 
 
 def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
@@ -28,11 +28,10 @@ def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
         identity_batch_size=2,
         coarse_batch_size=2,
         coarse_beta=0.4,
-        rerank=False,
     )
     sample = {**_sample(), "positive_image_ids": ["a", "b"]}
-    monkeypatch.setattr(model, "score_target", lambda *a: pytest.fail("fine mining"))
-    full = retrieve_variants(
+    score_target = model.score_target
+    full = rank_weight_grid(
         [sample],
         cache,
         _Tokenizer(),
@@ -40,12 +39,14 @@ def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
         model,
         torch.device("cpu"),
         gallery_ids=gallery,
-        variants={"run": settings},
-    )["run"]
+        settings=settings,
+        weights=[(0.4, 0.0)],
+    )[0]
     forbidden = {"q", "a", "b", "disputed"}
-    expected = [gallery[i] for i in full["rankings"][0] if gallery[i] not in forbidden][
-        :2
-    ]
+    expected = [
+        gallery[i] for i in full["coarse_rankings"][0] if gallery[i] not in forbidden
+    ][:2]
+    monkeypatch.setattr(model, "score_target", lambda *a: pytest.fail("fine mining"))
     pools = mine_hard_negatives(
         [sample],
         cache,
@@ -60,7 +61,8 @@ def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
     )
     assert pools == {"s1": expected}
     assert model.training and text_encoder.training
-    limited = retrieve_variants(
+    monkeypatch.setattr(model, "score_target", score_target)
+    limited = rank_weight_grid(
         [sample],
         cache,
         _Tokenizer(),
@@ -68,9 +70,10 @@ def test_mining_keeps_only_train_negatives_and_bounded_outputs(monkeypatch):
         model,
         torch.device("cpu"),
         gallery_ids=gallery,
-        variants={"run": settings},
+        settings=settings,
+        weights=[(0.4, 0.0)],
         ranking_limit=2,
-    )["run"]
+    )[0]
     assert limited["rankings"].shape == limited["coarse_rankings"].shape == (1, 2)
     torch.testing.assert_close(limited["rankings"], full["rankings"][:, :2])
 
@@ -189,9 +192,8 @@ def test_retrieve_rankings_excludes_query_and_restores_training_modes() -> None:
     "identity_batch_size,coarse_batch_size", [(1, 1), (3, 2), (20, 20)]
 )
 @pytest.mark.parametrize("empty_query", [False, True])
-@pytest.mark.parametrize("beta", [0.0, 0.3])
 def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
-    identity_batch_size, coarse_batch_size, empty_query, beta
+    identity_batch_size, coarse_batch_size, empty_query
 ) -> None:
     torch.manual_seed(23)
     # The final two images have no detected people. Valid columns need not be
@@ -215,25 +217,19 @@ def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
     query_identity = torch.randn(0 if empty_query else 3, 6)
     logits = torch.randn(2, len(query_identity))
     query_mask = torch.tensor([] if empty_query else [True, False, True]).bool()
-    state = dict(
-        query_state=torch.nn.functional.normalize(torch.randn(4), dim=-1),
-        gallery_state=torch.nn.functional.normalize(torch.randn(7, 4), dim=-1),
-        beta=beta,
-    )
     with torch.inference_mode():
         batches = _encode_gallery_identity(
             cache, model, torch.device("cpu"), identity_batch_size
         )
-        expected = coarse_scores(
+        expected = identity_scores(
             query_identity,
             logits,
-            model.identity_head(cache.persons.float()),
+            model.encode_identity(cache.persons.float()),
             cache.mask,
             query_mask=query_mask,
-            **state,
         )
         actual = _coarse_scores_chunked(
-            query_identity, logits, query_mask, batches, coarse_batch_size, **state
+            query_identity, logits, query_mask, batches, coarse_batch_size
         )
 
     torch.testing.assert_close(actual, expected)
@@ -271,16 +267,16 @@ def test_chunked_full_rankings_match_dense_reference(monkeypatch, coarse_batch_s
         del batch_size
         return [
             (
-                model.identity_head(cache.persons[image_indices].to(device)),
+                model.encode_identity(cache.persons[image_indices].to(device)),
                 cache.mask[image_indices].to(device),
             )
         ]
 
-    def dense_scores(query_identity, logits, query_mask, batches, batch_size, **state):
+    def dense_scores(query_identity, logits, query_mask, batches, batch_size):
         del batch_size
         identity, mask = batches[0]
-        return coarse_scores(
-            query_identity, logits, identity, mask, query_mask=query_mask, **state
+        return identity_scores(
+            query_identity, logits, identity, mask, query_mask=query_mask
         )
 
     monkeypatch.setattr(retrieval, "_encode_gallery_identity", dense_gallery)
@@ -487,30 +483,8 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
         fine_batch_size=2,
         identity_batch_size=2,
         coarse_batch_size=2,
-        coarse_normalization="zscore",
-        rerank=False,
     )
-    variants = {
-        "id": {**base, "coarse_mode": "identity_only"},
-        "state": {**base, "coarse_mode": "state_only"},
-        "beta0": {**base, "coarse_beta": 0.0},
-        "beta1": {**base, "coarse_beta": 1.0},
-        "fine": {**base, "coarse_beta": 1.0, "rerank": True},
-        "fine_small": {**base, "coarse_beta": 1.0, "rerank": True, "top_m": 1},
-    }
-    # Joint 2D sweep, with zero weights and the existing (.4, .4) pair.
-    variants.update(
-        {
-            f"joint_{beta}_{weight}": {
-                **base,
-                "coarse_beta": beta,
-                "fine_coarse_weight": weight,
-                "rerank": True,
-            }
-            for beta in (0.0, 0.4, 1.0)
-            for weight in (0.0, 0.4, 1.0)
-        }
-    )
+    weights = [(beta, weight) for beta in (0.0, 0.4, 1.0) for weight in (0.0, 0.4, 1.0)]
     calls, loads, combinations = [], [], []
     score_identity, load = retrieval._coarse_scores_chunked, cache.load
     combine = retrieval.combine_scores
@@ -530,11 +504,14 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
     monkeypatch.setattr(retrieval, "_coarse_scores_chunked", count_scores)
     monkeypatch.setattr(cache, "load", count_loads)
     monkeypatch.setattr(retrieval, "combine_scores", count_combinations)
-    actual = retrieve_variants(*args, gallery_ids=cache.image_ids, variants=variants)
-    assert len(calls) == 1  # One ID score vector for all beta/mode variants.
-    assert len(combinations) == 5  # Reuse normalization/sort across final weights.
+    actual = rank_weight_grid(
+        *args, gallery_ids=cache.image_ids, settings=base, weights=weights
+    )
+    assert len(calls) == 1  # One ID score vector for all weight pairs.
+    assert len(combinations) == 3  # Reuse normalization/sort across final weights.
     assert loads[0] == 0 and len(loads[1:]) == len(set(loads[1:])) == 3
-    for name, cfg in variants.items():
+    for output, (beta, weight) in zip(actual, weights, strict=True):
+        cfg = {**base, "coarse_beta": beta, "fine_coarse_weight": weight}
         # Change chunk sizes to catch normalization accidentally performed per chunk.
         for batch_size in (1, 20):
             expected = retrieve_rankings(
@@ -547,55 +524,10 @@ def test_sweep_shares_scores_and_matches_independent_normalized_runs(monkeypatch
                 },
             )
             for key in ("rankings", "coarse_topm", "coarse_rankings"):
-                assert torch.equal(actual[name][key], expected[key])
-            if cfg["rerank"]:
-                assert torch.equal(
-                    actual[name]["fine_rankings"], expected["fine_rankings"]
-                )
-        assert actual[name]["rankings"].shape == (1, 4)
-        assert set(actual[name]["rankings"][0].tolist()) == {1, 2, 3, 4}
-    assert torch.equal(actual["id"]["rankings"], actual["beta0"]["rankings"])
-    assert torch.equal(actual["beta1"]["rankings"], actual["beta1"]["coarse_rankings"])
-
-
-def test_state_only_coarse_never_evaluates_identity_or_fine(monkeypatch):
-    cache = _Cache(["q", "a", "b", "c"])
-    cache.mask[:] = False
-    model = RCRModel(8, 6, 2, max_subjects=1, state_dim=2)
-
-    def fail(*args, **kwargs):
-        pytest.fail("state-only coarse used the ID/fine branch")
-
-    monkeypatch.setattr(model, "encode_query", fail)
-    monkeypatch.setattr(model, "score_target", fail)
-    monkeypatch.setattr(retrieval, "_encode_gallery_identity", fail)
-    monkeypatch.setattr(retrieval, "_coarse_scores_chunked", fail)
-    monkeypatch.setattr(
-        model, "encode_text_state", lambda *args: torch.tensor([[1.0, 0]])
-    )
-    monkeypatch.setattr(
-        retrieval,
-        "_encode_gallery_state",
-        lambda *args: torch.tensor([[0.0, 1], [0.1, 0], [1.0, 0], [0.5, 0]]),
-    )
-    output = retrieve_rankings(
-        [_sample()],
-        cache,
-        _Tokenizer(),
-        _TextEncoder(),
-        model,
-        torch.device("cpu"),
-        gallery_ids=cache.image_ids,
-        top_m=1,
-        fine_batch_size=1,
-        identity_batch_size=2,
-        coarse_mode="state_only",
-        coarse_beta=0,
-        coarse_normalization="zscore",
-        rerank=False,
-    )
-    assert output["rankings"].tolist() == [[2, 3, 1]]
-    assert output["coarse_topm"].tolist() == [[2]]
+                assert torch.equal(output[key], expected[key])
+            assert torch.equal(output["fine_rankings"], expected["fine_rankings"])
+        assert output["rankings"].shape == (1, 4)
+        assert set(output["rankings"][0].tolist()) == {1, 2, 3, 4}
 
 
 def test_runtime_beta_changes_ranking_without_mutating_checkpoint_beta(monkeypatch):
@@ -618,10 +550,8 @@ def test_runtime_beta_changes_ranking_without_mutating_checkpoint_beta(monkeypat
         top_m=1,
         fine_batch_size=1,
         identity_batch_size=2,
-        rerank=False,
-        coarse_normalization="zscore",
     )
-    results = retrieve_variants(
+    results = rank_weight_grid(
         [_sample()],
         cache,
         _Tokenizer(),
@@ -629,26 +559,18 @@ def test_runtime_beta_changes_ranking_without_mutating_checkpoint_beta(monkeypat
         model,
         torch.device("cpu"),
         gallery_ids=cache.image_ids,
-        variants={"inherited": settings, "override": {**settings, "coarse_beta": 2.0}},
+        settings=settings,
+        weights=[(model.coarse_beta, 0.0), (2.0, 0.0)],
     )
-    assert results["inherited"]["rankings"].tolist() == [[1, 2]]
-    assert results["override"]["rankings"].tolist() == [[2, 1]]
+    assert results[0]["rankings"].tolist() == [[1, 2]]
+    assert results[1]["rankings"].tolist() == [[2, 1]]
     assert model.coarse_beta == 0.0
 
 
 @pytest.mark.parametrize("query_batch_size", [1, 2, 8])
-@pytest.mark.parametrize(
-    "mode,beta",
-    [
-        ("identity_only", 0.4),
-        ("state_only", 0.4),
-        ("identity_state", 0.0),
-        ("identity_state", 0.4),
-    ],
-)
-@pytest.mark.parametrize("normalization", ["none", "zscore"])
+@pytest.mark.parametrize("beta", [0.0, 0.4])
 def test_batched_mining_matches_single_query_rankings_without_composition(
-    tmp_path, monkeypatch, query_batch_size, mode, beta, normalization
+    tmp_path, monkeypatch, query_batch_size, beta
 ):
     from rcr.proposed.cache.store import GalleryCache
     from tests.proposed.test_batch import _TextEncoder as VariableTextEncoder
@@ -687,10 +609,7 @@ def test_batched_mining_matches_single_query_rankings_without_composition(
         fine_batch_size=1,
         identity_batch_size=3,
         coarse_batch_size=2,
-        coarse_mode=mode,
         coarse_beta=beta,
-        coarse_normalization=normalization,
-        rerank=False,
     )
     excluded = {row["sample_id"]: {ids[7]} for row in samples}
     expected = retrieve_rankings(
@@ -704,7 +623,7 @@ def test_batched_mining_matches_single_query_rankings_without_composition(
         **settings,
     )
     pools = {}
-    for row, ranking in zip(samples, expected["rankings"], strict=True):
+    for row, ranking in zip(samples, expected["coarse_rankings"], strict=True):
         forbidden = {
             row["query_image_id"],
             *row["positive_image_ids"],
@@ -719,8 +638,6 @@ def test_batched_mining_matches_single_query_rankings_without_composition(
 
     monkeypatch.setattr(model.composition, "forward", fail)
     monkeypatch.setattr(model, "score_target", fail)
-    if mode == "state_only":
-        monkeypatch.setattr(model, "encode_grounded_identity", fail)
     calls = []
     handle = encoder.register_forward_hook(lambda *args: calls.append(1))
     actual = mine_hard_negatives(
@@ -752,8 +669,7 @@ def test_batched_mining_retains_canonical_ties_and_restores_modes_on_failure(
     samples = [_sample("s1"), _sample("s2")]
     settings = dict(
         identity_batch_size=2,
-        coarse_mode="identity_only",
-        coarse_normalization="zscore",
+        coarse_beta=0,
     )
     kwargs = dict(
         gallery_ids=cache.image_ids, retrieval=settings, pool_size=2, query_batch_size=2

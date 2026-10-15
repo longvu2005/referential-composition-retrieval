@@ -56,11 +56,13 @@ def test_method_recipe_uses_validation_then_frozen_test(
         )
         assert commands[0][3] == expected
     elif method == "proposed":
-        assert [args[1] for args in commands] == ["run", "ablate", "run"]
+        assert [args[1] for args in commands] == ["run", "calibrate", "run"]
         assert all(
             flag in commands[0] for flag in ("--prepare", "--build-cache", "--train")
         )
-        assert all(args[-2:] == ["--splits", "val"] for args in commands)
+        assert all(
+            args[-2:] == ["--splits", "val"] for args in (commands[0], commands[-1])
+        )
         assert commands[-1][3] == "runs/calibration/selected.yaml"
     else:
         assert [args[1] for args in commands] == ["prepare", "run"]

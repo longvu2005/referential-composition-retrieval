@@ -33,7 +33,7 @@ def test_retrieval_updates_semantic_and_scale_but_never_identity():
     loss, _ = compute_loss(model, _batch(), (2, 3), identity_weight=0, state_weight=0)
     loss.backward()
     assert model.identity_head.proj.weight.grad is None
-    assert model.semantic_proj.weight.grad.abs().sum() > 0
+    assert model.person_proj[0].weight.grad.abs().sum() > 0
     assert model.binding_log_scale.grad.abs() > 0
     optimizer.step()
     torch.testing.assert_close(before, model.identity_head.proj.weight)
@@ -42,14 +42,14 @@ def test_retrieval_updates_semantic_and_scale_but_never_identity():
         model.encode_identity(torch.randn(4, 8)), torch.tensor([1, 2, 1, 2])
     ).backward()
     assert model.identity_head.proj.weight.grad.abs().sum() > 0
-    assert model.semantic_proj.weight.grad is None
+    assert model.person_proj[0].weight.grad.abs().sum() > 0
     assert (
-        model.semantic_proj.weight.data_ptr()
+        model.person_proj[0].weight.data_ptr()
         != model.identity_head.proj.weight.data_ptr()
     )
 
 
-def test_dual_heads_support_different_person_and_scene_widths():
+def test_shared_person_supports_different_person_and_scene_widths():
     model = RCRModel(8, 6, 2, input_dim=10, person_input_dim=12).eval()
     batch = _batch()
     for key in ("query_scene", "target_scene"):
@@ -58,19 +58,8 @@ def test_dual_heads_support_different_person_and_scene_widths():
         batch[key] = torch.randn(*batch[key].shape[:-1], 12)
     loss, _ = compute_loss(model, batch, (2, 3))
     assert torch.isfinite(loss)
-    assert model.target_builder.identity_proj is None
-    assert model.identity_head.proj.in_features == 12
-    assert model.semantic_proj.in_features == 12
-
-
-def test_shared_control_keeps_the_original_identity_retrieval_path():
-    model = RCRModel(8, 6, 2, representation="shared", binding_mode="none")
-    loss, _ = compute_loss(model, _batch(), (2, 3), identity_weight=0, state_weight=0)
-    loss.backward()
-    assert model.identity_head.proj.weight.grad.abs().sum() > 0
-    assert model.semantic_proj is None
-    assert model.target_builder.identity_proj is not None
-    assert model.binding_log_scale is None
+    assert model.identity_head.proj.in_features == 8
+    assert model.person_proj[0].in_features == 12
 
 
 def test_identity_and_state_must_match_the_same_target_person():
@@ -83,10 +72,7 @@ def test_identity_and_state_must_match_the_same_target_person():
         torch.ones(1, 1, 1),
         torch.ones(1, 1, dtype=torch.bool),
     )
-    assert result["both"].item() == 1.0  # ID selects A; state also reads A.
-    assert result["identity"].item() == 1.0
-    assert result["semantic"].item() == 0.0  # No new matching in semantic ablation.
-    assert result["none"].item() == 0.0
+    assert result.item() == 1.0  # ID selects A; state also reads A.
 
 
 def test_binding_respects_member_masks_and_empty_targets():
@@ -99,8 +85,8 @@ def test_binding_respects_member_masks_and_empty_targets():
     subjects = torch.tensor([[True, False]] * 2)
     mask = torch.tensor([[True, False], [False, False]])
     result = binding_scores(qid, tid, comp, semantic, members, subjects, mask)
-    assert all(value[1] == -2.5 for value in result.values())
-    result["both"].sum().backward()
+    assert result[1] == -2.5
+    result.sum().backward()
     assert qid.grad is tid.grad is None
     assert semantic.grad[:, 1].count_nonzero() == 0
     assert comp.grad[:, 1].count_nonzero() == 0

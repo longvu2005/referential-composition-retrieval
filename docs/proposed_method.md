@@ -1,4 +1,4 @@
-# Proposed method A: shared partial matching without case labels
+# Proposed method: shared partial matching without case labels
 
 ## Frozen features
 
@@ -8,11 +8,6 @@ person crops for BOTH query and target images:
 
 ```text
 crop -> FAFA visual encoder -> image-only Q-Former hidden tokens -> mean pool h
-# model.representation: dual (default)
-z_id  = normalize(P_id(h))       # 128 dimensions
-z_sem = normalize(P_sem(h))      # 384 dimensions
-
-# model.representation: shared_person (retrain)
 u     = LayerNorm(W_u h + b_u)   # model.dim, separate from scene projection
 z_id  = normalize(W_id u + b_id) # 128 dimensions
 z_sem = u                       # existing semantic API; no independent head
@@ -25,11 +20,11 @@ The complete image-only trunk, including Q-Former, is frozen/eval during cache
 construction. No instruction enters this cache. `h` is cached, not learned heads.
 Mean pooling is a simple person representation, not native FDA scoring.
 
-DINO scene and FAFA person inputs have separate widths and cache metadata. In
-`dual`, the scene projection is not on the person identity path. BERT remains
+DINO scene and FAFA person inputs have separate widths and cache metadata. The
+scene projection is independent of the shared person projection. BERT remains
 frozen/eval; only its output projection is trained. No FAFA library/model is
 loaded during training or retrieval. The DINO directory stores scenes,
-detections, identities and DINO crop features for the backbone controls. The
+detections, identities and DINO crop features. Training/retrieval use FAFA crops. The
 FAFA directory stores only new crop features and its index. `GalleryCache`
 combines them and verifies the FAFA index references the same DINO cache ID.
 
@@ -73,7 +68,7 @@ individual members remain available. Fine composition receives detached
 Person-token outputs are normalized into `z_comp_si`. Roles remain distinct
 in one common composition, without branching on case.
 
-In `shared_person`, every person-semantic input above is the unnormalized `u`,
+Every person-semantic input above is the unnormalized `u`,
 including both grounding and composition. Target evidence/context also reads
 aligned `u`; cosine scoring alone L2-normalizes it. Query and target share the
 same person projection and LayerNorm. Scene projection remains independent and
@@ -90,8 +85,9 @@ S_coarse = z_gallery(S_id) + coarse_beta * z_gallery(S_global_state)
 ```
 
 Population z-scores use common eligible non-self split-gallery support. A
-constant branch contributes zero. `identity_only`, `state_only`, empty-person
-handling, Top-500 budget, stable ties and complete-gallery ordering are unchanged.
+constant branch contributes zero. A target without detected people retains an
+identity score of minus infinity. Top-M limits fine scoring, and the remaining
+gallery keeps coarse order with stable ties.
 Local person semantics do not replace global state/context.
 
 ## One partial identity matching for every fine branch
@@ -119,7 +115,7 @@ Let `pi(i)` denote the assigned target or null. State reads that target only:
 
 ```text
 e_si = cosine(z_comp_si, z_sem_t,pi(i))
-E_si = d_i,pi(i) + e_si                    # matched, main mode
+E_si = d_i,pi(i) + e_si                    # matched
 E_si = -missing_penalty                   # null
 B_s = sum_i w_si E_si                     # includes null members
 B_s = -missing_penalty                   # active Subject with no query member
@@ -151,8 +147,7 @@ S_fine = softplus(binding_log_scale) * B + C * S_context
 ```
 
 The scale starts at 1. An entirely unmatched query has zero context contribution
-and finite negative binding. Context remains unbounded in A; amplitude limiting
-is the separate B extension. Detector misses and grounding mistakes can still
+and finite negative binding. Context remains unbounded. Detector misses and grounding mistakes can still
 lower positive scores. Thresholds and ranking quality require validation.
 
 ## Objective and ranking
@@ -164,11 +159,7 @@ L = L_ground + 0.1 L_id + L_ret + L_global_state
 - Identity: the existing supervised contrastive formulation. Query people and
   valid positive-target people share an ID vocabulary. Unknown IDs, padding,
   duplicate observations and self-pairs are excluded.
-- In dual mode, `P_id` receives gradient only from `L_id`. Fine binding detaches
-  BOTH identity inputs. With identity loss disabled, AdamW also leaves this head
-  untouched. Pose/clothing/background invariance requires suitable cross-image
-  supervision and empirical verification.
-- In `shared_person`, `L_id` trains both the person projection and identity
+- `L_id` trains both the person projection and identity
   head. `L_ground` and `L_ret` also train that person projection. Fine still
   detaches both identity inputs; `L_ret` does not directly train the identity
   head. The target semantic/context path retains autograd. No identity/state
@@ -192,35 +183,12 @@ coarse order. Periodic evaluation, checkpoint selection, sampling, mining, AMP,
 LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
 
-## Architecture controls
-
-`shared_person` isolates the shared person representation while retaining dual's
-composition, target routing, binding scale, coverage/context scoring, partial
-matching and all four binding modes. It uses a separate retrained checkpoint.
-See [the paired representation experiment](shared_person.md).
-
-`model.representation: shared` is a retrained shared-head control: one identity
-head feeds identity loss/coarse, instruction composition and the target-token
-identity addition. It requires `model.binding_mode: none`. It uses the same
-partial assignment, aligned context and null penalties, while omitting matched
-cosine terms. `dual` has independent heads and detached identity binding.
-The control does not load an old checkpoint.
-
-DINO/FAFA x shared/dual tests backbone and the complete representation/routing
-change. Binding removals compare `both`, `identity`, `semantic`, `none`; they
-remove matched score terms, not identity assignment, null penalties, coverage,
-semantic context or coarse identity. Evaluate by case and
-CandidateRecall@500 as well as ID-mAP/Full-mAP. See [ablations](ablations.md).
-
 ## Configuration and checkpoints
 
-Architecture version for `dual`/legacy `shared`:
-`person-id-sem-partial-match-v2`; for `shared_person`:
-`shared-person-partial-match-v1`. Existing dual V2 checkpoints remain compatible.
-Representation mismatches are rejected before loading caches/backbones.
-V1 checkpoints are
-rejected before loading weights; retraining is required. Existing compatible
-DINO/FAFA caches need no rebuild. Main outputs default to `runs/proposed-a`.
+There is one architecture, with tag `shared-person-partial-match-v1`. Existing
+checkpoints from this path keep their parameter keys, scoring and loss formulas.
+Earlier architectures require training the current model. Compatible DINO/FAFA
+caches need no rebuild. Main outputs default to `runs/proposed-a`.
 
 `model.fine_matching` defines selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded

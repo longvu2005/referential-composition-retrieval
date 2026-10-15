@@ -66,7 +66,7 @@ def test_compute_loss_and_backward() -> None:
     loss.backward()
     assert model.grounding.score.weight.grad is not None
     assert model.identity_head.proj.weight.grad is not None
-    assert model.semantic_proj.weight.grad is not None
+    assert model.person_proj[0].weight.grad is not None
     assert model.reasoner.score[-1].weight.grad is not None
     assert model.state_text_proj.weight.grad.norm() > 0
     assert model.state_image_proj.weight.grad.norm() > 0
@@ -97,7 +97,7 @@ def test_384_model_trains_from_raw_768_features_with_frozen_text():
     assert attentions and all(m.dropout == 0.1 for m in attentions)
     assert all(m.embed_dim == 384 and m.num_heads == 6 for m in attentions)
     assert all(m.p == 0.1 for m in model.modules() if isinstance(m, nn.Dropout))
-    assert model.identity_head.proj.weight.shape == (128, 768)
+    assert model.identity_head.proj.weight.shape == (128, 384)
     assert model.state_image_proj.weight.shape == (128, 384)
     assert model.composition.ffn[0].out_features == 768
 
@@ -212,7 +212,7 @@ def test_positive_targets_supply_identity_pairs_and_gradients() -> None:
     batch["target_mask"][0, 0, 3] = False
     batch["query_persons"].requires_grad_()
     batch["target_persons"].requires_grad_()
-    q = model.identity_head(batch["query_persons"])
+    q = model.encode_identity(batch["query_persons"])
     assert identity_loss(q, batch["query_identity_labels"]).item() == 0
 
     loss, parts = compute_loss(
@@ -233,7 +233,7 @@ def test_positive_targets_supply_identity_pairs_and_gradients() -> None:
         )
     )
     expected = identity_loss(
-        model.identity_head(expected_features), torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+        model.encode_identity(expected_features), torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
     )
     torch.testing.assert_close(parts["identity"], expected)
     assert parts["identity"] > 0

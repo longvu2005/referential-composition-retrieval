@@ -5,33 +5,30 @@ from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 
 def test_target_person_builder_shape_and_grad() -> None:
     torch.manual_seed(0)
-    model = TargetPersonBuilder(dim=8, identity_dim=6)
+    model = TargetPersonBuilder(dim=8)
 
     evidence = torch.randn(2, 3, 8, requires_grad=True)
-    identity = torch.randn(2, 3, 6, requires_grad=True)
     boxes = torch.rand(2, 3, 4)
     boxes[..., 2:] = boxes[..., :2] + boxes[..., 2:] * (1 - boxes[..., :2])
 
-    out = model(evidence, boxes, identity)
+    out = model(evidence, boxes)
     assert out.shape == (2, 3, 8)
 
     out.mean().backward()
     assert evidence.grad is not None
-    assert identity.grad is not None
 
 
 def test_target_person_builder_uses_box_geometry() -> None:
     torch.manual_seed(1)
-    model = TargetPersonBuilder(dim=8, identity_dim=6).eval()
+    model = TargetPersonBuilder(dim=8).eval()
 
     evidence = torch.randn(1, 1, 8)
-    identity = torch.randn(1, 1, 6)
     left = torch.tensor([[[0.0, 0.1, 0.4, 0.9]]])
     right = torch.tensor([[[0.6, 0.1, 1.0, 0.9]]])
 
     assert not torch.allclose(
-        model(evidence, left, identity),
-        model(evidence, right, identity),
+        model(evidence, left),
+        model(evidence, right),
     )
 
 

@@ -51,7 +51,6 @@ class StructuredComposition(nn.Module):
     def __init__(
         self,
         dim: int,
-        person_dim: int,
         num_heads: int,
         max_subjects: int = 2,
         mlp_ratio: int = 2,
@@ -60,9 +59,6 @@ class StructuredComposition(nn.Module):
         super().__init__()
         self.num_heads = num_heads
 
-        self.person_proj = (
-            nn.Identity() if person_dim == dim else nn.Linear(person_dim, dim)
-        )
         self.role = nn.Embedding(max_subjects, dim)
         self.cls = nn.Parameter(torch.zeros(1, 1, dim))
 
@@ -111,8 +107,7 @@ class StructuredComposition(nn.Module):
                 b, -1
             )
         role = self.role(subject_ids.long().clamp_min(1) - 1)
-        projected = self.person_proj(persons)
-        ids = projected[:, None] + role[:, :, None]
+        ids = persons[:, None] + role[:, :, None]
 
         grounded = torch.sum(weight[..., None] * ids, dim=2)
         if subject_token_mask is None:

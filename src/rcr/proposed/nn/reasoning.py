@@ -5,14 +5,11 @@ from torch import Tensor, nn
 
 
 class TargetPersonBuilder(nn.Module):
-    """Context/geometry tokens; identity addition exists only in shared control."""
+    """Build aligned target tokens from contextual evidence and geometry."""
 
-    def __init__(self, dim: int, identity_dim: int | None = None) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
         self.evidence_proj = nn.Linear(dim, dim)
-        self.identity_proj = (
-            None if identity_dim is None else nn.Linear(identity_dim, dim)
-        )
         self.box_proj = nn.Linear(4, dim)
         self.norm = nn.LayerNorm(dim)
 
@@ -20,15 +17,10 @@ class TargetPersonBuilder(nn.Module):
         self,
         evidence: Tensor,
         boxes: Tensor,
-        identity: Tensor | None = None,
     ) -> Tensor:
         x1, y1, x2, y2 = boxes.unbind(-1)
         geometry = torch.stack(((x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1), dim=-1)
         target = self.evidence_proj(evidence) + self.box_proj(geometry)
-        if self.identity_proj is not None:
-            if identity is None:
-                raise ValueError("shared representation requires target identities")
-            target = target + self.identity_proj(identity)
         return self.norm(target)
 
 

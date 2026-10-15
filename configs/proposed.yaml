@@ -1,4 +1,6 @@
 # One source of truth for cache, training, retrieval and evaluation.
+# Current model: FAFA persons, shared projection, identity + semantic binding.
+# Coarse fusion uses gallery z-scores; fine scoring reranks the Top-M shortlist.
 method: proposed
 split: val
 data:
@@ -16,7 +18,6 @@ image_encoder:
   scene_size: [224, 224]
   person_size: [256, 128]
 person_encoder:
-  backend: fafa              # fafa | dino (backbone control)
   python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
   batch_size: 4
@@ -31,8 +32,6 @@ model:
   text_model: google-bert/bert-base-uncased
   dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
-  representation: shared_person      # dual | shared_person | shared (legacy control)
-  binding_mode: both          # both | identity | semantic | none
   identity_dim: 128
   state_dim: 128
   # Training default; inference overrides live in retrieval.
@@ -76,13 +75,9 @@ loss:
   state_temperature: 0.1
 retrieval:
   # Shared by periodic validation and standalone retrieval.
-  coarse_mode: identity_state   # identity_only | state_only | identity_state
-  coarse_beta: 0.4              # training default; joint sweep selects final pair
-  coarse_normalization: zscore  # none reproduces raw ID + beta * state
-  rerank: true                  # false keeps the complete coarse ranking
-  binding_mode: null           # null inherits model; inference binding ablations
+  coarse_beta: 0.4              # joint validation calibration selects final pair
   # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
-  # Tune BOTH weights with configs/calibration.yaml after training.
+  # Calibrate both weights with configs/calibration.yaml after training.
   fine_coarse_weight: 0.4
   top_m: 500
   fine_batch_size: 64

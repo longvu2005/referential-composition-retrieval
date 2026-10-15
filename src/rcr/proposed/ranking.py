@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -13,9 +13,8 @@ from tqdm import tqdm
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 from rcr.proposed.scores import (
-    BINDING_MODES,
-    coarse_scores,
     combine_scores,
+    identity_scores,
     identity_scores_batched,
 )
 
@@ -59,10 +58,6 @@ def _coarse_scores_chunked(
     query_mask: Tensor,
     gallery_batches: list[tuple[Tensor, Tensor]],
     batch_size: int,
-    *,
-    query_state: Tensor | None = None,
-    gallery_state: Tensor | None = None,
-    beta: float = 0.0,
 ) -> Tensor:
     """Score the entire gallery with bounded accelerator working memory."""
 
@@ -74,21 +69,12 @@ def _coarse_scores_chunked(
             stop = min(start + batch_size, len(identity_cpu))
             identity = identity_cpu[start:stop].to(query_identity.device)
             mask = mask_cpu[start:stop].to(query_identity.device)
-            scores[offset + start : offset + stop] = coarse_scores(
+            scores[offset + start : offset + stop] = identity_scores(
                 query_identity,
                 logits,
                 identity,
                 mask,
                 query_mask=query_mask,
-                query_state=query_state,
-                gallery_state=(
-                    gallery_state[offset + start : offset + stop].to(
-                        query_identity.device
-                    )
-                    if beta != 0 and gallery_state is not None
-                    else None
-                ),
-                beta=beta,
             )
             del identity, mask
         offset += len(identity_cpu)
@@ -158,14 +144,20 @@ def fuse_fine_coarse_scores(
 
 def retrieval_settings(cfg: dict, default_beta: float) -> dict:
     """Resolve runtime overrides and the model's default coarse weight."""
+    unknown = cfg.keys() - {
+        "top_m",
+        "fine_batch_size",
+        "identity_batch_size",
+        "coarse_batch_size",
+        "coarse_beta",
+        "fine_coarse_weight",
+    }
+    if unknown:
+        raise ValueError(f"unknown retrieval settings: {', '.join(sorted(unknown))}")
     settings = {
         "coarse_batch_size": 512,
-        "coarse_mode": "identity_state",
         "coarse_beta": default_beta,
-        "coarse_normalization": "none",
         "fine_coarse_weight": 0.0,
-        "rerank": True,
-        "binding_mode": None,
         **cfg,
     }
     if settings["coarse_beta"] is None:
@@ -175,9 +167,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
 
 def uses_state(cfg: dict, default_beta: float) -> bool:
     settings = retrieval_settings(cfg, default_beta)
-    return settings["coarse_mode"] == "state_only" or (
-        settings["coarse_mode"] == "identity_state" and settings["coarse_beta"] != 0
-    )
+    return settings["coarse_beta"] != 0
 
 
 def retrieve_rankings(
@@ -193,12 +183,8 @@ def retrieve_rankings(
     fine_batch_size: int,
     identity_batch_size: int,
     coarse_batch_size: int = 512,
-    coarse_mode: str = "identity_state",
     coarse_beta: float | None = None,
-    coarse_normalization: str = "none",
     fine_coarse_weight: float = 0.0,
-    rerank: bool = True,
-    binding_mode: str | None = None,
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Any]:
@@ -208,14 +194,11 @@ def retrieve_rankings(
         fine_batch_size=fine_batch_size,
         identity_batch_size=identity_batch_size,
         coarse_batch_size=coarse_batch_size,
-        coarse_mode=coarse_mode,
         coarse_beta=coarse_beta,
-        coarse_normalization=coarse_normalization,
         fine_coarse_weight=fine_coarse_weight,
-        rerank=rerank,
-        binding_mode=binding_mode,
     )
-    return retrieve_variants(
+    settings = retrieval_settings(settings, model.coarse_beta)
+    return rank_weight_grid(
         samples,
         cache,
         tokenizer,
@@ -223,14 +206,15 @@ def retrieve_rankings(
         model,
         device,
         gallery_ids=gallery_ids,
-        variants={"run": settings},
+        settings=settings,
+        weights=[(settings["coarse_beta"], settings["fine_coarse_weight"])],
         description=description,
         text_cache=text_cache,
-    )["run"]
+    )[0]
 
 
 @torch.inference_mode()
-def retrieve_variants(
+def rank_weight_grid(
     samples: Sequence[dict],
     cache: GalleryCache,
     tokenizer: Any,
@@ -239,52 +223,39 @@ def retrieve_variants(
     device: torch.device,
     *,
     gallery_ids: Sequence[str],
-    variants: Mapping[str, dict],
+    settings: dict,
+    weights: Sequence[tuple[float, float]],
     description: str = "retrieve",
     ranking_limit: int | None = None,
     text_cache: QueryTextCache | None = None,
-) -> dict[str, dict]:
-    """Reuse encodings and raw ID/state/fine scores across inference ablations.
+) -> list[dict]:
+    """Share model scores while calibrating (coarse beta, fine/coarse weight).
 
     Only the split gallery is projected. CPU gallery projections and GPU scoring
     chunks bound accelerator memory. Coarse normalization happens after gathering
-    one complete score vector, never per chunk. Variants with the same coarse
-    settings share their normalized scores and ranking. Fine/coarse final fusion is
-    normalized only inside each variant's Top-M shortlist. All outputs retain the
+    one complete score vector, never per chunk. Equal beta values share coarse
+    scores and rankings; each query-target pair is fine-scored once. Outputs keep
     full gallery order; top_m only limits fine reranking. Optional ranking_limit
     retains only a prefix to bound CPU output memory. Such truncated outputs
     are never accepted by the official full-rank evaluator.
     """
-    settings = {
-        name: retrieval_settings(cfg, model.coarse_beta)
-        for name, cfg in variants.items()
-    }
-    for cfg in settings.values():
-        cfg["binding_mode"] = cfg["binding_mode"] or model.binding_mode
-        if cfg["binding_mode"] not in BINDING_MODES:
-            raise ValueError("unknown retrieval binding_mode")
-        if model.representation == "shared" and cfg["binding_mode"] != "none":
-            raise ValueError("shared control requires retrieval.binding_mode=none")
-    if not samples or not settings:
-        raise ValueError("retrieval requires samples and at least one variant")
+    if not samples or not weights:
+        raise ValueError("retrieval requires samples and at least one weight pair")
     if ranking_limit is not None and ranking_limit < 1:
         raise ValueError("ranking_limit must be positive")
-    first = next(iter(settings.values()))
+    settings = retrieval_settings(settings, model.coarse_beta)
     batch_keys = ("fine_batch_size", "identity_batch_size", "coarse_batch_size")
-    for cfg in settings.values():
-        if min(cfg[key] for key in (*batch_keys, "top_m")) < 1:
-            raise ValueError("retrieval batch sizes and top_m must be positive")
-        if any(cfg[key] != first[key] for key in batch_keys):
-            raise ValueError("shared retrieval variants require the same batch sizes")
-        weight = cfg["fine_coarse_weight"]
+    if min(settings[key] for key in (*batch_keys, "top_m")) < 1:
+        raise ValueError("retrieval batch sizes and top_m must be positive")
+    for weight in (value for pair in weights for value in pair):
         if (
             not isinstance(weight, (int, float))
             or not math.isfinite(weight)
             or weight < 0
         ):
-            raise ValueError("fine_coarse_weight must be finite and nonnegative")
+            raise ValueError("retrieval weights must be finite and nonnegative")
     fine_batch_size, identity_batch_size, coarse_batch_size = (
-        first[key] for key in batch_keys
+        settings[key] for key in batch_keys
     )
     gallery_ids = list(gallery_ids)
     if not gallery_ids or len(gallery_ids) != len(set(gallery_ids)):
@@ -296,25 +267,15 @@ def retrieve_variants(
     if any(sample["query_image_id"] not in gallery_by_id for sample in samples):
         raise ValueError("query image must belong to the retrieval gallery")
     image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
-    need_identity = any(c["coarse_mode"] != "state_only" for c in settings.values())
-    need_state = any(
-        c["coarse_mode"] == "state_only"
-        or (c["coarse_mode"] == "identity_state" and c["coarse_beta"] != 0)
-        for c in settings.values()
-    )
-    need_fine = any(c["rerank"] for c in settings.values())
+    need_state = any(beta != 0 for beta, _ in weights)
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
     model_was_training, text_was_training = model.training, text_encoder.training
     model.eval()
     text_encoder.eval()
     try:
-        gallery_batches = (
-            _encode_gallery_identity(
-                cache, model, device, identity_batch_size, image_indices
-            )
-            if need_identity
-            else None
+        gallery_batches = _encode_gallery_identity(
+            cache, model, device, identity_batch_size, image_indices
         )
         gallery_state = (
             _encode_gallery_state(
@@ -323,40 +284,40 @@ def retrieve_variants(
             if need_state
             else None
         )
-        outputs = {
-            name: {"rankings": [], "coarse_rankings": [], "coarse_topm": []}
-            for name in settings
-        }
-        for name, cfg in settings.items():
-            if cfg["rerank"]:
-                outputs[name]["fine_rankings"] = []
+        outputs = [
+            {
+                key: []
+                for key in (
+                    "rankings",
+                    "coarse_rankings",
+                    "coarse_topm",
+                    "fine_rankings",
+                )
+            }
+            for _ in weights
+        ]
         for sample in tqdm(samples, desc=description):
             query_index = gallery_by_id[sample["query_image_id"]]
             text = encode_query_text(
                 [sample], tokenizer, text_encoder, device, text_cache=text_cache
             )
-            if need_identity or need_fine:
-                query_idx = torch.tensor([by_id[sample["query_image_id"]]])
-                q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
-                q_mask = q_mask.to(device)
-                query = model.encode_query(
-                    q_scene.to(device),
-                    q_persons.to(device),
-                    q_boxes.to(device),
-                    patch_hw=cache.patch_hw,
-                    query_person_mask=q_mask,
-                    **text,
-                )
-            identity = (
-                _coarse_scores_chunked(
-                    query.identity[0],
-                    query.logits[0],
-                    q_mask[0],
-                    gallery_batches,
-                    coarse_batch_size,
-                )
-                if need_identity
-                else None
+            query_idx = torch.tensor([by_id[sample["query_image_id"]]])
+            q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
+            q_mask = q_mask.to(device)
+            query = model.encode_query(
+                q_scene.to(device),
+                q_persons.to(device),
+                q_boxes.to(device),
+                patch_hw=cache.patch_hw,
+                query_person_mask=q_mask,
+                **text,
+            )
+            identity = _coarse_scores_chunked(
+                query.identity[0],
+                query.logits[0],
+                q_mask[0],
+                gallery_batches,
+                coarse_batch_size,
             )
             state = None
             if need_state:
@@ -370,94 +331,78 @@ def retrieve_variants(
                         for start in range(0, len(gallery_ids), coarse_batch_size)
                     ]
                 )
-            # Fine scores depend on the query/target pair, not on beta, Top-M,
-            # or the final fine/coarse fusion weight, so variants can share them.
-            fine_scores = {
-                mode: torch.empty(len(gallery_ids), device=device)
-                for mode in {c["binding_mode"] for c in settings.values()}
-            }
+            fine_scores = torch.empty(len(gallery_ids), device=device)
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             coarse_orders = {}
-            for name, cfg in settings.items():
+            for output, (beta, fine_coarse_weight) in zip(
+                outputs, weights, strict=True
+            ):
                 # A joint sweep changes the final fusion weight repeatedly for
                 # each beta. Normalize/sort coarse only once per distinct setting.
-                coarse_key = (
-                    cfg["coarse_mode"],
-                    cfg["coarse_beta"],
-                    cfg["coarse_normalization"],
-                )
+                coarse_key = beta
                 if coarse_key not in coarse_orders:
                     coarse = combine_scores(
                         identity,
                         state,
-                        mode=cfg["coarse_mode"],
-                        beta=cfg["coarse_beta"],
-                        normalization=cfg["coarse_normalization"],
+                        beta=beta,
                         exclude_index=query_index,
                     )
                     order = torch.argsort(coarse, descending=True, stable=True)
                     order = order[order != query_index]
                     coarse_orders[coarse_key] = coarse, order
                 coarse, order = coarse_orders[coarse_key]
-                top_indices = order[: cfg["top_m"]]
-                final_order = order
-                if cfg["rerank"]:
-                    missing = top_indices[~fine_done[top_indices]]
-                    for start in range(0, len(missing), fine_batch_size):
-                        local = missing[start : start + fine_batch_size]
-                        scene, persons, boxes, _, mask = cache.load(
-                            image_indices[local.cpu()]
-                        )
-                        count = len(local)
-                        components = model.score_target(
-                            query.repeat_candidates(count),
-                            scene.to(device),
-                            persons.to(device),
-                            boxes.to(device),
-                            cache.patch_hw,
-                            mask.to(device),
-                            return_components=True,
-                        )
-                        for mode in fine_scores:
-                            fine_scores[mode][local] = components[mode]
-                        fine_done[local] = True
-                    scores = fine_scores[cfg["binding_mode"]]
-                    fine_only = top_indices[
-                        torch.argsort(scores[top_indices], descending=True, stable=True)
-                    ]
-                    outputs[name]["fine_rankings"].append(
-                        torch.cat((fine_only, order[len(top_indices) :]))[
-                            :ranking_limit
-                        ]
-                        .to(torch.int32)
-                        .cpu()
+                top_indices = order[: settings["top_m"]]
+                missing = top_indices[~fine_done[top_indices]]
+                for start in range(0, len(missing), fine_batch_size):
+                    local = missing[start : start + fine_batch_size]
+                    scene, persons, boxes, _, mask = cache.load(
+                        image_indices[local.cpu()]
                     )
-                    rerank_scores = fuse_fine_coarse_scores(
-                        scores[top_indices],
-                        coarse[top_indices],
-                        float(cfg["fine_coarse_weight"]),
+                    count = len(local)
+                    fine_scores[local] = model.score_target(
+                        query.repeat_candidates(count),
+                        scene.to(device),
+                        persons.to(device),
+                        boxes.to(device),
+                        cache.patch_hw,
+                        mask.to(device),
                     )
-                    fine_order = top_indices[
-                        torch.argsort(rerank_scores, descending=True, stable=True)
-                    ]
-                    final_order = torch.cat((fine_order, order[len(top_indices) :]))
-                outputs[name]["rankings"].append(
+                    fine_done[local] = True
+                scores = fine_scores
+                fine_only = top_indices[
+                    torch.argsort(scores[top_indices], descending=True, stable=True)
+                ]
+                output["fine_rankings"].append(
+                    torch.cat((fine_only, order[len(top_indices) :]))[:ranking_limit]
+                    .to(torch.int32)
+                    .cpu()
+                )
+                rerank_scores = fuse_fine_coarse_scores(
+                    scores[top_indices],
+                    coarse[top_indices],
+                    float(fine_coarse_weight),
+                )
+                fine_order = top_indices[
+                    torch.argsort(rerank_scores, descending=True, stable=True)
+                ]
+                final_order = torch.cat((fine_order, order[len(top_indices) :]))
+                output["rankings"].append(
                     final_order[:ranking_limit].to(torch.int32).cpu()
                 )
-                outputs[name]["coarse_rankings"].append(
+                output["coarse_rankings"].append(
                     order[:ranking_limit].to(torch.int32).cpu()
                 )
-                outputs[name]["coarse_topm"].append(
+                output["coarse_topm"].append(
                     top_indices[:ranking_limit].to(torch.int32).cpu()
                 )
-        return {
-            name: {
+        return [
+            {
                 "sample_ids": [sample["sample_id"] for sample in samples],
                 "gallery_ids": gallery_ids,
                 **{key: torch.stack(rows) for key, rows in output.items()},
             }
-            for name, output in outputs.items()
-        }
+            for output in outputs
+        ]
     finally:
         model.train(model_was_training)
         text_encoder.train(text_was_training)
@@ -513,19 +458,14 @@ def mine_hard_negatives(
     for sample in samples:
         groups.setdefault(len(sample["subjects"]), []).append(sample)
     image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
-    need_identity = cfg["coarse_mode"] != "state_only"
     need_state = uses_state(cfg, model.coarse_beta)
     modes = model.training, text_encoder.training
     model.eval()
     text_encoder.eval()
     pools = {}
     try:
-        gallery_batches = (
-            _encode_gallery_identity(
-                cache, model, device, cfg["identity_batch_size"], image_indices
-            )
-            if need_identity
-            else []
+        gallery_batches = _encode_gallery_identity(
+            cache, model, device, cfg["identity_batch_size"], image_indices
         )
         gallery_state = (
             _encode_gallery_state(
@@ -541,40 +481,34 @@ def mine_hard_negatives(
                     text = encode_query_text(
                         rows, tokenizer, text_encoder, device, text_cache=text_cache
                     )
-                    identity = None
-                    if need_identity:
-                        indices = torch.tensor(
-                            [by_id[row["query_image_id"]] for row in rows]
-                        )
-                        scene, persons, boxes, _, mask = cache.load(indices)
-                        mask = mask.to(device)
-                        logits, query_identity = model.encode_grounded_identity(
-                            scene.to(device),
-                            persons.to(device),
-                            boxes.to(device),
-                            text["selections"],
-                            cache.patch_hw,
-                            text["selection_mask"],
-                        )
-                        identity = query_identity.new_empty(len(rows), len(gallery_ids))
-                        offset = 0
-                        for people_cpu, mask_cpu in gallery_batches:
-                            for j in range(
-                                0, len(people_cpu), cfg["coarse_batch_size"]
-                            ):
-                                stop = min(
-                                    j + cfg["coarse_batch_size"], len(people_cpu)
+                    indices = torch.tensor(
+                        [by_id[row["query_image_id"]] for row in rows]
+                    )
+                    scene, persons, boxes, _, mask = cache.load(indices)
+                    mask = mask.to(device)
+                    logits, query_identity = model.encode_grounded_identity(
+                        scene.to(device),
+                        persons.to(device),
+                        boxes.to(device),
+                        text["selections"],
+                        cache.patch_hw,
+                        text["selection_mask"],
+                    )
+                    identity = query_identity.new_empty(len(rows), len(gallery_ids))
+                    offset = 0
+                    for people_cpu, mask_cpu in gallery_batches:
+                        for j in range(0, len(people_cpu), cfg["coarse_batch_size"]):
+                            stop = min(j + cfg["coarse_batch_size"], len(people_cpu))
+                            identity[:, offset + j : offset + stop] = (
+                                identity_scores_batched(
+                                    query_identity,
+                                    logits,
+                                    people_cpu[j:stop].to(device),
+                                    mask_cpu[j:stop].to(device),
+                                    query_mask=mask,
                                 )
-                                identity[:, offset + j : offset + stop] = (
-                                    identity_scores_batched(
-                                        query_identity,
-                                        logits,
-                                        people_cpu[j:stop].to(device),
-                                        mask_cpu[j:stop].to(device),
-                                        query_mask=mask,
-                                    )
-                                )
-                            offset += len(people_cpu)
+                            )
+                        offset += len(people_cpu)
                     state = None
                     if need_state:
                         query_state = model.encode_text_state(
@@ -589,11 +523,9 @@ def mine_hard_negatives(
                     for n, row in enumerate(rows):
                         query_index = gallery_by_id[row["query_image_id"]]
                         scores = combine_scores(
-                            None if identity is None else identity[n],
+                            identity[n],
                             None if state is None else state[n],
-                            mode=cfg["coarse_mode"],
                             beta=cfg["coarse_beta"],
-                            normalization=cfg["coarse_normalization"],
                             exclude_index=query_index,
                         )
                         order = torch.argsort(scores, descending=True, stable=True)

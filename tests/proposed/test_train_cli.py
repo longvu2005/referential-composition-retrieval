@@ -43,9 +43,8 @@ class Backbone(nn.Module):
 
 @pytest.mark.parametrize("prefetch", [0, 1])
 @pytest.mark.parametrize("enabled,train_queries", [(True, 1), (True, 0), (False, 0)])
-@pytest.mark.parametrize("representation", ["dual", "shared_person"])
 def test_train_checkpoints_metrics_and_retrieve(
-    monkeypatch, tmp_path, enabled, train_queries, prefetch, representation
+    monkeypatch, tmp_path, enabled, train_queries, prefetch
 ):
     samples = [
         _sample("train1"),
@@ -163,7 +162,6 @@ def test_train_checkpoints_metrics_and_retrieve(
         "candidate_ks": [1, 2],
         "data": {"final_dir": "unused", "image_root": "unused", "cache": "unused"},
         "model": {
-            "representation": representation,
             "text_model": "tiny",
             "dim": 6,
             "dropout": 0.1,
@@ -220,7 +218,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     output = tmp_path / "run"
     last = torch.load(output / "last.pt", weights_only=True)
     assert last["epoch"] == 3
-    assert last["representation"] == representation
+    assert last["representation"] == "shared_person"
     assert last["scaler"] == {}  # Disabled on CPU.
     mined = json.loads((output / "hard_negatives.json").read_text())
     assert mined["model_epoch"] == 1 and mined["split"] == "train"
@@ -269,16 +267,12 @@ def test_train_checkpoints_metrics_and_retrieve(
 
     # Reload the saved checkpoint through the public retrieval and evaluation CLIs.
     cfg["checkpoint"] = str(output / ("best.pt" if enabled else "last.pt"))
-    if representation == "dual":
-        legacy = torch.load(cfg["checkpoint"], weights_only=True)
-        legacy.pop("representation")  # Existing V2 checkpoint format still loads.
-        torch.save(legacy, cfg["checkpoint"])
     cfg["split"] = "val"
     config_path.write_text(yaml.safe_dump(cfg))
     cli.main(["retrieve", *sys.argv[1:]])
     saved = torch.load(output / "val/rankings.pt", weights_only=True)
     metadata = json.loads((output / "val/run.json").read_text())
-    assert metadata["representation"] == representation
+    assert metadata["representation"] == "shared_person"
     assert metadata["architecture_version"] == last["architecture_version"]
     assert saved["sample_ids"] == ["val1"]
     assert saved["gallery_ids"] == ["val_n", "val_q", "val_a"]
@@ -304,7 +298,7 @@ def test_retrieve_rejects_old_checkpoint_before_loading_backbones(
 ) -> None:
     checkpoint_path = tmp_path / "old.pt"
     torch.save({"model": {}, "config": {"model": {}}}, checkpoint_path)
-    with pytest.raises(ValueError, match="legacy checkpoint"):
+    with pytest.raises(ValueError, match="architecture is incompatible"):
         retrieve_proposed.retrieve(
             {
                 "checkpoint": str(checkpoint_path),

@@ -62,7 +62,7 @@ def test_model_forward_shape_and_grad() -> None:
     ):
         assert tensor.grad is not None
     assert model.identity_head.proj.weight.grad is None
-    assert model.semantic_proj.weight.grad is not None
+    assert model.person_proj[0].weight.grad is not None
 
 
 def test_model_uses_one_shared_binding() -> None:

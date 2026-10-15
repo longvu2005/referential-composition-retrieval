@@ -63,9 +63,7 @@ def test_nonfinite_fine_scores_never_become_rankings(invalid, weight):
 
 
 def test_old_configs_default_to_fine_only() -> None:
-    settings = retrieval_settings(
-        {"coarse_mode": "identity_state", "coarse_beta": None}, default_beta=0.4
-    )
+    settings = retrieval_settings({"coarse_beta": None}, default_beta=0.4)
 
     assert settings["coarse_beta"] == 0.4
     assert settings["fine_coarse_weight"] == 0.0

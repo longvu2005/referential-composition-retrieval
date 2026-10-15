@@ -19,9 +19,8 @@ from tools import run as cli
 def split_cache(experiment, local_stages, tmp_path, monkeypatch):  # noqa: F811
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path), "--cache-stage", "dino"])
-    source = Path(cfg["data"]["cache"])
+    source = Path(cfg["data"]["dino_cache"])
     cfg["data"].update(dino_cache=str(source), cache=str(tmp_path / "persons"))
-    cfg["person_encoder"]["backend"] = "fafa"
     native = yaml.safe_load(Path("configs/fafa.yaml").read_text())
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"fixture FAFA weights")
@@ -50,12 +49,11 @@ def _bytes(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-@pytest.mark.parametrize("representation", ["dual", "shared_person"])
 def test_persons_only_reuses_dino_then_train_and_retrieve(
-    split_cache, monkeypatch, representation,
+    split_cache,
+    monkeypatch,
 ):
     cfg, path, source, _, worker_calls = split_cache
-    cfg["model"]["representation"] = representation
     path.write_text(yaml.safe_dump(cfg))
     before = _bytes(source)
     monkeypatch.setattr(
@@ -72,7 +70,7 @@ def test_persons_only_reuses_dino_then_train_and_retrieve(
     assert [row["split"] for row in rows] == ["val", "test"]
     checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
     assert checkpoint["input_dim"] == 6 and checkpoint["person_input_dim"] == 5
-    assert checkpoint["representation"] == representation
+    assert checkpoint["representation"] == "shared_person"
     root = Path(cfg["data"]["cache"])
     saved = _bytes(root)
     worker_calls.clear()
@@ -119,22 +117,6 @@ def test_legacy_dino_without_pixel_boxes_is_read_only(split_cache):
     cfg["cache"]["allow_legacy_dino"] = False
     with pytest.raises(ValueError, match="allow_legacy_dino"):
         check_cache_config(cache, cfg)
-
-
-def test_legacy_dino_ablation_resolves_the_shared_source(split_cache, tmp_path):
-    cfg, path, source, _, _ = split_cache
-    _make_legacy(cfg, source)
-    path.write_text(yaml.safe_dump(cfg))
-    suite = yaml.safe_load(Path("configs/ablations/representation.yaml").read_text())
-    suite.update(base_config=str(path), output_dir=str(tmp_path / "ablations"))
-    suite["experiments"] = [suite["experiments"][0], suite["experiments"][2]]
-    suite_path = tmp_path / "suite.yaml"
-    suite_path.write_text(yaml.safe_dump(suite))
-    before = _bytes(source)
-    rows = cli.main(["ablate", "--config", str(suite_path), "--splits", "val"])
-    assert {row["person_backend"] for row in rows} == {"dino"}
-    assert {row["representation"] for row in rows} == {"shared", "dual"}
-    assert _bytes(source) == before
 
 
 @pytest.mark.parametrize("image_size", [(73, 129), (129, 73), (101, 101)])

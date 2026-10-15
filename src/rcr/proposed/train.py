@@ -216,7 +216,7 @@ def train(cfg: dict) -> Path:
         raise ValueError("train.mining_batch_size must be a positive integer")
     use_state = uses_state(cfg["retrieval"], model_cfg.get("coarse_beta", 0.3))
     if loss_cfg.get("state_weight", 1.0) == 0 and use_state:
-        raise ValueError("state_weight=0 requires identity_only or coarse_beta=0")
+        raise ValueError("state_weight=0 requires retrieval.coarse_beta=0")
 
     from transformers import AutoModel, AutoTokenizer
 
@@ -243,7 +243,7 @@ def train(cfg: dict) -> Path:
         lru_mib=cache_cfg.get("lru_mib", 0),
     )
     cache.validate_gallery(data.gallery_ids)
-    expected_backend = cfg.get("person_encoder", {}).get("backend")
+    expected_backend = "fafa" if "person_encoder" in cfg else None
     actual_backend = (cache.encoder_metadata.get("person_encoder") or {}).get(
         "backend", "dino"
     )
@@ -278,19 +278,14 @@ def train(cfg: dict) -> Path:
     max_subjects = len(SUBJECT_MARKERS)
     model = RCRModel(
         dim=dim,
-        identity_dim=model_cfg["identity_dim"],
-        num_heads=model_cfg["num_heads"],
         max_subjects=max_subjects,
-        mlp_ratio=model_cfg["mlp_ratio"],
-        geo_dim=model_cfg["geo_dim"],
-        state_dim=model_cfg.get("state_dim"),
-        coarse_beta=model_cfg.get("coarse_beta", 0.3),
         person_input_dim=person_input_dim,
-        representation=model_cfg.get("representation", "dual"),
-        binding_mode=model_cfg.get("binding_mode", "both"),
         input_dim=input_dim,
-        dropout=model_cfg.get("dropout", 0.0),
-        fine_matching=model_cfg.get("fine_matching"),
+        **{
+            key: value
+            for key, value in model_cfg.items()
+            if key not in ("text_model", "dim")
+        },
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -534,7 +529,7 @@ def train(cfg: dict) -> Path:
                 if use_state and state_pairs_seen == 0:
                     raise ValueError(
                         "no supervised state pairs; increase identity sampling or "
-                        "evaluate with coarse_mode=identity_only"
+                        "evaluate with retrieval.coarse_beta=0"
                     )
                 metrics_dir = output / "evaluation" / f"epoch_{epoch_number:03d}"
                 metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -622,7 +617,7 @@ def train(cfg: dict) -> Path:
                 "encoder_metadata": getattr(cache, "encoder_metadata", None),
                 "cache_id": cache.cache_id,
                 "architecture_version": model.architecture_version,
-                "representation": model.representation,
+                "representation": "shared_person",
                 "best_full_map": best_full_map,
                 "best_macro_full_map": best_macro_full_map,
                 "best_score": best_score,

@@ -41,8 +41,7 @@ def main(argv=None):
                 command.add_argument(f"--{flag}", action="store_true")
         else:
             command.add_argument("--max-queries", type=int)
-    ablate = commands.add_parser("ablate", parents=[shared])
-    ablate.add_argument("--splits", nargs="+", choices=("val", "test"), default=["val"])
+    commands.add_parser("calibrate", parents=[shared])
     args = parser.parse_args(argv)
 
     try:
@@ -50,10 +49,10 @@ def main(argv=None):
     except (ValueError, OSError) as error:
         parser.error(str(error))
     command = args.command
-    if command == "ablate":
-        from rcr.proposed.experiments import run_ablation
+    if command == "calibrate":
+        from rcr.proposed.calibration import calibrate
 
-        return run_ablation(cfg, Path(__file__).resolve(), splits=args.splits)
+        return calibrate(cfg)
     method = cfg.get("method")
     if method not in ("proposed", "clip", "fafa"):
         parser.error("method must be proposed, clip or fafa")
@@ -110,7 +109,7 @@ def main(argv=None):
     )
     if command == "run":
         if method == "proposed":
-            from rcr.proposed.experiments import run_experiment
+            from rcr.proposed.runner import run_experiment
 
             return run_experiment(
                 cfg,

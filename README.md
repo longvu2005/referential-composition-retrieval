@@ -27,8 +27,8 @@ The benchmark uses four case types:
 - `tools/run.py`: the single experiment CLI.
 - `tools/report.py`: validate saved JSON and export overall/by-case paper tables.
 - `configs/{proposed,clip,fafa}.yaml`: one config per method.
-- `configs/ablations/*.yaml`: explicit experiments.
-- `src/rcr/proposed/`: training, losses, ranking and experiments; `nn/` holds
+- `configs/calibration.yaml`: validation grids for the two fusion weights.
+- `src/rcr/proposed/`: training, losses, ranking and stage coordination; `nn/` holds
   model components and `cache/` holds frozen feature extraction/loading.
 - `src/rcr/baselines/`: CLIP, official FAFA adapter and val tuning.
 - `src/rcr/common/`: shared data loading, runtime, I/O and detection utilities.
@@ -43,27 +43,22 @@ See [where to edit and module responsibilities](docs/code_structure.md).
 Dependency direction: CLI → method functions → model / shared utilities.
 YAML parsing lives in `common/config.py`; saved-result evaluation lives in
 `evaluation/runner.py`. Model and loss modules do not import the CLI. There is no trainer framework,
-recursive config inheritance or plugin registry. An ablation suite reads one
-method YAML and applies flat overrides. Method dependencies are imported only
-when that method/stage is used.
+recursive config inheritance or plugin registry. Method dependencies are imported
+only when that method/stage is used.
 
 ## Architecture
 
 The proposed model uses frozen **DINO scene patches** and a frozen **FAFA
 image-only person trunk**. Mean hidden Q-Former tokens produce each cached crop
-feature. Separate trainable heads produce normalized identity (128) and semantic
-(384) embeddings in the default `dual` mode. Identity is trained only by
-supervised contrastive loss in that mode;
-semantic features feed selection grounding and instruction composition.
+feature. The single person path learns `u = LayerNorm(Linear(h))` and
+`z_id = normalize(Linear(u))`. Grounding, composition and target evidence read
+the same `u`. Identity loss and fine retrieval train this person projection;
+fine matching/binding detach identity embeddings and do not directly train the
+identity head. DINO scene features have a separate projection.
 
-`model.representation: shared_person` instead learns
-`u = LayerNorm(Linear(h))` and `z_id = normalize(Linear(u))`. Grounding,
-composition and target semantic/context evidence read the same `u`. Identity
-loss and fine retrieval therefore train the same person projection; fine still
-detaches identity matching/binding and does not train the identity head directly.
-All matching, scoring and loss definitions stay as in `dual`. This mode requires
-fresh training and reuses existing feature caches. See the
-[paired experiment and checkpoint rules](docs/shared_person.md).
+FAFA, the shared person path, identity + semantic binding, z-score coarse fusion
+and Top-M reranking are fixed in code. The YAML controls dimensions, loss weights,
+training, matching thresholds and runtime settings.
 
 Fine uses one partial one-to-one identity assignment across all query Subjects,
 with explicit null matches. State and context read those same assigned people;
@@ -71,8 +66,8 @@ unmatched members stay in the score and coverage gates context. Subject roles
 come from query text; case labels and GT member counts are not used at inference.
 Scene/ordered geometry supports conditions outside crops. Global-state coarse
 and evaluation remain. See [equations and limitations](docs/proposed_method.md).
-The new architecture requires retraining; compatible feature caches can be
-reused. Default training outputs are `runs/proposed-a`.
+Existing `shared-person-partial-match-v1` checkpoints and compatible caches
+remain usable. Earlier architectures require training the current model. Default training outputs are `runs/proposed-a`.
 
 ## Setup and run
 
@@ -118,10 +113,7 @@ See [Kaggle reuse and commands](docs/proposed_runs.md).
 bash scripts/methods/proposed.bash val
 
 # Joint 2D validation calibration; only the selected pair reaches test.
-.venv-proposed/bin/python tools/run.py ablate --config configs/calibration.yaml --splits val test
-
-# Score-term removals from the same calibrated checkpoint/shortlist.
-.venv-proposed/bin/python tools/run.py ablate --config configs/ablations/binding.yaml --splits val test
+.venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
 
 # CLIP and native FAFA: prepare assets, retrieve and evaluate validation.
 bash scripts/methods/clip.bash val
@@ -149,22 +141,22 @@ and checkpoint identity are checked. Keep historical run directories separately.
 | `retrieve` | Save complete split-gallery rankings |
 | `evaluate` | Evaluate saved rankings without a model |
 | `run` | Coordinate prepare/build/train/retrieve/evaluate |
-| `ablate` | Explicit training/inference suites or validation calibration |
+| `calibrate` | Select the two fusion weights on complete validation queries |
 
-`--set key=value ...` overrides existing YAML fields. `--splits` selects splits.
-`--max-queries` is only for matching retrieve/evaluate smoke runs. Normal run and
-ablation use complete requested query splits. Outputs contain checkpoints,
+`--set key=value ...` overrides existing YAML fields. `--splits` selects splits
+for retrieve/evaluate/run; calibration always uses validation.
+`--max-queries` is only for matching retrieve/evaluate smoke runs. Normal runs and
+calibration use complete query splits. Outputs contain checkpoints,
 config/tokenizer, history, per-epoch metrics, rankings, run metadata and summaries.
 W&B retains its metrics and additionally logs the learned binding scale.
 
-Detailed [proposed workflow](docs/proposed_runs.md),
-[baseline workflow](docs/baselines.md), and [new ablations](docs/ablations.md).
-Ablations now cover DINO/FAFA x shared/dual and binding term removals, with optional
-retraining. The old identity-amplitude, coarse-only, loss and sampling suites
-have been removed. Calibration lives separately in `configs/calibration.yaml`.
-The isolated `dual`–`shared_person` comparison is in
-`configs/ablations/shared_person.yaml`; legacy `shared` changes routing/binding
-and is a separate control.
+Detailed [proposed workflow](docs/proposed_runs.md) and
+[baseline workflow](docs/baselines.md).
+
+Keep one current architecture in the main code. Try a new module on a short-lived
+Git branch; keep its commit, config, seed and metrics when deciding whether to
+retain it. The config contains model dimensions, training hyperparameters and
+runtime settings. Architecture controls and score-removal suites are absent.
 
 ## Tests
 

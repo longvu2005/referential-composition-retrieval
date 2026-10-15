@@ -79,7 +79,7 @@ Changing test labels cannot affect the selection. Val-optimal does not guarantee
 test-optimal performance. Running val with only one fusion mode replaces the
 selection file with that mode; select both if both will be tested later.
 
-For a fixed-weight ablation or retrieval smoke check:
+For a fixed-weight run or retrieval smoke check:
 
 ```bash
 python tools/run.py retrieve --config configs/clip.yaml \

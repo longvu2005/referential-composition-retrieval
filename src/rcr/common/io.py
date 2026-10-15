@@ -89,7 +89,7 @@ def write_summary(root: str | Path, rows: list[dict]) -> None:
     preserve_file(path)
     temporary = path.with_suffix(".csv.tmp")
     with temporary.open("w", newline="", encoding="utf-8") as handle:
-        # Ablations can report different candidate K values (e.g. different Top-M).
+        # Runs can report different candidate K values (e.g. different Top-M).
         fields = list(dict.fromkeys(key for row in rows for key in row))
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
