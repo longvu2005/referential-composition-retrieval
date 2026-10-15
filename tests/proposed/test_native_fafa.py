@@ -9,8 +9,8 @@ import torch.nn.functional as F
 
 from rcr.baselines.fafa import fda_scores
 from rcr.common.data import load_rcr_data
-from rcr.proposed.cache import native_build
-from rcr.proposed.cache.native import NativeFAFACache, query_key, subject_conditions
+from rcr.proposed.cache import fafa as fafa_cache
+from rcr.proposed.cache.native import query_key, subject_conditions
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.matching import partial_identity_matching
 from rcr.proposed.nn.model import RCRModel
@@ -120,104 +120,128 @@ def test_query_key_ignores_annotations_but_tracks_instruction_and_subject_order(
     assert query_key(labeled) != original
 
 
-def test_native_cache_shapes_text_validation_and_readonly_reuse(
-    experiment,
-    local_stages,
-    monkeypatch,  # noqa: F811
+def test_unified_cache_shapes_text_validation_and_readonly_reuse(
+    experiment, local_stages
 ):
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path)])
-    gallery = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
-    cache = NativeFAFACache(cfg["data"]["native_cache"], gallery)
+    root = Path(cfg["data"]["cache"])
+    gallery = GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-    query = cache.load_queries(data.samples, 2)
-    targets = cache.load_targets(torch.tensor([2, 0, 2]), 2)
-    assert query.shape == (3, 1, 2, 3)
-    assert targets.shape == (3, 2, 7, 3)
-    assert not query.requires_grad and not targets.requires_grad
-    assert query[:, :, 1:].count_nonzero() == 0
-    torch.testing.assert_close(query[0, 0, 0], torch.tensor([0.6, 0.8, 0.0]))
-    torch.testing.assert_close(targets[0], targets[2])
-    assert targets[:, 1:].count_nonzero() == 0
-    changed = {
-        **data.samples[0],
-        "final_change": data.samples[0]["final_change"] + " now",
-    }
-    with pytest.raises(ValueError, match="missing/stale"):
-        cache.load_queries([changed], 2)
-    with pytest.raises(ValueError, match="person padding differs"):
-        cache.load_targets(torch.tensor([0]), 0)
-    root = Path(cfg["data"]["native_cache"])
+    assert gallery.native_queries(data.samples[:1], 2).shape == (1, 1, 2, 3)
+    assert gallery.native_targets(torch.tensor([0, 0]), 2).shape == (2, 2, 7, 3)
+    assert gallery.native.cache_id == gallery.cache_id
+    assert gallery.format_version == 4
+    assert not (root / ".persons").exists()
+    assert list(root.glob("index.pt")) == [root / "index.pt"]
     before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
-    monkeypatch.setattr(
-        native_build, "load_fafa", lambda *a: pytest.fail("loaded FAFA")
-    )
-    cfg["data"]["image_root"] = "missing-images"
-    native_build.finish_native_cache(cfg)
-    assert all(path.read_bytes() == value for path, value in before.items())
-    gallery.cache_id = "rebuilt"
-    with pytest.raises(ValueError, match="differs from the person cache"):
-        NativeFAFACache(root, gallery)
+    fafa_cache.finish_fafa_cache(cfg)
+    assert all(p.read_bytes() == value for p, value in before.items())
+    changed = copy.deepcopy(data.samples)
+    changed[0]["final_change"] += " different shoes"
+    with pytest.raises(ValueError, match="stale"):
+        gallery.native.validate_samples(changed)
+    with pytest.raises(ValueError, match="padding differs"):
+        gallery.native_targets(torch.tensor([0]), 0)
+    shard = root / "targets/0.pt"
+    item = torch.load(shard, weights_only=True)
+    item["cache_id"] = "other-cache"
+    torch.save(item, shard)
+    with pytest.raises(ValueError, match="invalid native FAFA feature shard"):
+        gallery.native_targets(torch.tensor([0]), 1)
 
 
-def test_interrupted_native_build_resumes_targets_and_query_shards(
-    experiment,
-    local_stages,
-    monkeypatch,  # noqa: F811
+def test_one_image_forward_supplies_both_person_and_native_target(
+    experiment, local_stages, monkeypatch
 ):
     cfg, path = experiment
-    cli.main(["build-cache", "--config", str(path), "--cache-stage", "dino"])
-    cli.main(["build-cache", "--config", str(path), "--cache-stage", "persons"])
     model = FakeFAFA()
     original = model.extract_features
-    calls = []
+    calls, loads = [], []
 
-    def interrupt(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 2:
-            raise RuntimeError("interrupted")
-        return original(*args, **kwargs)
+    def extract(samples, mode):
+        calls.append(mode)
+        return original(samples, mode)
 
-    monkeypatch.setattr(model, "extract_features", interrupt)
-    monkeypatch.setattr(
-        native_build,
-        "load_fafa",
-        lambda *a: (
-            model,
-            {"eval": str},
-            lambda crop: torch.ones(3, 4, 4),
-            {},
-        ),
-    )
-    with pytest.raises(RuntimeError, match="interrupted"):
-        native_build.finish_native_cache(cfg)
-    root = Path(cfg["data"]["native_cache"])
-    assert (root / ".building").is_file()
-    gallery = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
-    with pytest.raises(RuntimeError, match="incomplete"):
-        NativeFAFACache(root, gallery)
-    saved = {p: p.read_bytes() for p in root.rglob("*.pt")}
-    monkeypatch.setattr(model, "extract_features", original)
+    def load(*args):
+        loads.append(1)
+        return model, {"eval": str}, lambda crop: torch.ones(3, 4, 4), {}
+
+    monkeypatch.setattr(model, "extract_features", extract)
     monkeypatch.setattr(
         model,
         "extract_target_features",
-        lambda *a, **k: pytest.fail("recomputed targets"),
+        lambda *a, **k: pytest.fail("second image forward"),
     )
-    native_build.finish_native_cache(cfg)
+    monkeypatch.setattr(fafa_cache, "load_fafa", load)
+    cli.main(["build-cache", "--config", str(path)])
+    gallery = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
+    assert loads == [1]
+    assert calls.count("image") == len(gallery.image_ids)
+    assert calls.count("multimodal") == len(gallery.native.queries)
+    expected = original({"image": torch.ones(1, 3, 4, 4)}, "image")
+    torch.testing.assert_close(
+        gallery.persons[0, :1].float(), expected.image_embeds.mean(1)
+    )
+    torch.testing.assert_close(
+        gallery.native_targets(torch.tensor([0]), 1)[0],
+        expected.image_embeds_proj,
+        atol=3e-4,
+        rtol=1e-3,
+    )
+
+
+def test_interrupted_unified_build_resumes_images_and_query_shards(
+    experiment, local_stages, monkeypatch
+):
+    cfg, path = experiment
+    cli.main(["build-cache", "--config", str(path), "--cache-stage", "dino"])
+    model = FakeFAFA()
+    original = model.extract_features
+    queries = []
+
+    def interrupt(samples, mode):
+        if mode == "multimodal":
+            queries.append(1)
+            if len(queries) == 2:
+                raise RuntimeError("interrupted")
+        return original(samples, mode)
+
+    monkeypatch.setattr(model, "extract_features", interrupt)
+    monkeypatch.setattr(
+        fafa_cache,
+        "load_fafa",
+        lambda *a: (model, {"eval": str}, lambda crop: torch.ones(3, 4, 4), {}),
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        fafa_cache.finish_fafa_cache(cfg)
+    root = Path(cfg["data"]["cache"])
+    with pytest.raises(RuntimeError, match="incomplete"):
+        GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
+    saved = {
+        p: p.read_bytes()
+        for p in root.rglob("*.pt")
+        if p.parent.name in ("targets", "queries")
+    }
+
+    def remaining(samples, mode):
+        assert mode == "multimodal", "recomputed completed image features"
+        return original(samples, mode)
+
+    monkeypatch.setattr(model, "extract_features", remaining)
+    fafa_cache.finish_fafa_cache(cfg)
     assert not (root / ".building").exists()
-    assert all(
-        p.read_bytes() == value for p, value in saved.items() if p.name != ".build.pt"
-    )
-    cache = NativeFAFACache(root, gallery)
+    assert not (root / ".persons").exists()
+    assert all(p.read_bytes() == value for p, value in saved.items())
+    gallery = GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
     assert (
-        cache.cache_id
+        gallery.cache_id
         == torch.load(next(root.glob("queries/*.pt")), weights_only=True)["cache_id"]
     )
 
 
-def test_native_cache_handles_no_detection_without_inventing_a_crop(
-    experiment,
-    local_stages,
+def test_unified_cache_handles_no_detection_without_inventing_a_crop(
+    experiment, local_stages
 ):
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path), "--cache-stage", "dino"])
@@ -231,9 +255,7 @@ def test_native_cache_handles_no_detection_without_inventing_a_crop(
     item["identity_ids"] = []
     torch.save(item, source / "features/0.pt")
     cli.main(["build-cache", "--config", str(path)])
-    gallery = GalleryCache(
-        cfg["data"]["cache"], scene_root=source, native_root=cfg["data"]["native_cache"]
-    )
+    gallery = GalleryCache(cfg["data"]["cache"], scene_root=source)
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     assert gallery.native_queries(data.samples[:1], 0).shape == (1, 1, 0, 3)
     assert gallery.native_targets(torch.tensor([0]), 0).shape == (1, 0, 7, 3)

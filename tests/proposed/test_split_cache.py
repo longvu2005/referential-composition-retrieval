@@ -7,7 +7,6 @@ import yaml
 
 from rcr.proposed.cache import build as builder
 from rcr.proposed.cache import fafa as fafa_cache
-from rcr.proposed.cache import native_build
 from rcr.proposed.cache.build import check_cache_config
 from rcr.proposed.cache.dino import boxes_to_scene
 from rcr.proposed.cache.store import GalleryCache
@@ -34,16 +33,13 @@ def split_cache(experiment, local_stages, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.setattr(
         fafa_cache,
         "load_fafa",
-        lambda *args: (model, {}, lambda crop: torch.ones(3, 4, 4), {}),
+        lambda *args: (model, {"eval": str}, lambda crop: torch.ones(3, 4, 4), {}),
     )
     worker_calls = []
 
     def worker(cfg, **options):
         worker_calls.append(options)
-        if options.get("native"):
-            native_build.finish_native_cache(cfg)
-        else:
-            fafa_cache.finish_fafa_cache(cfg)
+        fafa_cache.finish_fafa_cache(cfg)
 
     monkeypatch.setattr(builder, "run_person_worker", worker)
     return cfg, path, source, model, worker_calls
@@ -63,10 +59,9 @@ def test_persons_only_reuses_dino_then_train_and_retrieve(
     monkeypatch.setattr(
         builder, "_prepare_dino", lambda *args: pytest.fail("built DINO")
     )
-    cli.main(["build-cache", "--config", str(path), "--cache-stage", "persons"])
+    cli.main(["build-cache", "--config", str(path), "--cache-stage", "fafa"])
     assert worker_calls == [{}]
     assert _bytes(source) == before
-    cli.main(["build-cache", "--config", str(path), "--cache-stage", "native"])
     native_path = Path(cfg["person_encoder"]["fafa_config"])
     native_config = native_path.read_bytes()
     native_path.unlink()
@@ -158,7 +153,7 @@ def test_fafa_resumes_saved_images_and_never_publishes_partial(
     monkeypatch.setattr(model, "extract_features", fail_second)
     with pytest.raises(RuntimeError, match="interrupted"):
         fafa_cache.finish_fafa_cache(cfg)
-    first = (root / "features/0.pt").read_bytes()
+    first = (root / ".persons/0.pt").read_bytes()
     manifest = torch.load(root / ".build.pt", weights_only=True)
     with pytest.raises(RuntimeError, match="incomplete"):
         GalleryCache(root, scene_root=source)
@@ -172,10 +167,10 @@ def test_fafa_resumes_saved_images_and_never_publishes_partial(
     monkeypatch.setattr(model, "extract_features", count_remaining)
     fafa_cache.finish_fafa_cache(cfg)
     cache = GalleryCache(root, scene_root=source)
-    assert calls == len(cache.image_ids) - 1
-    first_persons = torch.load(io.BytesIO(first), weights_only=True)["persons"]
+    assert calls == len(cache.image_ids) - 1 + len(cache.native.queries)
+    first_persons = torch.load(io.BytesIO(first), weights_only=True)["features"]
     torch.testing.assert_close(cache.persons[0, cache.mask[0]], first_persons)
-    assert not (root / "features").exists()
+    assert not (root / ".persons").exists()
     assert cache.cache_id == manifest["cache_id"]
     assert not (root / ".build.pt").exists()
     assert not (root / ".persons.bin").exists()
@@ -213,21 +208,21 @@ def test_complete_person_index_needs_only_dino_shards(split_cache, monkeypatch):
     cfg, _, source, _, _ = split_cache
     fafa_cache.finish_fafa_cache(cfg)
     root = Path(cfg["data"]["cache"])
-    assert not (root / "features").exists()
+    assert not (root / ".persons").exists()
     monkeypatch.setattr(
         builder, "_prepare_dino", lambda *args: pytest.fail("rebuilt DINO")
     )
     monkeypatch.setattr(
         builder, "run_person_worker", lambda *args, **kw: pytest.fail("FAFA")
     )
-    builder.prepare_cache(cfg, stage="persons")
+    builder.prepare_cache(cfg, stage="fafa")
     cache = GalleryCache(root, scene_root=source)
     _, persons, _, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(persons[0], cache.persons[0, cache.mask[0]].float())
     # Older completed caches can retain shards. They must not make fine
     # scoring read different persons from the coarse index.
-    (root / "features").mkdir()
-    torch.save({"persons": torch.full_like(persons[0], -999)}, root / "features/0.pt")
+    (root / ".persons").mkdir()
+    torch.save({"persons": torch.full_like(persons[0], -999)}, root / ".persons/0.pt")
     _, legacy_persons, _, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(legacy_persons, persons)
     (source / "features/0.pt").unlink()
@@ -267,7 +262,7 @@ def test_persons_stage_requires_complete_dino(split_cache):
     cfg, _, _, _, worker_calls = split_cache
     cfg["data"]["dino_cache"] = "missing-source"
     with pytest.raises(ValueError, match="DINO cache missing"):
-        builder.prepare_cache(cfg, stage="persons")
+        builder.prepare_cache(cfg, stage="fafa")
     assert not worker_calls
 
 

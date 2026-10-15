@@ -164,7 +164,6 @@ def test_train_checkpoints_metrics_and_retrieve(
             "final_dir": "unused",
             "image_root": "unused",
             "cache": "unused",
-            "native_cache": "unused",
         },
         "model": {
             "text_model": "tiny",

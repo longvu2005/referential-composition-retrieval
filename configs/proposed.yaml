@@ -6,9 +6,8 @@ split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  cache: cache/proposed-fafa
+  cache: cache/proposed-fafa-unified  # pooled persons + FDA targets + composed queries
   dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
-  native_cache: cache/proposed-fafa-native  # new; reuse both existing caches above
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
@@ -98,7 +97,7 @@ wandb:
   log_every_steps: 20
 runtime:
   device: auto
-checkpoint: runs/proposed-fafa-native/best.pt
+checkpoint: runs/proposed-fafa-unified/best.pt
 output:
   # Root only; the runner appends each split.
-  dir: runs/proposed-fafa-native
+  dir: runs/proposed-fafa-unified

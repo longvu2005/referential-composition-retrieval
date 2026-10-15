@@ -18,7 +18,6 @@ class GalleryCache:
         *,
         scene_root: str | Path | None = None,
         lru_mib: int = 0,
-        native_root: str | Path | None = None,
     ) -> None:
         if not isinstance(lru_mib, int) or lru_mib < 0:
             raise ValueError("cache.lru_mib must be a nonnegative integer")
@@ -38,6 +37,10 @@ class GalleryCache:
 
         self._scene_cache = None
         if index.get("layout") == "persons":
+            raise ValueError(
+                "old FAFA cache; rebuild unified FAFA in a new data.cache directory"
+            )
+        if index.get("layout") == "fafa":
             if scene_root is None:
                 raise ValueError("FAFA person cache requires data.dino_cache")
             self._scene_cache = GalleryCache(scene_root)
@@ -79,17 +82,24 @@ class GalleryCache:
         from rcr.proposed.cache.native import NativeFAFACache
 
         self.native = (
-            None if native_root is None else NativeFAFACache(native_root, self)
+            NativeFAFACache(index["native"], self)
+            if index.get("layout") == "fafa"
+            else None
         )
 
     def native_queries(self, samples, max_people: int) -> Tensor:
         if self.native is None:
-            raise ValueError("data.native_cache is required; run build-cache")
+            raise ValueError("unified FAFA cache is required; run build-cache")
         return self.native.load_queries(samples, max_people)
+
+    def validate_samples(self, samples) -> None:
+        if self.native is None:
+            raise ValueError("unified FAFA cache is required; run build-cache")
+        self.native.validate_samples(samples)
 
     def native_targets(self, indices: Tensor, max_people: int) -> Tensor:
         if self.native is None:
-            raise ValueError("data.native_cache is required; run build-cache")
+            raise ValueError("unified FAFA cache is required; run build-cache")
         return self.native.load_targets(indices, max_people)
 
     def validate_gallery(self, image_ids: list[str]) -> None:

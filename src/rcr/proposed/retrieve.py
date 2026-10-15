@@ -61,7 +61,7 @@ def _retrieve(
     if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
             "checkpoint architecture is incompatible; train FAFA-native V1 "
-            "in a new output directory after building data.native_cache"
+            "in a new output directory after building the unified FAFA cache"
         )
     if checkpoint.get("representation", "shared_person") != "shared_person":
         raise ValueError("checkpoint representation differs from its architecture")
@@ -97,10 +97,9 @@ def _retrieve(
         data_cfg["cache"],
         scene_root=data_cfg.get("dino_cache"),
         lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
-        native_root=data_cfg["native_cache"],
     )
     cache.validate_gallery(data.gallery_ids)
-    cache.native.validate_samples(samples)
+    cache.validate_samples(samples)
     if cache.native.metadata != checkpoint.get("native_cache"):
         raise ValueError("native FAFA cache differs from training")
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:

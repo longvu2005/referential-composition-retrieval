@@ -122,11 +122,14 @@ class FakeFAFA(nn.Module):
             )
         assert mode == "image" and set(samples) == {"image"}
         # Hidden tokens differ from the projected features on purpose.
-        tokens = (
-            torch.arange(10.0).reshape(1, 2, 5).expand(len(samples["image"]), -1, -1)
+        tokens = (torch.arange(35.0).reshape(1, 7, 5) - 12.5).expand(
+            len(samples["image"]), -1, -1
         )
         return SimpleNamespace(
-            image_embeds=tokens, image_embeds_proj=torch.zeros(len(tokens), 2, 1)
+            image_embeds=tokens,
+            image_embeds_proj=torch.nn.functional.normalize(
+                torch.arange(21.0).reshape(1, 7, 3).expand(len(tokens), -1, -1), dim=-1
+            ),
         )
 
 
@@ -179,14 +182,14 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
         fafa_cache,
         "load_rcr_data",
         lambda *args: SimpleNamespace(
-            gallery_ids=["image"], image_path=lambda _: image
+            gallery_ids=["image"], samples=[], image_path=lambda _: image
         ),
     )
     model = FakeFAFA()
     monkeypatch.setattr(
         fafa_cache,
         "load_fafa",
-        lambda *args: (model, {}, lambda crop: torch.ones(3, 4, 4), {}),
+        lambda *args: (model, {"eval": str}, lambda crop: torch.ones(3, 4, 4), {}),
     )
     extract = model.extract_features
     monkeypatch.setattr(

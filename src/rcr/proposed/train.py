@@ -2,7 +2,6 @@
 
 import json
 import math
-import shutil
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -16,6 +15,12 @@ from rcr.common.config import validate_training_schedule
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.common.io import write_json
 from rcr.common.runtime import resolve_device
+from rcr.common.torch_io import (
+    link_checkpoint,
+    require_disk_space,
+    save_torch,
+    tensor_bytes,
+)
 from rcr.dataset.audit import negative_exclusions, positive_conflicts
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.proposed.batch import (
@@ -241,10 +246,9 @@ def train(cfg: dict) -> Path:
         data_cfg["cache"],
         scene_root=data_cfg.get("dino_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
-        native_root=data_cfg["native_cache"],
     )
     cache.validate_gallery(data.gallery_ids)
-    cache.native.validate_samples([*samples, *val_samples])
+    cache.validate_samples([*samples, *val_samples])
     expected_backend = "fafa" if "person_encoder" in cfg else None
     actual_backend = (cache.encoder_metadata.get("person_encoder") or {}).get(
         "backend", "dino"
@@ -317,6 +321,17 @@ def train(cfg: dict) -> Path:
 
     output = Path(output_cfg["dir"])
     output.mkdir(parents=True, exist_ok=True)
+    # Reserve latest + best + an atomic temporary, including Adam's two moments.
+    weights_bytes = tensor_bytes(
+        {"model": model.state_dict(), "text": text_encoder.state_dict()}
+    )
+    adam_bytes = 2 * sum(
+        p.numel() * p.element_size()
+        for group in optimizer.param_groups
+        for p in group["params"]
+        if p.requires_grad
+    )
+    require_disk_space(output, 3 * (weights_bytes + adam_bytes))
     (output / "config.yaml").write_text(
         yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
     )
@@ -628,13 +643,9 @@ def train(cfg: dict) -> Path:
                 "state_supervised_pairs": state_pairs_seen,
             }
             last_path = output / "last.pt"
-            temporary = output / "last.pt.tmp"
-            torch.save(checkpoint, temporary)
-            temporary.replace(last_path)
+            save_torch(checkpoint, last_path)
             if is_best:
-                temporary = output / "best.pt.tmp"
-                shutil.copyfile(last_path, temporary)
-                temporary.replace(output / "best.pt")
+                link_checkpoint(last_path, output / "best.pt")
 
     finally:
         if run is not None:

@@ -38,7 +38,7 @@ The benchmark uses four case types:
 - `scripts/`: Bash workflows that sequence those commands for reproduction.
 - `requirements/`: separate installations for methods, annotation and evaluation.
 
-See [where to edit and module responsibilities](docs/code_structure.md).
+See [model equations](docs/proposed_method.md) and [run commands](docs/proposed_runs.md).
 
 Dependency direction: CLI → method functions → model / shared utilities.
 YAML parsing lives in `common/config.py`; saved-result evaluation lives in
@@ -61,9 +61,9 @@ tokens for the Context Reasoner. Fine score is
 `softplus(binding_log_scale) * B_FAFA + coverage * S_context`.
 
 There is one architecture: `fafa-native-partial-match-v1`. Earlier checkpoints
-require retraining in a new run directory; compatible DINO and image-only FAFA
-caches remain reusable. Build the additional native cache before training.
-Default outputs are `runs/proposed-fafa-native`. See
+require retraining in a new run directory. Keep the DINO source and rebuild
+one unified FAFA cache containing pooled persons, projected target tokens and
+multimodal queries. Default outputs are `runs/proposed-fafa-unified`. See
 [equations and limitations](docs/proposed_method.md).
 
 ## Setup and run
@@ -97,13 +97,15 @@ environment's Python to use it with a workflow instead of the default venv.
 | `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
 | `requirements/dev.txt` | CPU tests and linting |
 
-Set `data.dino_cache`, `data.cache`, `data.native_cache`, raw-image paths and
-`person_encoder.python` in the proposed YAML. Keep the three directories
-separate. `--cache-stage dino` builds scenes/detections; `persons` builds pooled
-image-only features; `native` adds multimodal queries for all Subject/crop
-candidates and target tokens. The default `all` ensures all three caches.
-Complete compatible stages are reused; interrupted native extraction resumes
-saved shards. Train/retrieve read caches without loading native FAFA.
+Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
+in the proposed YAML. There are two caches: immutable DINO scenes/detections and
+one unified FAFA directory. `--cache-stage dino` builds the source;
+`--cache-stage fafa` builds all FAFA features with one model load. Image-only
+hidden means and projected target tokens share one Q-Former forward per crop.
+Multimodal queries cover every public Subject/crop candidate. The default `all`
+builds/reuses both caches; interrupted FAFA builds resume saved image/query shards.
+Train/retrieve read the features without loading native FAFA. Old separate FAFA
+caches must be rebuilt; use a new `data.cache` directory.
 See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash

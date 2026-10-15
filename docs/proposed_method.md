@@ -212,12 +212,15 @@ LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
 
 ## Configuration and checkpoints
 
-There is one architecture, `fafa-native-partial-match-v1`. Older checkpoints
-are explicitly rejected: train V1 in `runs/proposed-fafa-native` or another new
-run directory. Keep compatible DINO/image-only FAFA caches and build only the
-new `data.native_cache` if they already exist. The native manifest binds the
-person cache ID, encoder metadata, checkpoint hash, crop order and public
-instruction/Subject order. Query text changes require a new native cache.
+There is one architecture, `fafa-native-partial-match-v1`. Keep the compatible
+DINO source and rebuild FAFA into one new `data.cache` directory. The unified
+cache uses format 4 and one cache ID for image-only person means, native target
+tokens and multimodal queries. A single image-only Q-Former forward returns both
+hidden means and projected tokens; their mathematical definitions are unchanged.
+The index binds the DINO source, encoder settings, checkpoint hash, crop order and
+public instruction/Subject order. Query text changes require a new unified cache.
+Remove `data.native_cache` from old YAMLs. Train in `runs/proposed-fafa-unified`
+or another new run directory because old checkpoints refer to different caches.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and fusion coefficients.

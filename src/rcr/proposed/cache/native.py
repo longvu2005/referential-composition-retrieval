@@ -7,7 +7,6 @@ indexed by public instruction/Subject slots, never by selected members or GT.
 import hashlib
 import json
 import re
-from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -89,38 +88,21 @@ def query_key(sample: dict) -> str:
 class NativeFAFACache:
     """Small manifest in RAM, native features read only for requested pairs."""
 
-    def __init__(self, root: str | Path, gallery) -> None:
-        self.root = Path(root)
-        if (self.root / ".building").exists():
-            raise RuntimeError("native FAFA cache incomplete; resume build-cache")
-        path = self.root / "index.pt"
-        if not path.is_file():
-            raise FileNotFoundError("native FAFA cache missing; run build-cache")
-        index = torch.load(path, map_location="cpu", weights_only=True)
+    def __init__(self, index: dict, gallery) -> None:
+        self.root = gallery.root
         if index.get("version") != NATIVE_VERSION:
             raise ValueError("native FAFA cache version differs; use a new directory")
-        if (
-            index["person_cache_id"] != gallery.cache_id
-            or index["encoder_metadata"] != gallery.encoder_metadata
-            or index["image_ids"] != gallery.image_ids
-            or not torch.equal(index["mask"], gallery.mask)
-        ):
-            raise ValueError("native FAFA cache differs from the person cache")
-        self.cache_id = index["cache_id"]
+        self.cache_id = gallery.cache_id
         self.dim = index["dim"]
         self.tokens = index["tokens"]
         self.queries = index["queries"]
         self.gallery = gallery
         self.metadata = {
-            key: index[key]
-            for key in (
-                "version",
-                "cache_id",
-                "person_cache_id",
-                "spec",
-                "dim",
-                "tokens",
-            )
+            "version": index["version"],
+            "cache_id": self.cache_id,
+            "spec": gallery.encoder_metadata["person_encoder"],
+            "dim": self.dim,
+            "tokens": self.tokens,
         }
 
     def validate_samples(self, samples) -> None:

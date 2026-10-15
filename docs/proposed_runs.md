@@ -21,14 +21,14 @@ Alternatively, `PYTHON=python3.11 bash scripts/setup.bash proposed` and
 including on notebook images without `ensurepip`. The host pip needs 22.3+.
 
 Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`,
-`data.native_cache`, and
+and
 `person_encoder.python` in `configs/proposed.yaml`. All relative paths are
 relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
 For Kaggle, use venv Python paths explicitly in every cell.
 
 ## Main workflow
 
-`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses all three
+`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses both
 caches, trains, calibrates coefficients on validation and writes the selected
 validation result to `runs/calibration/selected/val`. Run
 `bash scripts/methods/proposed.bash test` later to use the frozen selected YAML.
@@ -43,13 +43,10 @@ checkpoint, changing configs/seeds or running only one cache stage.
 # Stream 1: DINO scenes/detections/crops; no FAFA environment required.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
 
-# Stream 2: FAFA persons from the completed DINO source.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage persons
+# Stream 2: pooled persons + target tokens + multimodal queries in one FAFA cache.
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa
 
-# Stream 3: native FAFA multimodal queries + target tokens, same detections.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage native
-
-# Or ensure all three caches; compatible completed stages are skipped.
+# Or ensure both caches; compatible completed stages are skipped.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
@@ -87,8 +84,7 @@ data:
   final_dir: dataset/data/final
   image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
   dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
-  cache: /kaggle/working/cache/proposed-fafa
-  native_cache: /kaggle/working/cache/proposed-fafa-native
+  cache: /kaggle/working/cache/proposed-fafa-unified
 ```
 
 Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.
@@ -115,54 +111,39 @@ DINO caches store explicit metadata and pixel boxes.
 
 | Directory | Contents | Usage |
 | --- | --- | --- |
-| `data.dino_cache` | DINO scenes, detections, identities, DINO crops/index | Shared immutable source; may be read-only Kaggle input |
-| `data.cache` | FAFA `index.pt` (persons + FP32 scene means) | References source ID; does not copy scene patches |
-| `data.native_cache` | Multimodal queries and projected target token shards + manifest | Same crops/order; no GT or selection decisions |
+| `data.dino_cache` | DINO scenes, detections, identities, crop index | Shared immutable source; may be read-only Kaggle input |
+| `data.cache` | `index.pt`, `targets/`, `queries/` | One FAFA cache ID, crop order and encoder provenance |
 
-Both builders skip a completed compatible cache before loading models. A
-completed cache with different encoders, gallery order or source ID fails
-explicitly; choose a new output directory for new settings. DINO feature files are
-checked when read, without scanning the entire directory on every reuse. A
-missing DINO file raises an I/O error; it does not silently trigger a rebuild.
-For FAFA, the completed `index.pt` owns the person features; per-image FAFA
-shards are temporary extraction checkpoints and are removed after finalization.
-The loader reads the same indexed person features for coarse and fine scoring.
-`--force` remains an asset-preparation option.
+`index.pt` holds pooled person features, FP32 scene means and the native feature
+manifest. Target shards hold projected Q-Former tokens; query shards hold FP32
+multimodal embeddings for every Subject/crop. A single image-only forward supplies
+both pooled means and target tokens. FAFA is loaded once per unfinished build.
+Complete compatible caches are reused before loading FAFA or opening raw images.
 
-Each unfinished directory has its own `.building` marker and `.build.pt`
-manifest. Feature files and final indexes are published atomically. Repeating
-the same stage preserves its cache ID and skips saved compatible images.
-Different resume settings fail. Training/retrieval reject incomplete source, person or native caches. After publishing the index, the marker is removed. An older
-interrupted build without a resume manifest starts that incomplete stage again;
-completed legacy DINO files remain untouched.
+Each unfinished cache has a `.building` marker and `.build.pt` signature. Repeating
+the build skips valid saved image/query shards and retains its cache ID. Changed
+weights, preprocessing, source ID or instructions require a new directory.
+Training/retrieval reject incomplete caches. Query keys use public text and
+Subject order; no GT labels or grounding predictions enter native extraction.
 
-Large padded indexes are memory-mapped when loaded. FAFA index assembly uses a
-padded tensor in CPU RAM and writes `index.pt.tmp` before publishing `index.pt`.
-RAM must hold that padded tensor. The finalizer estimates disk needs plus a
-margin; when necessary it removes already-consumed FAFA shards before writing.
-If interrupted after such removal, resume re-extracts those images. DINO source
-files are never deleted. FAFA stores FP32 scene means so later runs need not
-repool all legacy scene files.
+Pooled extraction shards in `.persons/` are temporary. They are assembled into
+one memory-mapped padded index and removed after publication; target/query shards
+remain final data. Scene patches are never copied from DINO. CPU RAM must hold
+the padded person index during finalization. A disk estimate includes that index,
+FAFA shards and serialization overhead before extraction starts.
 
-The default `all` stage builds/reuses DINO, pooled FAFA persons, then native
-FAFA queries/target tokens. Native FAFA assets are loaded only by the isolated
-worker when either FAFA stage needs extraction; there is no extra preflight subprocess. Use `prepare` first when assets
-are missing. Complete caches can be reused without a FAFA environment or raw
-images. The saved FAFA YAML is still needed by `build-cache` to compare extraction
-settings.
+Old separate FAFA caches are deliberately unsupported. Keep DINO, remove
+`data.native_cache` from the YAML and build format 4 in a new `data.cache` directory.
+Use a new run directory and recalibrate validation weights after retraining.
+Two dependency environments remain necessary because DINO and FAFA pin different
+Transformers versions; both use the same FAFA source/checkpoint loader.
 
-The architecture tag is `fafa-native-partial-match-v1`. Old checkpoints are
-rejected before model loading. Train in a new output directory; compatible
-DINO and image-only FAFA caches remain reusable. Existing calibration files
-refer to the old checkpoint: regenerate them after training V1.
-
-Native cache records the person cache ID, source/weight/preprocessing metadata,
-token dimensions and query keys. Query keys use public query image ID,
-Subject IDs/order and final change; they do not include labels or predictions.
-Grounding changes need no cache rebuild because all Subject/crop candidates are
-encoded. Changed instructions or a rebuilt person cache require a new native
-cache directory. Native shards are the final stored features, not disposable
-extraction files. Targets are read for requested candidates only.
+Checkpoint writes check available disk space and use an atomic temporary file.
+Failed writes remove that temporary and leave the previous checkpoint intact.
+Training reserves estimated space for best, last and a temporary before epoch 1.
+When best equals last, a hard link avoids another full copy; later replacement
+of last preserves the older best. Filesystems without hard links use an atomic
+copy. These checks report insufficient disk space; they cannot create more storage.
 
 After a successful build, training/retrieval read cached features only. They do
 not need native FAFA weights, its YAML or raw crop images. Training requires FAFA
@@ -172,7 +153,7 @@ environment paths are used only in prepare and cache extraction.
 
 ## Outputs and diagnostics
 
-`runs/proposed-fafa-native` contains config, tokenizer, `last.pt`, `best.pt`, history,
+`runs/proposed-fafa-unified` contains config, tokenizer, `last.pt`, `best.pt`, history,
 training-data diagnostics and per-epoch train/val metrics. Split runs save
 `rankings.pt`, `run.json`, `metrics.json`; `run` writes `summary.csv`.
 Saved-result evaluation checks the recorded split fingerprint before writing
@@ -198,7 +179,7 @@ Standalone query-limited retrieval/evaluation use matching `--max-queries`; norm
 ## Development
 
 The method config describes the current architecture and its hyperparameters.
-Edit the owning module directly (see [code structure](code_structure.md)); use a
+Edit the owning module directly (`cache/fafa.py`, `nn/`, losses or ranking); use a
 separate branch and output directory for a new idea. Keep the commit/config/seed
 and measurements, then retain successful changes in the main model.
 
