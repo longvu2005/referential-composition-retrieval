@@ -20,7 +20,11 @@ def main(argv=None):
     prepare = commands.add_parser("prepare", parents=[shared])
     prepare.add_argument("--force", action="store_true")
     cache = commands.add_parser("build-cache", parents=[shared])
-    cache.add_argument("--cache-stage", choices=("all", "dino", "fafa"), default="all")
+    cache.add_argument(
+        "--cache-stage",
+        choices=("all", "dino", "fafa", "fafa-image", "fafa-query"),
+        default="all",
+    )
     commands.add_parser("train", parents=[shared])
     for name in ("retrieve", "evaluate", "run"):
         command = commands.add_parser(name, parents=[shared])

@@ -72,7 +72,8 @@ def experiment(tmp_path):
     data = {
         "final_dir": str(final),
         "image_root": str(images),
-        "cache": str(tmp_path / "cache"),
+        "fafa_image_cache": str(tmp_path / "cache"),
+        "fafa_query_cache": str(tmp_path / "queries"),
         "dino_cache": str(tmp_path / "dino"),
     }
     cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
@@ -149,7 +150,11 @@ def local_stages(monkeypatch):
     monkeypatch.setattr(
         build,
         "run_person_worker",
-        lambda cfg, **kw: None if kw.get("prepare") else fafa.finish_fafa_cache(cfg),
+        lambda cfg, **kw: (
+            None
+            if kw.get("prepare")
+            else fafa.finish_fafa_cache(cfg, stage=kw.get("stage", "fafa"))
+        ),
     )
     calls = []
 
@@ -180,7 +185,7 @@ def test_complete_pipeline_then_evaluate_without_rebuild(experiment, local_stage
     assert all(row["num_queries"] == 1 for row in rows)
     root = Path(cfg["output"]["dir"])
     best = torch.load(root / "best.pt", weights_only=True)
-    index = Path(cfg["data"]["cache"]) / "index.pt"
+    index = Path(cfg["data"]["fafa_image_cache"]) / "index.pt"
     cache = torch.load(index, weights_only=True)
     assert best["cache_id"] == cache["cache_id"]
     assert best["best_epoch"] == 1
@@ -256,11 +261,11 @@ def test_overrides_are_shared_and_original_yaml_is_unchanged(
             "--build-cache",
             "--train",
             "--set",
-            f"data.cache={cache}",
+            f"data.fafa_image_cache={cache}",
             f"output.dir={output}",
         ]
     )
-    assert all(cfg["data"]["cache"] == str(cache) for _, cfg in local_stages)
+    assert all(cfg["data"]["fafa_image_cache"] == str(cache) for _, cfg in local_stages)
     assert all(row["checkpoint"] == str(output / "best.pt") for row in rows)
     assert (cache / "index.pt").is_file()
     assert (output / "test/metrics.json").is_file()
@@ -272,7 +277,7 @@ def test_rebuilt_cache_is_rejected_before_model_load(
 ):
     cfg, path = experiment
     cli.main(["run", "--config", str(path), "--build-cache", "--train"])
-    index = Path(cfg["data"]["cache"]) / "index.pt"
+    index = Path(cfg["data"]["fafa_image_cache"]) / "index.pt"
     cache = torch.load(index, weights_only=True)
     cache["cache_id"] = "rebuilt"
     torch.save(cache, index)
@@ -336,9 +341,9 @@ def test_training_rejects_wrong_person_backend_without_native_assets(
 ):
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path)])
-    cfg["data"]["cache"] = cfg["data"]["dino_cache"]
+    cfg["data"]["fafa_image_cache"] = cfg["data"]["dino_cache"]
     path.write_text(yaml.safe_dump(cfg))
-    with pytest.raises(ValueError, match="unified FAFA cache is required"):
+    with pytest.raises(ValueError, match="FAFA image/query caches are required"):
         cli.main(["train", "--config", str(path)])
 
 

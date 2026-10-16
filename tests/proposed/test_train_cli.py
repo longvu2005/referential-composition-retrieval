@@ -163,7 +163,7 @@ def test_train_checkpoints_metrics_and_retrieve(
         "data": {
             "final_dir": "unused",
             "image_root": "unused",
-            "cache": "unused",
+            "fafa_image_cache": "unused",
         },
         "model": {
             "text_model": "tiny",

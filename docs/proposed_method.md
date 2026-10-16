@@ -212,15 +212,22 @@ LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
 
 ## Configuration and checkpoints
 
-There is one architecture, `fafa-native-partial-match-v1`. Keep the compatible
-DINO source and rebuild FAFA into one new `data.cache` directory. The unified
-cache uses format 4 and one cache ID for image-only person means, native target
-tokens and multimodal queries. A single image-only Q-Former forward returns both
-hidden means and projected tokens; their mathematical definitions are unchanged.
-The index binds the DINO source, encoder settings, checkpoint hash, crop order and
-public instruction/Subject order. Query text changes require a new unified cache.
-Remove `data.native_cache` from old YAMLs. Train in `runs/proposed-fafa-unified`
-or another new run directory because old checkpoints refer to different caches.
+There is one architecture, `fafa-native-partial-match-v1`. Frozen extraction has
+three independent directories: `data.dino_cache`, `data.fafa_image_cache` and
+`data.fafa_query_cache`. The format-5 image index contains pooled person means,
+native target-token metadata and encoder/crop provenance, with no query text.
+One image-only Q-Former forward still supplies both hidden means and projected
+tokens; their mathematical definitions are unchanged. The query index separately
+maps sample/Subject slots to content-addressed conditions. Each key binds the
+FAFA source/checkpoint/preprocessing, DINO crop source, extraction precision,
+reference image and public condition. Query text edits only require rerunning
+`--cache-stage fafa-query`; unchanged condition features are reused.
+
+Completed format-4 unified caches remain valid image sources without writes.
+Replace `data.cache` with `data.fafa_image_cache` and add `data.fafa_query_cache`.
+Checkpoints bind image feature identity and encoder provenance, not the query
+manifest UUID. Earlier architecture checkpoints still require retraining in a
+new run directory; this cache separation does not change the model equations.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and fusion coefficients.

@@ -164,7 +164,8 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
     native_path.write_text(yaml.safe_dump(native))
     cfg = {
         "data": {
-            "cache": str(root),
+            "fafa_image_cache": str(root),
+            "fafa_query_cache": str(tmp_path / "queries"),
             "dino_cache": str(source_root),
             "final_dir": "unused",
             "image_root": str(tmp_path),

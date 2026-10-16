@@ -7,6 +7,7 @@ indexed by public instruction/Subject slots, never by selected members or GT.
 import hashlib
 import json
 import re
+from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -85,18 +86,105 @@ def query_key(sample: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-class NativeFAFACache:
-    """Small manifest in RAM, native features read only for requested pairs."""
+def condition_key(signature: dict, image_id: str, condition: str) -> str:
+    """One embedding family, reference crop order and public Subject condition."""
+    value = [NATIVE_VERSION, signature, image_id, condition]
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-    def __init__(self, index: dict, gallery) -> None:
+
+def query_entries(samples, signature: dict) -> dict:
+    return {
+        row["sample_id"]: {
+            "key": query_key(row),
+            "features": [
+                condition_key(signature, row["query_image_id"], text)
+                for text in subject_conditions(row)
+            ],
+        }
+        for row in samples
+    }
+
+
+class NativeQueryCache:
+    """Independent, incrementally extendable FP32 query features."""
+
+    def __init__(self, root: str | Path, signature: dict, dim: int) -> None:
+        self.root = Path(root)
+        if (self.root / ".building").exists():
+            raise RuntimeError(
+                f"query cache build is incomplete at {self.root}; resume fafa-query"
+            )
+        index = torch.load(
+            self.root / "index.pt", map_location="cpu", weights_only=True
+        )
+        if (
+            index.get("version") != NATIVE_VERSION
+            or index.get("layout") != "fafa-queries"
+        ):
+            raise ValueError("unsupported FAFA query cache; use a new directory")
+        if index.get("signature") != signature or index.get("dim") != dim:
+            raise ValueError("FAFA query encoder/crops differ from image cache")
+        self.signature = signature
+        self.dim = dim
+        self.cache_id = index["cache_id"]
+        self.queries = index["queries"]
+
+    def contains_samples(self, samples) -> bool:
+        expected = query_entries(samples, self.signature)
+        return all(self.queries.get(key) == value for key, value in expected.items())
+
+    def validate_samples(self, samples) -> None:
+        if not self.contains_samples(samples):
+            raise ValueError(
+                "native FAFA query missing/stale; "
+                "run build-cache --cache-stage fafa-query"
+            )
+
+    def load(self, sample, count: int) -> Tensor:
+        entry = self.queries[sample["sample_id"]]
+        features = []
+        for key in entry["features"]:
+            path = self.root / "features" / f"{key}.pt"
+            item = torch.load(path, map_location="cpu", weights_only=True)
+            value = item.get("features")
+            if (
+                item.get("cache_id") != self.cache_id
+                or item.get("key") != key
+                or not isinstance(value, Tensor)
+                or value.shape != (count, self.dim)
+                or value.dtype != torch.float32
+                or not torch.isfinite(value).all()
+            ):
+                raise ValueError(f"invalid native FAFA feature shard: {path}")
+            features.append(value)
+        return torch.stack(features)
+
+
+class NativeFAFACache:
+    """Image-owned target tokens plus an optional independent query cache.
+
+    Completed format-4 image caches remain readable without being rewritten.
+    Their embedded queries are used only when no separate query root is supplied.
+    """
+
+    def __init__(self, index: dict, gallery, query_root=None) -> None:
         self.root = gallery.root
         if index.get("version") != NATIVE_VERSION:
             raise ValueError("native FAFA cache version differs; use a new directory")
         self.cache_id = gallery.cache_id
         self.dim = index["dim"]
         self.tokens = index["tokens"]
-        self.queries = index["queries"]
+        self.query_cache = (
+            NativeQueryCache(query_root, gallery.feature_signature, self.dim)
+            if query_root is not None
+            else None
+        )
+        self.queries = (
+            self.query_cache.queries if self.query_cache else index.get("queries")
+        )
         self.gallery = gallery
+        # The checkpoint binds the image features and encoder provenance. Query
+        # index UUIDs and sample order are deliberately not part of this contract.
         self.metadata = {
             "version": index["version"],
             "cache_id": self.cache_id,
@@ -106,21 +194,26 @@ class NativeFAFACache:
         }
 
     def validate_samples(self, samples) -> None:
+        if self.query_cache is not None:
+            self.query_cache.validate_samples(samples)
+            return
+        if self.queries is None:
+            raise ValueError("FAFA query cache is required; set data.fafa_query_cache")
         for sample in samples:
             entry = self.queries.get(sample["sample_id"])
             if entry is None or entry["key"] != query_key(sample):
                 raise ValueError(
-                    f"{sample['sample_id']}: native FAFA query missing/stale; "
-                    "build a new native cache for changed instructions"
+                    "native FAFA query missing/stale; build a separate FAFA query cache"
                 )
 
     def _read(self, group, index, key, shape):
         path = self.root / group / f"{index}.pt"
         item = torch.load(path, map_location="cpu", weights_only=True)
-        features = item["features"]
+        features = item.get("features")
         if (
             item.get("cache_id") != self.cache_id
             or item.get("key") != key
+            or not isinstance(features, Tensor)
             or features.shape != shape
             or not torch.isfinite(features).all()
         ):
@@ -132,21 +225,22 @@ class NativeFAFACache:
         subjects = max(len(row["subjects"]) for row in samples)
         out = torch.zeros(len(samples), subjects, max_people, self.dim)
         for n, sample in enumerate(samples):
-            entry = self.queries[sample["sample_id"]]
             count = int(
                 self.gallery.mask[self.gallery.by_id[sample["query_image_id"]]].sum()
             )
             if count > max_people:
                 raise ValueError("native/query person padding differs")
             shape = (len(sample["subjects"]), count, self.dim)
-            out[n, : shape[0], :count] = self._read(
-                "queries", entry["index"], entry["key"], shape
-            )
+            if self.query_cache is not None:
+                features = self.query_cache.load(sample, count)
+            else:
+                entry = self.queries[sample["sample_id"]]
+                features = self._read("queries", entry["index"], entry["key"], shape)
+            out[n, : shape[0], :count] = features
         return out
 
     def load_targets(self, indices: Tensor, max_people: int) -> Tensor:
         out = torch.zeros(len(indices), max_people, self.tokens, self.dim)
-        # Repeated positives/candidates are read once per batch.
         rows = {}
         for n, i in enumerate(indices.tolist()):
             count = int(self.gallery.mask[i].sum())

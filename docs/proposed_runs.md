@@ -20,15 +20,15 @@ Alternatively, `PYTHON=python3.11 bash scripts/setup.bash proposed` and
 `PYTHON=python3.11 bash scripts/setup.bash fafa` create the isolated environments,
 including on notebook images without `ensurepip`. The host pip needs 22.3+.
 
-Set `data.final_dir`, `data.image_root`, `data.dino_cache`, `data.cache`,
-and
+Set `data.final_dir`, `data.image_root`, `data.dino_cache`,
+`data.fafa_image_cache`, `data.fafa_query_cache`, and
 `person_encoder.python` in `configs/proposed.yaml`. All relative paths are
 relative to the repository root. Windows uses `.venv-fafa/Scripts/python.exe`.
 For Kaggle, use venv Python paths explicitly in every cell.
 
 ## Main workflow
 
-`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses both
+`bash scripts/methods/proposed.bash val` prepares assets, builds/reuses all three
 caches, trains, calibrates coefficients on validation and writes the selected
 validation result to `runs/calibration/selected/val`. Run
 `bash scripts/methods/proposed.bash test` later to use the frozen selected YAML.
@@ -43,10 +43,14 @@ checkpoint, changing configs/seeds or running only one cache stage.
 # Stream 1: DINO scenes/detections/crops; no FAFA environment required.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
 
-# Stream 2: pooled persons + target tokens + multimodal queries in one FAFA cache.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa
+# Stream 2: query-independent pooled persons and projected target tokens.
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
 
-# Or ensure both caches; compatible completed stages are skipped.
+# Stream 3: multimodal queries, updated incrementally when instructions change.
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
+
+# Use --cache-stage fafa to run both FAFA stages with one model load.
+# Or ensure all three caches; compatible completed stages are skipped.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
@@ -84,7 +88,8 @@ data:
   final_dir: dataset/data/final
   image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
   dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
-  cache: /kaggle/working/cache/proposed-fafa-unified
+  fafa_image_cache: /kaggle/working/cache/fafa-images
+  fafa_query_cache: /kaggle/working/cache/fafa-queries
 ```
 
 Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.
@@ -112,31 +117,48 @@ DINO caches store explicit metadata and pixel boxes.
 | Directory | Contents | Usage |
 | --- | --- | --- |
 | `data.dino_cache` | DINO scenes, detections, identities, crop index | Shared immutable source; may be read-only Kaggle input |
-| `data.cache` | `index.pt`, `targets/`, `queries/` | One FAFA cache ID, crop order and encoder provenance |
+| `data.fafa_image_cache` | `index.pt`, `targets/` | Query-independent person means, projected target tokens and encoder/crop provenance |
+| `data.fafa_query_cache` | `index.pt`, `features/<hash>.pt` | Separate sample/Subject mapping and FP32 text-conditioned embeddings |
 
-`index.pt` holds pooled person features, FP32 scene means and the native feature
-manifest. Target shards hold projected Q-Former tokens; query shards hold FP32
-multimodal embeddings for every Subject/crop. A single image-only forward supplies
-both pooled means and target tokens. FAFA is loaded once per unfinished build.
-Complete compatible caches are reused before loading FAFA or opening raw images.
+The image index uses format 5. Its signature has no queries or split membership.
+Image-only pooled means and projected tokens share one Q-Former forward per crop.
+The query index has its own cache ID; its signature binds the DINO source cache,
+FAFA source/config/checkpoint hash, preprocessing and extraction precision. Each
+query shard is keyed by that signature, reference image and public Subject
+condition. Target and query crop order is inherited from the same DINO index.
+No GT labels or grounding predictions enter native extraction.
 
-Each unfinished cache has a `.building` marker and `.build.pt` signature. Repeating
-the build skips valid saved image/query shards and retains its cache ID. Changed
-weights, preprocessing, source ID or instructions require a new directory.
-Training/retrieval reject incomplete caches. Query keys use public text and
-Subject order; no GT labels or grounding predictions enter native extraction.
+Run `fafa-query` again after editing instructions. It reuses existing condition
+shards, extracts only missing ones and atomically replaces the sample mapping.
+Changing sample order does not change feature paths. Changing Subject order only
+updates the mapping; identical image/condition pairs are extracted once. Old
+condition shards stay available for reverting a text edit. If the query cache is
+mounted read-only and instructions change, use a writable query directory; the
+current builder does not overlay a writable layer on a read-only query cache.
+
+Each unfinished FAFA cache has its own `.building` marker and `.build.pt`.
+Repeating a stage skips valid saved shards and retains that cache's ID. Query edits
+are allowed during either stage's resume. Changed weights, preprocessing, DINO
+source ID or extraction precision require a new cache directory. Training/retrieval
+reject incomplete caches; image-only readers are independent of query build state.
 
 Pooled extraction shards in `.persons/` are temporary. They are assembled into
-one memory-mapped padded index and removed after publication; target/query shards
-remain final data. Scene patches are never copied from DINO. CPU RAM must hold
-the padded person index during finalization. A disk estimate includes that index,
-FAFA shards and serialization overhead before extraction starts.
+one memory-mapped padded index and removed after publication. Scene patches are
+never copied from DINO. CPU RAM must hold the padded person index during
+finalization. Separate disk checks reserve the image build's peak space and only
+missing query features, including serialization overhead. Splitting the caches
+alone does not reduce total feature storage. Publish completed image features as
+a Kaggle Dataset and point `data.fafa_image_cache` to its read-only mount to avoid
+keeping that copy in `/kaggle/working`; query output can remain writable.
 
-Old separate FAFA caches are deliberately unsupported. Keep DINO, remove
-`data.native_cache` from the YAML and build format 4 in a new `data.cache` directory.
-Use a new run directory and recalibrate validation weights after retraining.
-Two dependency environments remain necessary because DINO and FAFA pin different
-Transformers versions; both use the same FAFA source/checkpoint loader.
+For a completed format-4 unified cache, replace `data.cache` with
+`data.fafa_image_cache` pointing to the same directory and add a separate
+`data.fafa_query_cache` path. The old image features, cache ID and native target
+shards are reused without writes. Build `fafa-query` once; the old embedded query
+files are not migrated. An unfinished old unified build has a different resume
+signature: finish it using the old code or choose a new image cache directory.
+Earlier person-only caches still require rebuilding. Two dependency environments
+remain necessary because DINO and FAFA pin different Transformers versions.
 
 Checkpoint writes check available disk space and use an atomic temporary file.
 Failed writes remove that temporary and leave the previous checkpoint intact.
@@ -148,7 +170,9 @@ copy. These checks report insufficient disk space; they cannot create more stora
 After a successful build, training/retrieval read cached features only. They do
 not need native FAFA weights, its YAML or raw crop images. Training requires FAFA
 person features when an external person-encoder config is supplied; retrieval compares
-cache ID, feature widths and encoder metadata with the checkpoint. Encoder
+image cache ID, feature widths and encoder metadata with the checkpoint. Query
+cache UUIDs are independent of checkpoints; the loader verifies matching encoder/crop
+provenance and the current instruction mapping. Encoder
 environment paths are used only in prepare and cache extraction.
 
 ## Outputs and diagnostics

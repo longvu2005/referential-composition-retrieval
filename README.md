@@ -61,9 +61,9 @@ tokens for the Context Reasoner. Fine score is
 `softplus(binding_log_scale) * B_FAFA + coverage * S_context`.
 
 There is one architecture: `fafa-native-partial-match-v1`. Earlier checkpoints
-require retraining in a new run directory. Keep the DINO source and rebuild
-one unified FAFA cache containing pooled persons, projected target tokens and
-multimodal queries. Default outputs are `runs/proposed-fafa-unified`. See
+require retraining in a new run directory. Frozen extraction uses separate
+DINO, FAFA image and FAFA query caches. Query edits do not invalidate image
+features. Default outputs are `runs/proposed-fafa-unified`. See
 [equations and limitations](docs/proposed_method.md).
 
 ## Setup and run
@@ -97,15 +97,22 @@ environment's Python to use it with a workflow instead of the default venv.
 | `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
 | `requirements/dev.txt` | CPU tests and linting |
 
-Set `data.dino_cache`, `data.cache`, raw-image paths and `person_encoder.python`
-in the proposed YAML. There are two caches: immutable DINO scenes/detections and
-one unified FAFA directory. `--cache-stage dino` builds the source;
-`--cache-stage fafa` builds all FAFA features with one model load. Image-only
-hidden means and projected target tokens share one Q-Former forward per crop.
-Multimodal queries cover every public Subject/crop candidate. The default `all`
-builds/reuses both caches; interrupted FAFA builds resume saved image/query shards.
-Train/retrieve read the features without loading native FAFA. Old separate FAFA
-caches must be rebuilt; use a new `data.cache` directory.
+Set `data.dino_cache`, `data.fafa_image_cache`, `data.fafa_query_cache`, raw-image
+paths and `person_encoder.python` in the proposed YAML. There are three caches:
+immutable DINO scenes/detections, FAFA image features and FAFA query features.
+`--cache-stage dino` builds the source; `fafa-image` builds pooled persons and
+projected target tokens in one Q-Former forward per crop; `fafa-query` extracts
+multimodal embeddings for every public Subject/crop candidate. The FAFA stages
+can run in either order after DINO. `fafa` runs both with one lazy model load;
+the default `all` also builds/reuses DINO. Each FAFA cache resumes independently.
+
+Query shards use hashes of encoder/crop provenance, reference image and the public
+Subject condition. Changed instructions update only missing conditions in the same
+query directory; sample reordering and label edits reuse existing features. A
+completed image cache can be a read-only Kaggle input. Train/retrieve load both
+caches without native FAFA. Completed format-4 unified caches can be reused as
+`data.fafa_image_cache`; build the separate query cache once. Incomplete old
+unified builds need the old code to finish or a new image output directory.
 See [Kaggle reuse and commands](docs/proposed_runs.md).
 
 ```bash

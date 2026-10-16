@@ -120,18 +120,23 @@ def test_query_key_ignores_annotations_but_tracks_instruction_and_subject_order(
     assert query_key(labeled) != original
 
 
-def test_unified_cache_shapes_text_validation_and_readonly_reuse(
+def test_split_cache_shapes_text_validation_and_readonly_reuse(
     experiment, local_stages
 ):
     cfg, path = experiment
     cli.main(["build-cache", "--config", str(path)])
-    root = Path(cfg["data"]["cache"])
-    gallery = GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
+    root = Path(cfg["data"]["fafa_image_cache"])
+    gallery = GalleryCache(
+        root,
+        scene_root=cfg["data"]["dino_cache"],
+        query_root=cfg["data"]["fafa_query_cache"],
+    )
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     assert gallery.native_queries(data.samples[:1], 2).shape == (1, 1, 2, 3)
     assert gallery.native_targets(torch.tensor([0, 0]), 2).shape == (2, 2, 7, 3)
     assert gallery.native.cache_id == gallery.cache_id
-    assert gallery.format_version == 4
+    assert gallery.native.query_cache.cache_id != gallery.cache_id
+    assert gallery.format_version == 5
     assert not (root / ".persons").exists()
     assert list(root.glob("index.pt")) == [root / "index.pt"]
     before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
@@ -175,7 +180,11 @@ def test_one_image_forward_supplies_both_person_and_native_target(
     )
     monkeypatch.setattr(fafa_cache, "load_fafa", load)
     cli.main(["build-cache", "--config", str(path)])
-    gallery = GalleryCache(cfg["data"]["cache"], scene_root=cfg["data"]["dino_cache"])
+    gallery = GalleryCache(
+        cfg["data"]["fafa_image_cache"],
+        scene_root=cfg["data"]["dino_cache"],
+        query_root=cfg["data"]["fafa_query_cache"],
+    )
     assert loads == [1]
     assert calls.count("image") == len(gallery.image_ids)
     assert calls.count("multimodal") == len(gallery.native.queries)
@@ -191,7 +200,7 @@ def test_one_image_forward_supplies_both_person_and_native_target(
     )
 
 
-def test_interrupted_unified_build_resumes_images_and_query_shards(
+def test_interrupted_split_build_resumes_images_and_query_shards(
     experiment, local_stages, monkeypatch
 ):
     cfg, path = experiment
@@ -215,14 +224,16 @@ def test_interrupted_unified_build_resumes_images_and_query_shards(
     )
     with pytest.raises(RuntimeError, match="interrupted"):
         fafa_cache.finish_fafa_cache(cfg)
-    root = Path(cfg["data"]["cache"])
+    root = Path(cfg["data"]["fafa_image_cache"])
     with pytest.raises(RuntimeError, match="incomplete"):
-        GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
-    saved = {
-        p: p.read_bytes()
-        for p in root.rglob("*.pt")
-        if p.parent.name in ("targets", "queries")
-    }
+        GalleryCache(
+            root,
+            scene_root=cfg["data"]["dino_cache"],
+            query_root=cfg["data"]["fafa_query_cache"],
+        )
+    query_root = Path(cfg["data"]["fafa_query_cache"])
+    saved = {p: p.read_bytes() for p in root.rglob("*.pt")}
+    saved.update({p: p.read_bytes() for p in (query_root / "features").glob("*.pt")})
 
     def remaining(samples, mode):
         assert mode == "multimodal", "recomputed completed image features"
@@ -233,14 +244,21 @@ def test_interrupted_unified_build_resumes_images_and_query_shards(
     assert not (root / ".building").exists()
     assert not (root / ".persons").exists()
     assert all(p.read_bytes() == value for p, value in saved.items())
-    gallery = GalleryCache(root, scene_root=cfg["data"]["dino_cache"])
+    gallery = GalleryCache(
+        root,
+        scene_root=cfg["data"]["dino_cache"],
+        query_root=cfg["data"]["fafa_query_cache"],
+    )
     assert (
-        gallery.cache_id
-        == torch.load(next(root.glob("queries/*.pt")), weights_only=True)["cache_id"]
+        gallery.native.query_cache.cache_id
+        == torch.load(
+            next(Path(cfg["data"]["fafa_query_cache"]).glob("features/*.pt")),
+            weights_only=True,
+        )["cache_id"]
     )
 
 
-def test_unified_cache_handles_no_detection_without_inventing_a_crop(
+def test_split_cache_handles_no_detection_without_inventing_a_crop(
     experiment, local_stages
 ):
     cfg, path = experiment
@@ -255,7 +273,11 @@ def test_unified_cache_handles_no_detection_without_inventing_a_crop(
     item["identity_ids"] = []
     torch.save(item, source / "features/0.pt")
     cli.main(["build-cache", "--config", str(path)])
-    gallery = GalleryCache(cfg["data"]["cache"], scene_root=source)
+    gallery = GalleryCache(
+        cfg["data"]["fafa_image_cache"],
+        scene_root=source,
+        query_root=cfg["data"]["fafa_query_cache"],
+    )
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     assert gallery.native_queries(data.samples[:1], 0).shape == (1, 1, 0, 3)
     assert gallery.native_targets(torch.tensor([0]), 0).shape == (1, 0, 7, 3)

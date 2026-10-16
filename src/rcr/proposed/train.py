@@ -243,8 +243,9 @@ def train(cfg: dict) -> Path:
         seed,
     )
     cache = GalleryCache(
-        data_cfg["cache"],
+        data_cfg["fafa_image_cache"],
         scene_root=data_cfg.get("dino_cache"),
+        query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
     )
     cache.validate_gallery(data.gallery_ids)

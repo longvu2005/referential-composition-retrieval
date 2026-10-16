@@ -1,6 +1,7 @@
-"""One frozen FAFA build: pooled persons, target tokens and multimodal queries."""
+"""Independent frozen FAFA image and content-addressed query extraction."""
 
-from pathlib import Path
+import pickle
+import shutil
 from uuid import uuid4
 
 import torch
@@ -12,8 +13,20 @@ from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
 from rcr.common.torch_io import require_disk_space, save_torch
-from rcr.proposed.cache.build import check_cache_config, fafa_spec, load_fafa_config
-from rcr.proposed.cache.native import NATIVE_VERSION, query_key, subject_conditions
+from rcr.proposed.cache.build import (
+    cache_paths,
+    check_cache_config,
+    existing_cache,
+    fafa_spec,
+    load_fafa_config,
+    query_cache_ready,
+)
+from rcr.proposed.cache.native import (
+    NATIVE_VERSION,
+    condition_key,
+    query_entries,
+    subject_conditions,
+)
 from rcr.proposed.cache.store import GalleryCache
 
 
@@ -43,10 +56,14 @@ def boxes_to_pixels(
 def _ready(path, cache_id, key, shape, dtype):
     if not path.is_file():
         return False
-    item = torch.load(path, map_location="cpu", weights_only=True)
-    features = item.get("features")
+    try:
+        item = torch.load(path, map_location="cpu", weights_only=True)
+    except (OSError, EOFError, RuntimeError, pickle.UnpicklingError):
+        return False
+    features = item.get("features") if isinstance(item, dict) else None
     return (
-        item.get("cache_id") == cache_id
+        isinstance(item, dict)
+        and item.get("cache_id") == cache_id
         and item.get("key") == key
         and isinstance(features, torch.Tensor)
         and features.shape == shape
@@ -55,104 +72,77 @@ def _ready(path, cache_id, key, shape, dtype):
     )
 
 
-@torch.inference_mode()
-def finish_fafa_cache(cfg: dict) -> None:
-    root = Path(cfg["data"]["cache"])
-    source_root = Path(cfg["data"]["dino_cache"])
-    if root.resolve() == source_root.resolve():
-        raise ValueError("FAFA output must differ from the DINO source directory")
-    source = GalleryCache(source_root)
-    check_cache_config(source, cfg, person_backend="dino")
-    if source.cache_id is None:
-        raise ValueError("DINO source requires a cache_id to bind FAFA features safely")
-    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-    source.validate_gallery(data.gallery_ids)
-    marker = root / ".building"
-    if (root / "index.pt").is_file() and not marker.exists():
-        ready = GalleryCache(root, scene_root=source_root)
-        check_cache_config(ready, cfg)
-        ready.validate_samples(data.samples)
-        print(f"Using existing unified FAFA cache: {root}", flush=True)
-        return
-
-    native_cfg = load_fafa_config(cfg)
-    batch_size = cfg["person_encoder"]["batch_size"]
-    if type(batch_size) is not int or batch_size < 1:
-        raise ValueError("person_encoder.batch_size must be positive")
-    storage = cfg.get("cache", {}).get("storage_dtype", "float16")
-    if storage not in ("float16", "float32"):
-        raise ValueError("storage_dtype must be float32 or float16")
-    dtype = getattr(torch, storage)
-    device = resolve_device(cfg)
-    queries = {
-        row["sample_id"]: {
-            "index": i,
-            "key": query_key(row),
-            "conditions": subject_conditions(row),
-        }
-        for i, row in enumerate(data.samples)
-    }
-    signature = {
-        "source_cache_id": source.cache_id,
-        "spec": fafa_spec(native_cfg),
-        "checkpoint_sha256": sha256_file(native_cfg["checkpoint"]["path"]),
-        "image_encoder": cfg["image_encoder"],
-        "detector": cfg["detector"],
-        "storage_dtype": storage,
-        "encoder_precision": "float16" if device.type == "cuda" else "float32",
-        "queries": queries,
-    }
-    for group in ("targets", "queries", ".persons"):
-        (root / group).mkdir(parents=True, exist_ok=True)
-    manifest_path = root / ".build.pt"
-    if manifest_path.is_file():
-        manifest = torch.load(manifest_path, map_location="cpu", weights_only=True)
-        if manifest["signature"] != signature:
+def _begin(root, signature, *, cache_id=None):
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / ".build.pt"
+    if path.is_file():
+        manifest = torch.load(path, map_location="cpu", weights_only=True)
+        if manifest["signature"] != signature or (
+            cache_id is not None and manifest["cache_id"] != cache_id
+        ):
             raise ValueError(
                 "unfinished FAFA cache settings differ; use a new directory"
             )
     else:
-        manifest = {"cache_id": uuid4().hex, "signature": signature}
-        save_torch(manifest, manifest_path)
-    cache_id = manifest["cache_id"]
-    marker.write_text(cache_id, encoding="utf-8")
-    model, processors, preprocess, _ = load_fafa(native_cfg, device)
-    model.requires_grad_(False).eval()
-    hidden_dim = model.Qformer.config.hidden_size
-    dim = model.vision_proj.out_features
-    tokens = model.query_tokens.shape[1]
-    count_people = int(source.mask.sum())
-    query_people = sum(
-        len(row["subjects"])
-        * int(source.mask[source.by_id[row["query_image_id"]]].sum())
-        for row in data.samples
-    )
-    # Account for final tokens/queries, temporary pooled shards, the padded index,
-    # scene means and small per-file headers before starting expensive extraction.
-    estimated = (
-        count_people * (tokens * dim + hidden_dim) * dtype.itemsize
-        + source.mask.numel() * hidden_dim * dtype.itemsize
-        + query_people * dim * 4
-        + len(source.image_ids) * source.scene_dim * 4
-        + (2 * len(source.image_ids) + len(data.samples)) * 4096
-    )
-    saved_bytes = sum(
-        path.stat().st_size
-        for group in ("targets", "queries", ".persons")
-        for path in (root / group).glob("*.pt")
-    )
-    require_disk_space(root, max(0, estimated - saved_bytes))
-    print(f"Unified FAFA cache estimate: {estimated / 1024**3:.2f} GiB", flush=True)
+        manifest = {"cache_id": cache_id or uuid4().hex, "signature": signature}
+        save_torch(manifest, path)
+    (root / ".building").write_text(manifest["cache_id"], encoding="utf-8")
+    return manifest["cache_id"]
 
-    def crop_batches(image_id, item):
-        count = int(source.mask[source.by_id[image_id]].sum())
+
+def _publish(root, index):
+    save_torch(index, root / "index.pt")
+    (root / ".building").unlink()
+    (root / ".build.pt").unlink(missing_ok=True)
+
+
+def _write(path, cache_id, key, features):
+    if not torch.isfinite(features).all():
+        raise ValueError(f"non-finite FAFA features: {path}")
+    save_torch({"cache_id": cache_id, "key": key, "features": features}, path)
+
+
+class _Extractor:
+    """One lazy model load shared by both stages in the isolated FAFA process."""
+
+    def __init__(self, cfg, source, data):
+        self.cfg, self.source, self.data = cfg, source, data
+        self.batch_size = cfg["person_encoder"]["batch_size"]
+        if type(self.batch_size) is not int or self.batch_size < 1:
+            raise ValueError("person_encoder.batch_size must be positive")
+        self.native_cfg = load_fafa_config(cfg)
+        self.device = resolve_device(cfg)
+        self.signature = {
+            "source_cache_id": source.cache_id,
+            "spec": fafa_spec(self.native_cfg),
+            "checkpoint_sha256": sha256_file(self.native_cfg["checkpoint"]["path"]),
+            "image_encoder": cfg["image_encoder"],
+            "detector": cfg["detector"],
+            "encoder_precision": "float16" if self.device.type == "cuda" else "float32",
+        }
+        self.model = None
+
+    def load(self):
+        if self.model is None:
+            model, self.processors, self.preprocess, _ = load_fafa(
+                self.native_cfg, self.device
+            )
+            self.model = model.requires_grad_(False).eval()
+            self.hidden_dim = model.Qformer.config.hidden_size
+            self.dim = model.vision_proj.out_features
+            self.tokens = model.query_tokens.shape[1]
+
+    def crops(self, image_id):
+        i = self.source.by_id[image_id]
+        count = int(self.source.mask[i].sum())
         if count == 0:
             return
-        with Image.open(data.image_path(image_id)) as image_file:
+        item = self.source._load_item(i)
+        with Image.open(self.data.image_path(image_id)) as image_file:
             image = image_file.convert("RGB")
             boxes = item.get("boxes_pixel")
             if boxes is None:
-                h, w = cfg["image_encoder"]["scene_size"]
+                h, w = self.cfg["image_encoder"]["scene_size"]
                 boxes = boxes_to_pixels(item["boxes_scene"], image.size, (w, h))
             if (
                 boxes.shape != (count, 4)
@@ -160,25 +150,49 @@ def finish_fafa_cache(cfg: dict) -> None:
                 or (boxes[:, 2:] <= boxes[:, :2]).any()
             ):
                 raise ValueError("invalid DINO person boxes")
-            for start in range(0, count, batch_size):
+            for start in range(0, count, self.batch_size):
                 pixels = torch.stack(
                     [
-                        preprocess(image.crop(tuple(box.tolist())))
-                        for box in boxes[start : start + batch_size]
+                        self.preprocess(image.crop(tuple(box.tolist())))
+                        for box in boxes[start : start + self.batch_size]
                     ]
-                ).to(device)
-                yield start, pixels.half() if device.type == "cuda" else pixels.float()
+                ).to(self.device)
+                yield (
+                    start,
+                    pixels.half() if self.device.type == "cuda" else pixels.float(),
+                )
 
-    def write_features(path, key, features):
-        if not torch.isfinite(features).all():
-            raise ValueError(f"non-finite FAFA features: {path}")
-        save_torch({"cache_id": cache_id, "key": key, "features": features}, path)
 
+def _build_images(cfg, root, extractor):
+    storage = cfg.get("cache", {}).get("storage_dtype", "float16")
+    if storage not in ("float16", "float32"):
+        raise ValueError("storage_dtype must be float32 or float16")
+    dtype = getattr(torch, storage)
+    signature = {**extractor.signature, "storage_dtype": storage}
+    cache_id = _begin(root, signature)
+    for group in ("targets", ".persons"):
+        (root / group).mkdir(exist_ok=True)
+    extractor.load()
+    source = extractor.source
+    hidden_dim, dim, tokens = extractor.hidden_dim, extractor.dim, extractor.tokens
+    # Reserve peak space: final padded index coexists with pooled-person shards.
+    estimated = (
+        int(source.mask.sum()) * (tokens * dim + hidden_dim) * dtype.itemsize
+        + source.mask.numel() * hidden_dim * dtype.itemsize
+        + len(source.image_ids) * source.scene_dim * 4
+        + 2 * len(source.image_ids) * 4096
+    )
+    saved_bytes = sum(
+        path.stat().st_size
+        for group in ("targets", ".persons")
+        for path in (root / group).glob("*.pt")
+    )
+    require_disk_space(root, max(0, estimated - saved_bytes))
+    print(f"FAFA image cache peak estimate: {estimated / 1024**3:.2f} GiB", flush=True)
     global_features = torch.empty(len(source.image_ids), source.scene_dim)
     for i, image_id in enumerate(tqdm(source.image_ids, desc="cache FAFA images")):
         count = int(source.mask[i].sum())
-        item = source._load_item(i)
-        global_features[i] = item["scene"].float().mean(0)
+        global_features[i] = source._load_item(i)["scene"].float().mean(0)
         person_path, target_path = (
             root / group / f"{i}.pt" for group in (".persons", "targets")
         )
@@ -188,9 +202,8 @@ def finish_fafa_cache(cfg: dict) -> None:
             continue
         persons = torch.empty(count, hidden_dim, dtype=dtype)
         targets = torch.empty(count, tokens, dim, dtype=dtype)
-        for start, pixels in crop_batches(image_id, item):
-            # Both outputs come from the same image-only Q-Former forward.
-            value = model.extract_features({"image": pixels}, mode="image")
+        for start, pixels in extractor.crops(image_id):
+            value = extractor.model.extract_features({"image": pixels}, mode="image")
             hidden, projected = value.image_embeds, value.image_embeds_proj
             if hidden.shape != (len(pixels), tokens, hidden_dim):
                 raise ValueError("FAFA image_embeds must be [N,L,hidden_dim]")
@@ -199,49 +212,22 @@ def finish_fafa_cache(cfg: dict) -> None:
             stop = start + len(pixels)
             persons[start:stop] = hidden.float().mean(1).cpu().to(dtype)
             targets[start:stop] = projected.float().cpu().to(dtype)
-        write_features(person_path, image_id, persons)
-        write_features(target_path, image_id, targets)
-
-    for row in tqdm(data.samples, desc="cache FAFA queries"):
-        entry = queries[row["sample_id"]]
-        image_id = row["query_image_id"]
-        i = source.by_id[image_id]
-        count = int(source.mask[i].sum())
-        conditions = entry["conditions"]
-        shape = (len(conditions), count, dim)
-        path = root / "queries" / f"{entry['index']}.pt"
-        if _ready(path, cache_id, entry["key"], shape, torch.float32):
-            continue
-        features = torch.empty(shape)  # Same FP32 query storage as native baseline.
-        for start, pixels in crop_batches(image_id, source._load_item(i)):
-            for s, condition in enumerate(conditions):
-                value = model.extract_features(
-                    {
-                        "image": pixels,
-                        "text_input": [processors["eval"](condition)] * len(pixels),
-                    },
-                    mode="multimodal",
-                ).multimodal_embeds.float()
-                if value.ndim == 3 and value.shape[1] == 1:
-                    value = value[:, 0]
-                if value.shape != (len(pixels), dim):
-                    raise ValueError("FAFA multimodal query must be [N,D_fafa]")
-                features[s, start : start + len(pixels)] = value.cpu()
-        write_features(path, entry["key"], features)
-
-    del model  # Release native FAFA before assembling the CPU person index.
+        _write(person_path, cache_id, image_id, persons)
+        _write(target_path, cache_id, image_id, targets)
     persons_index = torch.zeros(*source.mask.shape, hidden_dim, dtype=dtype)
     for i in range(len(source.image_ids)):
         item = torch.load(
             root / ".persons" / f"{i}.pt", map_location="cpu", weights_only=True
         )
         persons_index[i, : int(source.mask[i].sum())] = item["features"]
-    save_torch(
+    _publish(
+        root,
         {
-            "format_version": 4,
+            "format_version": 5,
             "layout": "fafa",
             "cache_id": cache_id,
             "source_cache_id": source.cache_id,
+            "signature": extractor.signature,
             "image_ids": source.image_ids,
             "persons": persons_index,
             "mask": source.mask,
@@ -258,18 +244,134 @@ def finish_fafa_cache(cfg: dict) -> None:
                 "hidden_dim": hidden_dim,
                 "encoder_precision": signature["encoder_precision"],
             },
-            "native": {
-                "version": NATIVE_VERSION,
-                "dim": dim,
-                "tokens": tokens,
-                "queries": queries,
-            },
+            "native": {"version": NATIVE_VERSION, "dim": dim, "tokens": tokens},
         },
-        root / "index.pt",
     )
-    for i in range(len(source.image_ids)):
-        (root / ".persons" / f"{i}.pt").unlink()
-    (root / ".persons").rmdir()
-    marker.unlink()
-    manifest_path.unlink(missing_ok=True)
-    print(f"Finished unified FAFA cache: {root}", flush=True)
+    shutil.rmtree(root / ".persons")
+    print(f"Finished FAFA image cache: {root}", flush=True)
+
+
+def _query_index(root, signature):
+    if not (root / "index.pt").is_file():
+        return None
+    index = torch.load(root / "index.pt", map_location="cpu", weights_only=True)
+    if (
+        index.get("layout") != "fafa-queries"
+        or index.get("version") != NATIVE_VERSION
+        or index.get("signature") != signature
+    ):
+        raise ValueError("FAFA query encoder/crops differ; use a new query directory")
+    return index
+
+
+def _build_queries(root, extractor):
+    signature, source = extractor.signature, extractor.source
+    entries = query_entries(extractor.data.samples, signature)
+    previous = _query_index(root, signature)
+    if (
+        previous is not None
+        and not (root / ".building").exists()
+        and previous["queries"] == entries
+    ):
+        print(f"Using existing FAFA query cache: {root}", flush=True)
+        return
+    cache_id = _begin(
+        root, signature, cache_id=previous["cache_id"] if previous else None
+    )
+    (root / "features").mkdir(exist_ok=True)
+    if previous is None:
+        extractor.load()
+    dim = previous["dim"] if previous is not None else extractor.dim
+    work = {}
+    for row in extractor.data.samples:
+        image_id = row["query_image_id"]
+        count = int(source.mask[source.by_id[image_id]].sum())
+        for condition in subject_conditions(row):
+            key = condition_key(signature, image_id, condition)
+            work[key] = (image_id, condition, count)
+    missing = {
+        key: value
+        for key, value in work.items()
+        if not _ready(
+            root / "features" / f"{key}.pt",
+            cache_id,
+            key,
+            (value[2], dim),
+            torch.float32,
+        )
+    }
+    estimated = sum(count * dim * 4 + 4096 for _, _, count in missing.values())
+    # Atomic replacement temporarily retains the prior manifest.
+    estimated += len(str(entries).encode()) * 2
+    require_disk_space(root, estimated)
+    print(
+        f"FAFA queries: {len(missing)}/{len(work)} conditions to extract, "
+        f"{estimated / 1024**3:.2f} GiB additional",
+        flush=True,
+    )
+    if missing:
+        extractor.load()
+        if extractor.dim != dim:
+            raise ValueError("FAFA query feature dimension differs from cache")
+    for key, (image_id, condition, count) in tqdm(
+        missing.items(), desc="cache FAFA queries"
+    ):
+        features = torch.empty(count, dim)
+        for start, pixels in extractor.crops(image_id):
+            value = extractor.model.extract_features(
+                {
+                    "image": pixels,
+                    "text_input": [extractor.processors["eval"](condition)]
+                    * len(pixels),
+                },
+                mode="multimodal",
+            ).multimodal_embeds.float()
+            if value.ndim == 3 and value.shape[1] == 1:
+                value = value[:, 0]
+            if value.shape != (len(pixels), dim):
+                raise ValueError("FAFA multimodal query must be [N,D_fafa]")
+            features[start : start + len(pixels)] = value.cpu()
+        _write(root / "features" / f"{key}.pt", cache_id, key, features)
+    _publish(
+        root,
+        {
+            "layout": "fafa-queries",
+            "version": NATIVE_VERSION,
+            "cache_id": cache_id,
+            "signature": signature,
+            "dim": dim,
+            "queries": entries,
+        },
+    )
+    print(f"Finished FAFA query cache: {root}", flush=True)
+
+
+@torch.inference_mode()
+def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
+    if stage not in ("fafa", "fafa-image", "fafa-query"):
+        raise ValueError("invalid FAFA cache stage")
+    source_root, image_root, query_root = cache_paths(cfg)
+    source = GalleryCache(source_root)
+    check_cache_config(source, cfg, person_backend="dino")
+    if source.cache_id is None:
+        raise ValueError("DINO source requires a cache_id to bind FAFA features safely")
+    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+    source.validate_gallery(data.gallery_ids)
+    image = existing_cache(cfg, image_root, scene_root=source_root)
+    if image is not None:
+        image.validate_gallery(data.gallery_ids)
+        if stage == "fafa-image":
+            print(f"Using existing FAFA image cache: {image_root}", flush=True)
+            return
+        if query_cache_ready(query_root, image, data.samples):
+            print(f"Using existing FAFA query cache: {query_root}", flush=True)
+            return
+    extractor = _Extractor(cfg, source, data)
+    if image is not None and image.feature_signature != extractor.signature:
+        raise ValueError("FAFA query encoder/precision differs from image cache")
+    if stage != "fafa-image":
+        _query_index(query_root, extractor.signature)
+    if stage != "fafa-query" and image is None:
+        _build_images(cfg, image_root, extractor)
+    if stage != "fafa-image":
+        _build_queries(query_root, extractor)

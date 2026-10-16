@@ -17,6 +17,7 @@ class GalleryCache:
         root: str | Path,
         *,
         scene_root: str | Path | None = None,
+        query_root: str | Path | None = None,
         lru_mib: int = 0,
     ) -> None:
         if not isinstance(lru_mib, int) or lru_mib < 0:
@@ -37,9 +38,7 @@ class GalleryCache:
 
         self._scene_cache = None
         if index.get("layout") == "persons":
-            raise ValueError(
-                "old FAFA cache; rebuild unified FAFA in a new data.cache directory"
-            )
+            raise ValueError("old FAFA person cache; rebuild data.fafa_image_cache")
         if index.get("layout") == "fafa":
             if scene_root is None:
                 raise ValueError("FAFA person cache requires data.dino_cache")
@@ -79,27 +78,40 @@ class GalleryCache:
             self.image_ids
         ):
             raise ValueError("cache index persons/mask/gallery shape mismatch")
+        if index.get("layout") == "fafa":
+            # Derive provenance for completed format-4 images as well as format 5.
+            person = self.encoder_metadata["person_encoder"]
+            self.feature_signature = {
+                "source_cache_id": index["source_cache_id"],
+                "spec": person["spec"],
+                "checkpoint_sha256": person["checkpoint_sha256"],
+                "image_encoder": index["image_encoder"],
+                "detector": index["detector"],
+                "encoder_precision": person["encoder_precision"],
+            }
+            if index.get("signature", self.feature_signature) != self.feature_signature:
+                raise ValueError("FAFA image signature differs from encoder metadata")
         from rcr.proposed.cache.native import NativeFAFACache
 
         self.native = (
-            NativeFAFACache(index["native"], self)
+            NativeFAFACache(index["native"], self, query_root)
             if index.get("layout") == "fafa"
             else None
         )
 
     def native_queries(self, samples, max_people: int) -> Tensor:
         if self.native is None:
-            raise ValueError("unified FAFA cache is required; run build-cache")
+            raise ValueError("FAFA image/query caches are required; run build-cache")
         return self.native.load_queries(samples, max_people)
 
     def validate_samples(self, samples) -> None:
         if self.native is None:
-            raise ValueError("unified FAFA cache is required; run build-cache")
+            raise ValueError("FAFA image/query caches are required; run build-cache")
         self.native.validate_samples(samples)
 
     def native_targets(self, indices: Tensor, max_people: int) -> Tensor:
         if self.native is None:
-            raise ValueError("unified FAFA cache is required; run build-cache")
+            raise ValueError("FAFA image/query caches are required; run build-cache")
         return self.native.load_targets(indices, max_people)
 
     def validate_gallery(self, image_ids: list[str]) -> None:
