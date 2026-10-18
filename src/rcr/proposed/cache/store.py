@@ -67,6 +67,7 @@ class GalleryCache:
         self.person_dim = index["persons"].shape[-1]
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
+        self.person_offsets = index.get("person_offsets")
         self.patch_hw = tuple(index["patch_hw"])
         self._global_features = index.get("global_features")
         if self._global_features is not None and self._global_features.shape != (
@@ -74,10 +75,27 @@ class GalleryCache:
             self.scene_dim,
         ):
             raise ValueError("cache global features/gallery shape mismatch")
-        if self.persons.shape[:2] != self.mask.shape or self.persons.shape[0] != len(
-            self.image_ids
-        ):
+        if self.mask.ndim != 2 or self.mask.shape[0] != len(self.image_ids):
             raise ValueError("cache index persons/mask/gallery shape mismatch")
+        if self.person_offsets is None:
+            if (
+                self.format_version == 6
+                or self.persons.ndim != 3
+                or self.persons.shape[:2] != self.mask.shape
+            ):
+                raise ValueError("cache index persons/mask/gallery shape mismatch")
+        elif (
+            self.format_version != 6
+            or index.get("layout") != "fafa"
+            or self.persons.ndim != 2
+            or not isinstance(self.person_offsets, Tensor)
+            or self.person_offsets.dtype != torch.int64
+            or self.person_offsets.shape != (len(self.image_ids) + 1,)
+            or self.person_offsets[0] != 0
+            or self.person_offsets[-1] != len(self.persons)
+            or not torch.equal(self.person_offsets.diff(), self.mask.sum(dim=1))
+        ):
+            raise ValueError("invalid packed person index offsets/mask")
         if index.get("layout") == "fafa":
             # Derive provenance for completed format-4 images as well as format 5.
             person = self.encoder_metadata["person_encoder"]
@@ -119,11 +137,31 @@ class GalleryCache:
         if self.image_ids != image_ids:
             raise ValueError("cache gallery IDs/order differ from finalized data")
 
+    def person_row(self, index: int) -> Tensor:
+        """Actual persons in crop order, without gallery-wide padding."""
+        if self.person_offsets is None:
+            return self.persons[index, self.mask[index]]
+        start, stop = self.person_offsets[index : index + 2].tolist()
+        return self.persons[start:stop]
+
+    def load_persons(self, indices: Tensor) -> tuple[Tensor, Tensor]:
+        """Load the coarse index only, padding useful columns for this batch."""
+        mask = self.mask[indices]
+        columns = mask.any(dim=0)
+        mask = mask[:, columns]
+        if self.person_offsets is None:
+            return self.persons[indices[:, None], columns.nonzero().flatten()], mask
+        persons = self.persons.new_zeros(len(indices), mask.shape[1], self.person_dim)
+        for n, index in enumerate(indices.tolist()):
+            persons[n, mask[n]] = self.person_row(index)
+        return persons, mask
+
     def _read_feature(self, index: int) -> dict:
         item = torch.load(
             self.root / "features" / f"{index}.pt",
             map_location="cpu",
             weights_only=True,
+            mmap=True,
         )
         if item.get("cache_id") != self.cache_id or (
             "image_id" in item and item["image_id"] != self.image_ids[index]
@@ -137,7 +175,7 @@ class GalleryCache:
             # extraction checkpoints and may be removed during finalization.
             # Clone the row so a small LRU item does not retain/count the whole
             # memory-mapped person index as its tensor storage.
-            persons = self.persons[index, self.mask[index]].clone()
+            persons = self.person_row(index).clone()
             item = {**self._scene_cache._load_item(index), "persons": persons}
         else:
             item = self._read_feature(index)

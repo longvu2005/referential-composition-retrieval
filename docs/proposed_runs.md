@@ -120,7 +120,10 @@ DINO caches store explicit metadata and pixel boxes.
 | `data.fafa_image_cache` | `index.pt`, `targets/` | Query-independent person means, projected target tokens and encoder/crop provenance |
 | `data.fafa_query_cache` | `index.pt`, `features/<hash>.pt` | Separate sample/Subject mapping and FP32 text-conditioned embeddings |
 
-The image index uses format 5. Its signature has no queries or split membership.
+New image indices use format 6: `persons` is `[N_persons, hidden_dim]` and
+`person_offsets` is `[N_images + 1]`. Only actual people are stored; coarse batches
+are padded when read. Completed dense format-4/5 indices remain readable without
+rewriting them. The image signature has no queries or split membership.
 Image-only pooled means and projected tokens share one Q-Former forward per crop.
 The query index has its own cache ID; its signature binds the DINO source cache,
 FAFA source/config/checkpoint hash, preprocessing and extraction precision. Each
@@ -143,11 +146,15 @@ source ID or extraction precision require a new cache directory. Training/retrie
 reject incomplete caches; image-only readers are independent of query build state.
 
 Pooled extraction shards in `.persons/` are temporary. They are assembled into
-one memory-mapped padded index and removed after publication. Scene patches are
-never copied from DINO. CPU RAM must hold the padded person index during
-finalization. Separate disk checks reserve the image build's peak space and only
-missing query features, including serialization overhead. Splitting the caches
-alone does not reduce total feature storage. Publish completed image features as
+one compact, memory-mapped index and removed after publication. Finalization
+holds only actual pooled person features, rather than a gallery-wide padded
+tensor. Scene patches and global means are owned by DINO. Legacy global means
+are pooled lazily on first use, without writing to the DINO source. Separate disk
+checks reserve the image build's peak space and only missing query features,
+including serialization overhead. Only validated reusable image shards reduce
+the reservation. A format-5 interrupted image build can resume into format 6
+with the same cache ID and valid shards. See [memory audit](cache_memory_audit.md).
+Publish completed image features as
 a Kaggle Dataset and point `data.fafa_image_cache` to its read-only mount to avoid
 keeping that copy in `/kaggle/working`; query output can remain writable.
 

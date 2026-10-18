@@ -17,6 +17,8 @@ python_bin="${PYTHON:-python3}"
 # --without-pip also works on notebook images without ensurepip. Bootstrap
 # through the host pip, then use the environment's pip for the actual install.
 "$python_bin" -m venv --without-pip "$env_dir"
-"$python_bin" -m pip --python "$env_dir/bin/python" install -r requirements/bootstrap.txt
-"$env_dir/bin/python" -m pip install --no-build-isolation -r "requirements/$1.txt"
+# CUDA wheels can be several GiB. Keep only the installed packages on notebook
+# disks, rather than retaining another compressed copy in pip's download cache.
+"$python_bin" -m pip --python "$env_dir/bin/python" install --no-cache-dir -r requirements/bootstrap.txt
+"$env_dir/bin/python" -m pip install --no-cache-dir --no-build-isolation -r "requirements/$1.txt"
 echo "Ready: $env_dir/bin/python"

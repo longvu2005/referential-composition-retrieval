@@ -175,7 +175,7 @@ def test_fafa_resumes_saved_images_and_never_publishes_partial(
     )
     assert calls == len(cache.image_ids) - 1 + len(cache.native.queries)
     first_persons = torch.load(io.BytesIO(first), weights_only=True)["features"]
-    torch.testing.assert_close(cache.persons[0, cache.mask[0]], first_persons)
+    torch.testing.assert_close(cache.person_row(0), first_persons)
     assert not (root / ".persons").exists()
     assert cache.cache_id == manifest["cache_id"]
     assert not (root / ".build.pt").exists()
@@ -226,7 +226,7 @@ def test_complete_person_index_needs_only_dino_shards(split_cache, monkeypatch):
         root, scene_root=source, query_root=cfg["data"]["fafa_query_cache"]
     )
     _, persons, _, _, _ = cache.load(torch.tensor([0]))
-    torch.testing.assert_close(persons[0], cache.persons[0, cache.mask[0]].float())
+    torch.testing.assert_close(persons[0], cache.person_row(0).float())
     # Older completed caches can retain shards. They must not make fine
     # scoring read different persons from the coarse index.
     (root / ".persons").mkdir()

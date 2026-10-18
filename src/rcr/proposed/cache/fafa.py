@@ -57,7 +57,7 @@ def _ready(path, cache_id, key, shape, dtype):
     if not path.is_file():
         return False
     try:
-        item = torch.load(path, map_location="cpu", weights_only=True)
+        item = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     except (OSError, EOFError, RuntimeError, pickle.UnpicklingError):
         return False
     features = item.get("features") if isinstance(item, dict) else None
@@ -175,31 +175,57 @@ def _build_images(cfg, root, extractor):
     extractor.load()
     source = extractor.source
     hidden_dim, dim, tokens = extractor.hidden_dim, extractor.dim, extractor.tokens
-    # Reserve peak space: final padded index coexists with pooled-person shards.
+    counts = source.mask.sum(dim=1)
+    offsets = torch.cat((torch.zeros(1, dtype=torch.int64), counts.cumsum(0)))
+    total = int(offsets[-1])
+    pooled_bytes = total * hidden_dim * dtype.itemsize
+    target_bytes = total * tokens * dim * dtype.itemsize
+    # The compact index coexists with resumable pooled shards until publication.
+    # DINO owns the global scene features; no second copy is written here.
     estimated = (
-        int(source.mask.sum()) * (tokens * dim + hidden_dim) * dtype.itemsize
-        + source.mask.numel() * hidden_dim * dtype.itemsize
-        + len(source.image_ids) * source.scene_dim * 4
-        + 2 * len(source.image_ids) * 4096
+        target_bytes
+        + 2 * pooled_bytes
+        + source.mask.numel()
+        + offsets.numel() * offsets.element_size()
+        + (2 * len(source.image_ids) + 1) * 4096
+        + 2 * len(str(source.image_ids).encode())
     )
-    saved_bytes = sum(
-        path.stat().st_size
-        for group in ("targets", ".persons")
-        for path in (root / group).glob("*.pt")
-    )
-    require_disk_space(root, max(0, estimated - saved_bytes))
-    print(f"FAFA image cache peak estimate: {estimated / 1024**3:.2f} GiB", flush=True)
-    global_features = torch.empty(len(source.image_ids), source.scene_dim)
-    for i, image_id in enumerate(tqdm(source.image_ids, desc="cache FAFA images")):
-        count = int(source.mask[i].sum())
-        global_features[i] = source._load_item(i)["scene"].float().mean(0)
+    complete = set()
+    saved_bytes = 0
+    for i, image_id in enumerate(tqdm(source.image_ids, desc="check FAFA images")):
+        count = int(counts[i])
         person_path, target_path = (
             root / group / f"{i}.pt" for group in (".persons", "targets")
         )
         if _ready(
             person_path, cache_id, image_id, (count, hidden_dim), dtype
         ) and _ready(target_path, cache_id, image_id, (count, tokens, dim), dtype):
+            complete.add(i)
+            # Only valid reusable shards count toward the reservation. Cap the
+            # credit so oversized storages/stale files cannot bypass the guard.
+            saved_bytes += min(
+                person_path.stat().st_size, count * hidden_dim * dtype.itemsize + 4096
+            ) + min(
+                target_path.stat().st_size,
+                count * tokens * dim * dtype.itemsize + 4096,
+            )
+    padded_bytes = source.mask.numel() * hidden_dim * dtype.itemsize
+    print(
+        f"FAFA images: {len(complete)}/{len(source.image_ids)} ready, {total} persons; "
+        f"person index {padded_bytes / 1024**3:.2f} -> "
+        f"{pooled_bytes / 1024**3:.2f} GiB (packed); "
+        f"target tokens {target_bytes / 1024**3:.2f} GiB; "
+        f"peak estimate {estimated / 1024**3:.2f} GiB",
+        flush=True,
+    )
+    require_disk_space(root, max(0, estimated - saved_bytes))
+    for i, image_id in enumerate(tqdm(source.image_ids, desc="cache FAFA images")):
+        if i in complete:
             continue
+        count = int(counts[i])
+        person_path, target_path = (
+            root / group / f"{i}.pt" for group in (".persons", "targets")
+        )
         persons = torch.empty(count, hidden_dim, dtype=dtype)
         targets = torch.empty(count, tokens, dim, dtype=dtype)
         for start, pixels in extractor.crops(image_id):
@@ -214,26 +240,29 @@ def _build_images(cfg, root, extractor):
             targets[start:stop] = projected.float().cpu().to(dtype)
         _write(person_path, cache_id, image_id, persons)
         _write(target_path, cache_id, image_id, targets)
-    persons_index = torch.zeros(*source.mask.shape, hidden_dim, dtype=dtype)
+    persons_index = torch.empty(total, hidden_dim, dtype=dtype)
     for i in range(len(source.image_ids)):
         item = torch.load(
-            root / ".persons" / f"{i}.pt", map_location="cpu", weights_only=True
+            root / ".persons" / f"{i}.pt",
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
         )
-        persons_index[i, : int(source.mask[i].sum())] = item["features"]
+        persons_index[int(offsets[i]) : int(offsets[i + 1])] = item["features"]
     _publish(
         root,
         {
-            "format_version": 5,
+            "format_version": 6,
             "layout": "fafa",
             "cache_id": cache_id,
             "source_cache_id": source.cache_id,
             "signature": extractor.signature,
             "image_ids": source.image_ids,
             "persons": persons_index,
+            "person_offsets": offsets,
             "mask": source.mask,
             "patch_hw": source.patch_hw,
             "scene_dim": source.scene_dim,
-            "global_features": global_features,
             "storage_dtype": storage,
             "image_encoder": cfg["image_encoder"],
             "detector": cfg["detector"],

@@ -6,6 +6,7 @@ from torch import nn
 
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.proposed import ranking as retrieval
+from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.ranking import (
     _coarse_scores_chunked,
@@ -135,6 +136,9 @@ class _Cache(NativeFixture):
     def load_groups(self, *groups):
         return tuple(self.load(indices) for indices in groups)
 
+    def load_persons(self, indices):
+        return self.persons[indices], self.mask[indices]
+
     def load(self, indices):
         indices = indices.long()
         count = len(indices)
@@ -201,6 +205,7 @@ def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
     # contiguous, so accidentally truncating at the valid count would lose data.
     cache = SimpleNamespace(
         image_ids=[str(index) for index in range(7)],
+        person_offsets=None,
         persons=torch.randn(7, 5, 8).half(),
         mask=torch.tensor(
             [
@@ -214,6 +219,7 @@ def test_chunked_coarse_matches_dense_with_padding_and_empty_images(
             ]
         ),
     )
+    cache.load_persons = lambda indices: GalleryCache.load_persons(cache, indices)
     model = RCRModel(8, 6, 2)
     query_identity = torch.randn(0 if empty_query else 3, 6)
     logits = torch.randn(2, len(query_identity))

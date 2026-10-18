@@ -282,6 +282,9 @@ def test_completed_unified_images_are_reused_without_writes(split_cache, monkeyp
     extraction.finish_fafa_cache(cfg)
     image_root = Path(cfg["data"]["fafa_image_cache"])
     image_index = torch.load(image_root / "index.pt", weights_only=True)
+    cache = GalleryCache(image_root, scene_root=source)
+    image_index["persons"], _ = cache.load_persons(torch.arange(len(cache.image_ids)))
+    image_index.pop("person_offsets")
     image_index["format_version"] = 4
     image_index.pop("signature")
     # Legacy embedded query metadata must not constrain the separate query cache.

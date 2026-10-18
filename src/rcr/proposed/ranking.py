@@ -28,8 +28,8 @@ def _encode_gallery_identity(
 ) -> list[tuple[Tensor, Tensor]]:
     """Project once, retaining only CPU batches with useful person columns.
 
-    The cache pads every image to the gallery's maximum person count. Dropping
-    columns masked out for an entire batch saves RAM without removing evidence.
+    Packed caches pad only the current batch. Legacy dense caches drop columns
+    masked out for an entire batch without removing evidence.
     Never concatenate these batches on the accelerator (or duplicate them in RAM).
     """
 
@@ -39,12 +39,8 @@ def _encode_gallery_identity(
     dtype = model.identity_head.proj.weight.dtype
     for start in range(0, len(image_indices), batch_size):
         indices = image_indices[start : start + batch_size]
-        mask = cache.mask[indices]
-        columns = mask.any(dim=0)
-        mask = mask[:, columns]
-        persons = cache.persons[indices[:, None], columns.nonzero().flatten()].to(
-            device=device, dtype=dtype
-        )
+        persons, mask = cache.load_persons(indices)
+        persons = persons.to(device=device, dtype=dtype)
         identity = model.encode_identity(persons)
         batches.append((identity.cpu(), mask.cpu()))
         # Release GPU outputs before allocating the next projection batch.

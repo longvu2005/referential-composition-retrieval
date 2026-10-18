@@ -69,7 +69,7 @@ def check_cache_config(
         if cache.patch_hw != (height // 16, width // 16):
             raise ValueError("legacy DINO patch grid differs from scene_size")
         return
-    if cache.format_version not in (2, 4, 5):
+    if cache.format_version not in (2, 4, 5, 6):
         raise ValueError("unsupported cache format")
     actual = cache.encoder_metadata["person_encoder"] or {}
     if actual.get("backend") != person_backend:
@@ -79,7 +79,7 @@ def check_cache_config(
     if cache.encoder_metadata["detector"] != cfg["detector"]:
         raise ValueError("cache detector differs from config")
     if person_backend == "fafa":
-        if cache.format_version not in (4, 5) or cache.native is None:
+        if cache.format_version not in (4, 5, 6) or cache.native is None:
             raise ValueError("build a FAFA image cache in data.fafa_image_cache")
         native_cfg = load_fafa_config(cfg)
         if actual.get("spec") != fafa_spec(native_cfg):

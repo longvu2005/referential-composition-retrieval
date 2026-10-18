@@ -208,7 +208,7 @@ class NativeFAFACache:
 
     def _read(self, group, index, key, shape):
         path = self.root / group / f"{index}.pt"
-        item = torch.load(path, map_location="cpu", weights_only=True)
+        item = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         features = item.get("features")
         if (
             item.get("cache_id") != self.cache_id
@@ -243,15 +243,20 @@ class NativeFAFACache:
         out = torch.zeros(len(indices), max_people, self.tokens, self.dim)
         rows = {}
         for n, i in enumerate(indices.tolist()):
+            rows.setdefault(i, []).append(n)
+        # Retain one shard at a time alongside the padded output, even when
+        # candidate images repeat across queries in a training batch.
+        for i, positions in rows.items():
             count = int(self.gallery.mask[i].sum())
             if count > max_people:
                 raise ValueError("native/target person padding differs")
-            if i not in rows:
-                rows[i] = self._read(
-                    "targets",
-                    i,
-                    self.gallery.image_ids[i],
-                    (count, self.tokens, self.dim),
-                )
-            out[n, :count] = rows[i]
+            features = self._read(
+                "targets",
+                i,
+                self.gallery.image_ids[i],
+                (count, self.tokens, self.dim),
+            )
+            for n in positions:
+                out[n, :count] = features
+            del features
         return out

@@ -136,7 +136,7 @@ def test_split_cache_shapes_text_validation_and_readonly_reuse(
     assert gallery.native_targets(torch.tensor([0, 0]), 2).shape == (2, 2, 7, 3)
     assert gallery.native.cache_id == gallery.cache_id
     assert gallery.native.query_cache.cache_id != gallery.cache_id
-    assert gallery.format_version == 5
+    assert gallery.format_version == 6
     assert not (root / ".persons").exists()
     assert list(root.glob("index.pt")) == [root / "index.pt"]
     before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
@@ -190,7 +190,7 @@ def test_one_image_forward_supplies_both_person_and_native_target(
     assert calls.count("multimodal") == len(gallery.native.queries)
     expected = original({"image": torch.ones(1, 3, 4, 4)}, "image")
     torch.testing.assert_close(
-        gallery.persons[0, :1].float(), expected.image_embeds.mean(1)
+        gallery.person_row(0)[:1].float(), expected.image_embeds.mean(1)
     )
     torch.testing.assert_close(
         gallery.native_targets(torch.tensor([0]), 1)[0],
