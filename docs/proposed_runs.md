@@ -89,7 +89,7 @@ data:
   image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
   dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
   fafa_image_cache: /kaggle/working/cache/fafa-images
-  fafa_query_cache: /kaggle/working/cache/fafa-queries
+  fafa_query_cache: /kaggle/working/cache/fafa-queries-txt128
 ```
 
 Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.

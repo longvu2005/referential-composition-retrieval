@@ -7,7 +7,7 @@ data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
   fafa_image_cache: cache/fafa-images  # pooled persons + projected target tokens
-  fafa_query_cache: cache/fafa-queries  # text-conditioned queries; updated independently
+  fafa_query_cache: cache/fafa-queries-txt128  # separate from old/incomplete 32-token queries
   dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
 detector:
   model: IDEA-Research/grounding-dino-tiny

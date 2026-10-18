@@ -12,6 +12,8 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from rcr.baselines.fafa import text_policy
+
 NATIVE_VERSION = "fafa-multimodal-fda-v1"
 
 
@@ -86,23 +88,50 @@ def query_key(sample: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def condition_key(signature: dict, image_id: str, condition: str) -> str:
+def condition_key(
+    signature: dict,
+    image_id: str,
+    condition: str,
+    policy: dict | None = None,
+) -> str:
     """One embedding family, reference crop order and public Subject condition."""
     value = [NATIVE_VERSION, signature, image_id, condition]
+    if policy is not None and policy != text_policy({}):
+        value.append(policy)
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def query_entries(samples, signature: dict) -> dict:
+def query_entries(samples, signature: dict, policy: dict | None = None) -> dict:
     return {
         row["sample_id"]: {
             "key": query_key(row),
             "features": [
-                condition_key(signature, row["query_image_id"], text)
+                condition_key(signature, row["query_image_id"], text, policy)
                 for text in subject_conditions(row)
             ],
         }
         for row in samples
     }
+
+
+def cached_text_policy(index: dict) -> dict[str, int]:
+    """Older query manifests used the pinned 32-token/50-word defaults."""
+    policy = index.get("text_policy", text_policy({}))
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != {"max_txt_len", "max_words"}
+        or any(type(value) is not int for value in policy.values())
+        or policy != text_policy({"checkpoint": policy})
+    ):
+        raise ValueError("invalid FAFA query text policy; rebuild fafa-query")
+    return dict(policy)
+
+
+def checkpoint_native_metadata(metadata: dict | None) -> dict | None:
+    """Interpret pre-policy checkpoints without accepting new text features."""
+    if metadata is None or metadata.get("version") != NATIVE_VERSION:
+        return metadata
+    return {**metadata, "text_policy": cached_text_policy(metadata)}
 
 
 class NativeQueryCache:
@@ -125,12 +154,13 @@ class NativeQueryCache:
         if index.get("signature") != signature or index.get("dim") != dim:
             raise ValueError("FAFA query encoder/crops differ from image cache")
         self.signature = signature
+        self.text_policy = cached_text_policy(index)
         self.dim = dim
         self.cache_id = index["cache_id"]
         self.queries = index["queries"]
 
     def contains_samples(self, samples) -> bool:
-        expected = query_entries(samples, self.signature)
+        expected = query_entries(samples, self.signature, self.text_policy)
         return all(self.queries.get(key) == value for key, value in expected.items())
 
     def validate_samples(self, samples) -> None:
@@ -183,6 +213,9 @@ class NativeFAFACache:
             self.query_cache.queries if self.query_cache else index.get("queries")
         )
         self.gallery = gallery
+        self.text_policy = (
+            self.query_cache.text_policy if self.query_cache else text_policy({})
+        )
         # The checkpoint binds the image features and encoder provenance. Query
         # index UUIDs and sample order are deliberately not part of this contract.
         self.metadata = {
@@ -191,6 +224,7 @@ class NativeFAFACache:
             "spec": gallery.encoder_metadata["person_encoder"],
             "dim": self.dim,
             "tokens": self.tokens,
+            "text_policy": self.text_policy,
         }
 
     def validate_samples(self, samples) -> None:

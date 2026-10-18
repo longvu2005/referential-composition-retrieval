@@ -103,6 +103,9 @@ class FakeFAFA(nn.Module):
         self.vision_proj = nn.Linear(5, 3)
         self.query_tokens = nn.Parameter(torch.ones(1, 7, 5))
 
+    def tokenizer(self, text, **kwargs):
+        return {"input_ids": list(range(len(text.split()) + 2))}
+
     def extract_target_features(self, pixels, mode):
         assert mode == "mean"
         assert not self.training and not self.weight.requires_grad

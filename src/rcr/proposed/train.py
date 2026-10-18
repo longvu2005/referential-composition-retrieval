@@ -28,6 +28,7 @@ from rcr.proposed.batch import (
     prefetch_batches,
     prepare_visual_batch,
 )
+from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
@@ -250,6 +251,7 @@ def train(cfg: dict) -> Path:
     )
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples([*samples, *val_samples])
+    check_query_text_config(cache, cfg)
     expected_backend = "fafa" if "person_encoder" in cfg else None
     actual_backend = (cache.encoder_metadata.get("person_encoder") or {}).get(
         "backend", "dino"

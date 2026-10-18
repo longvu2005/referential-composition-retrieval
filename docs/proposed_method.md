@@ -220,17 +220,29 @@ One image-only Q-Former forward still supplies both hidden means and projected
 tokens; their mathematical definitions are unchanged. The query index separately
 maps sample/Subject slots to content-addressed conditions. Each key binds the
 FAFA source/checkpoint/preprocessing, DINO crop source, extraction precision,
-reference image and public condition. Query text edits only require rerunning
-`--cache-stage fafa-query`; unchanged condition features are reused.
+reference image, public condition and query text policy. Query text edits only
+require rerunning `--cache-stage fafa-query`; unchanged condition features are reused.
 
 Completed format-4 unified caches remain valid image sources without writes.
 Replace `data.cache` with `data.fafa_image_cache` and add `data.fafa_query_cache`.
-Checkpoints bind image feature identity and encoder provenance, not the query
-manifest UUID. Earlier architecture checkpoints still require retraining in a
-new run directory; this cache separation does not change the model equations.
+Checkpoints bind image feature identity, encoder provenance and query text policy,
+not the query manifest UUID. Earlier architecture checkpoints still require
+retraining in a new run directory; this cache separation does not change the model
+equations.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and fusion coefficients.
+
+`checkpoint.max_txt_len` in the native FAFA YAML explicitly selects 128 tokens,
+including special tokens, for both the baseline and proposed extraction. The
+wrapper sets the caption word cap to at least that limit. New query manifests
+record `text_policy`; manifests/checkpoints without it retain the historical
+32-token/50-word meaning. Changing the policy re-extracts query features only.
+An interrupted query build must resume with its original policy or use a new
+query directory. Query extraction logs and stores `text_stats` for newly extracted
+conditions, counting tokenized input before tokenizer truncation. Train/retrieve
+check a native YAML when present; cache-only machines can omit it and rely on the
+recorded policy and checkpoint contract without installing native FAFA.
 
 `model.fine_matching` defines selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded

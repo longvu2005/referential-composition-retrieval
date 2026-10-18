@@ -6,11 +6,12 @@ from pathlib import Path
 
 import yaml
 
+from rcr.baselines.fafa import text_policy
 from rcr.common.config import load_config
 from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.proposed.cache.dino import _prepare_dino
-from rcr.proposed.cache.native import NativeQueryCache
+from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
 from rcr.proposed.cache.store import GalleryCache
 
 
@@ -104,11 +105,29 @@ def existing_cache(
     return cache
 
 
-def query_cache_ready(root: Path, image: GalleryCache, samples) -> bool:
+def check_query_text_config(cache: GalleryCache, cfg: dict) -> None:
+    """Check a present extraction config without requiring the FAFA runtime.
+
+    Cache-only machines may omit the native YAML entirely. In that case its
+    recorded text policy is authoritative and remains bound to the checkpoint.
+    """
+    if cache.native.metadata.get("version") != NATIVE_VERSION:
+        return
+    path = cfg.get("person_encoder", {}).get("fafa_config")
+    if path is None or not Path(path).is_file():
+        return
+    if cache.native.text_policy != text_policy(load_config(path)):
+        raise ValueError(
+            "FAFA query text policy differs from config; "
+            "run build-cache --cache-stage fafa-query before training/retrieval"
+        )
+
+
+def query_cache_ready(root: Path, image: GalleryCache, samples, policy: dict) -> bool:
     if not (root / "index.pt").is_file() or (root / ".building").exists():
         return False
     queries = NativeQueryCache(root, image.feature_signature, image.native.dim)
-    return queries.contains_samples(samples)
+    return queries.text_policy == policy and queries.contains_samples(samples)
 
 
 def cache_paths(cfg: dict) -> tuple[Path, Path, Path]:
@@ -160,7 +179,9 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     if (
         stage != "fafa-image"
         and image is not None
-        and query_cache_ready(query_root, image, data.samples)
+        and query_cache_ready(
+            query_root, image, data.samples, text_policy(load_fafa_config(cfg))
+        )
     ):
         print(f"Using existing FAFA caches: {image_root}, {query_root}", flush=True)
         return
@@ -177,6 +198,9 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
             raise RuntimeError("FAFA query build did not publish index.pt")
         # Query-only extraction also works before the image cache is built.
         if image is not None:
-            NativeQueryCache(
+            queries = NativeQueryCache(
                 query_root, image.feature_signature, image.native.dim
-            ).validate_samples(data.samples)
+            )
+            if queries.text_policy != text_policy(load_fafa_config(cfg)):
+                raise RuntimeError("FAFA worker produced a different query text policy")
+            queries.validate_samples(data.samples)

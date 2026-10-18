@@ -115,6 +115,15 @@ caches without native FAFA. Completed format-4 unified caches can be reused as
 unified builds need the old code to finish or a new image output directory.
 See [Kaggle reuse and commands](docs/proposed_runs.md).
 
+`configs/fafa.yaml` explicitly sets `checkpoint.max_txt_len: 128` (including
+special tokens) for both methods. The wrapper also raises the caption word cap
+to 128. Query keys/checkpoints track this text policy separately from image
+provenance. Build `fafa-query` again when changing the limit; DINO/image caches
+remain reusable. The default query directory is `cache/fafa-queries-txt128` so an
+unfinished old 32-token build is preserved. Train a new checkpoint/run for the new
+features. Old query manifests/checkpoints without a text policy mean 32 tokens
+and 50 words; use an explicitly matching extraction config to reproduce them.
+
 ```bash
 # Main model: prepare, build/reuse caches, train, then calibrate on validation.
 bash scripts/methods/proposed.bash val

@@ -19,6 +19,13 @@ from tests.proposed.test_split_cache import split_cache as split_cache
 from tools import run as cli
 
 
+def _text_limit(cfg, length):
+    path = Path(cfg["person_encoder"]["fafa_config"])
+    native = yaml.safe_load(path.read_text())
+    native["checkpoint"]["max_txt_len"] = length
+    path.write_text(yaml.safe_dump(native))
+
+
 def _files(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
@@ -390,3 +397,138 @@ def test_query_provenance_mismatch_fails_before_extracting_images(
     with pytest.raises(ValueError, match="encoder/crops differ"):
         extraction.finish_fafa_cache(cfg)
     assert not Path(cfg["data"]["fafa_image_cache"]).exists()
+
+
+def test_text_limit_upgrade_rebuilds_only_queries(split_cache, monkeypatch):
+    cfg, _, source, model, _ = split_cache
+    _text_limit(cfg, 32)
+    extraction.finish_fafa_cache(cfg)
+    old = _gallery(cfg)
+    old_queries = {
+        key for row in old.native.queries.values() for key in row["features"]
+    }
+    image_root = Path(cfg["data"]["fafa_image_cache"])
+    query_root = Path(cfg["data"]["fafa_query_cache"])
+    images, dino = _files(image_root), _files(source)
+    calls = _record(model, monkeypatch)
+    _text_limit(cfg, 128)
+    monkeypatch.setattr(
+        extraction, "_build_images", lambda *a: pytest.fail("rebuilt image features")
+    )
+    save = extraction.save_torch
+
+    def queries_only(value, target):
+        assert query_root in target.parents
+        return save(value, target)
+
+    monkeypatch.setattr(extraction, "save_torch", queries_only)
+    builder.prepare_cache(cfg)
+    new = _gallery(cfg)
+    new_queries = {
+        key for row in new.native.queries.values() for key in row["features"]
+    }
+    assert new.native.text_policy == {"max_txt_len": 128, "max_words": 128}
+    assert not old_queries & new_queries
+    assert new.native.query_cache.cache_id != old.native.query_cache.cache_id
+    assert new.cache_id == old.cache_id
+    assert calls == ["multimodal"] * len(_rows(cfg))
+    assert _files(image_root) == images and _files(source) == dino
+    monkeypatch.setattr(
+        builder, "run_person_worker", lambda *a, **kw: pytest.fail("extracted twice")
+    )
+    builder.prepare_cache(cfg)
+
+
+def test_training_rejects_stale_text_config_before_changing_output(split_cache):
+    from rcr.proposed.train import train
+
+    cfg, _, _, _, _ = split_cache
+    _text_limit(cfg, 32)
+    extraction.finish_fafa_cache(cfg)
+    output = Path(cfg["output"]["dir"])
+    output.mkdir(parents=True)
+    (output / "best.pt").write_bytes(b"previous checkpoint")
+    before = _files(output)
+    _text_limit(cfg, 128)
+    with pytest.raises(ValueError, match="query text policy differs from config"):
+        train(cfg)
+    assert _files(output) == before
+
+
+def test_legacy_query_and_checkpoint_still_work_at_32_tokens(split_cache):
+    cfg, path, _, _, _ = split_cache
+    _text_limit(cfg, 32)
+    extraction.finish_fafa_cache(cfg)
+    query_index = Path(cfg["data"]["fafa_query_cache"]) / "index.pt"
+    index = torch.load(query_index, weights_only=True)
+    index.pop("text_policy")
+    index.pop("text_stats")
+    torch.save(index, query_index)
+    assert _gallery(cfg).native.text_policy == {"max_txt_len": 32, "max_words": 50}
+    cli.main(["train", "--config", str(path)])
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["native_cache"].pop("text_policy")
+    torch.save(checkpoint, cfg["checkpoint"])
+    cli.main(["retrieve", "--config", str(path), "--splits", "test"])
+
+
+def test_checkpoint_rejects_query_features_with_different_text_limit(split_cache):
+    cfg, path, _, _, _ = split_cache
+    _text_limit(cfg, 32)
+    cli.main(["run", "--config", str(path), "--build-cache", "--train"])
+    saved = Path(cfg["checkpoint"]).read_bytes()
+    _text_limit(cfg, 128)
+    builder.prepare_cache(cfg, stage="fafa-query")
+    with pytest.raises(ValueError, match="query text policy differs from training"):
+        cli.main(["retrieve", "--config", str(path), "--splits", "test"])
+    assert Path(cfg["checkpoint"]).read_bytes() == saved
+
+
+def test_text_upgrade_resumes_without_mixing_limits(split_cache, monkeypatch):
+    cfg, _, source, model, _ = split_cache
+    _text_limit(cfg, 32)
+    extraction.finish_fafa_cache(cfg)
+    images = _files(Path(cfg["data"]["fafa_image_cache"]))
+    dino = _files(source)
+    _text_limit(cfg, 128)
+    original, count = model.extract_features, 0
+
+    def interrupted(samples, mode):
+        nonlocal count
+        assert mode == "multimodal"
+        count += 1
+        if count == 2:
+            raise RuntimeError("interrupted text upgrade")
+        return original(samples, mode)
+
+    monkeypatch.setattr(model, "extract_features", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted text upgrade"):
+        builder.prepare_cache(cfg, stage="fafa-query")
+    query_root = Path(cfg["data"]["fafa_query_cache"])
+    interrupted_files = _files(query_root)
+    _text_limit(cfg, 64)
+    with pytest.raises(ValueError, match="unfinished FAFA cache settings differ"):
+        builder.prepare_cache(cfg, stage="fafa-query")
+    assert _files(query_root) == interrupted_files
+    _text_limit(cfg, 128)
+    monkeypatch.setattr(model, "extract_features", original)
+    remaining = _record(model, monkeypatch)
+    builder.prepare_cache(cfg, stage="fafa-query")
+    assert remaining == ["multimodal"] * (len(_rows(cfg)) - 1)
+    _gallery(cfg).validate_samples(_rows(cfg))
+    assert _files(Path(cfg["data"]["fafa_image_cache"])) == images
+    assert _files(source) == dino
+
+
+def test_query_build_reports_conditions_exceeding_token_limit(split_cache):
+    cfg, _, _, _, _ = split_cache
+    rows = _rows(cfg)
+    rows[0]["final_change"] = "Subject 1 " + "wears red " * 80
+    _save_rows(cfg, rows)
+    extraction.finish_fafa_cache(cfg)
+    index = torch.load(
+        Path(cfg["data"]["fafa_query_cache"]) / "index.pt", weights_only=True
+    )
+    assert index["text_stats"]["conditions_checked"] == len(rows)
+    assert index["text_stats"]["over_token_limit"] == 1
+    assert index["text_stats"]["max_tokens"] > 128

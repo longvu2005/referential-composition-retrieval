@@ -17,6 +17,8 @@ checkpoint:
   status: OFFICIAL_RELEASED
   model_name: blip2_fafa_cpr
   model_type: pretrain
+  # Includes special tokens. Shared by native FAFA and proposed query extraction.
+  max_txt_len: 128
   fda_k: 6
   fda_alpha: 0.5
   use_soft: true

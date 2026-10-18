@@ -176,7 +176,22 @@ def offline_model_load():
         socket.socket.connect, socket.socket.connect_ex = connect, connect_ex
 
 
+def text_policy(cfg: dict) -> dict[str, int]:
+    """Resolve query-only text limits; missing settings reproduce legacy FAFA.
+
+    The pinned loader defaults to 32 tokens and its caption processor to 50
+    words. Keep those defaults for old configs/caches; current YAML explicitly
+    selects 128. A word cap at least as large as the token cap cannot remove a
+    usable text prefix before the tokenizer applies its own limit.
+    """
+    length = cfg.get("checkpoint", {}).get("max_txt_len", 32)
+    if type(length) is not int or not 2 <= length <= 512:
+        raise ValueError("checkpoint.max_txt_len must be an integer in [2, 512]")
+    return {"max_txt_len": length, "max_words": max(50, length)}
+
+
 def load_fafa(cfg: dict, device):
+    policy = text_policy(cfg)
     directory = official_source(cfg)
     if not assets_ready(cfg):
         raise RuntimeError("FAFA runtime assets missing/stale; run the prepare command")
@@ -202,6 +217,13 @@ def load_fafa(cfg: dict, device):
     model.fda_k = int(cfg["checkpoint"]["fda_k"])
     model.fda_alpha = float(cfg["checkpoint"]["fda_alpha"])
     model.use_soft = bool(cfg["checkpoint"]["use_soft"])
+    model.max_txt_len = policy["max_txt_len"]
+    processors["eval"].max_words = policy["max_words"]
+    print(
+        f"FAFA text: max_txt_len={model.max_txt_len} tokens, "
+        f"processor.max_words={processors['eval'].max_words}",
+        flush=True,
+    )
     preprocess = squarepad(
         int(cfg["checkpoint"]["image_size"]),
         need_size=tuple(cfg["checkpoint"]["test_resize_hw"]),
@@ -213,6 +235,7 @@ def load_fafa(cfg: dict, device):
         {
             "missing_keys": list(incompatible.missing_keys),
             "unexpected_keys": list(incompatible.unexpected_keys),
+            "text_policy": policy,
         },
     )
 
@@ -373,7 +396,12 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         "version": ADAPTER_VERSION,
         "checkpoint_sha256": checkpoint_sha,
         "selector_sha256": selector_sha,
-        "checkpoint_settings": cfg["checkpoint"],
+        # Text changes only invalidate multimodal query features, not images.
+        "checkpoint_settings": {
+            key: value
+            for key, value in cfg["checkpoint"].items()
+            if key != "max_txt_len"
+        },
         "runtime_marker_sha256": sha256_file(
             cfg["checkpoint"]["runtime_assets_marker"]
         ),
@@ -383,15 +411,16 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         "encoder_precision": "float16" if device.type == "cuda" else "float32",
     }
     gallery_dir = cache_directory(cfg["cache"]["dir"], signature)
-    query_dir = cache_directory(
-        gallery_dir / "queries",
-        {
-            "version": ADAPTER_VERSION,
-            "query_items": query_items,
-            "query_offsets": query_offsets,
-            "sample_ids": [s["sample_id"] for s in samples],
-        },
-    )
+    query_signature = {
+        "version": ADAPTER_VERSION,
+        "query_items": query_items,
+        "query_offsets": query_offsets,
+        "sample_ids": [s["sample_id"] for s in samples],
+    }
+    policy = text_policy(cfg)
+    if policy != text_policy({}):
+        query_signature["text_policy"] = policy
+    query_dir = cache_directory(gallery_dir / "queries", query_signature)
     model, processors, preprocess, load_info = load_fafa(cfg, device)
     print(
         f"FAFA checkpoint: {len(load_info['missing_keys'])} missing / "

@@ -18,6 +18,8 @@ from rcr.common.io import (
 )
 from rcr.common.runtime import resolve_device
 from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
+from rcr.proposed.cache.build import check_query_text_config
+from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
@@ -101,7 +103,18 @@ def _retrieve(
     )
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(samples)
-    if cache.native.metadata != checkpoint.get("native_cache"):
+    check_query_text_config(cache, cfg)
+    expected_native = checkpoint_native_metadata(checkpoint.get("native_cache"))
+    if cache.native.metadata != expected_native:
+        if (
+            expected_native is not None
+            and cache.native.metadata.get("text_policy")
+            != expected_native.get("text_policy")
+        ):
+            raise ValueError(
+                "native FAFA query text policy differs from training; "
+                "use matching query features or train a new checkpoint"
+            )
         raise ValueError("native FAFA cache differs from training")
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")

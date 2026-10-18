@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from rcr.baselines.fafa import load_fafa
+from rcr.baselines.fafa import load_fafa, text_policy
 from rcr.common.data import load_rcr_data
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
@@ -23,6 +23,7 @@ from rcr.proposed.cache.build import (
 )
 from rcr.proposed.cache.native import (
     NATIVE_VERSION,
+    cached_text_policy,
     condition_key,
     query_entries,
     subject_conditions,
@@ -111,6 +112,7 @@ class _Extractor:
         if type(self.batch_size) is not int or self.batch_size < 1:
             raise ValueError("person_encoder.batch_size must be positive")
         self.native_cfg = load_fafa_config(cfg)
+        self.text_policy = text_policy(self.native_cfg)
         self.device = resolve_device(cfg)
         self.signature = {
             "source_cache_id": source.cache_id,
@@ -290,22 +292,33 @@ def _query_index(root, signature):
         or index.get("signature") != signature
     ):
         raise ValueError("FAFA query encoder/crops differ; use a new query directory")
+    cached_text_policy(index)
     return index
 
 
 def _build_queries(root, extractor):
     signature, source = extractor.signature, extractor.source
-    entries = query_entries(extractor.data.samples, signature)
+    policy = extractor.text_policy
+    entries = query_entries(extractor.data.samples, signature, policy)
     previous = _query_index(root, signature)
+    same_policy = previous is not None and cached_text_policy(previous) == policy
     if (
         previous is not None
+        and same_policy
         and not (root / ".building").exists()
         and previous["queries"] == entries
     ):
         print(f"Using existing FAFA query cache: {root}", flush=True)
         return
+    # Preserve legacy resume signatures. New limits belong to query extraction
+    # only, so completed image indices and target shards never change.
+    build_signature = (
+        signature
+        if policy == text_policy({})
+        else {"encoder": signature, "text_policy": policy}
+    )
     cache_id = _begin(
-        root, signature, cache_id=previous["cache_id"] if previous else None
+        root, build_signature, cache_id=previous["cache_id"] if same_policy else None
     )
     (root / "features").mkdir(exist_ok=True)
     if previous is None:
@@ -316,7 +329,7 @@ def _build_queries(root, extractor):
         image_id = row["query_image_id"]
         count = int(source.mask[source.by_id[image_id]].sum())
         for condition in subject_conditions(row):
-            key = condition_key(signature, image_id, condition)
+            key = condition_key(signature, image_id, condition, policy)
             work[key] = (image_id, condition, count)
     missing = {
         key: value
@@ -342,16 +355,22 @@ def _build_queries(root, extractor):
         extractor.load()
         if extractor.dim != dim:
             raise ValueError("FAFA query feature dimension differs from cache")
+    stats = {"conditions_checked": 0, "over_token_limit": 0, "max_tokens": 0}
     for key, (image_id, condition, count) in tqdm(
         missing.items(), desc="cache FAFA queries"
     ):
+        processed = extractor.processors["eval"](condition)
+        tokens = extractor.model.tokenizer(processed, truncation=False)["input_ids"]
+        length = len(tokens)
+        stats["conditions_checked"] += 1
+        stats["over_token_limit"] += int(length > policy["max_txt_len"])
+        stats["max_tokens"] = max(stats["max_tokens"], length)
         features = torch.empty(count, dim)
         for start, pixels in extractor.crops(image_id):
             value = extractor.model.extract_features(
                 {
                     "image": pixels,
-                    "text_input": [extractor.processors["eval"](condition)]
-                    * len(pixels),
+                    "text_input": [processed] * len(pixels),
                 },
                 mode="multimodal",
             ).multimodal_embeds.float()
@@ -368,9 +387,19 @@ def _build_queries(root, extractor):
             "version": NATIVE_VERSION,
             "cache_id": cache_id,
             "signature": signature,
+            "text_policy": policy,
+            # Counts cover conditions extracted by this invocation, not reused shards.
+            "text_stats": stats,
             "dim": dim,
             "queries": entries,
         },
+    )
+    print(
+        f"FAFA query text: max_txt_len={policy['max_txt_len']}, "
+        f"max_words={policy['max_words']}; "
+        f"{stats['over_token_limit']}/{stats['conditions_checked']} new conditions "
+        f"exceed the token limit (max_tokens={stats['max_tokens']})",
+        flush=True,
     )
     print(f"Finished FAFA query cache: {root}", flush=True)
 
@@ -392,7 +421,9 @@ def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
         if stage == "fafa-image":
             print(f"Using existing FAFA image cache: {image_root}", flush=True)
             return
-        if query_cache_ready(query_root, image, data.samples):
+        if query_cache_ready(
+            query_root, image, data.samples, text_policy(load_fafa_config(cfg))
+        ):
             print(f"Using existing FAFA query cache: {query_root}", flush=True)
             return
     extractor = _Extractor(cfg, source, data)
