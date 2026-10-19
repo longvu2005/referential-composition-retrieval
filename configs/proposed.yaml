@@ -33,7 +33,7 @@ model:
   text_model: google-bert/bert-base-uncased
   dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
-  identity_dim: 128
+  identity_dim: 32
   fda_k: 6                  # native top-k target tokens; no learned semantic cosine
   state_dim: 128
   # Training default; inference overrides live in retrieval.
