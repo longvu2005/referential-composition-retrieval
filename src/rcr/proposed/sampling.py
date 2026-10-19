@@ -5,6 +5,8 @@ from collections import Counter, defaultdict
 
 import torch
 
+from rcr.common.data import required_identity_ids
+
 
 def case_sampling_weights(samples: list[dict]) -> torch.Tensor:
     """Per-row 1/sqrt(N_case), giving each case total mass sqrt(N_case)."""
@@ -60,11 +62,7 @@ def identity_candidate_pools(data, samples, gallery_image_ids):
             by_identity[str(box["identity_id"])].add(image_id)
     pools = {}
     for sample in samples:
-        required = {
-            str(identity)
-            for subject in sample["subjects"]
-            for identity in subject["identity_ids"]
-        }
+        required = set(map(str, required_identity_ids(sample)))
         if not required:
             raise ValueError(f"{sample['sample_id']}: missing required identities")
         images = set.intersection(*(by_identity[identity] for identity in required))

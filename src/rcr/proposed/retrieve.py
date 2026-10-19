@@ -21,8 +21,8 @@ from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
 from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache
-from rcr.proposed.nn.encoders import TextEncoder
-from rcr.proposed.nn.model import ARCHITECTURE_VERSION, RCRModel
+from rcr.proposed.nn.encoders import load_text_modules
+from rcr.proposed.nn.model import ARCHITECTURE_VERSION, DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     rank_weight_grid,
     retrieval_settings,
@@ -77,7 +77,9 @@ def _retrieve(
     if state_untrained and (
         any(beta != 0 for beta, _ in weights)
         if weights is not None
-        else uses_state(cfg["retrieval"], model_cfg.get("coarse_beta", 0.4))
+        else uses_state(
+            cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
+        )
     ):
         raise ValueError(
             "checkpoint state branch is untrained; use retrieval.coarse_beta=0"
@@ -106,11 +108,9 @@ def _retrieve(
     check_query_text_config(cache, cfg)
     expected_native = checkpoint_native_metadata(checkpoint.get("native_cache"))
     if cache.native.metadata != expected_native:
-        if (
-            expected_native is not None
-            and cache.native.metadata.get("text_policy")
-            != expected_native.get("text_policy")
-        ):
+        if expected_native is not None and cache.native.metadata.get(
+            "text_policy"
+        ) != expected_native.get("text_policy"):
             raise ValueError(
                 "native FAFA query text policy differs from training; "
                 "use matching query features or train a new checkpoint"
@@ -126,30 +126,18 @@ def _retrieve(
     if cache.encoder_metadata != checkpoint.get("encoder_metadata"):
         raise ValueError("retrieval encoder metadata differs from training")
 
-    from transformers import AutoModel, AutoTokenizer
-
     tokenizer_path = checkpoint_path.parent / "tokenizer"
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    text_backbone = AutoModel.from_pretrained(model_cfg["text_model"])
-    text_backbone.resize_token_embeddings(len(tokenizer))
-    text_encoder = TextEncoder(text_backbone, dim).to(device)
+    tokenizer, text_encoder = load_text_modules(
+        model_cfg["text_model"], dim, device, tokenizer_source=tokenizer_path
+    )
     text_encoder.load_state_dict(checkpoint["text_encoder"])
 
     max_subjects = checkpoint["model"]["composition.role.weight"].shape[0]
-    model = RCRModel(
-        dim=dim,
-        identity_dim=model_cfg["identity_dim"],
-        num_heads=model_cfg["num_heads"],
-        max_subjects=max_subjects,
-        mlp_ratio=model_cfg["mlp_ratio"],
-        geo_dim=model_cfg["geo_dim"],
-        state_dim=model_cfg.get("state_dim"),
-        coarse_beta=model_cfg.get("coarse_beta", 0.3),
-        person_input_dim=checkpoint["person_input_dim"],
+    model = RCRModel.from_config(
+        model_cfg,
         input_dim=checkpoint.get("input_dim", dim),
-        dropout=model_cfg.get("dropout", 0.0),
-        fine_matching=model_cfg.get("fine_matching"),
-        fda_k=model_cfg.get("fda_k", 6),
+        person_input_dim=checkpoint["person_input_dim"],
+        max_subjects=max_subjects,
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 

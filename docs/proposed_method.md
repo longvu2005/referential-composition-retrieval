@@ -2,7 +2,7 @@
 
 ## Frozen features
 
-The existing person detector supplies full-person boxes. DINO supplies the
+The person detector supplies full-person boxes. DINO supplies the
 letterboxed scene patch grid. A separate frozen FAFA image-only trunk supplies
 person crops for BOTH query and target images:
 
@@ -10,7 +10,7 @@ person crops for BOTH query and target images:
 crop -> FAFA visual encoder -> image-only Q-Former hidden tokens -> mean pool h
 u     = LayerNorm(W_u h + b_u)   # model.dim, separate from scene projection
 z_id  = normalize(W_id u + b_id) # 128 dimensions
-z_sem = u                       # existing semantic API; no independent head
+z_sem = u                       # shared semantic token; no independent head
 ```
 
 Use the official pinned FAFA checkpoint and preprocessing from
@@ -25,7 +25,7 @@ scene projection is independent of the shared person projection. BERT remains
 frozen/eval; only its output projection is trained. No FAFA library/model is
 loaded during training or retrieval. The DINO directory stores scenes,
 detections, identities and DINO crop features. Training/retrieval use FAFA crops. The
-FAFA directory stores only new crop features and its index. `GalleryCache`
+FAFA directory stores crop features and its index. `GalleryCache`
 combines them and verifies the FAFA index references the same DINO cache ID.
 
 ## Grounding and composition
@@ -37,7 +37,7 @@ g_si = Ground(F_q, z_sem_qi, box_qi, selection_s)
 a_si = sigmoid(g_si)
 ```
 
-Coarse still uses these independent sigmoid memberships. Fine uses one
+Coarse uses these independent sigmoid memberships. Fine uses one
 exclusive owner per query detection, with a fixed background logit of zero:
 
 ```text
@@ -58,7 +58,8 @@ most one owner; it is not assumed to be a calibrated correctness probability.
 High-IoU NMS suppresses near-duplicate query boxes by grounding confidence and
 target boxes by area, with stable detection-order ties. This is a conservative
 box heuristic, not an identity oracle. `duplicate_iou=1` disables it. Padding
-and missing annotation masks are unchanged. Identity embeddings remain crop-only.
+and missing-annotation masks are applied before supervision. Identity embeddings
+remain crop-only.
 
 `StructuredComposition` uses semantic tokens, Subject roles, all Subject-marker
 mentions and the complete change text. It keeps one token per Subject/person,
@@ -77,7 +78,7 @@ can have a different raw input width. No composition residual gate is added.
 
 ## Coarse retrieval
 
-Keep the existing optimistic soft-identity score and global state branch:
+Coarse retrieval combines optimistic soft identity with a global state branch:
 
 ```text
 S_id(q,t) = mean_s sum_i normalized(a_si) max_j dot(z_id_qi,z_id_tj)
@@ -89,7 +90,8 @@ Population z-scores use common eligible non-self split-gallery support. A
 constant branch contributes zero. A target without detected people retains an
 identity score of minus infinity. Top-M limits fine scoring, and the remaining
 gallery keeps coarse order with stable ties.
-Local person semantics do not replace global state/context.
+Local person semantics feed fine context; they do not replace the global-state
+coarse branch.
 
 ## One partial identity matching for every fine branch
 
@@ -135,7 +137,7 @@ It never reads case labels, GT identities or member counts. Complete original
 change text still enters the Context Reasoner. Independent crop composition
 alone does not enforce group/relation correctness.
 
-Let `pi(i)` be the unchanged identity assignment or null:
+Let `pi(i)` be the shared identity assignment or null:
 
 ```text
 E_si = a_F_si,pi(i)                        # matched
@@ -147,8 +149,8 @@ B_FAFA = mean_active_subjects B_s
 
 Identity cosine is not added again. FDA lies in [-1,1], so the initial penalty
 is 1.1 and must exceed 1. This is an uncalibrated starting value. Missing members
-stay in the pooling denominator. An empty selection still blocks contextual
-retrieval gradients; V1 deliberately preserves grounding/matching behavior.
+stay in the pooling denominator. An empty selection blocks contextual retrieval
+gradients, preserving the grounding/matching decision.
 
 `EvidenceBinding` conditions scene patches on the composed reference, but its
 person inputs are gathered using `pi`. Target evidence and geometry are injected
@@ -171,8 +173,9 @@ S_fine = softplus(binding_log_scale) * B_FAFA + C * S_context
 ```
 
 The scale starts at 1. An entirely unmatched query has zero context contribution
-and finite negative binding. Context remains unbounded. Detector misses and grounding mistakes can still
-lower positive scores. Thresholds and ranking quality require validation.
+and finite negative binding. Context remains unbounded. Detector misses and
+grounding mistakes can still lower positive scores. Thresholds and ranking quality
+require validation.
 
 ## Objective and ranking
 
@@ -180,21 +183,21 @@ lower positive scores. Thresholds and ranking quality require validation.
 L = L_ground + 0.1 L_id + L_ret + L_global_state
 ```
 
-- Identity: the existing supervised contrastive formulation. Query people and
+- Identity: supervised contrastive learning. Query people and
   valid positive-target people share an ID vocabulary. Unknown IDs, padding,
   duplicate observations and self-pairs are excluded.
 - `L_id` trains both the person projection and identity
-  head. `L_ground` and `L_ret` also train that person projection. Fine still
+  head. `L_ground` and `L_ret` also train that person projection. Fine
   detaches both identity inputs; `L_ret` does not directly train the identity
   head. The target context path retains autograd. Native FAFA/FDA is frozen; retrieval
   trains the binding scale and Context Reasoner, including its reference
   composition, person/scene/text projections. It does not train a new composed
   embedding space or backpropagate through selection/assignment. No identity/state
   orthogonality loss or identity removal is introduced.
-- Grounding trains raw logits using the existing masked BCE. Retrieval cannot
+- Grounding trains raw logits using masked BCE. Retrieval cannot
   lower membership weights to avoid missing penalties. Both losses train shared
   semantic/evidence modules through their respective paths. Retrieval trains
-  composition/context using the complete new score and pairwise softplus ranking.
+  composition/context using the complete fine score and pairwise softplus ranking.
   There is no additional person semantic auxiliary loss in this version.
 - Global state keeps same-required-identity positive/negative supervision at image
   level. Wrong-identity images have unknown state labels and are excluded.
@@ -207,26 +210,26 @@ S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 
 Weight zero uses raw fine scores (the same ordering). The remaining gallery keeps
 coarse order. Periodic evaluation, checkpoint selection, sampling, mining, AMP,
-LRU and CPU prefetch retain the existing protocol. `best.pt` maximizes
+LRU and CPU prefetch use the shared experiment protocol. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
 
 ## Configuration and checkpoints
 
 There is one architecture, `fafa-native-partial-match-v1`. Frozen extraction has
 three independent directories: `data.dino_cache`, `data.fafa_image_cache` and
-`data.fafa_query_cache`. The format-5 image index contains pooled person means,
+`data.fafa_query_cache`. The current format-6 image index contains packed pooled person means,
 native target-token metadata and encoder/crop provenance, with no query text.
-One image-only Q-Former forward still supplies both hidden means and projected
-tokens; their mathematical definitions are unchanged. The query index separately
+One image-only Q-Former forward supplies both hidden means and projected tokens as
+defined above. The query index separately
 maps sample/Subject slots to content-addressed conditions. Each key binds the
 FAFA source/checkpoint/preprocessing, DINO crop source, extraction precision,
 reference image, public condition and query text policy. Query text edits only
-require rerunning `--cache-stage fafa-query`; unchanged condition features are reused.
+require rerunning `--cache-stage fafa-query`; identical condition features are reused.
 
 Completed format-4 unified caches remain valid image sources without writes.
 Replace `data.cache` with `data.fafa_image_cache` and add `data.fafa_query_cache`.
 Checkpoints bind image feature identity, encoder provenance and query text policy,
-not the query manifest UUID. Earlier architecture checkpoints still require
+not the query manifest UUID. Incompatible architecture checkpoints require
 retraining in a new run directory; this cache separation does not change the model
 equations.
 All train/val/test query features are frozen, label-free preprocessing; no
@@ -235,8 +238,8 @@ only train candidates; validation selects checkpoints and fusion coefficients.
 
 `checkpoint.max_txt_len` in the native FAFA YAML explicitly selects 128 tokens,
 including special tokens, for both the baseline and proposed extraction. The
-wrapper sets the caption word cap to at least that limit. New query manifests
-record `text_policy`; manifests/checkpoints without it retain the historical
+wrapper sets the caption word cap to at least that limit. Query manifests record
+`text_policy`; manifests/checkpoints without it retain the pinned
 32-token/50-word meaning. Changing the policy re-extracts query features only.
 An interrupted query build must resume with its original policy or use a new
 query directory. Query extraction logs and stores `text_stats` for newly extracted
@@ -247,7 +250,7 @@ recorded policy and checkpoint contract without installing native FAFA.
 `model.fine_matching` defines selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
-Current calibration still selects only coarse/fine fusion coefficients. Changing
+Calibration selects only coarse/fine fusion coefficients. Changing
 `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 
@@ -261,5 +264,5 @@ Saved rankings include `fafa_rankings` in addition to coarse/fine/fused rankings
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
 order outside it; it is not the full-gallery FAFA + SetMatch baseline.
 `fafa_binding`, `context` and `coverage` are aligned with `coarse_topm` in each
-saved output. The evaluator reports `fafa_*` metrics with its existing official
+saved output. The evaluator reports `fafa_*` metrics with the shared official
 protocol. These scores separate embedding quality from context/fusion effects.

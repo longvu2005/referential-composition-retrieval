@@ -17,7 +17,7 @@ def load_config(path: str | Path) -> dict:
 
 
 def override_config(cfg: dict, overrides: dict) -> dict:
-    """Apply existing dotted keys without mutating the base experiment."""
+    """Override known dotted keys without mutating the base experiment."""
     cfg = deepcopy(cfg)
     for key, value in overrides.items():
         parts, target = key.split("."), cfg

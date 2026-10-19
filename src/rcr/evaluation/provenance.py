@@ -40,8 +40,8 @@ def digest_json(value) -> str:
 def benchmark_metadata(data, split, output) -> dict:
     """Fingerprint annotations and ordered inputs, independently of file paths.
 
-    The dataset digest covers all labels for cross-run checks only. Selection
-    continues to use the existing validation-only fingerprint/context.
+    The dataset digest is for cross-run checks only. Model and weight selection
+    use the validation split fingerprint.
     """
     counts = Counter(
         data.samples_by_id[sample_id]["case_type"] for sample_id in output["sample_ids"]

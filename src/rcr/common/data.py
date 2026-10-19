@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from rcr.common.io import load_jsonl
+from rcr.common.io import index_unique, load_jsonl
 from rcr.dataset.text import parse_selection_texts
 
 SPLIT_NAMES = ("train", "val", "test")
@@ -59,12 +59,8 @@ def load_rcr_data(
     head_boxes = load_jsonl(final_dir / "head_boxes.jsonl")
     manifest = json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
 
-    samples_by_id = {row["sample_id"]: row for row in samples}
-    images_by_id = {row["image_id"]: row for row in images}
-    if len(samples_by_id) != len(samples):
-        raise ValueError("duplicate sample_id in samples.jsonl")
-    if len(images_by_id) != len(images):
-        raise ValueError("duplicate image_id in images.jsonl")
+    samples_by_id = index_unique(samples, "sample_id", "samples.jsonl")
+    images_by_id = index_unique(images, "image_id", "images.jsonl")
     gallery_ids = [row["image_id"] for row in gallery]
     if len(set(gallery_ids)) != len(gallery_ids) or set(gallery_ids) != set(
         images_by_id
@@ -130,14 +126,15 @@ def sample_selection_texts(sample: dict) -> list[str]:
     return parse_selection_texts(sample["final_desc"], subject_ids)
 
 
+def subject_identity_ids(subjects: list[dict]) -> list[str]:
+    return [
+        identity_id for subject in subjects for identity_id in subject["identity_ids"]
+    ]
+
+
 def required_identity_ids(sample: dict) -> list[str]:
     """Flatten required identities in deterministic Subject order."""
-
-    return [
-        identity_id
-        for subject in sample["subjects"]
-        for identity_id in subject["identity_ids"]
-    ]
+    return subject_identity_ids(sample["subjects"])
 
 
 def split_image_ids(data: RCRData, split: str) -> list[str]:

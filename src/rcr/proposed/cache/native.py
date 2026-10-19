@@ -1,6 +1,6 @@
 """Read frozen FAFA multimodal queries and projected target tokens.
 
-Crop order is inherited from the existing person cache. Query features are
+Crop order is inherited from the DINO person cache. Query features are
 indexed by public instruction/Subject slots, never by selected members or GT.
 """
 
@@ -115,7 +115,7 @@ def query_entries(samples, signature: dict, policy: dict | None = None) -> dict:
 
 
 def cached_text_policy(index: dict) -> dict[str, int]:
-    """Older query manifests used the pinned 32-token/50-word defaults."""
+    """Use pinned 32-token/50-word defaults when a manifest has no policy."""
     policy = index.get("text_policy", text_policy({}))
     if (
         not isinstance(policy, dict)
@@ -128,7 +128,7 @@ def cached_text_policy(index: dict) -> dict[str, int]:
 
 
 def checkpoint_native_metadata(metadata: dict | None) -> dict | None:
-    """Interpret pre-policy checkpoints without accepting new text features."""
+    """Attach the pinned default policy to checkpoints that omit it."""
     if metadata is None or metadata.get("version") != NATIVE_VERSION:
         return metadata
     return {**metadata, "text_policy": cached_text_policy(metadata)}

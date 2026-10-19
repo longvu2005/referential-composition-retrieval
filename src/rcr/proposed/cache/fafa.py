@@ -310,8 +310,8 @@ def _build_queries(root, extractor):
     ):
         print(f"Using existing FAFA query cache: {root}", flush=True)
         return
-    # Preserve legacy resume signatures. New limits belong to query extraction
-    # only, so completed image indices and target shards never change.
+    # The default-policy signature remains readable. Text limits affect query
+    # extraction only, so image indices and target shards never change.
     build_signature = (
         signature
         if policy == text_policy({})

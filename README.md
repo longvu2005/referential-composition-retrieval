@@ -1,219 +1,120 @@
-# Referential Composition Retrieval (RCR)
+# Referential Composition Retrieval
 
-This repository contains the dataset pipeline, proposed retrieval model, and
-shared evaluation protocol for **Referential Composition Retrieval (RCR)**.
+Minimal research code for **Referential Composition Retrieval (RCR)**: given a
+query image, text that identifies one or more Subjects, and a requested change,
+rank gallery images that preserve the referenced identities and satisfy the
+change.
 
-## Task
+The benchmark contains four query types:
 
-Given:
+- `INDIVIDUAL`: one Subject, one identity;
+- `GROUP`: one Subject, multiple identities;
+- `DUAL`: two Subjects with separate changes;
+- `RELATIONAL`: two Subjects linked by an ordered relation.
 
-1. a query image;
-2. referential text that identifies one or more Subjects in that image; and
-3. a target change/condition;
+## Method
 
-the system ranks gallery images that preserve the referenced identities and
-satisfy the requested target condition.
+The proposed model uses frozen DINO scene features, frozen native FAFA person and
+query features, learned Subject grounding, one global partial identity matching,
+and a Context Reasoner. Matching includes a null option, so missing people are not
+forced onto unrelated detections. The same assignment is reused by FDA binding and
+context reasoning.
 
-A **Subject** is a semantic reference and may contain one or more identities.
-The benchmark uses four case types:
+Coarse retrieval combines normalized identity and global-state scores. Fine
+retrieval reranks the coarse Top-M shortlist with native FAFA binding and learned
+relational context. Validation selects the checkpoint and the two retrieval fusion
+weights; test labels are never used for model or weight selection.
 
-- `INDIVIDUAL`: one Subject with exactly one identity;
-- `GROUP`: one Subject with two or more identities;
-- `DUAL`: two Subjects with independent Subject-specific changes;
-- `RELATIONAL`: two Subjects connected by an ordered relation.
+See [method equations](docs/proposed_method.md),
+[benchmark protocol](docs/benchmark_protocol.md), and
+[experiment details](docs/proposed_runs.md).
 
-## Code layout
+## Layout
 
-- `tools/run.py`: the single experiment CLI.
-- `tools/report.py`: validate saved JSON and export overall/by-case paper tables.
-- `configs/{proposed,clip,fafa}.yaml`: one config per method.
-- `configs/calibration.yaml`: validation grids for the two fusion weights.
-- `src/rcr/proposed/`: training, losses, ranking and stage coordination; `nn/` holds
-  model components and `cache/` holds frozen feature extraction/loading.
-- `src/rcr/baselines/`: CLIP, official FAFA adapter and val tuning.
-- `src/rcr/common/`: shared data loading, runtime, I/O and detection utilities.
-- `src/rcr/evaluation/`: shared benchmark protocol and metrics.
-- `dataset/`, `src/rcr/dataset/`, `tools/data/`, `labelstudio/`: dataset pipeline.
-- `tools/`: Python commands for individual stages, reports and the FAFA worker.
-- `scripts/`: Bash workflows that sequence those commands for reproduction.
-- `requirements/`: separate installations for methods, annotation and evaluation.
+```text
+configs/                 experiment configurations
+src/rcr/common/          shared data, I/O and runtime helpers
+src/rcr/dataset/         deterministic dataset construction
+src/rcr/evaluation/      metrics and report generation
+src/rcr/baselines/       CLIP and native FAFA baselines
+src/rcr/proposed/        cache, training and retrieval code
+tools/run.py             single experiment CLI
+scripts/                 reproducible setup and run recipes
+tests/                   CPU contract tests
+```
 
-See [model equations](docs/proposed_method.md) and [run commands](docs/proposed_runs.md).
+Dependency direction is CLI → experiment functions → model/shared utilities.
+There is no trainer framework, plugin registry, or recursive configuration system.
 
-Dependency direction: CLI → method functions → model / shared utilities.
-YAML parsing lives in `common/config.py`; saved-result evaluation lives in
-`evaluation/runner.py`. Model and loss modules do not import the CLI. There is no trainer framework,
-recursive config inheritance or plugin registry. Method dependencies are imported
-only when that method/stage is used.
+## Setup
 
-## Architecture
-
-The proposed model keeps DINO scenes, learned Subject grounding, the shared
-FAFA image-only person projection, global-state coarse retrieval and the Context
-Reasoner. Fine matching uses one partial one-to-one **identity** assignment with
-nulls across every Subject.
-
-The semantic retrieval branch now uses **frozen native FAFA multimodal queries**
-and **projected target Q-Former tokens**, scored with native FDA (top-6 token
-similarities). Its binding score is FDA only; identity cosine determines matching
-but is not added to binding. `StructuredComposition` still creates reference
-tokens for the Context Reasoner. Fine score is
-`softplus(binding_log_scale) * B_FAFA + coverage * S_context`.
-
-There is one architecture: `fafa-native-partial-match-v1`. Earlier checkpoints
-require retraining in a new run directory. Frozen extraction uses separate
-DINO, FAFA image and FAFA query caches. Query edits do not invalidate image
-features. Default outputs are `runs/proposed-fafa-unified`. See
-[equations and limitations](docs/proposed_method.md).
-
-## Setup and run
-
-Use Python 3.11/3.12. Each environment installs only its own requirements file.
-Dependency versions live in `pyproject.toml`; the requirements files select one
-extra without duplicating version lists. `requirements.txt` installs the shared
-package only. Keep proposed and native FAFA separate because their Transformers
-versions conflict:
+Use Python 3.11 or 3.12. Each method has its own environment because native FAFA
+and the proposed model require incompatible Transformers versions.
 
 ```bash
 PYTHON=python3.11 bash scripts/setup.bash proposed
 PYTHON=python3.11 bash scripts/setup.bash fafa
-# Only needed when running CLIP baselines:
-PYTHON=python3.11 bash scripts/setup.bash clip
+PYTHON=python3.11 bash scripts/setup.bash clip   # only for CLIP baselines
 ```
 
-The setup workflow creates `.venv-<name>`, bootstraps pip from the host (which
-needs pip 22.3+), then installs `requirements/<name>.txt`. It supports notebook
-images without `ensurepip`. Run standalone `tools/*.py` commands from the repo
-root; Bash workflows locate that root themselves. Set `PYTHON` to an existing
-environment's Python to use it with a workflow instead of the default venv.
+Available environments are `proposed`, `clip`, `fafa`, `dataset`,
+`dataset-clip`, `evaluation`, and `dev`. Dependency versions live in
+`pyproject.toml`; files under `requirements/` only select an extra.
 
-| Install | Purpose |
-| --- | --- |
-| `requirements/proposed.txt` | Proposed training, DINO cache and retrieval |
-| `requirements/clip.txt` | All four OpenAI CLIP variants |
-| `requirements/fafa.txt` | Native FAFA baseline or proposed person-feature worker |
-| `requirements/dataset.txt` | Annotation preparation and local UIs; no model libraries |
-| `requirements/dataset-clip.txt` | Optional OpenCLIP ordering of new positive tasks |
-| `requirements/evaluation.txt` | Evaluate saved `.pt` rankings without encoder libraries |
-| `requirements/dev.txt` | CPU tests and linting |
+## Run
 
-Set `data.dino_cache`, `data.fafa_image_cache`, `data.fafa_query_cache`, raw-image
-paths and `person_encoder.python` in the proposed YAML. There are three caches:
-immutable DINO scenes/detections, FAFA image features and FAFA query features.
-`--cache-stage dino` builds the source; `fafa-image` builds pooled persons and
-projected target tokens in one Q-Former forward per crop; `fafa-query` extracts
-multimodal embeddings for every public Subject/crop candidate. The FAFA stages
-can run in either order after DINO. `fafa` runs both with one lazy model load;
-the default `all` also builds/reuses DINO. Each FAFA cache resumes independently.
-
-Query shards use hashes of encoder/crop provenance, reference image and the public
-Subject condition. Changed instructions update only missing conditions in the same
-query directory; sample reordering and label edits reuse existing features. A
-completed image cache can be a read-only Kaggle input. Train/retrieve load both
-caches without native FAFA. Completed format-4 unified caches can be reused as
-`data.fafa_image_cache`; build the separate query cache once. Incomplete old
-unified builds need the old code to finish or a new image output directory.
-See [Kaggle reuse and commands](docs/proposed_runs.md).
-
-`configs/fafa.yaml` explicitly sets `checkpoint.max_txt_len: 128` (including
-special tokens) for both methods. The wrapper also raises the caption word cap
-to 128. Query keys/checkpoints track this text policy separately from image
-provenance. Build `fafa-query` again when changing the limit; DINO/image caches
-remain reusable. The default query directory is `cache/fafa-queries-txt128` so an
-unfinished old 32-token build is preserved. Train a new checkpoint/run for the new
-features. Old query manifests/checkpoints without a text policy mean 32 tokens
-and 50 words; use an explicitly matching extraction config to reproduce them.
+The main validation workflow builds or reuses caches, trains, evaluates, and
+calibrates the two retrieval weights:
 
 ```bash
-# Main model: prepare, build/reuse caches, train, then calibrate on validation.
 bash scripts/methods/proposed.bash val
+```
 
-# Joint 2D validation calibration; only the selected pair reaches test.
-.venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
+Run the frozen test configuration only after validation:
 
-# CLIP and native FAFA: prepare assets, retrieve and evaluate validation.
+```bash
+bash scripts/methods/proposed.bash test
+```
+
+Baselines follow the same validation-first protocol:
+
+```bash
 bash scripts/methods/clip.bash val
 bash scripts/methods/fafa.bash val
-.venv-proposed/bin/python tools/report.py --split val \
-  --run proposed=runs/calibration/selected/val
 ```
 
-For a frozen test run, use `bash scripts/methods/<method>.bash test`. Proposed
-loads `runs/calibration/selected.yaml`; CLIP/FAFA reuse their validation selections.
-The test workflows never train or select weights. For a custom config, stage or
-override, call `tools/run.py` directly. See [workflow contracts](scripts/README.md).
-
-The existing Kaggle DINO cache can be used read-only as `data.dino_cache`; only
-FAFA person features need extraction. Legacy files require the explicit
-`cache.allow_legacy_dino` setting and matching original preprocessing. Train new
-heads for the new architecture. Cache/source IDs, gallery order, encoder metadata
-and checkpoint identity are checked. Keep historical run directories separately.
-
-| Command | Purpose |
-| --- | --- |
-| `prepare` | Prepare proposed person encoder or baseline assets |
-| `build-cache` | Build/reuse DINO and/or FAFA caches (`--cache-stage`) |
-| `train` | Train from cache; validation selects best.pt |
-| `retrieve` | Save complete split-gallery rankings |
-| `evaluate` | Evaluate saved rankings without a model |
-| `run` | Coordinate prepare/build/train/retrieve/evaluate |
-| `calibrate` | Select the two fusion weights on complete validation queries |
-
-`--set key=value ...` overrides existing YAML fields. `--splits` selects splits
-for retrieve/evaluate/run; calibration always uses validation.
-`--max-queries` is only for matching retrieve/evaluate smoke runs. Normal runs and
-calibration use complete query splits. Outputs contain checkpoints,
-config/tokenizer, history, per-epoch metrics, rankings, run metadata and summaries.
-W&B retains its metrics and additionally logs the learned binding scale.
-
-Detailed [proposed workflow](docs/proposed_runs.md) and
-[baseline workflow](docs/baselines.md).
-
-Keep one current architecture in the main code. Try a new module on a short-lived
-Git branch; keep its commit, config, seed and metrics when deciding whether to
-retain it. The config contains model dimensions, training hyperparameters and
-runtime settings. Architecture controls and score-removal suites are absent.
-
-## Tests
+Lower-level stages use one CLI:
 
 ```bash
-.venv-proposed/bin/python -m pip install -r requirements/dev.txt
-.venv-proposed/bin/python -m pytest -q
-.venv-proposed/bin/python -m ruff check src tools tests labelstudio
+python tools/run.py prepare     --config configs/proposed.yaml
+python tools/run.py build-cache --config configs/proposed.yaml
+python tools/run.py train       --config configs/proposed.yaml
+python tools/run.py retrieve    --config configs/proposed.yaml --splits val
+python tools/run.py evaluate    --config configs/proposed.yaml --splits val
+python tools/run.py calibrate   --config configs/calibration.yaml
 ```
 
-The CPU contract suite also runs in GitHub Actions on Python 3.11 and 3.12.
-`proposed` and `dev` include SciPy for partial assignment; native FAFA weights
-are not needed.
+Use `--set key=value ...` for typed overrides. `--max-queries` is only a smoke-test
+option for matching retrieve/evaluate runs; normal results use complete splits.
 
-Tests use tiny local encoders/caches, including assignment-versus-brute-force,
-no target reuse, aligned evidence ownership, null penalties, gradient isolation,
-separate scene/person widths, empty sets, padding and the train/retrieve
-pipeline. The FAFA extraction contract is tested with a fake native trunk; tests
-do not download full weights or claim PIPA quality/CUDA throughput. Optional
-CLIP integration and CUDA tests require their corresponding dependencies/device.
+### Caches
 
-For an isolated CLIP environment, see [baseline setup](docs/baselines.md).
-The deterministic dataset pipeline uses `requirements/dataset.txt`; optional
-candidate ordering uses `requirements/dataset-clip.txt`. Report generation reads
-JSON and works with the base package; decoding saved rankings needs the
-evaluation environment. No model client is required for annotation preparation.
+The proposed pipeline keeps three independent caches:
 
-## Current dataset snapshot
+- `data.dino_cache`: DINO scenes and detections;
+- `data.fafa_image_cache`: FAFA person features and target tokens;
+- `data.fafa_query_cache`: multimodal query features.
 
-The checked-in final export is **version 0.1.0** with 4,311 queries and
-37,107 registered gallery images.
+Completed caches are reused automatically. Build only one stage with
+`--cache-stage dino`, `fafa-image`, or `fafa-query`. Query text changes invalidate
+only the query cache. The default FAFA policy is 128 tokens, and the default query
+cache is `cache/fafa-queries-txt128` so legacy 32-token features are not mixed with
+current runs.
 
-Each query searches **all images in its own PIPA split**, excluding the query
-image: 17,000 train images, 5,684 val images, or 7,868 test images. The 6,555
-leftover images remain in the image registry/cache but never enter a query's
-gallery. Gallery membership comes from `images.jsonl` paths, not the images
-appearing in annotated query/target pairs. Full Positives and identity-positive
-metrics use the same split gallery.
+## Dataset
 
-Stored annotations and final data stay unchanged. The loader intersects reviewed
-`positive_image_ids` with the query split in memory, leaving the original labels
-available for annotation provenance and other retrieval protocols.
+The checked-in snapshot is version `0.1.0` with 4,311 queries and 37,107 images.
+Each query searches all images in its own PIPA split, excluding its query image.
 
 | Split | INDIVIDUAL | GROUP | DUAL | RELATIONAL | Total |
 |---|---:|---:|---:|---:|---:|
@@ -222,55 +123,19 @@ available for annotation provenance and other retrieval protocols.
 | test | 5 | 2 | 3 | 4 | 14 |
 | **all** | **3,671** | **151** | **308** | **181** | **4,311** |
 
-The current test split is intentionally very small and should be treated as a
-pipeline-validation split, not yet as the final publication-scale test set.
+The current test split is a pipeline-validation split, not a publication-scale
+holdout. Raw images are not stored in the repository; configure `data.image_root`
+before extraction. Dataset reconstruction is documented in
+[dataset/README.md](dataset/README.md).
 
-Final benchmark files live in `dataset/data/final/`:
-
-```text
-samples.jsonl
-images.jsonl
-gallery.jsonl
-head_boxes.jsonl
-manifest.json
-splits/{train,val,test}.txt
-```
-
-Each final sample contains:
-
-```text
-sample_id
-case_type
-query_image_id
-target_image_id
-positive_image_ids
-subjects[{subject_id, identity_ids[]}]
-final_desc
-final_change
-final_instruction
-```
-
-The local raw image collection is not part of the repository archive and must
-be available under the configured `image_root`.
-
-### Dataset reconstruction
-
-The accepted Stage-2 text is treated as immutable input. The normal rebuild
-sequence is below. The source export currently contains 8,001 tasks. Review and
-positive completion counts are reported by the preparation tools. A full rebuild
-requires every selected task's labels; use `--allow-partial` during annotation.
-The checked-in final snapshot remains unchanged.
+## Tests
 
 ```bash
-bash scripts/setup.bash dataset
-bash scripts/data/prepare_review.bash
-# Complete or correct human reviews, then prepare positive tasks:
-bash scripts/data/prepare_positives.bash
-# Complete positive decisions, stop the UI, then export:
-bash scripts/data/finalize.bash --version 0.2.0
+bash scripts/setup.bash dev
+.venv-dev/bin/python -m pytest -q
+.venv-dev/bin/python -m ruff check src tools tests labelstudio
 ```
 
-Review preparation attaches image/Subject context directly to accepted Stage 2
-text. It preserves completed reviews and never creates completed labels for new
-tasks. `finalize.bash` validates positive decisions and writes the deterministic
-final export. See the [dataset workflow](dataset/README.md).
+Tests use tiny local backbones and caches. Native FAFA weights and pretrained model
+downloads are not required for the CPU suite; CUDA-only numerical and memory checks
+skip automatically when no GPU is available.

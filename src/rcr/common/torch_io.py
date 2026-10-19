@@ -19,7 +19,7 @@ def tensor_bytes(value) -> int:
         elif isinstance(item, dict):
             for child in item.values():
                 visit(child)
-        elif isinstance(item, (list, tuple)):
+        elif isinstance(item, list | tuple):
             for child in item:
                 visit(child)
 

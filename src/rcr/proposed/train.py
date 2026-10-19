@@ -31,8 +31,8 @@ from rcr.proposed.batch import (
 from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.losses import compute_loss
-from rcr.proposed.nn.encoders import SUBJECT_MARKERS, QueryTextCache, TextEncoder
-from rcr.proposed.nn.model import RCRModel
+from rcr.proposed.nn.encoders import QueryTextCache, load_text_modules
+from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     mine_hard_negatives,
     retrieve_rankings,
@@ -220,11 +220,11 @@ def train(cfg: dict) -> Path:
     mining_batch_size = train_cfg.get("mining_batch_size", 1)
     if not isinstance(mining_batch_size, int) or mining_batch_size < 1:
         raise ValueError("train.mining_batch_size must be a positive integer")
-    use_state = uses_state(cfg["retrieval"], model_cfg.get("coarse_beta", 0.3))
+    use_state = uses_state(
+        cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
+    )
     if loss_cfg.get("state_weight", 1.0) == 0 and use_state:
         raise ValueError("state_weight=0 requires retrieval.coarse_beta=0")
-
-    from transformers import AutoModel, AutoTokenizer
 
     seed = train_cfg["seed"]
     torch.manual_seed(seed)
@@ -274,27 +274,16 @@ def train(cfg: dict) -> Path:
         raise ValueError("model.dim must be divisible by num_heads")
 
     # BERT stays frozen, including the resized Subject-token embeddings.
-    tokenizer = AutoTokenizer.from_pretrained(model_cfg["text_model"])
-    tokenizer.add_special_tokens(
-        {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
+    tokenizer, text_encoder = load_text_modules(
+        model_cfg["text_model"], dim, device, add_subject_markers=True
     )
     text_cache = QueryTextCache(tokenizer)
     text_cache.prepare([*samples, *val_samples])
-    text_backbone = AutoModel.from_pretrained(model_cfg["text_model"])
-    text_backbone.resize_token_embeddings(len(tokenizer))
-    text_encoder = TextEncoder(text_backbone, dim).to(device)
 
-    max_subjects = len(SUBJECT_MARKERS)
-    model = RCRModel(
-        dim=dim,
-        max_subjects=max_subjects,
+    model = RCRModel.from_config(
+        model_cfg,
         person_input_dim=person_input_dim,
         input_dim=input_dim,
-        **{
-            key: value
-            for key, value in model_cfg.items()
-            if key not in ("text_model", "dim")
-        },
     ).to(device)
 
     optimizer = torch.optim.AdamW(

@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from statistics import fmean
 
+from rcr.common.io import atomic_write_text, preserve_file
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.provenance import BENCHMARK_FIELDS, PROTOCOL, digest_json
 
@@ -60,7 +61,7 @@ def _integer(value, label, minimum=0):
 def _metric(value, label):
     if (
         isinstance(value, bool)
-        or not isinstance(value, (float, int))
+        or not isinstance(value, float | int)
         or not math.isfinite(value)
         or not 0 <= value <= 1
     ):
@@ -85,9 +86,8 @@ def _close(actual, expected, label):
 def load_run(name: str, directory: str | Path, split: str) -> dict:
     """Read only metrics.json/run.json and verify their evaluator provenance.
 
-    Older rankings can be re-evaluated to attach the JSON binding without
-    inference. The original split fingerprint remains mandatory; missing
-    historical fingerprints cannot be reconstructed by this reporter.
+    Rankings can be re-evaluated to attach the JSON binding without inference.
+    The original split fingerprint remains mandatory and cannot be reconstructed.
     """
     directory = Path(directory)
     if name not in METHODS:
@@ -256,9 +256,8 @@ def validate_runs(runs: list[dict]) -> None:
                 raise ReportError(
                     f"incompatible {key}: {first['name']} vs {other['name']}"
                 )
-    # A matching split digest already binds exact queries, labels and gallery.
-    # Additional modern provenance must agree wherever recorded; never invent
-    # a Git commit/runtime/dataset version for legacy runs.
+    # The split digest binds queries, labels and gallery. Optional provenance
+    # fields must agree wherever they are recorded.
     for key in (
         "dataset_version",
         "dataset_sha256",
@@ -410,16 +409,12 @@ def generate_report(
             rendered[f"{name}.{format}"] = render_table(
                 headers, rows, format, by_case=by_case, decimals=decimals
             )
-    from rcr.common.io import preserve_file
-
     output = Path(output_dir) / split
     output.mkdir(parents=True, exist_ok=True)
     paths = []
     for filename, content in rendered.items():
         path = output / filename
         preserve_file(path)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
+        atomic_write_text(path, content)
         paths.append(path)
     return paths

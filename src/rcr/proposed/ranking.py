@@ -10,6 +10,7 @@ import torch
 from torch import Tensor, nn
 from tqdm import tqdm
 
+from rcr.common.runtime import evaluating
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 from rcr.proposed.scores import (
@@ -113,9 +114,9 @@ def fuse_fine_coarse_scores(
 ) -> Tensor:
     """Fuse fine and coarse evidence inside the same Top-M shortlist.
 
-    ``weight=0`` returns the raw fine scores exactly, preserving the historical
-    reranker. For positive weights, both branches are population-z-scored over
-    the same candidates with finite coarse support, then combined as
+    ``weight=0`` returns the raw fine scores exactly. For positive weights, both
+    branches are population-z-scored over the same candidates with finite coarse
+    support, then combined as
     ``z(fine) + weight * z(coarse)``. Non-finite coarse candidates stay last
     instead of being rescued by a fine score despite having no coarse support.
     """
@@ -158,12 +159,33 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
     }
     if settings["coarse_beta"] is None:
         settings["coarse_beta"] = default_beta
+    sizes = ("top_m", "fine_batch_size", "identity_batch_size", "coarse_batch_size")
+    if any(key in settings and settings[key] < 1 for key in sizes):
+        raise ValueError("retrieval batch sizes and top_m must be positive")
+    if any(
+        not math.isfinite(float(settings[key])) or settings[key] < 0
+        for key in ("coarse_beta", "fine_coarse_weight")
+    ):
+        raise ValueError("retrieval weights must be finite and nonnegative")
     return settings
 
 
 def uses_state(cfg: dict, default_beta: float) -> bool:
     settings = retrieval_settings(cfg, default_beta)
     return settings["coarse_beta"] != 0
+
+
+def _gallery_scope(cache, gallery_ids, samples, label):
+    gallery_ids = list(gallery_ids)
+    if not gallery_ids or len(gallery_ids) != len(set(gallery_ids)):
+        raise ValueError(f"{label} gallery_ids must be non-empty and unique")
+    if not set(gallery_ids) <= set(cache.by_id):
+        raise ValueError(f"{label} gallery contains images missing from the cache")
+    local = {image_id: index for index, image_id in enumerate(gallery_ids)}
+    if any(sample["query_image_id"] not in local for sample in samples):
+        raise ValueError(f"{label} query must belong to the retrieval gallery")
+    indices = torch.tensor([cache.by_id[image_id] for image_id in gallery_ids])
+    return gallery_ids, local, indices
 
 
 def retrieve_rankings(
@@ -241,11 +263,9 @@ def rank_weight_grid(
         raise ValueError("ranking_limit must be positive")
     settings = retrieval_settings(settings, model.coarse_beta)
     batch_keys = ("fine_batch_size", "identity_batch_size", "coarse_batch_size")
-    if min(settings[key] for key in (*batch_keys, "top_m")) < 1:
-        raise ValueError("retrieval batch sizes and top_m must be positive")
     for weight in (value for pair in weights for value in pair):
         if (
-            not isinstance(weight, (int, float))
+            not isinstance(weight, int | float)
             or not math.isfinite(weight)
             or weight < 0
         ):
@@ -253,23 +273,14 @@ def rank_weight_grid(
     fine_batch_size, identity_batch_size, coarse_batch_size = (
         settings[key] for key in batch_keys
     )
-    gallery_ids = list(gallery_ids)
-    if not gallery_ids or len(gallery_ids) != len(set(gallery_ids)):
-        raise ValueError("retrieval gallery_ids must be non-empty and unique")
-    by_id = {image_id: index for index, image_id in enumerate(cache.image_ids)}
-    if not set(gallery_ids) <= set(by_id):
-        raise ValueError("retrieval gallery contains images missing from the cache")
-    gallery_by_id = {image_id: index for index, image_id in enumerate(gallery_ids)}
-    if any(sample["query_image_id"] not in gallery_by_id for sample in samples):
-        raise ValueError("query image must belong to the retrieval gallery")
-    image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
+    gallery_ids, gallery_by_id, image_indices = _gallery_scope(
+        cache, gallery_ids, samples, "retrieval"
+    )
+    by_id = cache.by_id
     need_state = any(beta != 0 for beta, _ in weights)
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
-    model_was_training, text_was_training = model.training, text_encoder.training
-    model.eval()
-    text_encoder.eval()
-    try:
+    with evaluating(model, text_encoder):
         gallery_batches = _encode_gallery_identity(
             cache, model, device, identity_batch_size, image_indices
         )
@@ -437,9 +448,6 @@ def rank_weight_grid(
             }
             for output in outputs
         ]
-    finally:
-        model.train(model_was_training)
-        text_encoder.train(text_was_training)
 
 
 @torch.inference_mode()
@@ -467,17 +475,10 @@ def mine_hard_negatives(
     cfg = retrieval_settings(retrieval, model.coarse_beta)
     if not samples or pool_size < 1 or query_batch_size < 1:
         raise ValueError("mining requires samples and positive pool/query batch sizes")
-    if min(cfg["identity_batch_size"], cfg["coarse_batch_size"]) < 1:
-        raise ValueError("mining gallery batch sizes must be positive")
-    gallery_ids = list(gallery_ids)
-    if not gallery_ids or len(gallery_ids) != len(set(gallery_ids)):
-        raise ValueError("mining gallery_ids must be non-empty and unique")
+    gallery_ids, gallery_by_id, image_indices = _gallery_scope(
+        cache, gallery_ids, samples, "mining"
+    )
     by_id = cache.by_id
-    if not set(gallery_ids) <= set(by_id):
-        raise ValueError("mining gallery contains images missing from the cache")
-    gallery_by_id = {image_id: i for i, image_id in enumerate(gallery_ids)}
-    if any(row["query_image_id"] not in gallery_by_id for row in samples):
-        raise ValueError("mining query must belong to the training gallery")
     excluded = excluded or {}
     forbidden = {
         row["sample_id"]: set(row["positive_image_ids"])
@@ -491,13 +492,9 @@ def mine_hard_negatives(
     groups = {}
     for sample in samples:
         groups.setdefault(len(sample["subjects"]), []).append(sample)
-    image_indices = torch.tensor([by_id[image_id] for image_id in gallery_ids])
     need_state = uses_state(cfg, model.coarse_beta)
-    modes = model.training, text_encoder.training
-    model.eval()
-    text_encoder.eval()
     pools = {}
-    try:
+    with evaluating(model, text_encoder):
         gallery_batches = _encode_gallery_identity(
             cache, model, device, cfg["identity_batch_size"], image_indices
         )
@@ -571,6 +568,3 @@ def mine_hard_negatives(
                         ][:pool_size]
                     progress.update(len(rows))
         return {row["sample_id"]: pools[row["sample_id"]] for row in samples}
-    finally:
-        model.train(modes[0])
-        text_encoder.train(modes[1])

@@ -199,6 +199,16 @@ def fafa_context(data, cfg, device):
     )
 
 
+def _load_selection(path: Path, context: str, label: str) -> dict:
+    """Load one validation-frozen selection file for a test run."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Run --splits val first: missing {path}")
+    selection = json.loads(path.read_text(encoding="utf-8"))
+    if selection.get("split") != "val" or selection.get("context_sha256") != context:
+        raise ValueError(f"Saved {label} is stale; run --splits val again")
+    return selection
+
+
 def run_experiment(cfg, *, modes=None, splits=("val",)):
     """Default: validation only. Explicit test loads validation-frozen settings."""
     cfg = copy.deepcopy(cfg)
@@ -238,16 +248,9 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                 "policy": "manually fixed parameters evaluated on validation",
             }
         else:
-            if not adapter_path.is_file():
-                raise FileNotFoundError(
-                    f"Run --splits val first: missing {adapter_path}"
-                )
-            adapter_selection = json.loads(adapter_path.read_text(encoding="utf-8"))
-            if (
-                adapter_selection.get("split") != "val"
-                or adapter_selection.get("context_sha256") != context
-            ):
-                raise ValueError("Saved FAFA configuration is stale; run --splits val")
+            adapter_selection = _load_selection(
+                adapter_path, context, "FAFA configuration"
+            )
     fusion_modes = [m for m in modes if m in ("early_fusion", "late_fusion")]
     selection = None
     tuning_path = None
@@ -266,18 +269,7 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                 "modes": {},
             }
         else:
-            if not tuning_path.is_file():
-                raise FileNotFoundError(
-                    f"Run --splits val first: missing {tuning_path}"
-                )
-            selection = json.loads(tuning_path.read_text(encoding="utf-8"))
-            if (
-                selection.get("split") != "val"
-                or selection.get("context_sha256") != context
-            ):
-                raise ValueError(
-                    "Saved fusion selection is stale; run --splits val again"
-                )
+            selection = _load_selection(tuning_path, context, "fusion selection")
             if not all(m in selection["modes"] for m in fusion_modes):
                 raise ValueError(
                     "Saved selection lacks requested fusion modes; run --splits val"

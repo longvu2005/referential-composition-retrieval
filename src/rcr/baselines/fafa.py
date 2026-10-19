@@ -177,12 +177,10 @@ def offline_model_load():
 
 
 def text_policy(cfg: dict) -> dict[str, int]:
-    """Resolve query-only text limits; missing settings reproduce legacy FAFA.
+    """Resolve query-only text limits from the pinned FAFA defaults.
 
-    The pinned loader defaults to 32 tokens and its caption processor to 50
-    words. Keep those defaults for old configs/caches; current YAML explicitly
-    selects 128. A word cap at least as large as the token cap cannot remove a
-    usable text prefix before the tokenizer applies its own limit.
+    The loader defaults to 32 tokens and its caption processor to 50 words. A
+    word cap at least as large as the token cap leaves truncation to the tokenizer.
     """
     length = cfg.get("checkpoint", {}).get("max_txt_len", 32)
     if type(length) is not int or not 2 <= length <= 512:

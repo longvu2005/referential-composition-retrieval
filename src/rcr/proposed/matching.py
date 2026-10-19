@@ -87,11 +87,10 @@ def exclusive_membership(
 ) -> Tensor:
     """Select a variable-sized set per Subject, with one owner per query person.
 
-    Background has fixed logit zero. Softmax is over Subject/background, NEVER
-    over people. Existing independent BCE supervises the raw grounding logits;
-    the exclusive distribution conditions their odds on at most one owner.
-    Fine weights and hard decisions are detached from retrieval loss. Coarse
-    continues to use the original raw logits and sigmoid memberships.
+    Background has fixed logit zero. Softmax is over Subject/background, never
+    over people. Masked BCE supervises the raw grounding logits; the exclusive
+    distribution limits each person to one owner. Fine decisions are detached
+    from retrieval loss; coarse scoring uses sigmoid of the raw logits.
     """
     b, s, k = logits.shape
     if s == 0:

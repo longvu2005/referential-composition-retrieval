@@ -1,5 +1,7 @@
 """Validate and deterministically order Full Positive decisions."""
 
+from rcr.common.io import index_unique
+
 
 def validate_positive_set(source: dict, payload: dict) -> dict:
     """Validate one browser submission and return the canonical positive row."""
@@ -43,10 +45,11 @@ def validate_positive_set(source: dict, payload: dict) -> dict:
 def normalize_positive_sets(catalog: list[dict], decisions: list[dict]) -> list[dict]:
     """Validate all decisions before returning them in catalog/candidate order."""
 
-    sources = {row["sample_id"]: row for row in catalog}
-    saved = {row["sample_id"]: row for row in decisions}
-    if len(sources) != len(catalog) or len(saved) != len(decisions):
-        raise ValueError("duplicate sample_id in catalog or decisions")
+    try:
+        sources = index_unique(catalog, "sample_id", "catalog")
+        saved = index_unique(decisions, "sample_id", "decisions")
+    except ValueError as error:
+        raise ValueError("duplicate sample_id in catalog or decisions") from error
     unknown = set(saved) - set(sources)
     if unknown:
         raise ValueError(f"positive decision outside catalog: {min(unknown)}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import shutil
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -31,6 +32,26 @@ def load_jsonl(path: str | Path) -> list[JsonObject]:
     """Load all records from a JSONL file."""
 
     return list(iter_jsonl(path))
+
+
+def index_unique(records: Iterable[JsonObject], key: str, label: str) -> dict:
+    """Index records and reject duplicate keys at data-loading boundaries."""
+    indexed = {}
+    for row in records:
+        value = row[key]
+        if value in indexed:
+            raise ValueError(f"{label}: duplicate {key} {value}")
+        indexed[value] = row
+    return indexed
+
+
+def atomic_write_text(path: str | Path, content: str) -> None:
+    """Publish a text file only after the complete content is written."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
 
 
 def write_jsonl(
@@ -74,27 +95,18 @@ def output_directory(cfg: dict) -> Path:
 
 
 def write_json(path: str | Path, value) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False) + "\n")
 
 
 def write_summary(root: str | Path, rows: list[dict]) -> None:
     path = Path(root) / "summary.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
     preserve_file(path)
-    temporary = path.with_suffix(".csv.tmp")
-    with temporary.open("w", newline="", encoding="utf-8") as handle:
-        # Runs can report different candidate K values (e.g. different Top-M).
-        fields = list(dict.fromkeys(key for row in rows for key in row))
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-    temporary.replace(path)
+    buffer = io.StringIO(newline="")
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_write_text(path, buffer.getvalue())
     print(f"Saved summary: {path}", flush=True)
 
 

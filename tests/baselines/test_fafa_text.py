@@ -93,7 +93,9 @@ def test_baseline_text_change_reuses_gallery_and_rebuilds_query(
         fafa,
         "load_fafa",
         lambda *a: (
-            TinyFAFA(), {"eval": str}, preprocess,
+            TinyFAFA(),
+            {"eval": str},
+            preprocess,
             {"missing_keys": [], "unexpected_keys": []},
         ),
     )

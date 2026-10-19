@@ -7,7 +7,7 @@ from statistics import fmean
 
 import torch
 
-from rcr.common.data import RCRData, split_image_ids
+from rcr.common.data import RCRData, required_identity_ids, split_image_ids
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.metrics import (
     average_precision,
@@ -76,7 +76,7 @@ def evaluate_retrieval_output(
         coarse_rankings=coarse,
         candidate_ks=tuple(candidate_ks),
     )
-    # New proposed outputs retain a full coarse order as well as the shortlist.
+    # Proposed outputs retain a full coarse order as well as the shortlist.
     # Reuse the exact same protocol so coarse/fine mAP have the same denominator.
     for field, prefix in (
         ("coarse_rankings", "coarse"),
@@ -116,16 +116,6 @@ def evaluate_retrieval_output(
     return result
 
 
-def required_identity_ids(sample: dict) -> set[str]:
-    """All identities required by all Subjects in one query."""
-
-    return {
-        identity_id
-        for subject in sample["subjects"]
-        for identity_id in subject["identity_ids"]
-    }
-
-
 def identity_positive_ids(
     sample: dict,
     gallery_ids: Sequence[str],
@@ -137,7 +127,7 @@ def identity_positive_ids(
     and ordering are therefore irrelevant for this diagnostic target set.
     """
 
-    required_ids = required_identity_ids(sample)
+    required_ids = set(required_identity_ids(sample))
     if not required_ids:
         raise ValueError(f"{sample['sample_id']}: no required identities")
 

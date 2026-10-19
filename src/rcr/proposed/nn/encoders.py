@@ -11,6 +11,27 @@ from rcr.common.data import sample_selection_texts
 SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
 
 
+def load_text_modules(
+    model_name: str,
+    dim: int,
+    device: torch.device | str,
+    *,
+    tokenizer_source=None,
+    add_subject_markers: bool = False,
+):
+    """Build the tokenizer and frozen text encoder used by train and retrieve."""
+    from transformers import AutoModel, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source or model_name)
+    if add_subject_markers:
+        tokenizer.add_special_tokens(
+            {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
+        )
+    backbone = AutoModel.from_pretrained(model_name)
+    backbone.resize_token_embeddings(len(tokenizer))
+    return tokenizer, TextEncoder(backbone, dim).to(device)
+
+
 class QueryTextCache:
     """CPU token IDs only; the text projection is recomputed at each step."""
 

@@ -3,6 +3,8 @@
 from collections import defaultdict
 from collections.abc import Iterable
 
+from rcr.common.data import subject_identity_ids
+from rcr.common.io import index_unique
 from rcr.dataset.gallery import indexed_image_ids
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
@@ -30,16 +32,6 @@ def pair_split_index(pair_data: dict) -> dict[tuple[str, str], str]:
     return output
 
 
-def _index_unique(records: Iterable[dict], label: str) -> dict[str, dict]:
-    output = {}
-    for row in records:
-        sample_id = row["sample_id"]
-        if sample_id in output:
-            raise ValueError(f"{label}: duplicate sample_id {sample_id}")
-        output[sample_id] = row
-    return output
-
-
 def build_final_dataset(
     selected: list[dict],
     reviewed: list[dict],
@@ -52,9 +44,9 @@ def build_final_dataset(
 ) -> dict:
     """Build the final dataset, optionally using only completed handoffs."""
 
-    selected_by_id = _index_unique(selected, "selected")
-    reviewed_by_id = _index_unique(reviewed, "reviewed")
-    positives_by_id = _index_unique(positive_sets, "positive_sets")
+    selected_by_id = index_unique(selected, "sample_id", "selected")
+    reviewed_by_id = index_unique(reviewed, "sample_id", "reviewed")
+    positives_by_id = index_unique(positive_sets, "sample_id", "positive_sets")
     expected_ids = set(selected_by_id)
     pair_splits = pair_split_index(pair_data) if pair_data is not None else None
 
@@ -134,11 +126,7 @@ def build_final_dataset(
                 "final_change": review["final_change"],
             },
         )
-        required_ids = {
-            identity_id
-            for subject in subjects
-            for identity_id in subject["identity_ids"]
-        }
+        required_ids = set(subject_identity_ids(subjects))
 
         if not required_ids <= identities_by_image[query_id]:
             raise ValueError(

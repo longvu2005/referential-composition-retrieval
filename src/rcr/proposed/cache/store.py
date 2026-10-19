@@ -97,7 +97,7 @@ class GalleryCache:
         ):
             raise ValueError("invalid packed person index offsets/mask")
         if index.get("layout") == "fafa":
-            # Derive provenance for completed format-4 images as well as format 5.
+            # Reconstruct one canonical signature for every supported FAFA index.
             person = self.encoder_metadata["person_encoder"]
             self.feature_signature = {
                 "source_cache_id": index["source_cache_id"],
@@ -221,9 +221,9 @@ class GalleryCache:
     def global_features(self) -> Tensor:
         """Mean scene patches [G,D], kept on CPU and reused across evaluations.
 
-        Legacy caches are read once, one feature file at a time. This supports
+        Format-1 caches are read once, one feature file at a time. This supports
         read-only Kaggle inputs without rebuilding the detector/image cache.
-        New caches store the same FP32 means directly in index.pt.
+        Format-2 DINO indices store the same FP32 means directly in index.pt.
         """
         if self._global_features is None:
             if self._scene_cache is not None:

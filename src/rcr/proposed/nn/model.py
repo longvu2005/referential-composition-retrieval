@@ -19,12 +19,13 @@ from rcr.proposed.nn.composition import (
     composed_query_mask,
     reference_key_bias,
 )
-from rcr.proposed.nn.encoders import IdentityHead
+from rcr.proposed.nn.encoders import SUBJECT_MARKERS, IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import fafa_binding_scores
 
 ARCHITECTURE_VERSION = "fafa-native-partial-match-v1"
+DEFAULT_COARSE_BETA = 0.4
 
 
 @dataclass
@@ -62,6 +63,29 @@ class RCRModel(nn.Module):
 
     architecture_version = ARCHITECTURE_VERSION
 
+    @classmethod
+    def from_config(
+        cls,
+        config: dict,
+        *,
+        input_dim: int,
+        person_input_dim: int,
+        max_subjects: int = len(SUBJECT_MARKERS),
+    ) -> "RCRModel":
+        """Create the model from the single YAML model section."""
+        dim = config.get("dim", input_dim)
+        return cls(
+            dim=dim,
+            input_dim=input_dim,
+            person_input_dim=person_input_dim,
+            max_subjects=max_subjects,
+            **{
+                key: value
+                for key, value in config.items()
+                if key not in {"text_model", "dim", "representation"}
+            },
+        )
+
     def __init__(
         self,
         dim: int,
@@ -71,7 +95,7 @@ class RCRModel(nn.Module):
         mlp_ratio: int = 2,
         geo_dim: int = 32,
         state_dim: int | None = None,
-        coarse_beta: float = 0.4,
+        coarse_beta: float = DEFAULT_COARSE_BETA,
         input_dim: int | None = None,
         person_input_dim: int | None = None,
         dropout: float = 0.0,
@@ -301,7 +325,7 @@ class RCRModel(nn.Module):
         fafa_targets: Tensor,
         return_details: bool = False,
     ) -> Tensor | dict[str, Tensor]:
-        """Shared identity matching -> aligned state/context -> null-aware score.
+        """Shared identity matching -> aligned evidence/context -> null-aware score.
 
         Case labels, GT identities and GT cardinalities never enter this path.
         ``return_details`` is a diagnostic view of this very same forward pass.
@@ -310,8 +334,8 @@ class RCRModel(nn.Module):
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
-        # Identity determines the assignment; only context and fusion are learned
-        # by retrieval. Native FAFA features remain frozen in both directions.
+        # Identity fixes the assignment. Retrieval learns the aligned context and
+        # fusion scale; native FAFA features stay frozen in both directions.
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
         matching = partial_identity_matching(

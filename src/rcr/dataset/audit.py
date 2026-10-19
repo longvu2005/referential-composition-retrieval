@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 
-from rcr.common.data import split_image_ids, split_samples
+from rcr.common.data import required_identity_ids, split_image_ids, split_samples
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
 
@@ -101,11 +101,7 @@ def audit_data(data) -> dict:
                 sample["case_type"],
                 {k: sample[k] for k in ("final_desc", "final_change")},
             )
-            required = {
-                str(identity)
-                for subject in sample["subjects"]
-                for identity in subject["identity_ids"]
-            }
+            required = set(map(str, required_identity_ids(sample)))
             if not required <= identities.get(sample["query_image_id"], set()):
                 raise ValueError(f"{sample['sample_id']}: query lacks required IDs")
             positives = sample["positive_image_ids"]

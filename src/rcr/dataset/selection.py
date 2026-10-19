@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 
+from rcr.common.data import subject_identity_ids
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import SUBJECT_RE, validate_review_output
 
@@ -113,7 +114,7 @@ def select_samples(
         )
         if case_type != row["case_type"] or subjects != row["subjects"]:
             raise ValueError(f"{sample_id}: non-canonical subject assignment")
-        required_ids = {identity for s in subjects for identity in s["identity_ids"]}
+        required_ids = set(subject_identity_ids(subjects))
         if not required_ids <= query_boxes.keys():
             raise ValueError(f"{sample_id}: subject identity missing from boxes")
 

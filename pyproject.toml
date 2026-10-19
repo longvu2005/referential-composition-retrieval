@@ -100,3 +100,12 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["labelstudio", "rcr", "tools"]
+
+
+[tool.ruff.lint.per-file-ignores]
+# These modules re-export shared pytest fixtures under their public names.
+"tests/baselines/test_fafa_text.py" = ["F811"]
+"tests/proposed/test_amp_numerics.py" = ["F811"]
+"tests/proposed/test_compact_cache.py" = ["F811"]
+"tests/proposed/test_fafa_cache_lifecycle.py" = ["F811"]
+"tests/proposed/test_native_fafa.py" = ["F811"]
