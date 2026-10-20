@@ -65,6 +65,12 @@ Run:
 .venv-dataset/bin/python -m labelstudio.positives.app
 ```
 
+For a separate catalog from `tools/data/audit.py --review-queue`, pass
+`--input runs/full_positive_review.jsonl --output runs/full_positive_reviewed.jsonl`.
+Optional `--image-root` selects the raw image tree. Existing selections are
+prefilled from the audit catalog; decisions are written only when saved. Keep
+these files separate from canonical work files until review is reconciled.
+
 Open:
 
 ```text

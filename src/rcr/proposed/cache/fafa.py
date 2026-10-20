@@ -9,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from rcr.baselines.fafa import load_fafa, text_policy
-from rcr.common.data import load_rcr_data
+from rcr.common.data import load_rcr_inputs
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
 from rcr.common.torch_io import require_disk_space, save_torch
@@ -413,7 +413,7 @@ def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
     check_cache_config(source, cfg, person_backend="dino")
     if source.cache_id is None:
         raise ValueError("DINO source requires a cache_id to bind FAFA features safely")
-    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+    data = load_rcr_inputs(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     source.validate_gallery(data.gallery_ids)
     image = existing_cache(cfg, image_root, scene_root=source_root)
     if image is not None:

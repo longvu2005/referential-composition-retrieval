@@ -76,6 +76,14 @@ def test_train_checkpoints_metrics_and_retrieve(
         },
     )
     cache.cache_id = "tiny-cache"
+    data.image_path = lambda i: tmp_path / f"{i}.jpg"
+    for rows in data.gt_head_boxes_by_image.values():
+        for row in rows:
+            row.update(x=0.2, y=0.1, width=0.2, height=0.2)
+    cache._get_item = lambda i: {
+        "boxes_pixel": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
+        "boxes_scene": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
+    }
     cache.validate_gallery = lambda ids: None
     for module in (train_proposed, retrieve_proposed, evaluate_proposed):
         monkeypatch.setattr(module, "load_rcr_data", lambda *args: data)

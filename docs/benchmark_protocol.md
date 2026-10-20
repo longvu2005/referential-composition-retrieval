@@ -5,10 +5,33 @@ and metric definitions are unchanged. Every method uses the shared evaluator.
 
 ## Query, gallery and positives
 
-A query contains a reference image, `final_desc`, `final_change`, public Subject
-IDs and case structure. CLIP uses `final_instruction` by default. GT head boxes,
-identity labels, seed target and positives are evaluation labels: baseline
-inference must not use them, even to infer group cardinality.
+Inference receives a reference image, `final_desc`, `final_change` and public
+`subjects[].subject_id` slots. CLIP uses `final_instruction` by default. Subject
+slots identify references within the query; they reveal neither GT identities
+nor group cardinality. No method uses `case_type` for retrieval scoring, member
+selection or condition decomposition. FAFA uses one predicted-membership rule
+for every query and splits only independent clauses identified from text.
+
+GT head boxes, identity labels, seed targets and positives are annotations,
+not inference inputs. Proposed may use train annotations for sampling and
+supervised losses; CLIP and FAFA are not trained on RCR. Validation annotations
+support evaluation and model selection; test annotations support evaluation.
+Neither split's labels may determine retrieval scores or group cardinality.
+`case_type` remains available for train sampling, provenance and by-case metrics.
+
+The code enforces this boundary with `inference_sample()` and `RCRInputs`:
+Subject objects contain only `subject_id`, and annotation fields are absent.
+`load_rcr_inputs()` supports feature extraction without head annotations.
+`load_rcr_data()` is the annotated interface for training, evaluation and
+experiment bookkeeping. Dataset fingerprints and validation locks stay in that
+bookkeeping layer; scorers do not receive them as feature inputs.
+
+New visual cache shards contain no GT identities. `GalleryCache.load()` returns
+only scene features, person features, predicted boxes and a person mask.
+`TrainSupervision` aligns train heads with existing detections in memory, refuses
+non-train images, and supplies labels only to batch/loss construction. Detection
+diagnostics align GT separately for the requested split. Old cache labels are
+ignored; `tools/data/clean_cache.py` can remove them without re-encoding images.
 
 The gallery contains **all registered images in the query's PIPA split**, in
 canonical `gallery.jsonl` order. Membership comes from `images.jsonl` paths, not

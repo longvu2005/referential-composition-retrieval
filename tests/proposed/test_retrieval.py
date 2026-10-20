@@ -143,12 +143,10 @@ class _Cache(NativeFixture):
         indices = indices.long()
         count = len(indices)
         boxes = torch.tensor([0.0, 0.0, 1.0, 1.0]).expand(count, 1, 4)
-        identities = [[None] for _ in range(count)]
         return (
             self.scenes[indices],
             self.persons[indices],
             boxes,
-            identities,
             self.mask[indices],
         )
 
@@ -695,3 +693,45 @@ def test_batched_mining_retains_canonical_ties_and_restores_modes_on_failure(
             samples, cache, _Tokenizer(), encoder, model, torch.device("cpu"), **kwargs
         )
     assert model.training and not encoder.training
+
+
+def test_ranking_and_component_scores_are_invariant_to_private_labels():
+    from copy import deepcopy
+
+    from rcr.common.data import inference_sample
+
+    torch.manual_seed(71)
+    cache = _Cache()
+    model = RCRModel(8, 6, 2, max_subjects=1)
+    text_encoder = _TextEncoder()
+    tokenizer = _Tokenizer()
+    original = _sample()
+    poisoned = deepcopy(original)
+    poisoned.update(
+        case_type="unusable case",
+        target_image_id="not in gallery",
+        positive_image_ids=["q", "missing"],
+    )
+    poisoned["subjects"][0]["identity_ids"] = ["private"] * 100
+    poisoned["subjects"][0]["member_count"] = 100
+    outputs = [
+        retrieve_rankings(
+            [row],
+            cache,
+            tokenizer,
+            text_encoder,
+            model,
+            torch.device("cpu"),
+            gallery_ids=cache.image_ids,
+            top_m=2,
+            fine_batch_size=1,
+            identity_batch_size=2,
+        )
+        for row in (original, poisoned, inference_sample(original))
+    ]
+    for other in outputs[1:]:
+        for key, value in outputs[0].items():
+            if isinstance(value, torch.Tensor):
+                torch.testing.assert_close(value, other[key], rtol=0, atol=0)
+            else:
+                assert value == other[key]

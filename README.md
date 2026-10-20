@@ -12,6 +12,26 @@ The benchmark contains four query types:
 - `DUAL`: two Subjects with separate changes;
 - `RELATIONAL`: two Subjects linked by an ordered relation.
 
+Inference uses the reference image, `final_desc`, `final_change` and public
+`subjects[].subject_id` slots; CLIP uses `final_instruction` by default. Subject
+slots are query-local references, not identity labels or group sizes. Retrieval
+scoring does not use `case_type`: FAFA predicts members with the same CLIP rule
+for every query and splits conditions only when the text has independent clauses.
+
+GT head boxes, identity labels, seed targets and positives provide train
+supervision or evaluation labels. Validation selects settings; test labels are
+used only for evaluation and provenance, never retrieval scoring.
+
+| Boundary | Data available |
+| --- | --- |
+| Feature extraction / ranking | Images, text, public Subject slots, predicted boxes |
+| Proposed training supervision | Train GT alignment, identities and Full Positive labels, separately from features |
+| Evaluation / provenance | Annotated samples, GT heads/identities, case labels and positive sets |
+
+`load_rcr_inputs()` drops annotation fields and never opens `head_boxes.jsonl`.
+Runners keep annotated data for evaluation/provenance and pass public views to
+scorers. `case_type` remains useful for train sampling and by-case reporting.
+
 ## Method
 
 The proposed model uses frozen DINO scene features, frozen native FAFA person and
@@ -111,6 +131,19 @@ only the query cache. The default FAFA policy is 128 tokens, and the default que
 cache is `cache/fafa-queries-txt128` so legacy 32-token features are not mixed with
 current runs.
 
+Visual caches no longer store GT labels. Train-only alignment is computed lazily
+in memory from GT heads and the existing predicted pixel boxes. Older cache files
+remain readable; their `identity_ids` are discarded by the feature API. To remove
+that metadata physically, run this once on a **writable DINO cache**:
+
+```bash
+.venv-proposed/bin/python tools/data/clean_cache.py --cache /path/to/dino-cache
+```
+
+This preserves tensors, crop order and cache ID, so FAFA image/query features do
+not need extraction again. Legacy caches without pixel boxes additionally need
+raw image sizes and the original scene size when creating train supervision.
+
 ## Dataset
 
 The checked-in snapshot is version `0.1.0` with 4,311 queries and 37,107 images.
@@ -127,6 +160,21 @@ The current test split is a pipeline-validation split, not a publication-scale
 holdout. Raw images are not stored in the repository; configure `data.image_root`
 before extraction. Dataset reconstruction is documented in
 [dataset/README.md](dataset/README.md).
+
+Audit Full Positive integrity, equivalent-query conflicts and review scope:
+
+```bash
+.venv-dev/bin/python tools/data/audit.py \
+  --output runs/data_audit.json \
+  --review-queue runs/full_positive_review.jsonl
+```
+
+Add `--positive-catalog` and `--positive-decisions` with the original work files to
+check their candidate scope against every split ID Positive. Missing review
+artifacts mean **unknown scope**, not proven complete labels. The audit writes
+reports and a separate review queue; it never changes annotations or trains a
+model. See [Full Positive audit](docs/full_positive_audit.md) for findings,
+manual-review commands and the limits of this check.
 
 ## Tests
 

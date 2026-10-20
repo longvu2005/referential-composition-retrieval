@@ -37,12 +37,11 @@ def test_gallery_cache_loads_person_index_and_topm_features(tmp_path) -> None:
     with pytest.raises(ValueError, match="gallery IDs/order"):
         cache.validate_gallery(["b.jpg", "a.jpg"])
 
-    scene, persons, boxes, ids, mask = cache.load(torch.tensor([1, 0]))
+    scene, persons, boxes, mask = cache.load(torch.tensor([1, 0]))
     assert scene.shape == (2, 6, 8)
     assert persons.shape == (2, 3, 8)
     assert boxes.shape == (2, 3, 4)
-    assert ids[0] == ["0", "1", "2"]
-    assert ids[1] == ["0", "1", None]
+    assert "identity_ids" not in cache._load_item(0)
     assert mask.tolist() == [[True, True, True], [True, True, False]]
 
 

@@ -9,7 +9,7 @@ from rcr.common.data import (
     load_rcr_data,
     split_fingerprint,
     split_image_ids,
-    split_samples,
+    split_inputs,
 )
 from rcr.common.io import (
     output_directory,
@@ -91,7 +91,7 @@ def _retrieve(
     validation_sha256 = split_fingerprint(data, "val")
     if cfg.get("selected_validation_sha256", validation_sha256) != validation_sha256:
         raise ValueError("validation data changed since val selection; rerun the sweep")
-    samples = split_samples(data, cfg["split"])
+    samples = split_inputs(data, cfg["split"])
     if not samples:
         raise ValueError(f"{cfg['split']}: selected query split is empty")
     full_num_queries = len(samples)

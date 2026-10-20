@@ -15,8 +15,8 @@ SPLIT_NAMES = ("train", "val", "test")
 
 
 @dataclass
-class RCRData:
-    """In-memory indexes over `dataset/data/final`."""
+class RCRInputs:
+    """Image/text/Subject-slot inputs, without supervision or case labels."""
 
     final_dir: Path
     image_root: Path
@@ -24,12 +24,66 @@ class RCRData:
     samples_by_id: dict[str, dict]
     images_by_id: dict[str, dict]
     gallery_ids: list[str]
-    gt_head_boxes_by_image: dict[str, list[dict]]
     splits: dict[str, list[str]]
     manifest: dict
 
     def image_path(self, image_id: str) -> Path:
         return self.image_root / self.images_by_id[image_id]["path"]
+
+
+@dataclass
+class RCRData(RCRInputs):
+    """Annotated data for training, evaluation and experiment provenance."""
+
+    gt_head_boxes_by_image: dict[str, list[dict]]
+
+
+def inference_sample(sample: dict) -> dict:
+    """Allowlist public fields; never forward the annotated Subject objects."""
+    return {
+        **{
+            key: sample[key]
+            for key in (
+                "sample_id",
+                "query_image_id",
+                "final_desc",
+                "final_change",
+                "final_instruction",
+            )
+            if key in sample
+        },
+        "subjects": [{"subject_id": s["subject_id"]} for s in sample["subjects"]],
+    }
+
+
+def inference_samples(samples) -> list[dict]:
+    return [inference_sample(sample) for sample in samples]
+
+
+def inference_data(data: RCRInputs) -> RCRInputs:
+    """Public view for scorers; the runner retains annotations separately."""
+    samples = inference_samples(data.samples)
+    return RCRInputs(
+        final_dir=data.final_dir,
+        image_root=data.image_root,
+        samples=samples,
+        samples_by_id={s["sample_id"]: s for s in samples},
+        images_by_id={
+            i: {"image_id": i, "path": row["path"]}
+            for i, row in data.images_by_id.items()
+        },
+        gallery_ids=list(data.gallery_ids),
+        splits={name: list(ids) for name, ids in data.splits.items()},
+        manifest={"version": data.manifest.get("version")},
+    )
+
+
+def load_rcr_inputs(
+    final_dir: str | Path = "dataset/data/final",
+    image_root: str | Path = "dataset/data/raw/images",
+) -> RCRInputs:
+    """Load public fields without retaining labels or opening head annotations."""
+    return _load_data(final_dir, image_root, inputs_only=True)
 
 
 def _load_split_ids(final_dir: Path) -> dict[str, list[str]]:
@@ -48,7 +102,11 @@ def load_rcr_data(
     final_dir: str | Path = "dataset/data/final",
     image_root: str | Path = "dataset/data/raw/images",
 ) -> RCRData:
-    """Load final benchmark files and build small deterministic lookup indexes."""
+    """Load annotations for supervision, evaluation and provenance."""
+    return _load_data(final_dir, image_root, inputs_only=False)
+
+
+def _load_data(final_dir, image_root, *, inputs_only):
 
     final_dir = Path(final_dir)
     image_root = Path(image_root)
@@ -56,7 +114,8 @@ def load_rcr_data(
     samples = load_jsonl(final_dir / "samples.jsonl")
     images = load_jsonl(final_dir / "images.jsonl")
     gallery = load_jsonl(final_dir / "gallery.jsonl")
-    head_boxes = load_jsonl(final_dir / "head_boxes.jsonl")
+    if inputs_only:
+        samples = inference_samples(samples)
     manifest = json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
 
     samples_by_id = index_unique(samples, "sample_id", "samples.jsonl")
@@ -77,21 +136,31 @@ def load_rcr_data(
     if seen != set(samples_by_id):
         raise ValueError("splits must contain every sample exactly once")
 
-    gt_head_boxes_by_image = defaultdict(list)
-    for box in head_boxes:
-        gt_head_boxes_by_image[box["image_id"]].append(box)
-
-    return RCRData(
+    inputs = RCRInputs(
         final_dir=final_dir,
         image_root=image_root,
         samples=samples,
         samples_by_id=samples_by_id,
         images_by_id=images_by_id,
         gallery_ids=gallery_ids,
-        gt_head_boxes_by_image=dict(gt_head_boxes_by_image),
         splits=splits,
         manifest=manifest,
     )
+    if inputs_only:
+        return inference_data(inputs)
+    gt_head_boxes_by_image = defaultdict(list)
+    for box in load_jsonl(final_dir / "head_boxes.jsonl"):
+        gt_head_boxes_by_image[box["image_id"]].append(box)
+    return RCRData(**vars(inputs), gt_head_boxes_by_image=dict(gt_head_boxes_by_image))
+
+
+def split_inputs(data: RCRInputs, split: str) -> list[dict]:
+    """Select public queries independently of seed targets and positive labels."""
+    gallery = set(split_image_ids(data, split))
+    rows = [inference_sample(data.samples_by_id[i]) for i in data.splits[split]]
+    if any(row["query_image_id"] not in gallery for row in rows):
+        raise ValueError(f"query must belong to {split}")
+    return rows
 
 
 def split_samples(data: RCRData, split: str) -> list[dict]:

@@ -10,6 +10,7 @@ import torch
 from torch import Tensor, nn
 from tqdm import tqdm
 
+from rcr.common.data import inference_samples
 from rcr.common.runtime import evaluating
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
@@ -259,6 +260,7 @@ def rank_weight_grid(
     """
     if not samples or not weights:
         raise ValueError("retrieval requires samples and at least one weight pair")
+    samples = inference_samples(samples)
     if ranking_limit is not None and ranking_limit < 1:
         raise ValueError("ranking_limit must be positive")
     settings = retrieval_settings(settings, model.coarse_beta)
@@ -313,7 +315,7 @@ def rank_weight_grid(
                 [sample], tokenizer, text_encoder, device, text_cache=text_cache
             )
             query_idx = torch.tensor([by_id[sample["query_image_id"]]])
-            q_scene, q_persons, q_boxes, _, q_mask = cache.load(query_idx)
+            q_scene, q_persons, q_boxes, q_mask = cache.load(query_idx)
             q_mask = q_mask.to(device)
             query = model.encode_query(
                 q_scene.to(device),
@@ -373,7 +375,7 @@ def rank_weight_grid(
                 missing = top_indices[~fine_done[top_indices]]
                 for start in range(0, len(missing), fine_batch_size):
                     local = missing[start : start + fine_batch_size]
-                    scene, persons, boxes, _, mask = cache.load(
+                    scene, persons, boxes, mask = cache.load(
                         image_indices[local.cpu()]
                     )
                     count = len(local)
@@ -487,6 +489,7 @@ def mine_hard_negatives(
         for row in samples
     }
     limit = pool_size + max(map(len, forbidden.values()))
+    samples = inference_samples(samples)
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
     groups = {}
@@ -515,7 +518,7 @@ def mine_hard_negatives(
                     indices = torch.tensor(
                         [by_id[row["query_image_id"]] for row in rows]
                     )
-                    scene, persons, boxes, _, mask = cache.load(indices)
+                    scene, persons, boxes, mask = cache.load(indices)
                     mask = mask.to(device)
                     logits, query_identity = model.encode_grounded_identity(
                         scene.to(device),

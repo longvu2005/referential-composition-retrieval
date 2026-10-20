@@ -2,6 +2,7 @@
 
 import re
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -78,11 +79,11 @@ def test_group_dedup_preserves_padding_order_and_immutable_storage(
     assert reads == [0, 1, 2]
     assert queries[1].shape == (3, 2, 8)
     assert targets[1].shape == (3, 4, 8)
-    assert queries[4].tolist() == [[False, False], [True, True], [False, False]]
-    assert targets[3] == [
-        ["0", "1", None, None],
-        ["0", "1", "2", "3"],
-        ["0", "1", None, None],
+    assert queries[3].tolist() == [[False, False], [True, True], [False, False]]
+    assert targets[3].tolist() == [
+        [True, True, False, False],
+        [True] * 4,
+        [True, True, False, False],
     ]
     torch.testing.assert_close(queries[0][1], targets[0][0])
     torch.testing.assert_close(targets[0][0], targets[0][2])
@@ -295,7 +296,17 @@ def test_amp_training_finite_with_empty_images_and_padded_boxes(
         )
     candidates = [[ids[2], ids[1]], [ids[2], ids[0]]]
     visual = prepare_visual_batch(
-        samples, candidates, cache, state_image_ids=[set(ids)] * 2
+        samples,
+        candidates,
+        cache,
+        supervision=SimpleNamespace(
+            load_ids=lambda images, width: [
+                [str(j) for j in range(counts[ids.index(i)])]
+                + [None] * (width - counts[ids.index(i)])
+                for i in images
+            ]
+        ),
+        state_image_ids=[set(ids)] * 2,
     )
     tokens = QueryTextCache(_Tokenizer()).batch(samples)
     model = RCRModel(8, 6, 2, state_dim=4, geo_dim=4).to(device).train()

@@ -78,8 +78,6 @@ def negative_exclusions(samples: list[dict]) -> dict[str, set[str]]:
 
 def audit_data(data) -> dict:
     """Check structural labels, disjoint image/identity splits, and conflicts."""
-    from rcr.evaluation.evaluate import identity_positive_ids
-
     identities = {
         image_id: {str(b["identity_id"]) for b in boxes}
         for image_id, boxes in data.gt_head_boxes_by_image.items()
@@ -109,9 +107,13 @@ def audit_data(data) -> dict:
                 raise ValueError(f"{sample['sample_id']}: empty/duplicate positives")
             if sample["target_image_id"] not in positives:
                 raise ValueError(f"{sample['sample_id']}: missing seed positive")
-            if not set(positives) <= set(
-                identity_positive_ids(sample, gallery, identities)
-            ):
+            eligible = {
+                i
+                for i in gallery
+                if i != sample["query_image_id"]
+                and required <= identities.get(i, set())
+            }
+            if not set(positives) <= eligible:
                 raise ValueError(f"{sample['sample_id']}: invalid Full Positive")
         conflicts = positive_conflicts(samples)
         report[split] = {
@@ -133,23 +135,33 @@ def audit_data(data) -> dict:
     return {"splits": report, "identity_overlap": overlap}
 
 
-def audit_detection(data, cache) -> dict:
+def audit_detection(data, cache, *, scene_size=None) -> dict:
     """Read query/positive cache entries once; report ALL required ID coverage.
 
-    Coverage measures cached GT alignment, not detector localization accuracy.
+    Coverage measures diagnostic GT alignment, not detector localization accuracy.
     It never changes a feature, detector box, label, or ranking.
     """
     cache.validate_gallery(data.gallery_ids)
+    from rcr.proposed.supervision import align_identities
+
+    source = cache._scene_cache or cache
+    scene_size = scene_size or (source.encoder_metadata.get("image_encoder") or {}).get(
+        "scene_size"
+    )
     by_id = {image_id: i for i, image_id in enumerate(cache.image_ids)}
     detected = {}
 
     def identities(image_id):
         if image_id not in detected:
             item = cache._load_item(by_id[image_id])
+            labels = align_identities(
+                item,
+                data.gt_head_boxes_by_image.get(image_id, []),
+                image_path=data.image_path(image_id),
+                scene_size=scene_size,
+            )
             detected[image_id] = {
-                str(identity)
-                for identity in item.get("identity_ids", [])
-                if identity is not None
+                str(identity) for identity in labels if identity is not None
             }
         return detected[image_id]
 

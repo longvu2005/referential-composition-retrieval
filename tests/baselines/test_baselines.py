@@ -189,19 +189,75 @@ def test_clip_cache_shared_across_modes_and_invalidated_by_image(
 def test_predicted_membership_is_disjoint_and_supports_groups():
     similarity = np.array([[0.9, 0.88, 0.1, 0.2], [0.1, 0.2, 0.95, 0.92]])
     settings = dict(threshold=0.8, margin=0.05, max_members=3)
+    assert fafa_adapter.select_subject_members(similarity, **settings) == [
+        [0, 1],
+        [2, 3],
+    ]
     assert fafa_adapter.select_subject_members(
-        similarity, allow_multiple=True, **settings
-    ) == [[0, 1], [2, 3]]
-    assert fafa_adapter.select_subject_members(
-        similarity, allow_multiple=False, **settings
+        similarity, **{**settings, "max_members": 1}
     ) == [[0], [2]]
 
 
-def test_selection_does_not_read_gold_identity_count_or_positives(benchmark):
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (
+            "Subject 1 is wearing blue and Subject 2 is standing",
+            [
+                "the reference person is wearing blue",
+                "the reference person is standing",
+            ],
+        ),
+        (
+            "Subject 2 is standing and Subject 1 is wearing blue",
+            [
+                "the reference person is wearing blue",
+                "the reference person is standing",
+            ],
+        ),
+        ("Subject 1 is next to Subject 2", None),
+        ("Subject 1 is next to Subject 2 and Subject 2 is sitting", None),
+        ("Subject 1 and Subject 2 are standing together", None),
+        (
+            "Subject 1 is standing and Subject 1 is smiling and Subject 2 is sitting",
+            None,
+        ),
+        ("Subject 1 is standing", None),
+    ],
+)
+def test_subject_changes_split_only_independent_text_without_case(text, expected):
+    sample = {
+        "subjects": [{"subject_id": 1}, {"subject_id": 2}],
+        "final_change": "then retrieve target images where " + text,
+    }
+    if expected is None:
+        expected = [
+            text.replace("Subject 1", "the reference person").replace(
+                "Subject 2", "the other referenced person (Subject 2)"
+            ),
+            text.replace("Subject 2", "the reference person").replace(
+                "Subject 1", "the other referenced person (Subject 1)"
+            ),
+        ]
+    assert fafa_adapter.subject_changes(sample) == expected
+
+
+@pytest.mark.parametrize("case", ["INDIVIDUAL", "GROUP", "DUAL", "RELATIONAL", None])
+def test_selection_ignores_case_and_gold_labels(benchmark, monkeypatch, case):
     cfg, _, _ = benchmark
     data = load_rcr_data(**cfg["data"])
     samples, gallery = split_samples(data, "test"), split_image_ids(data, "test")
     localization = yaml.safe_load(Path("configs/fafa.yaml").read_text())["localization"]
+
+    # Both red crops match, including for an INDIVIDUAL annotation.
+    def selector(checkpoint, device):
+        module, model, transform = tiny_clip(checkpoint, device)
+        module.tokenize = lambda texts, truncate=False: torch.tensor(
+            [[1.0, 0.0, 0.0]] * len(texts)
+        )
+        return module, model, transform
+
+    monkeypatch.setattr(fafa_adapter, "load_clip", selector)
     candidates = [
         [
             {"box": [0, 0, 4, 8], "score": 0.9, "fallback": False},
@@ -211,8 +267,13 @@ def test_selection_does_not_read_gold_identity_count_or_positives(benchmark):
     first, stats = fafa_adapter.build_query_components(
         data, samples, gallery, candidates, localization, torch.device("cpu")
     )
+    assert stats["predicted_members_per_subject"] == [2, 2, 1, 1, 1, 1]
     changed = copy.deepcopy(samples)
     for sample in changed:
+        if case is None:
+            sample.pop("case_type")
+        else:
+            sample["case_type"] = case
         sample["target_image_id"] = "b"
         sample["positive_image_ids"] = ["b"]
         for subject in sample["subjects"]:
@@ -795,8 +856,12 @@ def test_fafa_requires_complete_val_then_frozen_test(fafa_protocol):
     assert result["run"]["adapter_selection"]["split"] == "val"
 
 
-@pytest.mark.parametrize("part", ["detector", "selector", "matching", "checkpoint"])
-def test_fafa_test_rejects_changed_parameters_before_inference(fafa_protocol, part):
+@pytest.mark.parametrize(
+    "part", ["detector", "selector", "matching", "checkpoint", "adapter"]
+)
+def test_fafa_test_rejects_changed_parameters_before_inference(
+    fafa_protocol, monkeypatch, part
+):
     from rcr.baselines.runner import run_experiment
 
     cfg, calls = fafa_protocol
@@ -807,6 +872,10 @@ def test_fafa_test_rejects_changed_parameters_before_inference(fafa_protocol, pa
         cfg["localization"]["query_selector"]["membership_margin"] = 0.1
     elif part == "matching":
         cfg["setmatch"]["unmatched_score"] = -0.5
+    elif part == "adapter":
+        monkeypatch.setattr(
+            fafa_adapter, "ADAPTER_VERSION", "rcr-fafa-predicted-set-v1"
+        )
     else:
         Path(cfg["checkpoint"]["path"]).write_bytes(b"changed")
     with pytest.raises(ValueError, match="stale"):
@@ -842,3 +911,35 @@ def test_clip_native_text_truncation_is_counted():
     )
     assert count == 1 and features.shape == (2, 77)
     assert np.isfinite(features).all()
+
+
+def test_runner_passes_public_views_to_scorer_and_keeps_gt_for_provenance(
+    benchmark, monkeypatch
+):
+    from rcr.baselines.runner import run_retrieval
+    from rcr.common.data import RCRInputs
+
+    cfg, _, _ = benchmark
+    original = clip.retrieve_clip
+    calls = []
+
+    def score(data, samples, *args):
+        assert type(data) is RCRInputs
+        assert not hasattr(data, "gt_head_boxes_by_image")
+        for row in [*data.samples, *samples]:
+            assert "case_type" not in row and "target_image_id" not in row
+            assert "positive_image_ids" not in row
+            assert all(set(s) == {"subject_id"} for s in row["subjects"])
+        calls.append(True)
+        return original(data, samples, *args)
+
+    monkeypatch.setattr(clip, "retrieve_clip", score)
+    run_retrieval(cfg)
+    assert calls == [True]
+    run = json.loads((output_directory(cfg) / "run.json").read_text())
+    assert run["case_counts"] == {
+        "INDIVIDUAL": 1,
+        "GROUP": 1,
+        "DUAL": 1,
+        "RELATIONAL": 1,
+    }

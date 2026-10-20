@@ -116,7 +116,7 @@ DINO caches store explicit metadata and pixel boxes.
 
 | Directory | Contents | Usage |
 | --- | --- | --- |
-| `data.dino_cache` | DINO scenes, detections, identities, crop index | Shared immutable source; may be read-only Kaggle input |
+| `data.dino_cache` | DINO scenes, predicted detections and crop index; no GT labels | Shared immutable source; may be read-only Kaggle input |
 | `data.fafa_image_cache` | `index.pt`, `targets/` | Query-independent person means, projected target tokens and encoder/crop provenance |
 | `data.fafa_query_cache` | `index.pt`, `features/<hash>.pt` | Separate sample/Subject mapping and FP32 text-conditioned embeddings |
 
@@ -174,13 +174,23 @@ When best equals last, a hard link avoids another full copy; later replacement
 of last preserves the older best. Filesystems without hard links use an atomic
 copy. These checks report insufficient disk space; they cannot create more storage.
 
-After a successful build, training/retrieval read cached features only. They do
-not need native FAFA weights, its YAML or raw crop images. Training requires FAFA
+After a successful build, training/retrieval read cached visual features. They do
+not need native FAFA weights or its YAML. Train supervision independently aligns
+GT heads using cached pixel boxes; legacy sources with only normalized scene boxes
+also require raw images for their dimensions and the original scene size.
+Training requires FAFA
 person features when an external person-encoder config is supplied; retrieval compares
 image cache ID, feature widths and encoder metadata with the checkpoint. Query
 cache UUIDs are independent of checkpoints; the loader verifies matching encoder/crop
 provenance and the current instruction mapping. Encoder
 environment paths are used only in prepare and cache extraction.
+
+Older DINO files may physically retain `identity_ids`; the reader never returns
+them. To remove that metadata, run
+`python tools/data/clean_cache.py --cache /writable/dino-cache` once. Each changed
+shard is replaced atomically. Index/cache ID, feature tensors and crop order are
+preserved; no FAFA image/query rebuild or model retraining is required solely for
+this cleanup. Read-only caches can still be used directly with labels ignored.
 
 ## Outputs and diagnostics
 

@@ -6,10 +6,13 @@ from pathlib import Path
 import pytest
 
 from rcr.common.data import (
+    inference_sample,
     load_rcr_data,
+    load_rcr_inputs,
     required_identity_ids,
     sample_selection_texts,
     split_image_ids,
+    split_inputs,
     split_samples,
 )
 from rcr.common.io import load_jsonl, write_jsonl
@@ -161,3 +164,37 @@ def test_split_samples_rejects_seed_from_another_split(tmp_path):
 
     with pytest.raises(ValueError, match="query and seed must belong to train"):
         split_samples(data, "train")
+
+
+def test_public_loader_needs_no_head_seed_case_or_positive_annotations(tmp_path):
+    _write_final_dataset(tmp_path)
+    expected = load_rcr_inputs(tmp_path)
+    (tmp_path / "head_boxes.jsonl").unlink()
+    # A public export can omit every private sample field.
+    write_jsonl(
+        tmp_path / "samples.jsonl", [inference_sample(s) for s in expected.samples]
+    )
+    actual = load_rcr_inputs(tmp_path)
+    assert not hasattr(actual, "gt_head_boxes_by_image")
+    assert split_inputs(actual, "train") == split_inputs(expected, "train")
+    assert actual.samples[0]["subjects"] == [{"subject_id": 1}, {"subject_id": 2}]
+    assert set(actual.samples[0]) == {
+        "sample_id",
+        "query_image_id",
+        "final_desc",
+        "final_change",
+        "final_instruction",
+        "subjects",
+    }
+
+
+def test_inference_projection_is_allowlisted_and_detached(tmp_path):
+    _write_final_dataset(tmp_path)
+    sample = load_rcr_data(tmp_path).samples[0]
+    sample["new_private_field"] = "do not forward"
+    sample["subjects"][0]["member_count"] = 17
+    public = inference_sample(sample)
+    assert "new_private_field" not in public and "case_type" not in public
+    assert all(set(s) == {"subject_id"} for s in public["subjects"])
+    public["subjects"][0]["subject_id"] = 9
+    assert sample["subjects"][0]["subject_id"] == 1

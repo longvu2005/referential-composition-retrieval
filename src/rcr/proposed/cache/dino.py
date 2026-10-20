@@ -11,7 +11,7 @@ from torch import nn
 from tqdm import tqdm
 
 from rcr.common.runtime import resolve_device
-from rcr.common.vision import detect, match_heads_to_persons
+from rcr.common.vision import detect
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import ImageEncoder
 
@@ -45,7 +45,6 @@ def build_cache(
     scene_processor,
     person_processor,
     device: torch.device | str,
-    gt_heads_by_image: dict[str, list[dict]] | None = None,
     detector_threshold: float = 0.3,
     detector_text_threshold: float = 0.25,
     storage_dtype: str = "float32",
@@ -158,26 +157,6 @@ def build_cache(
             dim = scene.shape[-1]
             person_features = scene.new_empty(len(persons), dim)
 
-        identity_ids: list[str | None] = [None] * len(persons)
-        if gt_heads_by_image is not None:
-            rows = gt_heads_by_image.get(image_id, [])
-            if rows:
-                gt_heads = persons.new_tensor(
-                    [
-                        [
-                            row["x"],
-                            row["y"],
-                            row["x"] + row["width"],
-                            row["y"] + row["height"],
-                        ]
-                        for row in rows
-                    ]
-                )
-                gt_index = match_heads_to_persons(gt_heads, persons)
-                for person, gt in enumerate(gt_index.tolist()):
-                    if gt >= 0:
-                        identity_ids[person] = str(rows[gt]["identity_id"])
-
         scene_size = (int(scene_pixels.shape[-1]), int(scene_pixels.shape[-2]))
         boxes_scene = boxes_to_scene(persons, image.size, scene_size)
         cached_persons = compact_cpu(person_features, feature_dtype)
@@ -191,7 +170,6 @@ def build_cache(
                 "image_id": image_id,
                 "scene": cached_scene,
                 "persons": cached_persons,
-                "identity_ids": identity_ids,
                 "boxes_scene": compact_cpu(boxes_scene, torch.float32),
                 "boxes_pixel": compact_cpu(persons, torch.float32),
                 "patch_hw": current_hw,
@@ -294,7 +272,6 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
         scene_processor=_LetterboxProcessor(processor, image_cfg["scene_size"]),
         person_processor=_LetterboxProcessor(processor, image_cfg["person_size"]),
         device=device,
-        gt_heads_by_image=data.gt_head_boxes_by_image,
         detector_threshold=detector_cfg["threshold"],
         detector_text_threshold=detector_cfg["text_threshold"],
         storage_dtype=cfg.get("cache", {}).get("storage_dtype", "float32"),

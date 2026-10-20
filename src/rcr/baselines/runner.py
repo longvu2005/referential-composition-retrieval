@@ -18,9 +18,12 @@ from rcr.baselines.clip import (
     write_clip_scores,
 )
 from rcr.common.data import (
+    inference_data,
+    inference_samples,
     load_rcr_data,
     split_fingerprint,
     split_image_ids,
+    split_inputs,
     split_samples,
 )
 from rcr.common.io import (
@@ -50,7 +53,7 @@ def run_retrieval(
     cfg = copy.deepcopy(cfg)
     if data is None:
         data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-    samples = split_samples(data, cfg["split"])
+    samples = split_inputs(data, cfg["split"])
     full_num_queries = len(samples)
     if max_queries is not None:
         samples = samples[:max_queries]
@@ -67,11 +70,15 @@ def run_retrieval(
     if cfg["method"] == "clip":
         from rcr.baselines.clip import retrieve_clip
 
-        scores, details = retrieve_clip(data, samples, gallery_ids, cfg, device)
+        scores, details = retrieve_clip(
+            inference_data(data), samples, gallery_ids, cfg, device
+        )
     elif cfg["method"] == "fafa":
         from rcr.baselines.fafa import retrieve_fafa
 
-        scores, details = retrieve_fafa(data, samples, gallery_ids, cfg, device)
+        scores, details = retrieve_fafa(
+            inference_data(data), samples, gallery_ids, cfg, device
+        )
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
     if selection_metadata is not None:
@@ -175,9 +182,12 @@ def fafa_context(data, cfg, device):
     No automatic FAFA search is performed. Re-running val freezes the supplied
     configuration; test only checks it, without selecting from test metrics.
     """
+    from rcr.baselines.fafa_adapter import ADAPTER_VERSION
+
     return digest_json(
         {
             "version": "fafa-rcr-val-v1",
+            "adapter_version": ADAPTER_VERSION,
             "val_sha256": split_fingerprint(data, "val"),
             "source": cfg["source"],
             "checkpoint": cfg["checkpoint"],
@@ -285,7 +295,12 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
         started = perf_counter()
         if cfg["method"] == "clip":
             inputs, details = prepare_clip_inputs(
-                data, samples, gallery_ids, split_cfg, device, modes
+                inference_data(data),
+                inference_samples(samples),
+                gallery_ids,
+                split_cfg,
+                device,
+                modes,
             )
             preparation_seconds = perf_counter() - started
             if split == "val" and fusion_modes:

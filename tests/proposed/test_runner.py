@@ -421,3 +421,19 @@ def test_invalid_training_schedule_never_prepares_assets(
             ]
         )
     assert not local_stages
+
+
+def test_cache_extraction_needs_only_public_export(experiment, local_stages):
+    from rcr.common.data import inference_samples
+    from rcr.common.io import load_jsonl, write_jsonl
+
+    cfg, path = experiment
+    final = Path(cfg["data"]["final_dir"])
+    public = inference_samples(load_jsonl(final / "samples.jsonl"))
+    write_jsonl(final / "samples.jsonl", public)
+    (final / "head_boxes.jsonl").unlink()
+    cli.main(["build-cache", "--config", str(path)])
+    for key in ("dino_cache", "fafa_image_cache", "fafa_query_cache"):
+        assert (Path(cfg["data"][key]) / "index.pt").is_file()
+    for feature in (Path(cfg["data"]["dino_cache"]) / "features").glob("*.pt"):
+        assert "identity_ids" not in torch.load(feature, weights_only=True)

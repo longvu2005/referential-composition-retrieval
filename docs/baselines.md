@@ -109,7 +109,9 @@ FAFA is a single-person model adapted here to RCR scenes: detect people, select
 query members with CLIP text/box similarity, encode each person/change component,
 then aggregate native FDA scores with Hungarian SetMatch. Group membership is
 predicted with threshold/margin and disjoint anchors, without GT identity or
-cardinality. Group/relation conditions are approximated independently, not
+cardinality or `case_type`. Every query uses the same membership rule; condition
+splitting depends only on independent Subject clauses in the text. Group/relation
+conditions are approximated independently, not
 jointly reasoned. These adapter settings are validation hyperparameters, not
 measured optima, and are not tuned automatically by the CLIP fusion runner.
 

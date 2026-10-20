@@ -1,6 +1,6 @@
 """RCR scene/Subject adaptation for native single-person FAFA.
 
-Only query images, public Subject IDs/case structure and final text are used.
+Only query images, public Subject slots and final text are used.
 Predicted set membership is a heuristic, not GT identity supervision. Relations
 remain text; independent FAFA components do not provide joint relation reasoning.
 """
@@ -21,20 +21,29 @@ from rcr.baselines.clip import load_clip
 from rcr.common.data import sample_selection_texts
 from rcr.common.io import cache_directory, image_signature, sha256_file
 
-ADAPTER_VERSION = "rcr-fafa-predicted-set-v1"
+ADAPTER_VERSION = "rcr-fafa-predicted-set-v2"
+# Detection and gallery encoding are unchanged by the case-free query policy.
+VISUAL_CACHE_VERSION = "rcr-fafa-predicted-set-v1"
 
 
 def subject_changes(sample: dict) -> list[str]:
-    """Split DUAL clauses at Subject boundaries; preserve relational clauses."""
+    """Split explicit independent Subject clauses; preserve relations without GT."""
     subject_ids = [subject["subject_id"] for subject in sample["subjects"]]
     text = sample["final_change"].removeprefix("then retrieve target images where ")
     parts = re.split(r"\s+and\s+(?=Subject\s+\d+\b)", text)
     by_id = {}
-    if sample["case_type"] == "DUAL":
-        for part in parts:
-            match = re.match(r"Subject\s+(\d+)\b", part)
-            if match:
-                by_id[int(match[1])] = part
+    for part in parts:
+        match = re.match(r"Subject\s+(\d+)\b", part)
+        mentions = set(map(int, re.findall(r"\bSubject\s+(\d+)\b", part)))
+        if (
+            not match
+            or not part[match.end() :].strip(" .,;")
+            or mentions != {int(match[1])}
+            or int(match[1]) in by_id
+        ):
+            by_id = {}
+            break
+        by_id[int(match[1])] = part
     # If the text cannot be decomposed safely, each Subject receives the intact
     # condition. Never guess a missing subject-specific modification.
     independent = set(by_id) == set(subject_ids)
@@ -57,7 +66,6 @@ def select_subject_members(
     threshold: float,
     margin: float,
     max_members: int,
-    allow_multiple: bool,
     valid_extra: np.ndarray | None = None,
 ) -> list[list[int]]:
     """Hungarian anchors, then disjoint high-similarity predicted extra members.
@@ -65,7 +73,8 @@ def select_subject_members(
     Anchor assignment is maximum-sum one-to-one matching. An unused crop is an
     extra member when its cosine score passes the absolute threshold and lies
     within ``margin`` of that Subject's best score. Competing Subjects assign it
-    to the highest-scoring eligible Subject. Cardinality is never read from GT.
+    to the highest-scoring eligible Subject. The same rule applies to every
+    query; no case label or GT cardinality is read.
     """
     if similarity.ndim != 2 or not np.isfinite(similarity).all():
         raise ValueError("selection similarities must be a finite matrix")
@@ -78,8 +87,6 @@ def select_subject_members(
     selected = [[] for _ in range(ns)]
     for row, col in zip(rows, cols, strict=True):
         selected[int(row)].append(int(col))
-    if not allow_multiple:
-        return selected
     used = set(cols.tolist())
     row_best = similarity.max(axis=1)
     valid_extra = np.ones(npersons, dtype=bool) if valid_extra is None else valid_extra
@@ -138,7 +145,7 @@ def detect_gallery(data, gallery_ids: list[str], cfg: dict, device):
         raise ValueError("max_persons_per_image must be positive")
 
     signature = {
-        "version": ADAPTER_VERSION,
+        "version": VISUAL_CACHE_VERSION,
         "detector": cfg,
         "device_type": device.type,
         "checkpoint_sha256": sha256_file(cfg["checkpoint"]),
@@ -247,7 +254,6 @@ def build_query_components(data, samples, gallery_ids, candidates, cfg, device):
             threshold=float(settings["membership_threshold"]),
             margin=float(settings["membership_margin"]),
             max_members=int(settings["max_members_per_subject"]),
-            allow_multiple=sample["case_type"] != "INDIVIDUAL",
             valid_extra=np.array([not box["fallback"] for box in boxes]),
         )
         changes = subject_changes(sample)
@@ -271,4 +277,5 @@ def build_query_components(data, samples, gallery_ids, candidates, cfg, device):
         "truncated_selection_texts": truncated_texts,
         "policy": "Hungarian anchors + disjoint threshold/margin set membership",
         "uses_gt_boxes_or_identities": False,
+        "uses_case_type": False,
     }

@@ -65,8 +65,9 @@ def test_invalid_text_limit_fails_before_native_model_loading(monkeypatch, value
         fafa.load_fafa({"checkpoint": {"max_txt_len": value}}, torch.device("cpu"))
 
 
-def test_baseline_text_change_reuses_gallery_and_rebuilds_query(
-    benchmark, tmp_path, monkeypatch
+@pytest.mark.parametrize("change", ["text_length", "adapter"])
+def test_baseline_query_policy_change_reuses_gallery_and_rebuilds_query(
+    benchmark, tmp_path, monkeypatch, change
 ):
     clip_cfg, weights, marker = benchmark
     cfg = yaml.safe_load(Path("configs/fafa.yaml").read_text())
@@ -117,10 +118,16 @@ def test_baseline_text_change_reuses_gallery_and_rebuilds_query(
         del scores
         return metadata
 
+    adapter_version = fafa.ADAPTER_VERSION
+    if change == "adapter":
+        monkeypatch.setattr(fafa, "ADAPTER_VERSION", fafa.VISUAL_CACHE_VERSION)
     old = retrieve()
     image_path = Path(old["gallery_cache"]) / "gallery.npy"
     images = image_path.read_bytes()
-    cfg["checkpoint"]["max_txt_len"] = 128
+    if change == "text_length":
+        cfg["checkpoint"]["max_txt_len"] = 128
+    else:
+        monkeypatch.setattr(fafa, "ADAPTER_VERSION", adapter_version)
     new = retrieve()
     assert new["gallery_cache"] == old["gallery_cache"]
     assert new["query_cache"] != old["query_cache"]

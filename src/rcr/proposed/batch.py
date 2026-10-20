@@ -57,6 +57,7 @@ def prepare_visual_batch(
     candidate_image_ids: list[list[str]],
     cache: GalleryCache,
     *,
+    supervision,
     state_image_ids: list[set[str]] | None = None,
 ) -> dict[str, Tensor]:
     """Read and collate CPU features/supervision without running a model."""
@@ -71,8 +72,15 @@ def prepare_visual_batch(
     )
 
     query, target = cache.load_groups(query_idx, target_idx)
-    q_scene, q_persons, q_boxes, q_ids, q_mask = query
-    t_scene, t_persons, t_boxes, t_ids, t_mask = target
+    q_scene, q_persons, q_boxes, q_mask = query
+    t_scene, t_persons, t_boxes, t_mask = target
+    q_ids = supervision.load_ids(
+        [row["query_image_id"] for row in samples], q_persons.shape[1]
+    )
+    t_ids = supervision.load_ids(
+        [image_id for rows in candidate_image_ids for image_id in rows],
+        t_persons.shape[1],
+    )
 
     subjects = [sample["subjects"] for sample in samples]
     identity_vocab: dict[str, int] = {}
@@ -188,13 +196,18 @@ def build_batch(
     text_encoder: nn.Module,
     device: torch.device | str,
     *,
+    supervision,
     state_image_ids: list[set[str]] | None = None,
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor]:
     """Synchronous interface, also used to check the prefetched path."""
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
-        samples, candidate_image_ids, cache, state_image_ids=state_image_ids
+        samples,
+        candidate_image_ids,
+        cache,
+        supervision=supervision,
+        state_image_ids=state_image_ids,
     )
     return finish_batch(visual, text_cache.batch(samples), text_encoder, device)
 

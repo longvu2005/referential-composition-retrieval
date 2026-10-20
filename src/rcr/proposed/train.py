@@ -45,6 +45,7 @@ from rcr.proposed.sampling import (
     sampling_settings,
     training_batches,
 )
+from rcr.proposed.supervision import TrainSupervision
 
 
 def _wandb_run(
@@ -259,6 +260,9 @@ def train(cfg: dict) -> Path:
     if expected_backend is not None and expected_backend != actual_backend:
         raise ValueError("cache person encoder differs from the training config")
     candidate_ids = split_image_ids(data, "train")
+    supervision = TrainSupervision(
+        data, cache, scene_size=cfg.get("image_encoder", {}).get("scene_size")
+    )
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
     excluded = negative_exclusions(samples)
@@ -303,6 +307,7 @@ def train(cfg: dict) -> Path:
             rows,
             candidates,
             cache,
+            supervision=supervision,
             state_image_ids=[state_images[row["sample_id"]] for row in rows],
         )
         tokens = text_cache.batch(rows)

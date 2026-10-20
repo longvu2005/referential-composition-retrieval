@@ -121,11 +121,10 @@ def test_build_cache_writes_gallery_features(tmp_path, storage_dtype, count) -> 
     assert cache.mask.tolist() == [[True] * count]
     assert cache.patch_hw == (4, 4)
 
-    scene, persons, boxes, ids, mask = cache.load(torch.tensor([0]))
+    scene, persons, boxes, mask = cache.load(torch.tensor([0]))
     assert scene.shape == (1, 16, 8)
     assert persons.shape == (1, count, 8)
     assert boxes.shape == (1, count, 4)
-    assert ids == [[None] * count]
     assert mask.tolist() == [[True] * count]
     assert scene.dtype == persons.dtype == boxes.dtype == torch.float32
     torch.testing.assert_close(cache.global_features, scene.mean(dim=1))

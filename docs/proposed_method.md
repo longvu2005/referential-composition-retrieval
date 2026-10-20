@@ -24,9 +24,16 @@ DINO scene and FAFA person inputs have separate widths and cache metadata. The
 scene projection is independent of the shared person projection. BERT remains
 frozen/eval; only its output projection is trained. No FAFA library/model is
 loaded during training or retrieval. The DINO directory stores scenes,
-detections, identities and DINO crop features. Training/retrieval use FAFA crops. The
+predicted detections and DINO crop features, without GT identity labels.
+Training/retrieval use FAFA crops. The
 FAFA directory stores crop features and its index. `GalleryCache`
 combines them and verifies the FAFA index references the same DINO cache ID.
+
+`GalleryCache.load()` returns `(scene, persons, boxes, mask)` only. Training uses
+`TrainSupervision` to align GT train heads to those detections separately and
+lazily; validation/test images are rejected by this supervision interface.
+Legacy identity metadata is discarded by the cache reader. This changes data
+ownership, not the matching geometry or model equations.
 
 ## Grounding and composition
 

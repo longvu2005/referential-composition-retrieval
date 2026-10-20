@@ -36,24 +36,46 @@ def test_subject_role_mapping_and_condition_separate_conflict_groups():
 
 
 def test_cache_coverage_distinguishes_partial_group_from_complete_detection():
+    import torch
+
     sample = _sample("s", "q", ["p", "n"])
     data = SimpleNamespace(
         gallery_ids=["q", "p", "n"],
         samples_by_id={"s": sample},
         splits={"train": ["s"], "val": [], "test": []},
         images_by_id={i: {"path": f"train/{i}.jpg"} for i in ["q", "p", "n"]},
+        gt_head_boxes_by_image={
+            i: [
+                {"identity_id": "a", "x": 1, "y": 1, "width": 1, "height": 1},
+                {"identity_id": "b", "x": 5, "y": 1, "width": 1, "height": 1},
+            ]
+            for i in ["q", "p", "n"]
+        },
+        image_path=lambda _: None,
     )
     loaded = []
 
     def item(index):
         loaded.append(index)
-        return {"identity_ids": [["a"], ["a", "b"], [None]][index]}
+        boxes = torch.tensor(
+            [[[0, 0, 3, 10]], [[0, 0, 3, 10], [4, 0, 8, 10]], [[20, 20, 30, 30]]][
+                index
+            ],
+            dtype=torch.float32,
+        )
+        return {
+            "boxes_scene": boxes,
+            "boxes_pixel": boxes,
+            "identity_ids": ["ignored legacy label"],
+        }
 
     cache = SimpleNamespace(
         image_ids=data.gallery_ids,
         cache_id="tiny",
         _load_item=item,
         validate_gallery=lambda ids: None,
+        _scene_cache=None,
+        encoder_metadata={},
     )
     result = audit_detection(data, cache)["splits"]["train"]["overall"]
     assert result["subjects_any_detected"] == 1

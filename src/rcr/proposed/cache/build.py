@@ -8,7 +8,7 @@ import yaml
 
 from rcr.baselines.fafa import text_policy
 from rcr.common.config import load_config
-from rcr.common.data import load_rcr_data
+from rcr.common.data import load_rcr_inputs
 from rcr.common.io import sha256_file
 from rcr.proposed.cache.dino import _prepare_dino
 from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
@@ -159,7 +159,7 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
         raise ValueError("invalid cache stage")
     root, image_root, query_root = cache_paths(cfg)
     data_cfg = cfg["data"]
-    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
+    data = load_rcr_inputs(data_cfg["final_dir"], data_cfg["image_root"])
     source = existing_cache(cfg, root, person_backend="dino")
     if source is not None:
         source.validate_gallery(data.gallery_ids)

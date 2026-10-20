@@ -32,7 +32,7 @@ def build_task_payload(
     selected = (
         positive["positive_image_ids"]
         if positive is not None
-        else [row["seed_target_image_id"]]
+        else list(row.get("positive_image_ids", [row["seed_target_image_id"]]))
     )
 
     candidates = []
@@ -264,10 +264,15 @@ class PositiveHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    global INPUT, OUTPUT, IMAGE_ROOT
     parser = argparse.ArgumentParser(description="Run the local RCR positive UI.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8091)
+    parser.add_argument("--input", type=Path, default=INPUT)
+    parser.add_argument("--output", type=Path, default=OUTPUT)
+    parser.add_argument("--image-root", type=Path, default=IMAGE_ROOT)
     args = parser.parse_args()
+    INPUT, OUTPUT, IMAGE_ROOT = args.input, args.output, args.image_root
 
     state = PositiveState()
     handler = type("BoundPositiveHandler", (PositiveHandler,), {"state": state})

@@ -113,7 +113,7 @@ def test_legacy_dino_without_pixel_boxes_is_read_only(split_cache):
     cache = GalleryCache(cfg["data"]["fafa_image_cache"], scene_root=source)
     check_cache_config(cache, cfg)
     assert _bytes(source) == before
-    scene, persons, _, _, _ = cache.load(torch.tensor([0]))
+    scene, persons, _, _ = cache.load(torch.tensor([0]))
     assert scene.shape == (1, 16, 6) and persons.shape == (1, 1, 5)
     torch.testing.assert_close(cache.global_features[0], scene[0].mean(0))
     cfg["cache"]["allow_legacy_dino"] = False
@@ -225,13 +225,13 @@ def test_complete_person_index_needs_only_dino_shards(split_cache, monkeypatch):
     cache = GalleryCache(
         root, scene_root=source, query_root=cfg["data"]["fafa_query_cache"]
     )
-    _, persons, _, _, _ = cache.load(torch.tensor([0]))
+    _, persons, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(persons[0], cache.person_row(0).float())
     # Older completed caches can retain shards. They must not make fine
     # scoring read different persons from the coarse index.
     (root / ".persons").mkdir()
     torch.save({"persons": torch.full_like(persons[0], -999)}, root / ".persons/0.pt")
-    _, legacy_persons, _, _, _ = cache.load(torch.tensor([0]))
+    _, legacy_persons, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(legacy_persons, persons)
     (source / "features/0.pt").unlink()
     with pytest.raises(FileNotFoundError):
@@ -291,7 +291,7 @@ def test_empty_person_gallery_still_publishes_scene_cache(split_cache):
         torch.save(item, path)
     fafa_cache.finish_fafa_cache(cfg)
     cache = GalleryCache(cfg["data"]["fafa_image_cache"], scene_root=source)
-    scene, persons, boxes, ids, mask = cache.load(torch.tensor([0]))
+    scene, persons, boxes, mask = cache.load(torch.tensor([0]))
     assert persons.shape == (1, 0, 5) and boxes.shape == (1, 0, 4)
-    assert ids == [[]] and not mask.any()
+    assert not mask.any()
     torch.testing.assert_close(cache.global_features[0], scene[0].mean(0))

@@ -60,21 +60,22 @@ class _Cache(NativeFixture):
         boxes = torch.tensor(
             [[[0.0, 0.0, 0.5, 1.0], [0.5, 0.0, 1.0, 1.0], [0, 0, 0, 0]]] * n
         )
-        ids = []
-        for index in indices.tolist():
-            image_id = self.image_ids[index]
-            if image_id == "q1":
-                ids.append(["10", "20", None])
-            elif image_id == "q2":
-                ids.append(["10", "30", None])
-            elif image_id == "p1":
-                ids.append(["20", "10", None])
-            elif image_id == "p2":
-                ids.append(["30", "40", None])
-            else:
-                ids.append([None, None, None])
         mask = torch.tensor([[True, True, False]] * n)
-        return scene, persons, boxes, ids, mask
+        return scene, persons, boxes, mask
+
+
+class _Supervision:
+    def load_ids(self, image_ids, max_people):
+        known = {
+            "q1": ["10", "20"],
+            "q2": ["10", "30"],
+            "p1": ["20", "10"],
+            "p2": ["30", "40"],
+        }
+        return [
+            known.get(i, []) + [None] * (max_people - len(known.get(i, [])))
+            for i in image_ids
+        ]
 
 
 def _samples():
@@ -151,6 +152,7 @@ def test_build_batch() -> None:
         tokenizer,
         text_encoder,
         "cpu",
+        supervision=_Supervision(),
     )
 
     assert batch["query_scene"].shape == (2, 2, 4)
@@ -204,6 +206,7 @@ def test_build_batch_tracks_repeated_subject_mentions() -> None:
         tokenizer,
         text_encoder,
         "cpu",
+        supervision=_Supervision(),
     )
 
     mentions = batch["subject_token_mask"][0]
@@ -221,6 +224,7 @@ def test_query_and_target_identities_share_labels() -> None:
         _Tokenizer(),
         _TextEncoder(),
         "cpu",
+        supervision=_Supervision(),
     )
     assert batch["query_identity_labels"].tolist() == [[0, 1, -1], [0, 2, -1]]
     assert batch["target_identity_labels"].tolist() == [
@@ -243,6 +247,7 @@ def test_identity_masks_deduplicate_images_across_queries_and_targets() -> None:
         _Tokenizer(),
         _TextEncoder(),
         "cpu",
+        supervision=_Supervision(),
     )
     assert batch["query_identity_mask"].tolist() == [
         [True, True, False],
@@ -290,6 +295,7 @@ def test_cached_precision_supports_batch_training(tmp_path, dtype) -> None:
         _Tokenizer(),
         _TextEncoder(),
         "cpu",
+        supervision=_Supervision(),
         state_image_ids=[{"p1"}],
     )
     model = RCRModel(dim=4, identity_dim=4, num_heads=2)
@@ -311,6 +317,7 @@ def test_state_mask_uses_gt_image_pool_not_detected_person_labels():
         _Tokenizer(),
         _TextEncoder(),
         "cpu",
+        supervision=_Supervision(),
         state_image_ids=[{"p1", "n1"}, {"p2"}],
     )
     # n1's detector labels are unknown, but its image-level GT has the required IDs.
@@ -325,5 +332,6 @@ def test_state_mask_uses_gt_image_pool_not_detected_person_labels():
             _Tokenizer(),
             _TextEncoder(),
             "cpu",
+            supervision=_Supervision(),
             state_image_ids=[{"n1"}],
         )

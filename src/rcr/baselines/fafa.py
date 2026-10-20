@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from rcr.baselines.fafa_adapter import (
     ADAPTER_VERSION,
+    VISUAL_CACHE_VERSION,
     build_query_components,
     choose_boxes,
     detect_gallery,
@@ -391,7 +392,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         query_items.extend((path, box, caption) for path, box, caption, _ in components)
         query_offsets.append(len(query_items))
     signature = {
-        "version": ADAPTER_VERSION,
+        "version": VISUAL_CACHE_VERSION,
         "checkpoint_sha256": checkpoint_sha,
         "selector_sha256": selector_sha,
         # Text changes only invalidate multimodal query features, not images.

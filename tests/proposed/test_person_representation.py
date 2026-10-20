@@ -184,7 +184,7 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
     }
     monkeypatch.setattr(
         fafa_cache,
-        "load_rcr_data",
+        "load_rcr_inputs",
         lambda *args: SimpleNamespace(
             gallery_ids=["image"], samples=[], image_path=lambda _: image
         ),
@@ -208,7 +208,7 @@ def test_fafa_cache_uses_hidden_image_tokens_and_preserves_scene(tmp_path, monke
     cache = GalleryCache(root, scene_root=source_root)
     assert cache.scene_dim == 8 and cache.person_dim == 5
     assert cache.encoder_metadata["person_encoder"]["backend"] == "fafa"
-    loaded_scene, persons, _, _, _ = cache.load(torch.tensor([0]))
+    loaded_scene, persons, _, _ = cache.load(torch.tensor([0]))
     torch.testing.assert_close(scene.float(), loaded_scene[0])
     torch.testing.assert_close(
         persons[0], torch.tensor([[2.5, 3.5, 4.5, 5.5, 6.5]] * 2)

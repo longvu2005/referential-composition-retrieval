@@ -8,6 +8,8 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 
+from rcr.common.data import inference_samples
+
 
 class GalleryCache:
     """CPU person index plus a bounded LRU for immutable on-disk image features."""
@@ -120,12 +122,12 @@ class GalleryCache:
     def native_queries(self, samples, max_people: int) -> Tensor:
         if self.native is None:
             raise ValueError("FAFA image/query caches are required; run build-cache")
-        return self.native.load_queries(samples, max_people)
+        return self.native.load_queries(inference_samples(samples), max_people)
 
     def validate_samples(self, samples) -> None:
         if self.native is None:
             raise ValueError("FAFA image/query caches are required; run build-cache")
-        self.native.validate_samples(samples)
+        self.native.validate_samples(inference_samples(samples))
 
     def native_targets(self, indices: Tensor, max_people: int) -> Tensor:
         if self.native is None:
@@ -167,7 +169,13 @@ class GalleryCache:
             "image_id" in item and item["image_id"] != self.image_ids[index]
         ):
             raise ValueError(f"cache feature {index} does not match index.pt")
-        return item
+        # Legacy shards can contain identity_ids. They never enter the feature
+        # API or its LRU; training computes fresh alignment from train GT only.
+        return {
+            key: item[key]
+            for key in ("scene", "persons", "boxes_scene", "boxes_pixel", "patch_hw")
+            if key in item
+        }
 
     def _load_item(self, index: int) -> dict:
         if self._scene_cache is not None:
@@ -270,12 +278,8 @@ class GalleryCache:
         persons = pad("persons", items[0]["persons"].shape[-1])
         boxes = pad("boxes_scene", 4)
 
-        identity_ids = []
         mask = torch.zeros(len(items), k, dtype=torch.bool)
         for n, item in enumerate(items):
             count = item["persons"].shape[0]
             mask[n, :count] = True
-            ids = item.get("identity_ids", [None] * count)
-            identity_ids.append(ids + [None] * (k - count))
-
-        return scene, persons, boxes, identity_ids, mask
+        return scene, persons, boxes, mask

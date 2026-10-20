@@ -23,17 +23,18 @@ whole-scene fallback; fallback crops never become extra group members.
 
 OpenAI CLIP ViT-B/32 selects crops using `final_desc` clauses, native CLIP
 preprocessing and normalized cosine similarity. Hungarian anchors are disjoint.
-Non-INDIVIDUAL cases may add unused crops above similarity 0.20 and within 0.03
-of a Subject's best score, cap 5 members per Subject. Competing Subjects select
-the highest eligible similarity. Group cardinality is predicted; no GT boxes,
-identity counts or positives are read. Count selector text truncation in metadata.
+Every query may add unused crops above similarity 0.20 and within 0.03 of a
+Subject's best score, cap 5 members per Subject. Competing Subjects select the
+highest eligible similarity. Membership is predicted from image/text similarity;
+no `case_type`, GT boxes, identity counts or positives are read. An INDIVIDUAL
+annotation does not force one member. Count selector text truncation in metadata.
 
 Reference crop plus condition enters native `extract_features().multimodal_embeds`.
 Gallery crops use `extract_target_features(mode="mean")`, retaining target tokens
 (upstream's mode argument does not mean-pool them). Use native
 `squarepad_transform_test(224, need_size=(384,192))` and eval caption processing.
-The pinned pretrain config resolves max text length to 32; native truncation may
-shorten long conditions.
+The pinned pretrain config defaults to 32 tokens; `configs/fafa.yaml` explicitly
+sets `checkpoint.max_txt_len=128`. Longer conditions may still be truncated.
 
 ## 3. Retrieval equations
 
@@ -58,18 +59,19 @@ s(q,g)=\min_c A_{c,\pi^*(c)}(g).
 Hungarian maximizes the **sum**, then aggregation takes the **minimum**; assignment
 is not bottleneck-optimal. Rank the full split gallery, excluding self.
 
-## 4. RCR adaptation by case
+## 4. RCR adaptation from text
 
-| Case | Behavior |
+The adapter reads public Subject slots and text, without a case label.
+
+| Text structure | Behavior |
 | --- | --- |
-| INDIVIDUAL | One CLIP-selected member; maximum FDA across target people |
-| GROUP | Predicted members receive intact group condition; SetMatch |
-| DUAL | Split clear `and Subject N` clauses, otherwise retain full condition |
-| RELATIONAL | Retain full relation for each Subject; preserve roles in text |
+| One explicit clause per Subject, separated by `and Subject N`, each mentioning only its own Subject | Split into Subject-specific conditions |
+| Cross-Subject references, missing/duplicate clauses or ambiguous boundaries | Retain the full condition for every Subject |
 
 Own Subject mentions become `the reference person`; other Subject mentions remain
 explicit other-person references. Each component matches a different target crop.
-There is no oracle membership/cardinality or target-box access.
+One predicted component uses maximum FDA across target crops; multiple components
+use SetMatch. There is no oracle membership/cardinality or target-box access.
 
 ## 5. Hyperparameters and validation
 
@@ -105,6 +107,10 @@ Cache detection, gallery/query features and component scores with input/model
 provenance. Defaults: gallery fp16, query/scoring fp32. Save complete config,
 three checkpoint hashes, official commit, membership/fallback/truncation statistics.
 Outputs: `runs/fafa/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.
+
+The case-free policy is adapter v2. Existing detection and gallery-feature caches
+remain reusable; query features and component scores use the new adapter version.
+Old `protocol.json` locks are stale: rerun complete validation before test.
 
 ## 8. Limitations
 

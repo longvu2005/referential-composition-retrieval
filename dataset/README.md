@@ -114,10 +114,17 @@ and evaluation; it does not rewrite annotation catalogs, labels, or final files.
 
 The proposed method never uses GT head crops or boxes to select detector
 candidates or construct identity features. It detects `person` candidates and
-projects encoded person crops; a GT head box can provide an identity label for
-a matched predicted person during cache construction. Unmatched candidates
-have unknown identity `-1` at training time. Evaluation independently derives
+projects encoded person crops. Visual caches contain no GT labels. During
+training, a separate in-memory `TrainSupervision` aligns only train GT heads with
+existing detections; legacy cached identity metadata is ignored. Unmatched
+candidates have unknown identity `-1`. Evaluation independently derives
 identity-positive sets from the same GT identity annotations.
+
+`tools/data/audit.py` audits Full Positive validity and review scope without
+rewriting this export. Provide `--positive-catalog` and `--positive-decisions` to
+check original review artifacts; without them, scope is unknown. Use
+`--review-queue runs/full_positive_review.jsonl` to create a separate split-scoped
+catalog. See [audit findings and review workflow](../docs/full_positive_audit.md).
 
 ## Construction pipeline
 
