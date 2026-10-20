@@ -250,6 +250,15 @@ def test_train_checkpoints_metrics_and_retrieve(
     epoch_logs = [row for row in logs if "epoch" in row]
     assert [row["epoch"] for row in epoch_logs] == [1, 2, 3]
     assert all("epoch/state_loss" in row for row in epoch_logs)
+    prep_keys = (
+        "scene", "labels", "fafa", "save", "tokens", "pin", "total",
+    )
+    for row in epoch_logs:
+        for name in prep_keys:
+            assert row[f"epoch/prepare_{name}_seconds"] >= 0
+        assert row["epoch/prepare_total_seconds"] >= sum(
+            row[f"epoch/prepare_{name}_seconds"] for name in prep_keys[:-1]
+        )
     runtime = json.loads((output / "runtime.json").read_text())
     assert runtime["device"] == "cpu" and not runtime["amp_enabled"]
     assert runtime["batch_size"] * runtime["candidates"] == 4

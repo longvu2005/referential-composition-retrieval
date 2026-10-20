@@ -102,6 +102,7 @@ def _retrieve(
         scene_root=data_cfg.get("dino_cache"),
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
+        native_lru_mib=cfg.get("cache", {}).get("native_lru_mib", 0),
         mmap_shards=cfg.get("cache", {}).get("mmap_shards", False),
     )
     cache.validate_gallery(data.gallery_ids)

@@ -20,13 +20,18 @@ class GalleryCache:
         scene_root: str | Path | None = None,
         query_root: str | Path | None = None,
         lru_mib: int = 0,
+        native_lru_mib: int = 0,
         mmap_shards: bool = False,
     ) -> None:
-        if not isinstance(lru_mib, int) or lru_mib < 0:
-            raise ValueError("cache.lru_mib must be a nonnegative integer")
+        for name, value in (("lru_mib", lru_mib), ("native_lru_mib", native_lru_mib)):
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"cache.{name} must be a nonnegative integer")
         self._limit = lru_mib * 1024**2
+        self._native_limit = native_lru_mib * 1024**2
         self._items: OrderedDict[object, tuple[object, int]] = OrderedDict()
+        self._native_items: OrderedDict[object, tuple[object, int]] = OrderedDict()
         self._bytes = 0
+        self._native_bytes = 0
         self._lock = Lock()
         self.mmap_shards = mmap_shards
         self.root = Path(root)
@@ -206,16 +211,19 @@ class GalleryCache:
         return self._cached(index, lambda: self._load_item(index))
 
     def _cached(self, key, load):
-        """Share one byte budget between scenes and native FAFA shards."""
-        # A single reader thread shares this cache with the main process.
-        # Cached tensors are immutable; collation creates independent batches.
+        """Keep scene and native-shard budgets independent."""
+        # Scene keys are integer image indices; native query/target keys are tuples.
+        native = isinstance(key, tuple)
         with self._lock:
-            if key in self._items:
-                item, size = self._items.pop(key)
-                self._items[key] = (item, size)
+            items = self._native_items if native else self._items
+            limit = self._native_limit if native else self._limit
+            used = self._native_bytes if native else self._bytes
+            if key in items:
+                item, size = items.pop(key)
+                items[key] = (item, size)
                 return item
             item = load()
-            if not self._limit:
+            if not limit:
                 return item
             values = (item,) if isinstance(item, Tensor) else item.values()
             storages = {
@@ -224,12 +232,16 @@ class GalleryCache:
                 if isinstance(value, Tensor)
             }
             size = sum(storages.values())
-            if size <= self._limit:
-                while self._items and self._bytes + size > self._limit:
-                    _, (_, removed) = self._items.popitem(last=False)
-                    self._bytes -= removed
-                self._items[key] = (item, size)
-                self._bytes += size
+            if size <= limit:
+                while items and used + size > limit:
+                    _, (_, removed) = items.popitem(last=False)
+                    used -= removed
+                items[key] = (item, size)
+                used += size
+                if native:
+                    self._native_bytes = used
+                else:
+                    self._bytes = used
             return item
 
     @property

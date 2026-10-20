@@ -120,16 +120,20 @@ def test_lru_does_not_retain_an_oversized_item(tmp_path, monkeypatch):
     assert cache._bytes == 0 and not cache._items
 
 
-def test_scene_and_native_tensors_evict_under_one_lru_budget(tmp_path):
+def test_native_eviction_does_not_reread_or_evict_scenes(tmp_path, monkeypatch):
     write_cache(tmp_path, counts=(1, 1), dim=512, patches=400)
-    cache = GalleryCache(tmp_path, lru_mib=1)
+    cache = GalleryCache(tmp_path, lru_mib=1, native_lru_mib=1)
+    reads = record_reads(cache, monkeypatch)
     cache.load(torch.tensor([0, 1]))
-    value = cache._cached(("fafa-target", 0), lambda: torch.zeros(192, 1024))
-    assert list(cache._items) == [("fafa-target", 0)]
-    assert cache._bytes == value.numel() * value.element_size()
+    scene_bytes = cache._bytes
+    for n in (0, 1):
+        value = cache._cached(("fafa-target", n), lambda: torch.zeros(192, 1024))
+    assert list(cache._native_items) == [("fafa-target", 1)]
+    assert cache._native_bytes == value.numel() * value.element_size()
     cache.load(torch.tensor([0]))
-    assert list(cache._items) == [0]
-    assert cache._bytes <= 1024**2
+    assert reads == [0, 1]
+    assert set(cache._items) == {0, 1}
+    assert cache._bytes == scene_bytes <= 1024**2
 
 
 def local_tokenizer(tmp_path):

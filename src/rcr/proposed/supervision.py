@@ -1,10 +1,13 @@
 """GT alignment for training or diagnostics, separate from visual caches."""
 
+import hashlib
+import json
 from pathlib import Path
 
 from PIL import Image
 
 from rcr.common.data import split_image_ids
+from rcr.common.io import atomic_write_text
 from rcr.common.vision import match_heads_to_persons
 
 
@@ -38,15 +41,56 @@ def align_identities(item, heads, *, image_path=None, scene_size=None):
 
 
 class TrainSupervision:
-    """Lazy, in-memory alignment restricted to the registered train gallery."""
+    """Train-only alignment, optionally reused across runs with identical inputs."""
 
-    def __init__(self, data, cache, *, scene_size=None):
+    def __init__(self, data, cache, *, scene_size=None, cache_file=None):
         self.cache = cache
         allowed = split_image_ids(data, "train")
         self.heads = {i: data.gt_head_boxes_by_image.get(i, []) for i in allowed}
         self.image_paths = {i: Path(data.image_path(i)) for i in allowed}
         self.scene_size = scene_size
         self._ids = {}
+        self._saved_count = 0
+        self.cache_file = Path(cache_file) if cache_file is not None else None
+        if self.cache_file is None:
+            return
+        if not cache.cache_id:
+            raise ValueError("persistent supervision requires a feature cache ID")
+        # Feature cache IDs bind immutable crops. Never import legacy shard labels.
+        signature = {
+            "version": "train-head-alignment-v1",
+            "cache_id": cache.cache_id,
+            "source_cache_id": getattr(
+                getattr(cache, "_scene_cache", None), "cache_id", None
+            ),
+            "scene_size": scene_size,
+            "images": [
+                [i, data.images_by_id[i]["path"], self.heads[i]] for i in allowed
+            ],
+        }
+        self.key = hashlib.sha256(
+            json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if self.cache_file is not None and self.cache_file.is_file():
+            stored = json.loads(self.cache_file.read_text(encoding="utf-8"))
+            if stored.get("key") == self.key:
+                self._ids = stored["identities"]
+                if not self._ids.keys() <= self.heads.keys():
+                    raise ValueError("supervision cache contains non-train images")
+                self._saved_count = len(self._ids)
+
+    def save(self):
+        """Publish completed train alignments after a CPU batch."""
+        if self.cache_file is None or len(self._ids) == self._saved_count:
+            return
+        atomic_write_text(
+            self.cache_file,
+            json.dumps(
+                {"key": self.key, "identities": self._ids}, separators=(",", ":")
+            )
+            + "\n",
+        )
+        self._saved_count = len(self._ids)
 
     def load_ids(self, image_ids, max_people):
         result = []

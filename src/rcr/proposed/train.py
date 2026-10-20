@@ -259,6 +259,7 @@ def train(cfg: dict) -> Path:
         scene_root=data_cfg.get("dino_cache"),
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
+        native_lru_mib=cache_cfg.get("native_lru_mib", 0),
         mmap_shards=cache_cfg.get("mmap_shards", False),
     )
     cache.validate_gallery(data.gallery_ids)
@@ -272,7 +273,10 @@ def train(cfg: dict) -> Path:
         raise ValueError("cache person encoder differs from the training config")
     candidate_ids = split_image_ids(data, "train")
     supervision = TrainSupervision(
-        data, cache, scene_size=cfg.get("image_encoder", {}).get("scene_size")
+        data,
+        cache,
+        scene_size=cfg.get("image_encoder", {}).get("scene_size"),
+        cache_file=cache_cfg.get("supervision_cache"),
     )
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
@@ -318,18 +322,29 @@ def train(cfg: dict) -> Path:
 
     def prepare(job):
         rows, candidates, stats = job
+        cpu_times = {}
+        prepare_start = perf_counter()
         visual = prepare_visual_batch(
             rows,
             candidates,
             cache,
             supervision=supervision,
             state_image_ids=[state_images[row["sample_id"]] for row in rows],
+            timings=cpu_times,
         )
+        start = perf_counter()
+        supervision.save()
+        cpu_times["save"] = perf_counter() - start
+        start = perf_counter()
         tokens = text_cache.batch(rows)
+        cpu_times["tokens"] = perf_counter() - start
+        start = perf_counter()
         if device.type == "cuda":
             visual = {key: value.pin_memory() for key, value in visual.items()}
             tokens = {key: value.pin_memory() for key, value in tokens.items()}
-        return rows, stats, visual, tokens
+        cpu_times["pin"] = perf_counter() - start
+        cpu_times["total"] = perf_counter() - prepare_start
+        return rows, stats, visual, tokens, cpu_times
 
     output = Path(output_cfg["dir"])
     output.mkdir(parents=True, exist_ok=True)
@@ -346,6 +361,10 @@ def train(cfg: dict) -> Path:
         "batch_size": train_cfg["batch_size"],
         "candidates": train_cfg["candidates"],
         "fafa_text_policy": getattr(cache.native, "text_policy", None),
+        "scene_lru_mib": cache_cfg.get("lru_mib", 0),
+        "native_lru_mib": cache_cfg.get("native_lru_mib", 0),
+        "supervision_cache": cache_cfg.get("supervision_cache"),
+        "supervision_cached_images": len(supervision._ids),
     }
     write_json(output / "runtime.json", runtime)
     print(
@@ -458,6 +477,12 @@ def train(cfg: dict) -> Path:
             }
             counts = {}
             timings = {"input_wait": 0.0, "forward": 0.0, "backward_step": 0.0}
+            timings.update({
+                f"prepare_{name}": 0.0
+                for name in (
+                    "scene", "labels", "fafa", "save", "tokens", "pin", "total",
+                )
+            })
             steps = 0
 
             def jobs(batches=batches, generator=generator, hard_pools=hard_pools):
@@ -487,7 +512,7 @@ def train(cfg: dict) -> Path:
                     desc=f"epoch {epoch + 1}/{train_cfg['epochs']}",
                 )
                 waiting_since = perf_counter()
-                for rows, sampling_counts, visual, tokens in progress:
+                for rows, sampling_counts, visual, tokens, cpu_times in progress:
                     forward_start = perf_counter()
                     timings["input_wait"] += forward_start - waiting_since
                     optimizer.zero_grad(set_to_none=True)
@@ -536,6 +561,14 @@ def train(cfg: dict) -> Path:
                     }
                     timings["backward_step"] += perf_counter() - backward_start
                     steps += 1
+                    for name, seconds in cpu_times.items():
+                        timings[f"prepare_{name}"] += seconds
+                    if steps == 1 or steps % 20 == 0:
+                        detail = " ".join(
+                            f"{name}={seconds:.2f}s"
+                            for name, seconds in cpu_times.items()
+                        )
+                        tqdm.write(f"CPU prep step {global_step}: {detail}")
                     state_pairs_seen += batch_counts["state_pairs"]
                     for name, value in batch_counts.items():
                         counts[name] = counts.get(name, 0) + value

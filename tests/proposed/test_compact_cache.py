@@ -222,7 +222,7 @@ def test_target_loader_reads_unique_shards_once_and_releases_each(
     torch.testing.assert_close(result[1], result[4], rtol=0, atol=0)
 
 
-def test_fafa_shards_share_scene_lru_without_changing_features(
+def test_fafa_shards_have_a_separate_lru_without_changing_features(
     split_cache, monkeypatch
 ):
     from rcr.common.data import load_rcr_inputs
@@ -231,7 +231,11 @@ def test_fafa_shards_share_scene_lru_without_changing_features(
     extraction.finish_fafa_cache(cfg, stage="fafa")
     root = Path(cfg["data"]["fafa_image_cache"])
     gallery = GalleryCache(
-        root, scene_root=source, query_root=cfg["data"]["fafa_query_cache"], lru_mib=1
+        root,
+        scene_root=source,
+        query_root=cfg["data"]["fafa_query_cache"],
+        lru_mib=1,
+        native_lru_mib=1,
     )
     sample = load_rcr_inputs(
         cfg["data"]["final_dir"], cfg["data"]["image_root"]
@@ -261,3 +265,15 @@ def test_fafa_shards_share_scene_lru_without_changing_features(
     assert len(reads) == first_reads == 5  # two scenes, two targets, one query
     assert gallery._bytes == sum(size for _, size in gallery._items.values())
     assert gallery._bytes <= 1024**2
+
+    assert gallery._native_bytes == sum(
+        size for _, size in gallery._native_items.values()
+    )
+    assert gallery._native_bytes <= 1024**2
+    # Repeated large native shards may evict each other, never the scene working set.
+    for n in range(3):
+        gallery._cached(("fafa-target", "pressure", n), lambda: torch.zeros(200_000))
+    torch.testing.assert_close(gallery.load(indices)[0], scenes[0], rtol=0, atol=0)
+    assert len(reads) == first_reads
+    assert all(isinstance(key, int) for key in gallery._items)
+    assert gallery._native_bytes <= 1024**2

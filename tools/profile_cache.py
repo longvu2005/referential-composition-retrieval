@@ -97,18 +97,25 @@ def profile(cfg, data, plan, state, mmap_shards, pass_number):
     paths = cfg["data"]
     with read_mode(mmap_shards, Path(paths["dino_cache"]) / "features") as reads:
         start = perf_counter()
+        reader_options = {}
+        if "native_lru_mib" in inspect.signature(GalleryCache).parameters:
+            reader_options["native_lru_mib"] = cache_cfg.get("native_lru_mib", 0)
         cache = GalleryCache(
             paths["fafa_image_cache"], scene_root=paths["dino_cache"],
             query_root=paths.get("fafa_query_cache"),
-            lru_mib=cache_cfg.get("lru_mib", 0),
+            lru_mib=cache_cfg.get("lru_mib", 0), **reader_options,
         )
         index_seconds = perf_counter() - start
         supervision = None
         if "supervision" in inspect.signature(prepare_visual_batch).parameters:
             from rcr.proposed.supervision import TrainSupervision
 
+            supervision_options = {}
+            if "cache_file" in inspect.signature(TrainSupervision).parameters:
+                supervision_options["cache_file"] = cache_cfg.get("supervision_cache")
             supervision = TrainSupervision(
-                data, cache, scene_size=cfg["image_encoder"]["scene_size"]
+                data, cache, scene_size=cfg["image_encoder"]["scene_size"],
+                **supervision_options,
             )
         totals = {}
         for method in ("load_groups", "native_queries", "native_targets"):
@@ -121,6 +128,8 @@ def profile(cfg, data, plan, state, mmap_shards, pass_number):
             "index_seconds": index_seconds, "format_version": cache.format_version,
             "gallery_images": len(cache.image_ids), "patch_hw": list(cache.patch_hw),
             "lru_mib": cache_cfg.get("lru_mib", 0),
+            "native_lru_mib": reader_options.get("native_lru_mib"),
+            "supervision_cached_images": len(supervision._ids) if supervision else 0,
             "global_means_in_index": cache._global_features is not None or (
                 source is not None and source._global_features is not None
             ),

@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from time import perf_counter
 
 import torch
 from torch import Tensor, nn
@@ -59,6 +60,7 @@ def prepare_visual_batch(
     *,
     supervision,
     state_image_ids: list[set[str]] | None = None,
+    timings: dict | None = None,
 ) -> dict[str, Tensor]:
     """Read and collate CPU features/supervision without running a model."""
 
@@ -71,9 +73,13 @@ def prepare_visual_batch(
         [by_id[image_id] for rows in candidate_image_ids for image_id in rows]
     )
 
+    start = perf_counter()
     query, target = cache.load_groups(query_idx, target_idx)
+    if timings is not None:
+        timings["scene"] = perf_counter() - start
     q_scene, q_persons, q_boxes, q_mask = query
     t_scene, t_persons, t_boxes, t_mask = target
+    start = perf_counter()
     q_ids = supervision.load_ids(
         [row["query_image_id"] for row in samples], q_persons.shape[1]
     )
@@ -81,6 +87,8 @@ def prepare_visual_batch(
         [image_id for rows in candidate_image_ids for image_id in rows],
         t_persons.shape[1],
     )
+    if timings is not None:
+        timings["labels"] = perf_counter() - start
 
     subjects = [sample["subjects"] for sample in samples]
     identity_vocab: dict[str, int] = {}
@@ -134,10 +142,15 @@ def prepare_visual_batch(
                 )
 
     k_t = t_persons.shape[1]
+    start = perf_counter()
+    fafa_query = cache.native_queries(samples, q_persons.shape[1])
+    fafa_targets = cache.native_targets(target_idx, k_t).unflatten(0, (b, c))
+    if timings is not None:
+        timings["fafa"] = perf_counter() - start
     batch = {
         "query_scene": q_scene,
         "query_persons": q_persons,
-        "fafa_query": cache.native_queries(samples, q_persons.shape[1]),
+        "fafa_query": fafa_query,
         "query_boxes": q_boxes,
         "query_person_mask": q_mask,
         "query_identity_labels": identity_labels,
@@ -145,7 +158,7 @@ def prepare_visual_batch(
         "grounding_targets": grounding_targets,
         "target_scene": t_scene.reshape(b, c, *t_scene.shape[1:]),
         "target_persons": t_persons.reshape(b, c, k_t, t_persons.shape[-1]),
-        "fafa_targets": cache.native_targets(target_idx, k_t).unflatten(0, (b, c)),
+        "fafa_targets": fafa_targets,
         "target_boxes": t_boxes.reshape(b, c, k_t, 4),
         "target_mask": t_mask.reshape(b, c, k_t),
         "target_identity_labels": target_identity_labels.reshape(b, c, k_t),
