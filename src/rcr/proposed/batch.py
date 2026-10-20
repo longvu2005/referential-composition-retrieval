@@ -80,13 +80,31 @@ def prepare_visual_batch(
     q_scene, q_persons, q_boxes, q_mask = query
     t_scene, t_persons, t_boxes, t_mask = target
     start = perf_counter()
+    positives = [
+        set(sample["positive_image_ids"])
+        if "positive_image_ids" in sample
+        else {sample["target_image_id"]}
+        for sample in samples
+    ]
     q_ids = supervision.load_ids(
         [row["query_image_id"] for row in samples], q_persons.shape[1]
     )
-    t_ids = supervision.load_ids(
-        [image_id for rows in candidate_image_ids for image_id in rows],
-        t_persons.shape[1],
-    )
+    # Only query/positive crops enter identity loss. Negative state supervision
+    # comes from image-level GT pools and needs no detector-to-head alignment.
+    k_t = t_persons.shape[1]
+    t_ids = [[None] * k_t for _ in range(b * c)]
+    positive_slots = [
+        (n * c + j, image_id)
+        for n, rows in enumerate(candidate_image_ids)
+        for j, image_id in enumerate(rows)
+        if image_id in positives[n]
+    ]
+    if positive_slots:
+        positive_ids = supervision.load_ids(
+            [image_id for _, image_id in positive_slots], k_t
+        )
+        for (position, _), ids in zip(positive_slots, positive_ids, strict=True):
+            t_ids[position] = ids
     if timings is not None:
         timings["labels"] = perf_counter() - start
 
@@ -97,12 +115,6 @@ def prepare_visual_batch(
     )
     target_identity_labels = _identity_labels(t_ids, identity_vocab)
 
-    positives = [
-        set(sample["positive_image_ids"])
-        if "positive_image_ids" in sample
-        else {sample["target_image_id"]}
-        for sample in samples
-    ]
     positive_mask = torch.tensor(
         [
             [image_id in positive for image_id in rows]
@@ -141,7 +153,6 @@ def prepare_visual_batch(
                     image_id, t_mask[index] & (target_identity_labels[index] >= 0)
                 )
 
-    k_t = t_persons.shape[1]
     start = perf_counter()
     fafa_query = cache.native_queries(samples, q_persons.shape[1])
     fafa_targets = cache.native_targets(target_idx, k_t).unflatten(0, (b, c))
