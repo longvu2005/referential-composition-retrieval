@@ -149,7 +149,9 @@ Pooled extraction shards in `.persons/` are temporary. They are assembled into
 one compact, memory-mapped index and removed after publication. Finalization
 holds only actual pooled person features, rather than a gallery-wide padded
 tensor. Scene patches and global means are owned by DINO. Legacy global means
-are pooled lazily on first use, without writing to the DINO source. Separate disk
+are pooled only for requested gallery images and retained in CPU memory, without
+writing to the DINO source. Train mining does not scan val/test/leftover scenes.
+Indexed DINO means remain reusable without scene reads. Separate disk
 checks reserve the image build's peak space and only missing query features,
 including serialization overhead. Only validated reusable image shards reduce
 the reservation. A format-5 interrupted image build can resume into format 6
@@ -214,6 +216,21 @@ include padded tokens, masks, device and precision, so AMP features cannot leak
 into FP32 validation. Only unprojected outputs are reused; the text projection
 still learns every step. Both LRUs retain immutable inputs, not learned scores.
 One-batch prefetch and within-batch image deduplication remain.
+
+Large `index.pt` files stay memory-mapped. Scene and native target shards use
+buffered reads by default, as in `ec5a2a2`; set `cache.mmap_shards=true` to compare
+the mapped reader on your filesystem. Scores, storage precision and crop order
+are identical in both modes. Buffered reads can increase resident CPU memory;
+the same LRU byte budget still applies to retained shards.
+
+`tools/profile_cache.py --config configs/proposed.yaml --batches 1` uses the same
+sampled training batches for buffered and mapped reads in both orders. It loads
+no pretrained model, runs no forward/backward, and writes no data/cache files.
+Use the proposed interpreter. Output separates scene collation, train GT
+alignment, native queries and native targets, with shard-load counts and total
+CPU batch preparation time. `--threads 1` provides a separate check for excessive
+CPU threading. OS page cache is not controlled, and peak RSS is the process's
+lifetime high-water mark. See [cache I/O audit](cache_io_audit.md).
 
 `runtime.json` records the actual device, visible GPU count, AMP setting, cache
 text policy and feature dimensions. Progress shows average `wait`, `fwd`, `bwd`

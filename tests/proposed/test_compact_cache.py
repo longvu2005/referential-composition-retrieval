@@ -35,6 +35,34 @@ def _uneven_source(source):
     return counts
 
 
+@pytest.mark.parametrize("mmap_shards", [False, True])
+def test_scene_and_target_io_mode_preserves_values(
+    split_cache, monkeypatch, mmap_shards
+):
+    cfg, _, source, _, _ = split_cache
+    extraction.finish_fafa_cache(cfg, stage="fafa-image")
+    root = Path(cfg["data"]["fafa_image_cache"])
+    cache = GalleryCache(root, scene_root=source, mmap_shards=mmap_shards)
+    reads = []
+    original = torch.load
+
+    def load(path, **kwargs):
+        reads.append((Path(path).parent.name, kwargs.get("mmap")))
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(torch, "load", load)
+    indices = torch.tensor([0, 1, 0])
+    scene, persons, _, _ = cache.load(indices)
+    targets = cache.native_targets(indices, persons.shape[1])
+    assert reads and all(mode == mmap_shards for _, mode in reads)
+    assert {group for group, _ in reads} == {"features", "targets"}
+    expected = GalleryCache(root, scene_root=source, mmap_shards=not mmap_shards)
+    torch.testing.assert_close(scene, expected.load(indices)[0], rtol=0, atol=0)
+    torch.testing.assert_close(
+        targets, expected.native_targets(indices, persons.shape[1]), rtol=0, atol=0
+    )
+
+
 @pytest.mark.parametrize("legacy_version", [4, 5])
 def test_packed_and_legacy_indices_have_identical_coarse_inputs_and_outputs(
     split_cache, legacy_version

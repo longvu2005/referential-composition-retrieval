@@ -13,6 +13,9 @@ class NativeFixture:
     def validate_samples(self, samples):
         pass
 
+    def load_global_features(self, indices):
+        return self.global_features[indices]
+
     def load_queries(self, samples, max_people):
         subjects = max(len(row["subjects"]) for row in samples)
         result = torch.zeros(len(samples), subjects, max_people, 5)

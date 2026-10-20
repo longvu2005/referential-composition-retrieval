@@ -259,6 +259,7 @@ def train(cfg: dict) -> Path:
         scene_root=data_cfg.get("dino_cache"),
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
+        mmap_shards=cache_cfg.get("mmap_shards", False),
     )
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples([*samples, *val_samples])

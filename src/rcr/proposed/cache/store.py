@@ -6,7 +6,6 @@ from threading import Lock
 
 import torch
 from torch import Tensor
-from tqdm import tqdm
 
 from rcr.common.data import inference_samples
 
@@ -21,6 +20,7 @@ class GalleryCache:
         scene_root: str | Path | None = None,
         query_root: str | Path | None = None,
         lru_mib: int = 0,
+        mmap_shards: bool = False,
     ) -> None:
         if not isinstance(lru_mib, int) or lru_mib < 0:
             raise ValueError("cache.lru_mib must be a nonnegative integer")
@@ -28,6 +28,7 @@ class GalleryCache:
         self._items: OrderedDict[object, tuple[object, int]] = OrderedDict()
         self._bytes = 0
         self._lock = Lock()
+        self.mmap_shards = mmap_shards
         self.root = Path(root)
         if (self.root / ".building").exists():
             raise RuntimeError(
@@ -44,7 +45,7 @@ class GalleryCache:
         if index.get("layout") == "fafa":
             if scene_root is None:
                 raise ValueError("FAFA person cache requires data.dino_cache")
-            self._scene_cache = GalleryCache(scene_root)
+            self._scene_cache = GalleryCache(scene_root, mmap_shards=mmap_shards)
             source = self._scene_cache
             source.validate_gallery(index["image_ids"])
             if index["source_cache_id"] != source.cache_id:
@@ -72,6 +73,7 @@ class GalleryCache:
         self.person_offsets = index.get("person_offsets")
         self.patch_hw = tuple(index["patch_hw"])
         self._global_features = index.get("global_features")
+        self._global_rows: dict[int, Tensor] = {}
         if self._global_features is not None and self._global_features.shape != (
             len(self.image_ids),
             self.scene_dim,
@@ -163,7 +165,7 @@ class GalleryCache:
             self.root / "features" / f"{index}.pt",
             map_location="cpu",
             weights_only=True,
-            mmap=True,
+            mmap=self.mmap_shards,
         )
         if item.get("cache_id") != self.cache_id or (
             "image_id" in item and item["image_id"] != self.image_ids[index]
@@ -232,24 +234,33 @@ class GalleryCache:
 
     @property
     def global_features(self) -> Tensor:
-        """Mean scene patches [G,D], kept on CPU and reused across evaluations.
-
-        Format-1 caches are read once, one feature file at a time. This supports
-        read-only Kaggle inputs without rebuilding the detector/image cache.
-        Format-2 DINO indices store the same FP32 means directly in index.pt.
-        """
+        """Explicit full-gallery view; ranking uses scoped loads instead."""
         if self._global_features is None:
-            if self._scene_cache is not None:
-                self._global_features = self._scene_cache.global_features
-                return self._global_features
-            features = torch.empty(len(self.image_ids), self.scene_dim)
-            for i in tqdm(
-                range(len(self.image_ids)), desc="pool cached global features"
-            ):
-                item = self._load_item(i)
-                features[i] = item["scene"].float().mean(dim=0)
-            self._global_features = features
+            self._global_features = self.load_global_features(
+                torch.arange(len(self.image_ids))
+            )
+            self._global_rows.clear()
         return self._global_features
+
+    def load_global_features(self, indices: Tensor) -> Tensor:
+        """Read only requested images; retain their fixed FP32 means on CPU.
+
+        A packed FAFA index can rely on a legacy DINO index with no means.
+        Mining the train gallery must not scan val/test/leftover scene shards.
+        Reuse any full scene already present in this reader's LRU.
+        """
+        if self._global_features is not None:
+            return self._global_features[indices]
+        source = self._scene_cache
+        if source is not None and source._global_features is not None:
+            return source.load_global_features(indices)
+        rows = indices.tolist()
+        if not rows:
+            return torch.empty(0, self.scene_dim)
+        for i in dict.fromkeys(rows):
+            if i not in self._global_rows:
+                self._global_rows[i] = self._get_item(i)["scene"].float().mean(0)
+        return torch.stack([self._global_rows[i] for i in rows])
 
     def load(
         self, indices: Tensor

@@ -28,6 +28,7 @@ cache:
   allow_legacy_dino: true
   storage_dtype: float16
   lru_mib: 1024
+  mmap_shards: false  # Eager scene/target reads, as in ec5a2a2; large indices stay mmap.
   text_lru_mib: 256   # frozen BERT outputs only; projection remains trainable
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
@@ -98,7 +99,7 @@ wandb:
   mode: online
   log_every_steps: 20
 runtime:
-  device: auto
+  device: cuda
 checkpoint: runs/proposed-fafa-unified/best.pt
 output:
   # Root only; the runner appends each split.

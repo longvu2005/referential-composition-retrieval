@@ -87,12 +87,11 @@ def _encode_gallery_state(
     image_indices: Tensor,
 ) -> Tensor:
     """Project global image features once per retrieval call, retaining CPU output."""
-    features = cache.global_features
     projection = model.state_image_proj.weight
     state = torch.empty(len(image_indices), projection.shape[0], dtype=projection.dtype)
     for start in range(0, len(image_indices), batch_size):
         stop = min(start + batch_size, len(image_indices))
-        chunk = features[image_indices[start:stop]].to(
+        chunk = cache.load_global_features(image_indices[start:stop]).to(
             device=device, dtype=projection.dtype
         )
         state[start:stop] = model.encode_image_state(chunk).cpu()

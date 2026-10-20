@@ -252,7 +252,9 @@ class NativeFAFACache:
 
     def _read(self, group, index, key, shape):
         path = self.root / group / f"{index}.pt"
-        item = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        item = torch.load(
+            path, map_location="cpu", weights_only=True, mmap=self.gallery.mmap_shards
+        )
         features = item.get("features")
         if (
             item.get("cache_id") != self.cache_id

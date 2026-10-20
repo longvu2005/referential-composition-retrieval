@@ -121,7 +121,16 @@ Training prints the actual device/AMP setting and average input-wait, forward an
 backward times per step. `runtime.json` records the selected hardware; history
 separates training, mining, evaluation and checkpoint time. On Kaggle, set
 `runtime.device=cuda` to require a GPU. See the
-[training performance audit](docs/training_performance_audit.md).
+[cache I/O audit](docs/cache_io_audit.md).
+
+Large cache indices stay memory-mapped. Scene/target shards use buffered reads
+by default (`cache.mmap_shards=false`), matching the original reader. Legacy
+global means are loaded only for the gallery being ranked. To compare read
+modes on your own cache without training:
+
+```bash
+.venv-proposed/bin/python tools/profile_cache.py --config configs/proposed.yaml --batches 1
+```
 
 ### Caches
 
