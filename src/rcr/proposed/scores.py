@@ -150,9 +150,11 @@ def fafa_binding_scores(
         selected = member > 0
         length, dim = targets.shape[-2:]
         # Gather first: unused/padded detections (even NaN/Inf) cannot enter FDA.
-        flat = targets.detach().float().flatten(2)
-        aligned = gather_matched(flat, matching).reshape(
-            targets.shape[0], query.shape[2], length, dim
+        flat = targets.detach().flatten(2)
+        aligned = (
+            gather_matched(flat, matching)
+            .float()
+            .reshape(targets.shape[0], query.shape[2], length, dim)
         )
         query = query.detach().float().masked_fill(~selected[..., None], 0)
         similarity = torch.einsum(

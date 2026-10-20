@@ -25,7 +25,7 @@ class GalleryCache:
         if not isinstance(lru_mib, int) or lru_mib < 0:
             raise ValueError("cache.lru_mib must be a nonnegative integer")
         self._limit = lru_mib * 1024**2
-        self._items: OrderedDict[int, tuple[dict, int]] = OrderedDict()
+        self._items: OrderedDict[object, tuple[object, int]] = OrderedDict()
         self._bytes = 0
         self._lock = Lock()
         self.root = Path(root)
@@ -201,27 +201,32 @@ class GalleryCache:
         return item
 
     def _get_item(self, index: int) -> dict:
+        return self._cached(index, lambda: self._load_item(index))
+
+    def _cached(self, key, load):
+        """Share one byte budget between scenes and native FAFA shards."""
         # A single reader thread shares this cache with the main process.
         # Cached tensors are immutable; collation creates independent batches.
         with self._lock:
-            if index in self._items:
-                item, size = self._items.pop(index)
-                self._items[index] = (item, size)
+            if key in self._items:
+                item, size = self._items.pop(key)
+                self._items[key] = (item, size)
                 return item
-            item = self._load_item(index)
+            item = load()
             if not self._limit:
                 return item
+            values = (item,) if isinstance(item, Tensor) else item.values()
             storages = {
                 value.untyped_storage().data_ptr(): value.untyped_storage().nbytes()
-                for value in item.values()
-                if isinstance(value, torch.Tensor)
+                for value in values
+                if isinstance(value, Tensor)
             }
             size = sum(storages.values())
             if size <= self._limit:
                 while self._items and self._bytes + size > self._limit:
                     _, (_, removed) = self._items.popitem(last=False)
                     self._bytes -= removed
-                self._items[index] = (item, size)
+                self._items[key] = (item, size)
                 self._bytes += size
             return item
 

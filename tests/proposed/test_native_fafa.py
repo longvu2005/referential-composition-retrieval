@@ -23,10 +23,15 @@ from tools import run as cli
 
 
 @pytest.mark.parametrize("tokens,k", [(3, 6), (8, 6), (8, 1)])
-def test_native_binding_equals_official_fda_on_identity_assigned_pairs(tokens, k):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_native_binding_equals_official_fda_on_identity_assigned_pairs(
+    tokens, k, dtype
+):
     generator = torch.Generator().manual_seed(18)
     query = F.normalize(torch.randn(1, 2, 2, 5, generator=generator), dim=-1)
-    target = F.normalize(torch.randn(1, 2, tokens, 5, generator=generator), dim=-1)
+    target = F.normalize(torch.randn(1, 2, tokens, 5, generator=generator), dim=-1).to(
+        dtype
+    )
     matching = partial_identity_matching(
         torch.eye(2)[None],
         torch.eye(2).flip(0)[None],
@@ -34,12 +39,19 @@ def test_native_binding_equals_official_fda_on_identity_assigned_pairs(tokens, k
         torch.ones(1, 2, dtype=torch.bool),
     )
     assert matching.indices.tolist() == [[1, 0]]
+    normalized_target = F.normalize(target.float(), dim=-1)
     expected = (
-        fda_scores(query[0, 0, 0:1], target[0], k)[0, 1]
-        + fda_scores(query[0, 1, 1:2], target[0], k)[0, 0]
+        fda_scores(query[0, 0, 0:1], normalized_target[0], k)[0, 1]
+        + fda_scores(query[0, 1, 1:2], normalized_target[0], k)[0, 0]
     ) / 2
     actual = fafa_binding_scores(query, target, matching=matching, k=k)
     torch.testing.assert_close(actual[0], expected)
+    torch.testing.assert_close(
+        actual,
+        fafa_binding_scores(query, target.float(), matching=matching, k=k),
+        rtol=0,
+        atol=0,
+    )
     # Padding is not visual evidence, including NaN/Inf in unused slots.
     query[0, 0, 1] = float("nan")
     query[0, 1, 0] = float("inf")
@@ -193,7 +205,7 @@ def test_one_image_forward_supplies_both_person_and_native_target(
         gallery.person_row(0)[:1].float(), expected.image_embeds.mean(1)
     )
     torch.testing.assert_close(
-        gallery.native_targets(torch.tensor([0]), 1)[0],
+        gallery.native_targets(torch.tensor([0]), 1)[0].float(),
         expected.image_embeds_proj,
         atol=3e-4,
         rtol=1e-3,

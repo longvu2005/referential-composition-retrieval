@@ -192,3 +192,44 @@ def test_target_loader_reads_unique_shards_once_and_releases_each(
     assert all(ref() is None for ref in refs)
     torch.testing.assert_close(result[0], result[2], rtol=0, atol=0)
     torch.testing.assert_close(result[1], result[4], rtol=0, atol=0)
+
+
+def test_fafa_shards_share_scene_lru_without_changing_features(
+    split_cache, monkeypatch
+):
+    from rcr.common.data import load_rcr_inputs
+
+    cfg, _, source, _, _ = split_cache
+    extraction.finish_fafa_cache(cfg, stage="fafa")
+    root = Path(cfg["data"]["fafa_image_cache"])
+    gallery = GalleryCache(
+        root, scene_root=source, query_root=cfg["data"]["fafa_query_cache"], lru_mib=1
+    )
+    sample = load_rcr_inputs(
+        cfg["data"]["final_dir"], cfg["data"]["image_root"]
+    ).samples[:1]
+    reads = []
+    load = torch.load
+
+    def track(path, **kwargs):
+        reads.append(Path(path))
+        return load(path, **kwargs)
+
+    monkeypatch.setattr(torch, "load", track)
+    indices = torch.tensor([0, 1, 0])
+    scenes = gallery.load(indices)
+    targets = gallery.native_targets(indices, 1)
+    query = gallery.native_queries(sample, 1)
+    first_reads = len(reads)
+    assert targets.dtype == torch.float16
+    # Public outputs are copies; mutating them cannot poison cached evidence.
+    expected = targets.clone()
+    targets.zero_()
+    torch.testing.assert_close(
+        gallery.native_targets(indices, 1), expected, rtol=0, atol=0
+    )
+    torch.testing.assert_close(gallery.native_queries(sample, 1), query, rtol=0, atol=0)
+    torch.testing.assert_close(gallery.load(indices)[0], scenes[0], rtol=0, atol=0)
+    assert len(reads) == first_reads == 5  # two scenes, two targets, one query
+    assert gallery._bytes == sum(size for _, size in gallery._items.values())
+    assert gallery._bytes <= 1024**2

@@ -117,6 +117,12 @@ python tools/run.py calibrate   --config configs/calibration.yaml
 Use `--set key=value ...` for typed overrides. `--max-queries` is only a smoke-test
 option for matching retrieve/evaluate runs; normal results use complete splits.
 
+Training prints the actual device/AMP setting and average input-wait, forward and
+backward times per step. `runtime.json` records the selected hardware; history
+separates training, mining, evaluation and checkpoint time. On Kaggle, set
+`runtime.device=cuda` to require a GPU. See the
+[training performance audit](docs/training_performance_audit.md).
+
 ### Caches
 
 The proposed pipeline keeps three independent caches:
@@ -127,9 +133,15 @@ The proposed pipeline keeps three independent caches:
 
 Completed caches are reused automatically. Build only one stage with
 `--cache-stage dino`, `fafa-image`, or `fafa-query`. Query text changes invalidate
-only the query cache. The default FAFA policy is 128 tokens, and the default query
-cache is `cache/fafa-queries-txt128` so legacy 32-token features are not mixed with
-current runs.
+only the query cache. FAFA's text budget comes from `checkpoint.max_txt_len` in
+`configs/fafa.yaml` (currently 32 tokens). Use a separate query-cache directory
+when changing that policy; image features remain reusable.
+
+`cache.lru_mib` is one shared CPU budget for scenes and native FAFA target/query
+shards. `cache.text_lru_mib` separately bounds frozen BERT output tensors (256 MiB
+by default); its projection is recomputed and trained every step. Set either
+budget to zero to disable that cache. Cached tensors retain their original
+precision, and FDA normalizes matched target rows in FP32.
 
 Visual caches no longer store GT labels. Train-only alignment is computed lazily
 in memory from GT heads and the existing predicted pixel boxes. Older cache files

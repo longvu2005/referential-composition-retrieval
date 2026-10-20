@@ -170,22 +170,32 @@ class NativeQueryCache:
                 "run build-cache --cache-stage fafa-query"
             )
 
-    def load(self, sample, count: int) -> Tensor:
+    def _read(self, key: str, count: int) -> Tensor:
+        path = self.root / "features" / f"{key}.pt"
+        item = torch.load(path, map_location="cpu", weights_only=True)
+        value = item.get("features")
+        if (
+            item.get("cache_id") != self.cache_id
+            or item.get("key") != key
+            or not isinstance(value, Tensor)
+            or value.shape != (count, self.dim)
+            or value.dtype != torch.float32
+            or not torch.isfinite(value).all()
+        ):
+            raise ValueError(f"invalid native FAFA feature shard: {path}")
+        return value
+
+    def load(self, sample, count: int, *, memory_cache=None) -> Tensor:
         entry = self.queries[sample["sample_id"]]
         features = []
         for key in entry["features"]:
-            path = self.root / "features" / f"{key}.pt"
-            item = torch.load(path, map_location="cpu", weights_only=True)
-            value = item.get("features")
-            if (
-                item.get("cache_id") != self.cache_id
-                or item.get("key") != key
-                or not isinstance(value, Tensor)
-                or value.shape != (count, self.dim)
-                or value.dtype != torch.float32
-                or not torch.isfinite(value).all()
-            ):
-                raise ValueError(f"invalid native FAFA feature shard: {path}")
+            if memory_cache is None:
+                value = self._read(key, count)
+            else:
+                value = memory_cache(
+                    ("fafa-query", self.cache_id, key, count),
+                    lambda key=key: self._read(key, count),
+                )
             features.append(value)
         return torch.stack(features)
 
@@ -266,15 +276,24 @@ class NativeFAFACache:
                 raise ValueError("native/query person padding differs")
             shape = (len(sample["subjects"]), count, self.dim)
             if self.query_cache is not None:
-                features = self.query_cache.load(sample, count)
+                features = self.query_cache.load(
+                    sample, count, memory_cache=self.gallery._cached
+                )
             else:
                 entry = self.queries[sample["sample_id"]]
-                features = self._read("queries", entry["index"], entry["key"], shape)
+                features = self.gallery._cached(
+                    ("fafa-query", entry["index"], entry["key"], shape),
+                    lambda entry=entry, shape=shape: self._read(
+                        "queries", entry["index"], entry["key"], shape
+                    ),
+                )
             out[n, : shape[0], :count] = features
         return out
 
     def load_targets(self, indices: Tensor, max_people: int) -> Tensor:
-        out = torch.zeros(len(indices), max_people, self.tokens, self.dim)
+        # Keep the on-disk precision through CPU collation and H2D transfer.
+        # FDA converts only the identity-assigned rows to FP32 after gathering.
+        out = None
         rows = {}
         for n, i in enumerate(indices.tolist()):
             rows.setdefault(i, []).append(n)
@@ -284,13 +303,22 @@ class NativeFAFACache:
             count = int(self.gallery.mask[i].sum())
             if count > max_people:
                 raise ValueError("native/target person padding differs")
-            features = self._read(
-                "targets",
-                i,
-                self.gallery.image_ids[i],
-                (count, self.tokens, self.dim),
+            shape = (count, self.tokens, self.dim)
+            features = self.gallery._cached(
+                ("fafa-target", i, shape),
+                lambda i=i, shape=shape: self._read(
+                    "targets", i, self.gallery.image_ids[i], shape
+                ),
             )
+            if out is None:
+                out = features.new_zeros(
+                    len(indices), max_people, self.tokens, self.dim
+                )
             for n in positions:
                 out[n, :count] = features
             del features
-        return out
+        return (
+            out
+            if out is not None
+            else self.gallery.persons.new_zeros(0, max_people, self.tokens, self.dim)
+        )

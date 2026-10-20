@@ -28,6 +28,7 @@ cache:
   allow_legacy_dino: true
   storage_dtype: float16
   lru_mib: 1024
+  text_lru_mib: 256   # frozen BERT outputs only; projection remains trainable
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased

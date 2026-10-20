@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 from statistics import fmean
+from time import perf_counter
 from typing import Any
 
 import torch
@@ -203,6 +204,15 @@ def _require_finite_loss(values, rows, epoch, step, amp_enabled, output):
     )
 
 
+def _scalar_values(values: dict[str, torch.Tensor]) -> dict[str, float | int]:
+    """Read scalar diagnostics with one device-to-host synchronization."""
+    numbers = torch.stack([value.detach().float() for value in values.values()])
+    return {
+        key: number if values[key].is_floating_point() else int(number)
+        for key, number in zip(values, numbers.cpu().tolist(), strict=True)
+    }
+
+
 def train(cfg: dict) -> Path:
     """Select best.pt by 0.5 * overall + 0.5 * macro-case validation Full-mAP."""
     validate_training_schedule(cfg)
@@ -279,7 +289,11 @@ def train(cfg: dict) -> Path:
 
     # BERT stays frozen, including the resized Subject-token embeddings.
     tokenizer, text_encoder = load_text_modules(
-        model_cfg["text_model"], dim, device, add_subject_markers=True
+        model_cfg["text_model"],
+        dim,
+        device,
+        add_subject_markers=True,
+        cache_mib=cache_cfg.get("text_lru_mib", 0),
     )
     text_cache = QueryTextCache(tokenizer)
     text_cache.prepare([*samples, *val_samples])
@@ -318,6 +332,28 @@ def train(cfg: dict) -> Path:
 
     output = Path(output_cfg["dir"])
     output.mkdir(parents=True, exist_ok=True)
+    runtime = {
+        "device": str(device),
+        "torch_version": str(torch.__version__),
+        "amp_enabled": amp_enabled,
+        "cpu_threads": torch.get_num_threads(),
+        "visible_gpus": torch.cuda.device_count(),
+        "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "patch_hw": list(cache.patch_hw),
+        "scene_dim": input_dim,
+        "person_dim": person_input_dim,
+        "batch_size": train_cfg["batch_size"],
+        "candidates": train_cfg["candidates"],
+        "fafa_text_policy": getattr(cache.native, "text_policy", None),
+    }
+    write_json(output / "runtime.json", runtime)
+    print(
+        f"Train runtime: device={device} ({runtime['gpu'] or 'CPU'}), "
+        f"AMP={amp_enabled}, threads={runtime['cpu_threads']}, "
+        f"patches={cache.patch_hw}, "
+        f"up to {train_cfg['batch_size'] * train_cfg['candidates']} pairs/step",
+        flush=True,
+    )
     # Reserve latest + best + an atomic temporary, including Adam's two moments.
     weights_bytes = tensor_bytes(
         {"model": model.state_dict(), "text": text_encoder.state_dict()}
@@ -366,6 +402,8 @@ def train(cfg: dict) -> Path:
 
     try:
         for epoch in range(train_cfg["epochs"]):
+            epoch_start = perf_counter()
+            mining_seconds = 0.0
             if (
                 int((train_cfg["candidates"] - 1) * sampling_cfg["hard_fraction"]) > 0
                 and epoch >= sampling_cfg["warmup_epochs"]
@@ -373,6 +411,8 @@ def train(cfg: dict) -> Path:
                 % sampling_cfg["refresh_every_epochs"]
                 == 0
             ):
+                print(f"epoch {epoch + 1}: mining train negatives", flush=True)
+                mining_start = perf_counter()
                 hard_pools = mine_hard_negatives(
                     samples,
                     cache,
@@ -396,6 +436,7 @@ def train(cfg: dict) -> Path:
                         "pools": hard_pools,
                     },
                 )
+                mining_seconds = perf_counter() - mining_start
             generator = torch.Generator().manual_seed(seed + epoch)
             batches = training_batches(
                 samples,
@@ -415,6 +456,8 @@ def train(cfg: dict) -> Path:
                 "identity_active": 0.0,
             }
             counts = {}
+            timings = {"input_wait": 0.0, "forward": 0.0, "backward_step": 0.0}
+            steps = 0
 
             def jobs(batches=batches, generator=generator, hard_pools=hard_pools):
                 for rows in batches:
@@ -435,13 +478,17 @@ def train(cfg: dict) -> Path:
                     )
                     yield rows, candidates, stats
 
+            train_start = perf_counter()
             with prefetch_batches(jobs(), prepare, prefetch) as prepared:
                 progress = tqdm(
                     prepared,
                     total=len(batches),
                     desc=f"epoch {epoch + 1}/{train_cfg['epochs']}",
                 )
+                waiting_since = perf_counter()
                 for rows, sampling_counts, visual, tokens in progress:
+                    forward_start = perf_counter()
+                    timings["input_wait"] += forward_start - waiting_since
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(
                         "cuda", dtype=torch.float16, enabled=amp_enabled
@@ -450,16 +497,20 @@ def train(cfg: dict) -> Path:
                         loss, parts = compute_loss(
                             model, batch, cache.patch_hw, **loss_cfg
                         )
-                    values = {
-                        "loss": loss.item(),
-                        **{
-                            k: parts[k].item()
-                            for k in ("grounding", "identity", "retrieval", "state")
-                        },
-                    }
+                    values = _scalar_values(
+                        {
+                            "loss": loss,
+                            **{
+                                k: parts[k]
+                                for k in ("grounding", "identity", "retrieval", "state")
+                            },
+                        }
+                    )
                     _require_finite_loss(
                         values, rows, epoch + 1, global_step + 1, amp_enabled, output
                     )
+                    backward_start = perf_counter()
+                    timings["forward"] += backward_start - forward_start
                     scaler.scale(loss).backward()
                     global_step += 1
                     should_log = run is not None and (
@@ -477,13 +528,22 @@ def train(cfg: dict) -> Path:
                     for name, value in values.items():
                         totals[name] += value * len(rows)
                     batch_counts = {
-                        **{k: v.item() for k, v in parts.items() if k not in values},
+                        **_scalar_values(
+                            {k: v for k, v in parts.items() if k not in values}
+                        ),
                         **sampling_counts,
                     }
+                    timings["backward_step"] += perf_counter() - backward_start
+                    steps += 1
                     state_pairs_seen += batch_counts["state_pairs"]
                     for name, value in batch_counts.items():
                         counts[name] = counts.get(name, 0) + value
-                    progress.set_postfix(loss=f"{values['loss']:.4f}")
+                    progress.set_postfix(
+                        loss=f"{values['loss']:.4f}",
+                        wait=f"{timings['input_wait'] / steps:.2f}s",
+                        fwd=f"{timings['forward'] / steps:.2f}s",
+                        bwd=f"{timings['backward_step'] / steps:.2f}s",
+                    )
 
                     if should_log:
                         run.log(
@@ -509,7 +569,9 @@ def train(cfg: dict) -> Path:
                     # Do not retain the last batch/text graph through validation or
                     # while constructing the next batch.
                     del batch, loss, parts, visual, tokens
+                    waiting_since = perf_counter()
 
+            train_seconds = perf_counter() - train_start
             optimizer.zero_grad(set_to_none=True)
             count = len(samples)
             summary = {name: value / count for name, value in totals.items()}
@@ -532,14 +594,22 @@ def train(cfg: dict) -> Path:
                 "epoch/state_loss": summary["state"],
                 "epoch/binding_scale": model.binding_scale.item(),
                 **{f"epoch/{k}": v for k, v in _diagnostics(counts).items()},
+                "epoch/mining_seconds": mining_seconds,
+                "epoch/train_seconds": train_seconds,
+                **{f"epoch/{key}_seconds": value for key, value in timings.items()},
             }
             is_best = False
+            evaluation_seconds = 0.0
 
             # Train diagnostics and validation use their own complete image galleries.
             if evaluation_cfg.get("enabled", False) and (
                 epoch_number % int(evaluation_cfg["every_epochs"]) == 0
                 or epoch_number == train_cfg["epochs"]
             ):
+                evaluation_start = perf_counter()
+                print(
+                    f"epoch {epoch_number}: train/val retrieval evaluation", flush=True
+                )
                 if use_state and state_pairs_seen == 0:
                     raise ValueError(
                         "no supervised state pairs; increase identity sampling or "
@@ -605,19 +675,11 @@ def train(cfg: dict) -> Path:
                     f"Full-R@1={val_metrics['full_r1']:.4f} "
                     f"ID-mAP={val_metrics['id_map']:.4f}"
                 )
+                evaluation_seconds = perf_counter() - evaluation_start
 
-            with (output / "history.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(epoch_log) + "\n")
-
-            if run is not None:
-                run.log(epoch_log)
-                if is_best:
-                    run.summary["best_val_full_map"] = best_full_map
-                    run.summary["best_val_macro_full_map"] = best_macro_full_map
-                    run.summary["best_val_checkpoint_score"] = best_score
-                    run.summary["best_epoch"] = best_epoch
-
+            epoch_log["epoch/evaluation_seconds"] = evaluation_seconds
             # Always save the latest state; validation alone selects best.pt.
+            checkpoint_start = perf_counter()
             checkpoint = {
                 "epoch": epoch_number,
                 "model": model.state_dict(),
@@ -643,6 +705,23 @@ def train(cfg: dict) -> Path:
             save_torch(checkpoint, last_path)
             if is_best:
                 link_checkpoint(last_path, output / "best.pt")
+            epoch_log["epoch/checkpoint_seconds"] = perf_counter() - checkpoint_start
+            epoch_log["epoch/total_seconds"] = perf_counter() - epoch_start
+            print(
+                f"epoch {epoch_number} time: train={train_seconds:.1f}s, "
+                f"mining={mining_seconds:.1f}s, evaluation={evaluation_seconds:.1f}s, "
+                f"checkpoint={epoch_log['epoch/checkpoint_seconds']:.1f}s",
+                flush=True,
+            )
+            with (output / "history.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(epoch_log) + "\n")
+            if run is not None:
+                run.log(epoch_log)
+                if is_best:
+                    run.summary["best_val_full_map"] = best_full_map
+                    run.summary["best_val_macro_full_map"] = best_macro_full_map
+                    run.summary["best_val_checkpoint_score"] = best_score
+                    run.summary["best_epoch"] = best_epoch
 
     finally:
         if run is not None:

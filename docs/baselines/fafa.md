@@ -34,7 +34,7 @@ Gallery crops use `extract_target_features(mode="mean")`, retaining target token
 (upstream's mode argument does not mean-pool them). Use native
 `squarepad_transform_test(224, need_size=(384,192))` and eval caption processing.
 The pinned pretrain config defaults to 32 tokens; `configs/fafa.yaml` explicitly
-sets `checkpoint.max_txt_len=128`. Longer conditions may still be truncated.
+sets `checkpoint.max_txt_len=32`. Longer conditions may still be truncated.
 
 ## 3. Retrieval equations
 

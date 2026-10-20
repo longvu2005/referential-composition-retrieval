@@ -1,6 +1,7 @@
 """Shared encoders, query text preparation, and identity projection."""
 
 import re
+from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +19,7 @@ def load_text_modules(
     *,
     tokenizer_source=None,
     add_subject_markers: bool = False,
+    cache_mib: int = 0,
 ):
     """Build the tokenizer and frozen text encoder used by train and retrieve."""
     from transformers import AutoModel, AutoTokenizer
@@ -29,7 +31,7 @@ def load_text_modules(
         )
     backbone = AutoModel.from_pretrained(model_name)
     backbone.resize_token_embeddings(len(tokenizer))
-    return tokenizer, TextEncoder(backbone, dim).to(device)
+    return tokenizer, TextEncoder(backbone, dim, cache_mib=cache_mib).to(device)
 
 
 class QueryTextCache:
@@ -203,31 +205,94 @@ class ImageEncoder(nn.Module):
 class TextEncoder(nn.Module):
     """Frozen, deterministic BERT features followed by a trainable projection."""
 
-    def __init__(self, backbone: nn.Module, dim: int) -> None:
+    def __init__(self, backbone: nn.Module, dim: int, *, cache_mib: int = 0) -> None:
         super().__init__()
+        if type(cache_mib) is not int or cache_mib < 0:
+            raise ValueError("cache.text_lru_mib must be a nonnegative integer")
         self.backbone = backbone
         self.backbone.requires_grad_(False)
         self.backbone.eval()
 
         hidden_dim = backbone.config.hidden_size
         self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
+        # Only frozen, unprojected features are cached. Projection gradients and
+        # optimizer updates must be recomputed on every visit to a text row.
+        self._hidden: OrderedDict[tuple, Tensor] = OrderedDict()
+        self._hidden_limit = cache_mib * 1024**2
+        self._hidden_bytes = 0
 
     def train(self, mode: bool = True):
         super().train(mode)
         self.backbone.eval()
         return self
 
+    def _load_from_state_dict(self, *args, **kwargs):
+        self._hidden.clear()
+        self._hidden_bytes = 0
+        super()._load_from_state_dict(*args, **kwargs)
+
     def forward(
         self, input_ids: Tensor, attention_mask: Tensor
     ) -> tuple[Tensor, Tensor]:
         """Return text tokens [B,L,D] and a boolean valid-token mask."""
 
-        with torch.no_grad():
-            tokens = self.backbone(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            ).last_hidden_state
+        if self._hidden_limit:
+            tokens = self._cached_backbone(input_ids, attention_mask)
+        else:
+            with torch.no_grad():
+                tokens = self.backbone(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                ).last_hidden_state
         return self.proj(tokens), attention_mask.bool()
+
+    @torch.no_grad()
+    def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        # Include the complete padded row and mask: left padding changes BERT's
+        # absolute positions. A changed instruction/mask must never reuse a row.
+        device_type = input_ids.device.type
+        precision = (
+            torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else None
+        )
+        backbone_dtype = next(self.backbone.parameters()).dtype
+        keys = [
+            (str(input_ids.device), backbone_dtype, precision, ids, mask)
+            for ids, mask in zip(
+                map(tuple, input_ids.cpu().tolist()),
+                map(tuple, attention_mask.cpu().tolist()),
+                strict=True,
+            )
+        ]
+        values, missing = {}, {}
+        for n, key in enumerate(keys):
+            if key in self._hidden:
+                value = self._hidden.pop(key)
+                self._hidden[key] = values[key] = value
+            else:
+                missing.setdefault(key, n)
+        if missing:
+            indices = torch.tensor(list(missing.values()), device=input_ids.device)
+            # Keep the caller's precision; AMP and FP32 visits have separate
+            # keys so validation cannot reuse approximate training features.
+            hidden = self.backbone(
+                input_ids=input_ids[indices],
+                attention_mask=attention_mask[indices],
+            ).last_hidden_state.cpu()
+            for key, row in zip(missing, hidden, strict=True):
+                value = row.clone()
+                values[key] = value
+                size = value.numel() * value.element_size()
+                if size <= self._hidden_limit:
+                    while (
+                        self._hidden and self._hidden_bytes + size > self._hidden_limit
+                    ):
+                        _, removed = self._hidden.popitem(last=False)
+                        self._hidden_bytes -= removed.numel() * removed.element_size()
+                    self._hidden[key] = value
+                    self._hidden_bytes += size
+        return torch.stack([values[key] for key in keys]).to(input_ids.device)
 
 
 class IdentityHead(nn.Module):

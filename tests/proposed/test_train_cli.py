@@ -184,7 +184,7 @@ def test_train_checkpoints_metrics_and_retrieve(
             "mlp_ratio": 2,
             "geo_dim": 4,
         },
-        "cache": {"prefetch_batches": prefetch, "lru_mib": 1},
+        "cache": {"prefetch_batches": prefetch, "lru_mib": 1, "text_lru_mib": 1},
         "train": {
             "epochs": 3,
             "batch_size": 2,
@@ -250,6 +250,25 @@ def test_train_checkpoints_metrics_and_retrieve(
     epoch_logs = [row for row in logs if "epoch" in row]
     assert [row["epoch"] for row in epoch_logs] == [1, 2, 3]
     assert all("epoch/state_loss" in row for row in epoch_logs)
+    runtime = json.loads((output / "runtime.json").read_text())
+    assert runtime["device"] == "cpu" and not runtime["amp_enabled"]
+    assert runtime["batch_size"] * runtime["candidates"] == 4
+    time_keys = (
+        "mining",
+        "train",
+        "input_wait",
+        "forward",
+        "backward_step",
+        "evaluation",
+        "checkpoint",
+        "total",
+    )
+    for row in epoch_logs:
+        assert all(row[f"epoch/{key}_seconds"] >= 0 for key in time_keys)
+        assert row["epoch/total_seconds"] >= row["epoch/train_seconds"]
+    assert epoch_logs[0]["epoch/mining_seconds"] == 0
+    assert epoch_logs[1]["epoch/mining_seconds"] > 0
+    assert (epoch_logs[1]["epoch/evaluation_seconds"] > 0) == enabled
     if enabled:
         assert [row["epoch"] for row in epoch_logs if "val/full_map" in row] == [2, 3]
         values = []

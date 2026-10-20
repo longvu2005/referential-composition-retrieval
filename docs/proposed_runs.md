@@ -89,7 +89,7 @@ data:
   image_root: /kaggle/input/YOUR_RAW_IMAGE_DATASET/images
   dino_cache: /kaggle/input/datasets/phmhunhlongv/rcr-proposed-cache
   fafa_image_cache: /kaggle/working/cache/fafa-images
-  fafa_query_cache: /kaggle/working/cache/fafa-queries-txt128
+  fafa_query_cache: /kaggle/working/cache/fafa-queries
 ```
 
 Some notebooks mount the source at `/kaggle/input/rcr-proposed-cache` instead.
@@ -208,7 +208,20 @@ logged. Its cache config records both feature widths and encoder
 provenance. It closes on exceptions. Nonfinite loss aborts before
 backward/optimizer updates and writes `nonfinite_batch.json`. Model parameters,
 geometry attention and losses stay FP32; CUDA training uses existing AMP/scaler.
-Mining and evaluation use FP32. LRU, deduplication and one-batch prefetch remain.
+Mining and evaluation use FP32. Scene and native FAFA shards share `cache.lru_mib`;
+frozen BERT outputs use the separate `cache.text_lru_mib` budget. Text cache keys
+include padded tokens, masks, device and precision, so AMP features cannot leak
+into FP32 validation. Only unprojected outputs are reused; the text projection
+still learns every step. Both LRUs retain immutable inputs, not learned scores.
+One-batch prefetch and within-batch image deduplication remain.
+
+`runtime.json` records the actual device, visible GPU count, AMP setting, cache
+text policy and feature dimensions. Progress shows average `wait`, `fwd`, `bwd`
+seconds per step. History/W&B add separate mining, train, input-wait, forward,
+backward-step, evaluation, checkpoint and total seconds. Input wait is the
+unhidden wait after CPU prefetch, not total worker CPU time. Forward/backward
+timings reuse the existing scalar-read synchronization; no extra CUDA-wide
+synchronization is added. These are wall-clock diagnostics, not a kernel profiler.
 Fine scores must be finite even when `fine_coarse_weight=0`; a failed reranker
 cannot publish NaN-based rankings or enter validation calibration.
 
