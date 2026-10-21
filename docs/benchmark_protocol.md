@@ -31,7 +31,7 @@ only scene features, person features, predicted boxes and a person mask.
 `TrainSupervision` aligns train heads with existing detections in memory, refuses
 non-train images, and supplies labels only to batch/loss construction. Detection
 diagnostics align GT separately for the requested split. Old cache labels are
-ignored; `tools/data/clean_cache.py` can remove them without re-encoding images.
+ignored by every public cache interface.
 
 The gallery contains **all registered images in the query's PIPA split**, in
 canonical `gallery.jsonl` order. Membership comes from `images.jsonl` paths, not

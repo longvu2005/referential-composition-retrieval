@@ -113,7 +113,7 @@ class TrainSupervision:
         return self._ids[image_id]
 
     def prepare(self, samples, *, all_train=False):
-        """Align required images once; optionally cover the full train gallery."""
+        """Align required images once; optionally index the full train gallery."""
         required = set()
         for sample in samples:
             required.add(sample["query_image_id"])
@@ -126,7 +126,6 @@ class TrainSupervision:
             raise ValueError("train supervision cannot prepare non-train images")
         if all_train:
             required = set(self.heads)
-        # Canonical gallery order also avoids random shard seeks in this pass.
         missing = [i for i in self.heads if i in required and i not in self._ids]
         self._prepared = False
         print(
@@ -142,15 +141,16 @@ class TrainSupervision:
         self._prepared = True
 
     def identity_crops(self):
-        """Index known crops only, with no feature/image reads after preparation."""
         if not self._prepared or not self.heads.keys() <= self._ids.keys():
-            raise RuntimeError("identity sampling requires prepared full-train labels")
-        result = defaultdict(list)
+            raise RuntimeError(
+                "prepare the full train gallery before identity sampling"
+            )
+        crops = defaultdict(list)
         for image_id in self.heads:
             for person, identity in enumerate(self._ids[image_id]):
                 if identity is not None:
-                    result[str(identity)].append((image_id, person))
-        return dict(result)
+                    crops[str(identity)].append((image_id, person))
+        return dict(crops)
 
     def load_ids(self, image_ids, max_people):
         result = []
@@ -168,7 +168,6 @@ def prepare_train_supervision(cfg):
     """Prepare reusable train labels without loading encoders or query features."""
     from rcr.proposed.cache.store import GalleryCache
     from rcr.proposed.identity import identity_sampling_settings
-
     data_cfg = cfg["data"]
     cache_file = cfg.get("cache", {}).get("supervision_cache")
     if cache_file is None:
@@ -187,8 +186,7 @@ def prepare_train_supervision(cfg):
     settings = identity_sampling_settings(cfg["train"].get("identity_sampling", {}))
     supervision.prepare(
         split_samples(data, "train"),
-        all_train=(
-            settings["max_crops"] > 0 and cfg["loss"].get("identity_weight", 0.1) != 0
-        ),
+        all_train=settings["max_crops"] > 0
+        and cfg["loss"].get("identity_weight", 0.1) != 0,
     )
     return supervision.cache_file

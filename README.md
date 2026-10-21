@@ -1,109 +1,106 @@
 # Referential Composition Retrieval
 
-Minimal research code for **Referential Composition Retrieval (RCR)**: given a
-query image, text that identifies one or more Subjects, and a requested change,
-rank gallery images that preserve the referenced identities and satisfy the
-change.
+Research code for **Referential Composition Retrieval (RCR)**. A query contains a
+reference image, text that identifies one or more Subjects, and a requested
+change. The task is to rank gallery images that preserve the referenced
+identities and satisfy that change.
 
-The benchmark contains four query types:
+The repository deliberately uses plain PyTorch, YAML and small Python modules.
+There is no trainer framework, registry, config inheritance or plugin layer. The
+main path is:
 
-- `INDIVIDUAL`: one Subject, one identity;
-- `GROUP`: one Subject, multiple identities;
-- `DUAL`: two Subjects with separate changes;
-- `RELATIONAL`: two Subjects linked by an ordered relation.
-
-Inference uses the reference image, `final_desc`, `final_change` and public
-`subjects[].subject_id` slots; CLIP uses `final_instruction` by default. Subject
-slots are query-local references, not identity labels or group sizes. Retrieval
-scoring does not use `case_type`: FAFA predicts members with the same CLIP rule
-for every query and splits conditions only when the text has independent clauses.
-
-GT head boxes, identity labels, seed targets and positives provide train
-supervision or evaluation labels. Validation selects settings; test labels are
-used only for evaluation and provenance, never retrieval scoring.
-
-| Boundary | Data available |
-| --- | --- |
-| Feature extraction / ranking | Images, text, public Subject slots, predicted boxes |
-| Proposed training supervision | Train GT alignment, identities and Full Positive labels, separately from features |
-| Evaluation / provenance | Annotated samples, GT heads/identities, case labels and positive sets |
-
-`load_rcr_inputs()` drops annotation fields and never opens `head_boxes.jsonl`.
-Runners keep annotated data for evaluation/provenance and pass public views to
-scorers. `case_type` remains useful for train sampling and by-case reporting.
+```text
+final dataset -> frozen feature caches -> train -> retrieve -> evaluate
+```
 
 ## Method
 
-The proposed model uses frozen DINO scene features, frozen native FAFA person and
-query features, learned Subject grounding, one global partial identity matching,
-and a Context Reasoner. Matching includes a null option, so missing people are not
-forced onto unrelated detections. The same assignment is reused by FDA binding and
-context reasoning.
+The proposed method keeps extraction frozen and learns only the RCR modules:
 
-Coarse retrieval combines normalized identity and global-state scores. Fine
-retrieval reranks the coarse Top-M shortlist with native FAFA binding and learned
-relational context. Validation selects the checkpoint and the two retrieval fusion
-weights; test labels are never used for model or weight selection.
+1. Ground each Subject description to people detected in the query image.
+2. Project person crops into an identity space for coarse retrieval.
+3. Match query people to target people with one global partial assignment and a
+   private null option for every query person.
+4. Score matched pairs with native FAFA composition and relational scene
+   context.
+5. Rerank the coarse Top-M shortlist with the fine score.
 
-See [method equations](docs/proposed_method.md),
-[benchmark protocol](docs/benchmark_protocol.md), and
-[experiment details](docs/proposed_runs.md).
-
-## Layout
+The training objective is
 
 ```text
-configs/                 experiment configurations
-src/rcr/common/          shared data, I/O and runtime helpers
-src/rcr/dataset/         deterministic dataset construction
-src/rcr/evaluation/      metrics and report generation
-src/rcr/baselines/       CLIP and native FAFA baselines
-src/rcr/proposed/        cache, training and retrieval code
-tools/run.py             single experiment CLI
-scripts/                 reproducible setup and run recipes
-tests/                   CPU contract tests
+L = L_ground + lambda_id L_id + L_retrieval + lambda_state L_state
 ```
 
-Dependency direction is CLI → experiment functions → model/shared utilities.
-There is no trainer framework, plugin registry, or recursive configuration system.
+`L_ground` is masked BCE, `L_id` is supervised contrastive loss,
+`L_retrieval` is pairwise ranking loss, and `L_state` learns the global requested
+change only from images that contain the required identities. See
+[docs/proposed_method.md](docs/proposed_method.md) for the complete equations.
+
+Inference receives only images, text and public Subject slots. Case labels,
+identity labels, head boxes and positive sets are used only for training or
+evaluation. `load_rcr_inputs()` enforces this boundary.
+
+## Repository layout
+
+```text
+configs/                 experiment configuration
+dataset/data/final/      finalized benchmark metadata
+src/rcr/common/          data, I/O and runtime helpers
+src/rcr/dataset/         deterministic dataset construction
+src/rcr/baselines/       CLIP and native FAFA baselines
+src/rcr/proposed/cache/  frozen DINO/FAFA extraction and readers
+src/rcr/proposed/nn/     learned RCR modules
+src/rcr/evaluation/      metrics and reports
+tools/run.py             experiment CLI
+scripts/                 reproducible commands
+tests/                   small mathematical and pipeline contracts
+```
+
+Dependency direction is `tools -> experiment functions -> model/shared
+utilities`. Files under `nn/` contain the method; `train.py` owns optimization;
+`ranking.py` owns inference.
 
 ## Setup
 
-Use Python 3.11 or 3.12. Each method has its own environment because native FAFA
-and the proposed model require incompatible Transformers versions.
+Python 3.11 or 3.12 is supported. Proposed/DINO and native FAFA require separate
+environments because their Transformers versions conflict.
 
 ```bash
 PYTHON=python3.11 bash scripts/setup.bash proposed
 PYTHON=python3.11 bash scripts/setup.bash fafa
-PYTHON=python3.11 bash scripts/setup.bash clip   # only for CLIP baselines
+PYTHON=python3.11 bash scripts/setup.bash clip
 ```
 
-Available environments are `proposed`, `clip`, `fafa`, `dataset`,
-`dataset-clip`, `evaluation`, and `dev`. Dependency versions live in
-`pyproject.toml`; files under `requirements/` only select an extra.
+Set the paths in `configs/proposed.yaml`, especially:
 
-## Run
+```yaml
+data:
+  final_dir: dataset/data/final
+  image_root: dataset/data/raw/images
+  dino_cache: cache/proposed-dino
+  fafa_image_cache: cache/fafa-images
+  fafa_query_cache: cache/fafa-queries
+person_encoder:
+  python: .venv-fafa/bin/python
+```
 
-The main validation workflow builds or reuses caches, trains, evaluates, and
-calibrates the two retrieval weights:
+## Run the proposed method
+
+The complete validation workflow prepares FAFA assets, reuses or builds caches,
+trains, calibrates the two fusion weights on validation, and writes validation
+results:
 
 ```bash
 bash scripts/methods/proposed.bash val
 ```
 
-Run the frozen test configuration only after validation:
+Run test only after validation has produced a frozen selected configuration:
 
 ```bash
 bash scripts/methods/proposed.bash test
 ```
 
-Baselines follow the same validation-first protocol:
-
-```bash
-bash scripts/methods/clip.bash val
-bash scripts/methods/fafa.bash val
-```
-
-Lower-level stages use one CLI:
+Every stage can also be run directly:
 
 ```bash
 python tools/run.py prepare     --config configs/proposed.yaml
@@ -114,140 +111,63 @@ python tools/run.py evaluate    --config configs/proposed.yaml --splits val
 python tools/run.py calibrate   --config configs/calibration.yaml
 ```
 
-Use `--set key=value ...` for typed overrides. `--max-queries` is only a smoke-test
-option for matching retrieve/evaluate runs; normal results use complete splits.
-
-Training prints the actual device/AMP setting and average input-wait, forward and
-backward times per step. `runtime.json` records the selected hardware; history
-separates training, mining, evaluation and checkpoint time. On Kaggle, set
-`runtime.device=cuda` to require a GPU. See the
-[cache I/O audit](docs/cache_io_audit.md).
-
-Large cache indices stay memory-mapped. Scene/target shards use buffered reads
-by default (`cache.mmap_shards=false`), matching the original reader. Legacy
-global means are loaded only for the gallery being ranked. To compare read
-modes on your own cache without training:
+Build one cache stage with `--cache-stage dino`, `fafa-image`, or `fafa-query`.
+Use `--set key=value ...` for explicit typed overrides. For example:
 
 ```bash
-.venv-proposed/bin/python tools/profile_cache.py --config configs/proposed.yaml --batches 1
+python tools/run.py run --config configs/proposed.yaml --train --splits val \
+  --set train.seed=1 output.dir=runs/proposed-seed1
 ```
 
-### Caches
+## Caches
 
-The proposed pipeline keeps three independent visual caches:
+| Config key | Contents | Depends on query text |
+| --- | --- | --- |
+| `data.dino_cache` | scene patches, detections and crop geometry | no |
+| `data.fafa_image_cache` | pooled person features and target tokens | no |
+| `data.fafa_query_cache` | text-conditioned query crop features | yes |
 
-- `data.dino_cache`: DINO scenes and detections;
-- `data.fafa_image_cache`: FAFA person features and target tokens;
-- `data.fafa_query_cache`: multimodal query features.
+The three caches are separate so a text edit only rebuilds FAFA query features.
+Crop order comes from the DINO cache and is shared by both FAFA paths. Visual
+caches never store training labels. Train-only identity labels are aligned to
+cached boxes in `cache.supervision_cache` before the first epoch.
 
-DINO detections fix the person boxes and crop order. FAFA image and query
-extraction use those same boxes on the original RGB images; GT never changes a
-crop or selects which people enter a visual cache. Training reads the cached
-features and does not open or crop the original images.
+Cache extraction is resumable. A completed cache is reused; an interrupted cache
+keeps a `.building` marker and resumes its missing shards. The loader supports the
+published legacy DINO cache when `cache.allow_legacy_dino: true` is set, but that
+flag is an explicit provenance assertion because the old index lacks encoder
+metadata.
 
-Completed caches are reused automatically. Build only one stage with
-`--cache-stage dino`, `fafa-image`, or `fafa-query`. Query text changes invalidate
-only the query cache. FAFA's text budget comes from `checkpoint.max_txt_len` in
-`configs/fafa.yaml`. Use a separate query-cache directory
-when changing that policy; image features remain reusable.
+## Dataset snapshot
 
-`cache.lru_mib` bounds scene reads; `cache.native_lru_mib` independently bounds
-FAFA target/query shards. `cache.text_lru_mib` bounds frozen BERT output tensors;
-its projection is recomputed and trained every step. A zero budget disables that
-memory cache. Cached tensors retain their original precision, and FDA normalizes
-matched target rows in FP32.
-
-Visual caches do not store GT labels. Train-only crop-to-ID alignment is prepared
-before epoch 1 and reused from `cache.supervision_cache`. With
-`train.identity_sampling.max_crops > 0`, this covers the complete train gallery.
-Compatible query/positive labels from older runs are retained; only missing
-train images are aligned. With auxiliary sampling disabled, only query and
-Full Positive images need preparation.
-Prepare the labels separately before launching a training job with:
-
-```bash
-.venv-proposed/bin/python tools/run.py prepare-supervision --config configs/proposed.yaml
-```
-
-This command needs completed DINO/FAFA image caches but no encoder weights or
-FAFA query cache. It reads crop boxes through mapped shards without copying
-full scene/person feature payloads. `train` also prepares any missing labels
-automatically, before loading BERT or starting an epoch. Training batches only
-look up these prepared labels; they do not align heads, open raw images, or
-rewrite the supervision file.
-Changed cache IDs, train heads or scene size invalidate the supervision cache.
-The alignment algorithm, visual crops and retrieval candidate sampling remain
-unchanged.
-
-Identity loss keeps the unique annotated query/Full Positive crops and adds a
-bounded auxiliary batch from the train gallery. Each query Subject ID can draw
-up to `crops_per_identity` extra observations from different images, regardless
-of retrieval conditions or whether other Subjects co-occur. Up to
-`random_identities` additional train IDs supply more identity classes, including
-IDs absent from the query set. Random IDs must have observations in at least two
-images. Already-used query/positive images and duplicate crops are excluded.
-Unknown/unmatched detector crops never enter this pool.
-
-The default config requests two crops per ID and eight additional random IDs,
-with at most 128 extra crops per step. Short pools use fewer crops. Features come
-only from the pooled FAFA person index and run through the shared person/identity
-projection; auxiliary images do not load scenes or native query/target tokens,
-or enter fine retrieval. Identity sampling has its own seeded generator so
-retrieval candidate draws are unchanged. `max_crops: 0` restores the original
-query/positive-only identity objective; older configs without this section also
-retain that behavior. `identity_weight: 0` skips the auxiliary pool entirely.
-
-Training logs `identity_extra_crops`, `identity_classes_per_batch`,
-`identity_valid_anchor_rate` (observations with another same-ID crop), and
-`identity_positive_pairs` (unordered pairs). Use validation Full-mAP and matching
-quality to compare the new objective with `max_crops: 0`; more identity data does
-not guarantee better retrieval.
-
-Older cache files remain readable; their `identity_ids` are discarded by the
-feature API. To remove that metadata physically, run this once on a **writable
-DINO cache**:
-
-```bash
-.venv-proposed/bin/python tools/data/clean_cache.py --cache /path/to/dino-cache
-```
-
-This preserves tensors, crop order and cache ID, so FAFA image/query features do
-not need extraction again. Legacy caches without pixel boxes additionally need
-raw image sizes and the original scene size when creating train supervision.
-
-## Dataset
-
-The checked-in snapshot is version `0.1.0` with 4,311 queries and 37,107 images.
-Each query searches all images in its own PIPA split, excluding its query image.
+Version `0.1.0` contains 4,311 queries and 37,107 images. Each query searches the
+images in its own PIPA split, excluding its reference image.
 
 | Split | INDIVIDUAL | GROUP | DUAL | RELATIONAL | Total |
-|---|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: |
 | train | 3,472 | 137 | 269 | 155 | 4,033 |
 | val | 194 | 12 | 36 | 22 | 264 |
 | test | 5 | 2 | 3 | 4 | 14 |
-| **all** | **3,671** | **151** | **308** | **181** | **4,311** |
 
-The current test split is a pipeline-validation split, not a publication-scale
-holdout. Raw images are not stored in the repository; configure `data.image_root`
-before extraction. Dataset reconstruction is documented in
-[dataset/README.md](dataset/README.md).
+The current test split validates the pipeline; it is not a publication-scale
+holdout. Raw images are not committed. Dataset reconstruction and annotation
+audits are documented in [dataset/README.md](dataset/README.md).
 
-Audit Full Positive integrity, equivalent-query conflicts and review scope:
+## Outputs
 
-```bash
-.venv-dev/bin/python tools/data/audit.py \
-  --output runs/data_audit.json \
-  --review-queue runs/full_positive_review.jsonl
-```
+Training writes `config.yaml`, `runtime.json`, `history.jsonl`, `last.pt`, and the
+validation-selected `best.pt`. Retrieval writes one directory per split with:
 
-Add `--positive-catalog` and `--positive-decisions` with the original work files to
-check their candidate scope against every split ID Positive. Missing review
-artifacts mean **unknown scope**, not proven complete labels. The audit writes
-reports and a separate review queue; it never changes annotations or trains a
-model. See [Full Positive audit](docs/full_positive_audit.md) for findings,
-manual-review commands and the limits of this check.
+- `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings;
+- `run.json`: configuration, checkpoint, cache and benchmark provenance;
+- `metrics.json`: overall and by-case metrics.
 
-## Tests
+`best.pt` maximizes the mean of overall validation Full-mAP and macro-case
+validation Full-mAP. `configs/calibration.yaml` then selects `coarse_beta` and
+`fine_coarse_weight` on validation. Test labels never select a checkpoint or
+weight.
+
+## Development
 
 ```bash
 bash scripts/setup.bash dev
@@ -255,6 +175,6 @@ bash scripts/setup.bash dev
 .venv-dev/bin/python -m ruff check src tools tests labelstudio
 ```
 
-Tests use tiny local backbones and caches. Native FAFA weights and pretrained model
-downloads are not required for the CPU suite; CUDA-only numerical and memory checks
-skip automatically when no GPU is available.
+When changing the method, edit the module that owns the equation, use a new
+output directory, and record the commit, config and seed. Keep preprocessing and
+evaluation fixed so an ablation changes one research decision at a time.

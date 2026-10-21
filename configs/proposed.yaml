@@ -32,7 +32,6 @@ cache:
   supervision_cache: cache/train-supervision.json  # train-only crop IDs prepared before train
   mmap_shards: false  # Eager scene/target reads, as in ec5a2a2; large indices stay mmap.
   text_lru_mib: 256   # frozen BERT outputs only; projection remains trainable
-  prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
 model:
   text_model: google-bert/bert-base-uncased
   dim: 384                   # person/semantic, scene and text width
@@ -57,17 +56,15 @@ train:
   candidates: 32
   case_balanced: true        # P(case) proportional to sqrt(N_case)
   seed: 0
-  amp: true           # CUDA training only; mining/evaluation remain FP32
+  amp: true
   mining_batch_size: 8
   identity_sampling:
-    max_crops: 128           # extra pooled crops/step; 0 restores query/positive-only IDs
-    crops_per_identity: 2    # different images; query IDs need not co-occur
-    random_identities: 8     # also cover IDs outside the current query
+    max_crops: 128
+    crops_per_identity: 2
+    random_identities: 8
   sampling:
-    positives_per_query: 2   # fewer if unavailable; always keep a negative
-    # Fractions of C-P negatives; remaining/unused slots are random.
+    positives_per_query: 2
     identity_fraction: 0.5
-    # 0.3 enables coarse hard-negative mining after warmup.
     hard_fraction: 0.3
     warmup_epochs: 1
     refresh_every_epochs: 2
@@ -97,13 +94,6 @@ candidate_ks: [100, 500]
 evaluation:
   enabled: true
   every_epochs: 2
-  train_max_queries: 100
-wandb:
-  enabled: true
-  project: referential-composition-retrieval
-  name: proposed
-  mode: online
-  log_every_steps: 20
 runtime:
   device: cuda
 checkpoint: runs/proposed-fafa-unified/best.pt

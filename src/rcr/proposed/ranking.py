@@ -465,21 +465,13 @@ def mine_hard_negatives(
     pool_size,
     excluded=None,
     query_batch_size=1,
-    text_cache: QueryTextCache | None = None,
+    text_cache=None,
 ):
-    """Batch train queries through coarse scoring; never build fine compositions.
-
-    Gallery tensors are copied once per query batch and gallery chunk. Only the
-    current batch's full score vectors are retained, preserving per-query zscores
-    and canonical tie ordering without a queries-by-gallery output matrix.
-    """
-    cfg = retrieval_settings(retrieval, model.coarse_beta)
-    if not samples or pool_size < 1 or query_batch_size < 1:
-        raise ValueError("mining requires samples and positive pool/query batch sizes")
+    """Return each query's highest-scoring non-positive coarse candidates."""
+    settings = retrieval_settings(retrieval, model.coarse_beta)
     gallery_ids, gallery_by_id, image_indices = _gallery_scope(
         cache, gallery_ids, samples, "mining"
     )
-    by_id = cache.by_id
     excluded = excluded or {}
     forbidden = {
         row["sample_id"]: set(row["positive_image_ids"])
@@ -489,84 +481,103 @@ def mine_hard_negatives(
     }
     limit = pool_size + max(map(len, forbidden.values()))
     samples = inference_samples(samples)
-    text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
+    text_cache = text_cache or QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
+
     groups = {}
     for sample in samples:
         groups.setdefault(len(sample["subjects"]), []).append(sample)
-    need_state = uses_state(cfg, model.coarse_beta)
+    need_state = uses_state(settings, model.coarse_beta)
     pools = {}
+
     with evaluating(model, text_encoder):
-        gallery_batches = _encode_gallery_identity(
-            cache, model, device, cfg["identity_batch_size"], image_indices
+        gallery_identity = _encode_gallery_identity(
+            cache,
+            model,
+            device,
+            settings["identity_batch_size"],
+            image_indices,
         )
         gallery_state = (
             _encode_gallery_state(
-                cache, model, device, cfg["identity_batch_size"], image_indices
+                cache,
+                model,
+                device,
+                settings["identity_batch_size"],
+                image_indices,
             )
             if need_state
             else None
         )
-        with tqdm(total=len(samples), desc="mine train negatives") as progress:
-            for group in groups.values():
-                for start in range(0, len(group), query_batch_size):
-                    rows = group[start : start + query_batch_size]
-                    text = encode_query_text(
-                        rows, tokenizer, text_encoder, device, text_cache=text_cache
-                    )
-                    indices = torch.tensor(
-                        [by_id[row["query_image_id"]] for row in rows]
-                    )
-                    scene, persons, boxes, mask = cache.load(indices)
-                    mask = mask.to(device)
-                    logits, query_identity = model.encode_grounded_identity(
-                        scene.to(device),
-                        persons.to(device),
-                        boxes.to(device),
-                        text["selections"],
-                        cache.patch_hw,
-                        text["selection_mask"],
-                    )
-                    identity = query_identity.new_empty(len(rows), len(gallery_ids))
-                    offset = 0
-                    for people_cpu, mask_cpu in gallery_batches:
-                        for j in range(0, len(people_cpu), cfg["coarse_batch_size"]):
-                            stop = min(j + cfg["coarse_batch_size"], len(people_cpu))
-                            identity[:, offset + j : offset + stop] = (
-                                identity_scores_batched(
-                                    query_identity,
-                                    logits,
-                                    people_cpu[j:stop].to(device),
-                                    mask_cpu[j:stop].to(device),
-                                    query_mask=mask,
-                                )
-                            )
-                        offset += len(people_cpu)
-                    state = None
-                    if need_state:
-                        query_state = model.encode_text_state(
-                            text["change"], text["change_mask"]
+        progress = tqdm(total=len(samples), desc="mine train negatives")
+        for group in groups.values():
+            for start in range(0, len(group), query_batch_size):
+                rows = group[start : start + query_batch_size]
+                text = encode_query_text(
+                    rows, tokenizer, text_encoder, device, text_cache=text_cache
+                )
+                indices = torch.tensor(
+                    [cache.by_id[row["query_image_id"]] for row in rows]
+                )
+                scene, people, boxes, mask = cache.load(indices)
+                mask = mask.to(device)
+                logits, query_identity = model.encode_grounded_identity(
+                    scene.to(device),
+                    people.to(device),
+                    boxes.to(device),
+                    text["selections"],
+                    cache.patch_hw,
+                    text["selection_mask"],
+                )
+
+                identity = query_identity.new_empty(len(rows), len(gallery_ids))
+                offset = 0
+                for people_cpu, mask_cpu in gallery_identity:
+                    for j in range(
+                        0, len(people_cpu), settings["coarse_batch_size"]
+                    ):
+                        stop = min(
+                            j + settings["coarse_batch_size"], len(people_cpu)
                         )
-                        state = query_state.new_empty(len(rows), len(gallery_ids))
-                        for j in range(0, len(gallery_ids), cfg["coarse_batch_size"]):
-                            stop = j + cfg["coarse_batch_size"]
-                            state[:, j:stop] = (
-                                query_state @ gallery_state[j:stop].to(device).T
+                        identity[:, offset + j : offset + stop] = (
+                            identity_scores_batched(
+                                query_identity,
+                                logits,
+                                people_cpu[j:stop].to(device),
+                                mask_cpu[j:stop].to(device),
+                                query_mask=mask,
                             )
-                    for n, row in enumerate(rows):
-                        query_index = gallery_by_id[row["query_image_id"]]
-                        scores = combine_scores(
-                            identity[n],
-                            None if state is None else state[n],
-                            beta=cfg["coarse_beta"],
-                            exclude_index=query_index,
                         )
-                        order = torch.argsort(scores, descending=True, stable=True)
-                        order = order[order != query_index][:limit].cpu().tolist()
-                        pools[row["sample_id"]] = [
-                            gallery_ids[i]
-                            for i in order
-                            if gallery_ids[i] not in forbidden[row["sample_id"]]
-                        ][:pool_size]
-                    progress.update(len(rows))
-        return {row["sample_id"]: pools[row["sample_id"]] for row in samples}
+                    offset += len(people_cpu)
+
+                state = None
+                if need_state:
+                    query_state = model.encode_text_state(
+                        text["change"], text["change_mask"]
+                    )
+                    state = query_identity.new_empty(len(rows), len(gallery_ids))
+                    for j in range(
+                        0, len(gallery_ids), settings["coarse_batch_size"]
+                    ):
+                        stop = j + settings["coarse_batch_size"]
+                        state[:, j:stop] = (
+                            query_state @ gallery_state[j:stop].to(device).T
+                        )
+
+                for n, row in enumerate(rows):
+                    query_index = gallery_by_id[row["query_image_id"]]
+                    scores = combine_scores(
+                        identity[n],
+                        None if state is None else state[n],
+                        beta=settings["coarse_beta"],
+                        exclude_index=query_index,
+                    )
+                    order = torch.argsort(scores, descending=True, stable=True)
+                    pools[row["sample_id"]] = [
+                        gallery_ids[index]
+                        for index in order[:limit].cpu().tolist()
+                        if gallery_ids[index] not in forbidden[row["sample_id"]]
+                    ][:pool_size]
+                progress.update(len(rows))
+        progress.close()
+    return pools

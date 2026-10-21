@@ -300,7 +300,7 @@ class RCRModel(nn.Module):
         patch_hw: tuple[int, int],
         selection_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Coarse/mining path: no instruction composition or fine reasoning."""
+        """Encode the coarse identity branch without fine composition."""
         semantic = self.encode_semantic(persons)
         logits = self.grounding(
             self.visual_proj(scene),
@@ -310,8 +310,7 @@ class RCRModel(nn.Module):
             patch_hw,
             selection_mask,
         )
-        identity = self.identity_head(semantic)
-        return logits, identity
+        return logits, self.identity_head(semantic)
 
     def score_target(
         self,

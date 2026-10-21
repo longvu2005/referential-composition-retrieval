@@ -192,7 +192,9 @@ L = L_ground + 0.1 L_id + L_ret + L_global_state
 
 - Identity: supervised contrastive learning. Query people and
   valid positive-target people share an ID vocabulary. Unknown IDs, padding,
-  duplicate observations and self-pairs are excluded.
+  duplicate observations and self-pairs are excluded. A bounded train-only crop
+  sample adds cross-image observations for query IDs and other train IDs without
+  entering retrieval scoring.
 - `L_id` trains both the person projection and identity
   head. `L_ground` and `L_ret` also train that person projection. Fine
   detaches both identity inputs; `L_ret` does not directly train the identity
@@ -216,8 +218,8 @@ S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 ```
 
 Weight zero uses raw fine scores (the same ordering). The remaining gallery keeps
-coarse order. Periodic evaluation, checkpoint selection, sampling, mining, AMP,
-LRU and CPU prefetch use the shared experiment protocol. `best.pt` maximizes
+coarse order. Periodic evaluation, checkpoint selection, candidate sampling, AMP
+and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
 
 ## Configuration and checkpoints
@@ -263,9 +265,7 @@ an explicitly retrained configuration for threshold studies.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
 Subject/overall coverage, binding, raw/gated context and final score from the same
-forward pass. Training logs fine coverage, member count, unmatched-member rate
-and empty-selection rate to expose early hard-grounding starvation. Tiny tests
-verify structure and numerics, not benchmark mAP.
+forward pass. Small tests verify structure and numerics, not benchmark mAP.
 
 Saved rankings include `fafa_rankings` in addition to coarse/fine/fused rankings.
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse

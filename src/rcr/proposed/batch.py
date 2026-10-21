@@ -1,8 +1,4 @@
-"""Build training batches from RCR samples and cached visual features."""
-
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from time import perf_counter
+"""Create one training batch from samples and frozen cache features."""
 
 import torch
 from torch import Tensor, nn
@@ -11,46 +7,71 @@ from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 
 
-def _identity_labels(
-    identity_ids: list[list[str | None]], vocab: dict[str, int]
-) -> Tensor:
-    labels = torch.full((len(identity_ids), len(identity_ids[0])), -1, dtype=torch.long)
-    for n, row in enumerate(identity_ids):
-        for i, identity_id in enumerate(row):
-            if identity_id is not None:
-                identity_id = str(identity_id)
-                if identity_id not in vocab:
-                    vocab[identity_id] = len(vocab)
-                labels[n, i] = vocab[identity_id]
+def _identity_labels(rows, vocabulary: dict[str, int]) -> Tensor:
+    labels = torch.full((len(rows), len(rows[0])), -1, dtype=torch.long)
+    for n, identities in enumerate(rows):
+        for person, identity in enumerate(identities):
+            if identity is None:
+                continue
+            identity = str(identity)
+            labels[n, person] = vocabulary.setdefault(identity, len(vocabulary))
     return labels
 
 
-def build_supervision(
-    identity_ids: list[list[str | None]],
-    subjects: list[list[dict]],
-    identity_vocab: dict[str, int] | None = None,
-) -> tuple[Tensor, Tensor]:
-    """Return grounding targets [B,S,K] and local identity labels [B,K]."""
-
-    b = len(identity_ids)
-    s = len(subjects[0])
-    k = len(identity_ids[0])
-
-    targets = torch.zeros(b, s, k)
-    labels = _identity_labels(
-        identity_ids, {} if identity_vocab is None else identity_vocab
-    )
-
-    for n in range(b):
-        for i, identity_id in enumerate(identity_ids[n]):
-            if identity_id is None:
+def build_supervision(identity_rows, subjects, vocabulary=None):
+    """Build Subject membership targets and local identity-class labels."""
+    vocabulary = {} if vocabulary is None else vocabulary
+    labels = _identity_labels(identity_rows, vocabulary)
+    targets = torch.zeros(len(identity_rows), len(subjects[0]), len(identity_rows[0]))
+    for n, (identities, subject_rows) in enumerate(
+        zip(identity_rows, subjects, strict=True)
+    ):
+        required = [set(map(str, subject["identity_ids"])) for subject in subject_rows]
+        for person, identity in enumerate(identities):
+            if identity is None:
                 continue
-
-            for subject, row in enumerate(subjects[n]):
-                if str(identity_id) in map(str, row["identity_ids"]):
-                    targets[n, subject, i] = 1
-
+            for subject, identity_set in enumerate(required):
+                targets[n, subject, person] = str(identity) in identity_set
     return targets, labels
+
+
+def _deduplicated_masks(
+    samples,
+    candidates,
+    positives,
+    query_labels,
+    target_labels,
+    query_mask,
+    target_mask,
+):
+    """Use each annotated crop once in the supervised contrastive loss."""
+    seen = set()
+
+    def unseen(image_id, valid):
+        keep = torch.zeros_like(valid)
+        for person in valid.nonzero(as_tuple=False).flatten().tolist():
+            key = (image_id, person)
+            if key not in seen:
+                seen.add(key)
+                keep[person] = True
+        return keep
+
+    query_keep = torch.stack(
+        [
+            unseen(row["query_image_id"], query_mask[n] & (query_labels[n] >= 0))
+            for n, row in enumerate(samples)
+        ]
+    )
+    target_keep = torch.zeros_like(target_mask)
+    width = len(candidates[0])
+    for n, image_ids in enumerate(candidates):
+        for j, image_id in enumerate(image_ids):
+            if image_id in positives[n]:
+                i = n * width + j
+                target_keep[i] = unseen(
+                    image_id, target_mask[i] & (target_labels[i] >= 0)
+                )
+    return query_keep, target_keep, seen
 
 
 def prepare_visual_batch(
@@ -61,166 +82,126 @@ def prepare_visual_batch(
     supervision,
     state_image_ids: list[set[str]] | None = None,
     identity_crops=(),
-    timings: dict | None = None,
 ) -> dict[str, Tensor]:
-    """Read and collate CPU features/supervision without running a model."""
-
-    b = len(samples)
-    c = len(candidate_image_ids[0])
-    by_id = cache.by_id
-
-    query_idx = torch.tensor([by_id[x["query_image_id"]] for x in samples])
-    target_idx = torch.tensor(
-        [by_id[image_id] for rows in candidate_image_ids for image_id in rows]
+    """Load CPU visual features and labels. No model is executed here."""
+    batch_size = len(samples)
+    candidates_per_query = len(candidate_image_ids[0])
+    query_indices = torch.tensor(
+        [cache.by_id[row["query_image_id"]] for row in samples]
     )
+    target_indices = torch.tensor(
+        [cache.by_id[image_id] for row in candidate_image_ids for image_id in row]
+    )
+    query, target = cache.load_groups(query_indices, target_indices)
+    q_scene, q_people, q_boxes, q_mask = query
+    t_scene, t_people, t_boxes, t_mask = target
 
-    start = perf_counter()
-    query, target = cache.load_groups(query_idx, target_idx)
-    if timings is not None:
-        timings["scene"] = perf_counter() - start
-    q_scene, q_persons, q_boxes, q_mask = query
-    t_scene, t_persons, t_boxes, t_mask = target
-    start = perf_counter()
-    positives = [
-        set(sample["positive_image_ids"])
-        if "positive_image_ids" in sample
-        else {sample["target_image_id"]}
-        for sample in samples
-    ]
+    positives = [set(row["positive_image_ids"]) for row in samples]
     q_ids = supervision.load_ids(
-        [row["query_image_id"] for row in samples], q_persons.shape[1]
+        [row["query_image_id"] for row in samples], q_people.shape[1]
     )
-    # Only query/positive candidate crops need labels here. Auxiliary gallery
-    # crops carry prepared IDs; state supervision uses image-level GT pools.
-    k_t = t_persons.shape[1]
-    t_ids = [[None] * k_t for _ in range(b * c)]
+    t_ids = [[None] * t_people.shape[1] for _ in range(len(target_indices))]
     positive_slots = [
-        (n * c + j, image_id)
-        for n, rows in enumerate(candidate_image_ids)
-        for j, image_id in enumerate(rows)
+        (n * candidates_per_query + j, image_id)
+        for n, image_ids in enumerate(candidate_image_ids)
+        for j, image_id in enumerate(image_ids)
         if image_id in positives[n]
     ]
     if positive_slots:
-        positive_ids = supervision.load_ids(
-            [image_id for _, image_id in positive_slots], k_t
+        rows = supervision.load_ids(
+            [image_id for _, image_id in positive_slots], t_people.shape[1]
         )
-        for (position, _), ids in zip(positive_slots, positive_ids, strict=True):
-            t_ids[position] = ids
-    if timings is not None:
-        timings["labels"] = perf_counter() - start
+        for (index, _), identities in zip(positive_slots, rows, strict=True):
+            t_ids[index] = identities
 
-    subjects = [sample["subjects"] for sample in samples]
-    identity_vocab: dict[str, int] = {}
-    grounding_targets, identity_labels = build_supervision(
-        q_ids, subjects, identity_vocab
+    vocabulary: dict[str, int] = {}
+    grounding_targets, query_labels = build_supervision(
+        q_ids, [row["subjects"] for row in samples], vocabulary
     )
-    target_identity_labels = _identity_labels(t_ids, identity_vocab)
-
+    target_labels = _identity_labels(t_ids, vocabulary)
     positive_mask = torch.tensor(
         [
-            [image_id in positive for image_id in rows]
-            for positive, rows in zip(positives, candidate_image_ids, strict=True)
+            [image_id in positive for image_id in image_ids]
+            for positive, image_ids in zip(positives, candidate_image_ids, strict=True)
         ],
         dtype=torch.bool,
     )
-
-    # A cached crop is one observation even when its image occurs in multiple
-    # queries/candidate lists. Deduplicate observations, never identity classes.
-    seen: set[tuple[str, int]] = set()
-
-    def unique_people(image_id: str, valid: Tensor) -> Tensor:
-        keep = torch.zeros_like(valid, dtype=torch.bool)
-        for person in valid.nonzero(as_tuple=False).flatten().tolist():
-            key = (image_id, person)
-            if key not in seen:
-                keep[person] = True
-                seen.add(key)
-        return keep
-
-    query_identity_mask = torch.stack(
-        [
-            unique_people(
-                sample["query_image_id"], q_mask[n] & (identity_labels[n] >= 0)
-            )
-            for n, sample in enumerate(samples)
-        ]
+    query_identity_mask, target_identity_mask, seen = _deduplicated_masks(
+        samples,
+        candidate_image_ids,
+        positives,
+        query_labels,
+        target_labels,
+        q_mask,
+        t_mask,
     )
-    target_identity_mask = torch.zeros_like(t_mask, dtype=torch.bool)
-    for n, rows in enumerate(candidate_image_ids):
-        for j, image_id in enumerate(rows):
-            if image_id in positives[n]:
-                index = n * c + j
-                target_identity_mask[index] = unique_people(
-                    image_id, t_mask[index] & (target_identity_labels[index] >= 0)
-                )
 
-    start = perf_counter()
     extra = []
     for image_id, person, identity in identity_crops:
-        key = (image_id, person)
-        if key not in seen:
-            seen.add(key)
+        if (image_id, person) not in seen:
+            seen.add((image_id, person))
             extra.append((image_id, person, identity))
-    # Pooled person rows come from index.pt. Auxiliary images never enter the
-    # scene/native FAFA reads or fine retrieval forward pass.
     extra_batch = {}
     if extra:
-        rows = {
-            i: cache.person_row(by_id[i]) for i in dict.fromkeys(x[0] for x in extra)
+        people_by_image = {
+            image_id: cache.person_row(cache.by_id[image_id])
+            for image_id in dict.fromkeys(image_id for image_id, _, _ in extra)
         }
         extra_batch = {
-            "extra_identity_persons": torch.stack([
-                rows[i][person] for i, person, _ in extra
-            ]).float(),
+            "extra_identity_persons": torch.stack(
+                [people_by_image[image_id][person] for image_id, person, _ in extra]
+            ).float(),
             "extra_identity_labels": _identity_labels(
-                [[identity for _, _, identity in extra]], identity_vocab
+                [[identity for _, _, identity in extra]], vocabulary
             )[0],
         }
-    if timings is not None:
-        timings["identity"] = perf_counter() - start
 
-    start = perf_counter()
-    fafa_query = cache.native_queries(samples, q_persons.shape[1])
-    fafa_targets = cache.native_targets(target_idx, k_t).unflatten(0, (b, c))
-    if timings is not None:
-        timings["fafa"] = perf_counter() - start
+    k_target = t_people.shape[1]
     batch = {
         **extra_batch,
         "query_scene": q_scene,
-        "query_persons": q_persons,
-        "fafa_query": fafa_query,
+        "query_persons": q_people,
         "query_boxes": q_boxes,
         "query_person_mask": q_mask,
-        "query_identity_labels": identity_labels,
+        "fafa_query": cache.native_queries(samples, q_people.shape[1]),
+        "query_identity_labels": query_labels,
         "query_identity_mask": query_identity_mask,
         "grounding_targets": grounding_targets,
-        "target_scene": t_scene.reshape(b, c, *t_scene.shape[1:]),
-        "target_persons": t_persons.reshape(b, c, k_t, t_persons.shape[-1]),
-        "fafa_targets": fafa_targets,
-        "target_boxes": t_boxes.reshape(b, c, k_t, 4),
-        "target_mask": t_mask.reshape(b, c, k_t),
-        "target_identity_labels": target_identity_labels.reshape(b, c, k_t),
-        "target_identity_mask": target_identity_mask.reshape(b, c, k_t),
-        "positive_mask": positive_mask,
         "grounding_complete": torch.tensor(
             [
                 [
                     set(map(str, subject["identity_ids"]))
-                    <= {str(identity) for identity in ids if identity is not None}
+                    <= {
+                        str(identity)
+                        for identity in identities
+                        if identity is not None
+                    }
                     for subject in sample["subjects"]
                 ]
-                for sample, ids in zip(samples, q_ids, strict=True)
+                for sample, identities in zip(samples, q_ids, strict=True)
             ],
             dtype=torch.bool,
         ),
+        "target_scene": t_scene.unflatten(0, (batch_size, candidates_per_query)),
+        "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
+        "target_boxes": t_boxes.unflatten(0, (batch_size, candidates_per_query)),
+        "target_mask": t_mask.unflatten(0, (batch_size, candidates_per_query)),
+        "fafa_targets": cache.native_targets(target_indices, k_target).unflatten(
+            0, (batch_size, candidates_per_query)
+        ),
+        "target_identity_labels": target_labels.unflatten(
+            0, (batch_size, candidates_per_query)
+        ),
+        "target_identity_mask": target_identity_mask.unflatten(
+            0, (batch_size, candidates_per_query)
+        ),
+        "positive_mask": positive_mask,
     }
     if state_image_ids is not None:
-        # Full GT image identities, not detector-aligned labels: a missed person
-        # must not change which target conditions supervise the global state.
         batch["state_mask"] = torch.tensor(
             [
-                [image_id in eligible for image_id in rows]
-                for rows, eligible in zip(
+                [image_id in eligible for image_id in image_ids]
+                for image_ids, eligible in zip(
                     candidate_image_ids, state_image_ids, strict=True
                 )
             ],
@@ -232,11 +213,9 @@ def prepare_visual_batch(
 
 
 def finish_batch(visual, tokens, text_encoder, device):
-    """Transfer a prepared batch and encode text in the training process."""
-    return {
-        **{key: value.to(device, non_blocking=True) for key, value in visual.items()},
-        **encode_tokenized_text(tokens, text_encoder, device),
-    }
+    """Move tensors to the accelerator and apply the trainable text projection."""
+    visual = {key: value.to(device, non_blocking=True) for key, value in visual.items()}
+    return {**visual, **encode_tokenized_text(tokens, text_encoder, device)}
 
 
 def build_batch(
@@ -252,8 +231,7 @@ def build_batch(
     identity_crops=(),
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor]:
-    """Synchronous interface, also used to check the prefetched path."""
-    text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
+    text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
         samples,
         candidate_image_ids,
@@ -263,38 +241,3 @@ def build_batch(
         identity_crops=identity_crops,
     )
     return finish_batch(visual, text_cache.batch(samples), text_encoder, device)
-
-
-@contextmanager
-def prefetch_batches(jobs, prepare, depth: int = 0):
-    """One CPU batch ahead; job generation (and its RNG) stays in the caller."""
-    if depth not in (0, 1):
-        raise ValueError("cache.prefetch_batches must be 0 or 1")
-    if depth == 0:
-        yield map(prepare, jobs)
-        return
-
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rcr-cache") as executor:
-
-        def batches():
-            iterator = iter(jobs)
-            pending = None
-            try:
-                first = next(iterator, None)
-                if first is None:
-                    return
-                pending = executor.submit(prepare, first)
-                for job in iterator:
-                    batch = pending.result()
-                    pending = executor.submit(prepare, job)
-                    yield batch
-                yield pending.result()
-            finally:
-                if pending is not None:
-                    pending.cancel()
-
-        iterator = batches()
-        try:
-            yield iterator
-        finally:
-            iterator.close()
