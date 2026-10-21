@@ -60,6 +60,7 @@ def prepare_visual_batch(
     *,
     supervision,
     state_image_ids: list[set[str]] | None = None,
+    identity_crops=(),
     timings: dict | None = None,
 ) -> dict[str, Tensor]:
     """Read and collate CPU features/supervision without running a model."""
@@ -89,8 +90,8 @@ def prepare_visual_batch(
     q_ids = supervision.load_ids(
         [row["query_image_id"] for row in samples], q_persons.shape[1]
     )
-    # Only query/positive crops enter identity loss. Negative state supervision
-    # comes from image-level GT pools and needs no detector-to-head alignment.
+    # Only query/positive candidate crops need labels here. Auxiliary gallery
+    # crops carry prepared IDs; state supervision uses image-level GT pools.
     k_t = t_persons.shape[1]
     t_ids = [[None] * k_t for _ in range(b * c)]
     positive_slots = [
@@ -154,11 +155,37 @@ def prepare_visual_batch(
                 )
 
     start = perf_counter()
+    extra = []
+    for image_id, person, identity in identity_crops:
+        key = (image_id, person)
+        if key not in seen:
+            seen.add(key)
+            extra.append((image_id, person, identity))
+    # Pooled person rows come from index.pt. Auxiliary images never enter the
+    # scene/native FAFA reads or fine retrieval forward pass.
+    extra_batch = {}
+    if extra:
+        rows = {
+            i: cache.person_row(by_id[i]) for i in dict.fromkeys(x[0] for x in extra)
+        }
+        extra_batch = {
+            "extra_identity_persons": torch.stack([
+                rows[i][person] for i, person, _ in extra
+            ]).float(),
+            "extra_identity_labels": _identity_labels(
+                [[identity for _, _, identity in extra]], identity_vocab
+            )[0],
+        }
+    if timings is not None:
+        timings["identity"] = perf_counter() - start
+
+    start = perf_counter()
     fafa_query = cache.native_queries(samples, q_persons.shape[1])
     fafa_targets = cache.native_targets(target_idx, k_t).unflatten(0, (b, c))
     if timings is not None:
         timings["fafa"] = perf_counter() - start
     batch = {
+        **extra_batch,
         "query_scene": q_scene,
         "query_persons": q_persons,
         "fafa_query": fafa_query,
@@ -222,6 +249,7 @@ def build_batch(
     *,
     supervision,
     state_image_ids: list[set[str]] | None = None,
+    identity_crops=(),
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor]:
     """Synchronous interface, also used to check the prefetched path."""
@@ -232,6 +260,7 @@ def build_batch(
         cache,
         supervision=supervision,
         state_image_ids=state_image_ids,
+        identity_crops=identity_crops,
     )
     return finish_batch(visual, text_cache.batch(samples), text_encoder, device)
 

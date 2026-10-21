@@ -1,4 +1,4 @@
-"""Only query and positive crops need train identity alignment."""
+"""Retrieval batches align query/positive crops; gallery extras are separate."""
 
 import copy
 

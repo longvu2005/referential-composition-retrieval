@@ -1,4 +1,4 @@
-"""Prepare only train query/positive labels; batches never need image I/O."""
+"""Prepare train crop IDs before batches; reuse labels without image I/O."""
 
 import json
 
@@ -186,3 +186,57 @@ def test_geometry_reader_rejects_boxes_that_differ_from_person_index(tmp_path, k
     torch.save(item, path)
     with pytest.raises(ValueError, match="box count differs"):
         cache.load_geometry(0)
+
+
+def test_full_train_preparation_extends_old_labels_and_indexes_only_known_train_crops(
+    tmp_path, monkeypatch
+):
+    data, _ = _fixture(tmp_path)
+    index_path = tmp_path / "index.pt"
+    index = torch.load(index_path, weights_only=True)
+    index["image_ids"].append("n")
+    index["persons"] = torch.cat((index["persons"], index["persons"][:1]))
+    index["mask"] = torch.cat((index["mask"], index["mask"][:1]))
+    torch.save(index, index_path)
+    shard = torch.load(tmp_path / "features/0.pt", weights_only=True)
+    shard["image_id"] = "n"
+    torch.save(shard, tmp_path / "features/3.pt")
+    data.images_by_id["n"] = {"path": "train/n.jpg"}
+    data.gallery_ids.append("n")
+    data.gt_head_boxes_by_image["n"] = data.gt_head_boxes_by_image["q"]
+    cache = GalleryCache(tmp_path)
+    path = tmp_path / "train-supervision.json"
+    sample = {"query_image_id": "q", "positive_image_ids": ["p"]}
+    first = TrainSupervision(data, cache, cache_file=path)
+    first.prepare([sample])
+    with pytest.raises(RuntimeError, match="full-train"):
+        first.identity_crops()
+
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.pt")}
+    calls = []
+    read_boxes = cache.load_geometry
+
+    def track(index):
+        calls.append(index)
+        return read_boxes(index)
+
+    def fail(*args, **kwargs):
+        pytest.fail("full-train labels must not read raw images/full features")
+
+    monkeypatch.setattr(cache, "load_geometry", track)
+    monkeypatch.setattr(cache, "_get_item", fail)
+    monkeypatch.setattr(Image, "open", fail)
+    again = TrainSupervision(data, cache, cache_file=path)
+    again.prepare([sample], all_train=True)
+    assert calls == [3]  # q/p reused, and val v never read.
+    assert again.identity_crops() == {
+        "a": [("q", 0), ("p", 0), ("n", 0)],
+        "b": [("q", 1), ("p", 1), ("n", 1)],
+    }
+    assert {p: p.read_bytes() for p in before} == before
+    monkeypatch.setattr(cache, "load_geometry", fail)
+    monkeypatch.setattr(alignment, "align_identities", fail)
+    monkeypatch.setattr(alignment, "atomic_write_text", fail)
+    warm = TrainSupervision(data, cache, cache_file=path)
+    warm.prepare([sample], all_train=True)
+    assert warm.identity_crops() == again.identity_crops()

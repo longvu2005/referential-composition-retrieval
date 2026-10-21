@@ -53,7 +53,7 @@ checkpoint, changing configs/seeds or running only one cache stage.
 # Or ensure all three caches; compatible completed stages are skipped.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 
-# Train-only labels: align each unique query/Full Positive image once.
+# Train-only labels: cover the train gallery for auxiliary identity sampling.
 # Reuses the same immutable crop boxes; no encoder or query cache is loaded.
 .venv-proposed/bin/python tools/run.py prepare-supervision --config configs/proposed.yaml
 
@@ -77,8 +77,27 @@ Training also prepares missing labels before epoch 1, so the one-command pipelin
 remains sufficient. The preparation progress is separate from epoch timing;
 `runtime.json` records `supervision_prepare_seconds`. A compatible
 `cache.supervision_cache` makes this pass a lookup only. Existing visual caches
-and crops do not need rebuilding for this change. Legacy sources without pixel
+and crops do not need rebuilding for this change. Older supervision files are
+extended only for missing train images. Legacy sources without pixel
 boxes need raw image headers once during supervision preparation, not in batches.
+
+`train.identity_sampling` adds only pooled person features to identity loss:
+two crops per query ID and up to eight other train IDs, bounded by 128 extra
+crops per step. Each ID samples different images independently of condition and
+Subject co-occurrence. The retrieval candidates and state supervision are
+unchanged. Start a fresh run to compare this objective with the earlier one;
+existing checkpoints remain usable for inference. To run the earlier identity
+sampling as an ablation, use a separate output directory:
+
+```bash
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val \
+  --set train.identity_sampling.max_crops=0 output.dir=runs/proposed_identity_baseline
+```
+
+Watch `identity_valid_anchor_rate`, `identity_classes_per_batch`,
+`identity_positive_pairs` and `identity_extra_crops` alongside validation Full-mAP
+and input/forward timing. The cap bounds extra crops; it is not a target that
+short identity pools must fill.
 
 For training another seed, reuse all caches and use a separate output directory.
 `run --train` sets its checkpoint to that directory's `best.pt` automatically:

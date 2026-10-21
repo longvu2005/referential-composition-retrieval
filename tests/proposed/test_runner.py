@@ -439,8 +439,9 @@ def test_cache_extraction_needs_only_public_export(experiment, local_stages):
         assert "identity_ids" not in torch.load(feature, weights_only=True)
 
 
+@pytest.mark.parametrize("max_crops,identity_weight", [(0, 0.1), (16, 0.1), (16, 0)])
 def test_prepare_supervision_uses_only_train_boxes_and_reuses_labels(
-    experiment, local_stages, monkeypatch
+    experiment, local_stages, monkeypatch, max_crops, identity_weight
 ):
     from rcr.proposed import supervision
     from rcr.proposed.cache.store import GalleryCache
@@ -449,6 +450,8 @@ def test_prepare_supervision_uses_only_train_boxes_and_reuses_labels(
     cli.main(["build-cache", "--config", str(path)])
     cache_file = path.parent / "train-supervision.json"
     cfg["cache"]["supervision_cache"] = str(cache_file)
+    cfg["train"]["identity_sampling"]["max_crops"] = max_crops
+    cfg["loss"]["identity_weight"] = identity_weight
     path.write_text(yaml.safe_dump(cfg))
     before = {
         p: p.read_bytes()
@@ -468,9 +471,10 @@ def test_prepare_supervision_uses_only_train_boxes_and_reuses_labels(
     ):
         monkeypatch.setattr(loader, "from_pretrained", fail)
     assert cli.main(["prepare-supervision", "--config", str(path)]) == cache_file
-    assert set(json.loads(cache_file.read_text())["identities"]) == {
-        "train_q", "train_a"
-    }
+    assert set(json.loads(cache_file.read_text())["identities"]) == (
+        {"train_q", "train_a", "train_n"}
+        if max_crops and identity_weight else {"train_q", "train_a"}
+    )
     assert {p: p.read_bytes() for p in before} == before
 
     monkeypatch.setattr(GalleryCache, "load_geometry", fail)
@@ -494,3 +498,54 @@ def test_fafa_build_uses_shared_boxes_without_reading_scene_features(
     cli.main(["build-cache", "--config", str(path), "--cache-stage", "fafa"])
     for key in ("fafa_image_cache", "fafa_query_cache"):
         assert (Path(cfg["data"][key]) / "index.pt").is_file()
+
+
+def test_cache_profiler_includes_gallery_identity_crops_without_extra_scene_reads(
+    experiment, local_stages, monkeypatch, capsys
+):
+    from rcr.common.data import load_rcr_data
+    from rcr.proposed.cache.store import GalleryCache
+    from tools.profile_cache import plan_batches, profile
+
+    cfg, path = experiment
+    cfg["cache"]["supervision_cache"] = str(path.parent / "labels.json")
+    path.write_text(yaml.safe_dump(cfg))
+    cli.main(["build-cache", "--config", str(path)])
+    cli.main(["prepare-supervision", "--config", str(path)])
+    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+    plan, state = plan_batches(cfg, data, 1)
+    before = {
+        p: p.read_bytes()
+        for key in ("dino_cache", "fafa_image_cache", "fafa_query_cache")
+        for p in Path(cfg["data"][key]).rglob("*.pt")
+    }
+
+    def fail(*args, **kwargs):
+        pytest.fail("warm profile must use prepared labels and cached features")
+
+    monkeypatch.setattr(GalleryCache, "load_geometry", fail)
+    monkeypatch.setattr(Image, "open", fail)
+    read = GalleryCache._get_item
+    expected_images = {
+        image_id for rows, candidates in plan
+        for image_id in [*(row["query_image_id"] for row in rows),
+                         *(i for candidate in candidates for i in candidate)]
+    }
+    reads = []
+
+    def read_base(cache, index):
+        assert cache.image_ids[index] in expected_images
+        reads.append(cache.image_ids[index])
+        return read(cache, index)
+
+    monkeypatch.setattr(GalleryCache, "_get_item", read_base)
+    capsys.readouterr()
+    for mmap in (False, True):
+        profile(cfg, data, plan, state, mmap, 1)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    batches = [event for event in events if event["event"] == "batch"]
+    assert len(batches) == 2
+    assert all(event["identity_extra_crops"] == 1 for event in batches)
+    assert all("person_row" in event["phases"] for event in batches)
+    assert len(reads) == 2 * len(expected_images)
+    assert {p: p.read_bytes() for p in before} == before

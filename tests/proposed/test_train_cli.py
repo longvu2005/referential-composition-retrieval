@@ -42,9 +42,10 @@ class Backbone(nn.Module):
 
 
 @pytest.mark.parametrize("prefetch", [0, 1])
+@pytest.mark.parametrize("identity_crops", [0, 8])
 @pytest.mark.parametrize("enabled,train_queries", [(True, 1), (True, 0), (False, 0)])
 def test_train_checkpoints_metrics_and_retrieve(
-    monkeypatch, tmp_path, enabled, train_queries, prefetch
+    monkeypatch, tmp_path, enabled, train_queries, prefetch, identity_crops
 ):
     samples = [
         _sample("train1"),
@@ -92,6 +93,7 @@ def test_train_checkpoints_metrics_and_retrieve(
         }
 
     cache.load_geometry = load_geometry
+    cache.person_row = lambda i: cache.persons[i, cache.mask[i]]
     cache.validate_gallery = lambda ids: None
     for module in (train_proposed, retrieve_proposed, evaluate_proposed):
         monkeypatch.setattr(module, "load_rcr_data", lambda *args: data)
@@ -202,6 +204,7 @@ def test_train_checkpoints_metrics_and_retrieve(
             "seed": 0,
             "amp": True,  # CPU runtime must fall back to FP32.
             "mining_batch_size": 2,
+            "identity_sampling": {"max_crops": identity_crops},
             "sampling": {
                 "identity_fraction": 0.0,
                 "hard_fraction": 1.0,
@@ -261,7 +264,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     assert [row["epoch"] for row in epoch_logs] == [1, 2, 3]
     assert all("epoch/state_loss" in row for row in epoch_logs)
     prep_keys = (
-        "scene", "labels", "fafa", "tokens", "pin", "total",
+        "scene", "labels", "identity", "fafa", "tokens", "pin", "total",
     )
     for row in epoch_logs:
         for name in prep_keys:
@@ -271,7 +274,13 @@ def test_train_checkpoints_metrics_and_retrieve(
         )
     runtime = json.loads((output / "runtime.json").read_text())
     assert runtime["device"] == "cpu" and not runtime["amp_enabled"]
-    assert geometry_reads == [cache.by_id["q"], cache.by_id["a"]]
+    assert geometry_reads == [cache.by_id[i] for i in (
+        ["q", "a", "b"] if identity_crops else ["q", "a"]
+    )]
+    assert runtime["identity_sampling_enabled"] == bool(identity_crops)
+    assert all(0 <= row["epoch/identity_valid_anchor_rate"] <= 1 for row in epoch_logs)
+    assert all((row["epoch/identity_extra_crops"] > 0) == bool(identity_crops)
+               for row in epoch_logs)
     assert runtime["supervision_prepare_seconds"] >= 0
     assert runtime["batch_size"] * runtime["candidates"] == 4
     time_keys = (

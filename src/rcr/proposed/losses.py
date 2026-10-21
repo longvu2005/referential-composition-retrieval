@@ -179,8 +179,8 @@ def compute_loss(
     if "query_identity_mask" in batch:
         query_keep &= batch["query_identity_mask"].bool()
 
-    # Share the query/target label vocabulary and learn from positive images.
-    # Retrieval negatives, padding, unknown IDs and duplicate crops are excluded.
+    # Main query/positive observations and gallery extras share one ID vocabulary.
+    # Candidate negatives remain excluded here; extras are supervised by crop ID.
     target_keep = (target_labels >= 0) & batch["positive_mask"][:, :, None].bool()
     if "target_mask" in batch:
         target_keep &= batch["target_mask"].bool()
@@ -188,12 +188,19 @@ def compute_loss(
         target_keep &= batch["candidate_mask"][:, :, None].bool()
     if "target_identity_mask" in batch:
         target_keep &= batch["target_identity_mask"].bool()
+    identity_labels = torch.cat((query_labels[query_keep], target_labels[target_keep]))
+    extra_labels = batch.get("extra_identity_labels", identity_labels[:0])
+    identity_labels = torch.cat((identity_labels, extra_labels))
+    _, identity_counts = torch.unique(identity_labels, return_counts=True)
     loss_identity = scores.new_zeros(())
     if identity_weight != 0:
         target_identity = model.encode_identity(batch["target_persons"][target_keep])
+        identity_features = [query_identity[query_keep], target_identity]
+        if extra_labels.numel():
+            identity_features.append(model.encode_identity(batch["extra_identity_persons"]))
         loss_identity = identity_loss(
-            torch.cat((query_identity[query_keep], target_identity), dim=0),
-            torch.cat((query_labels[query_keep], target_labels[target_keep]), dim=0),
+            torch.cat(identity_features, dim=0),
+            identity_labels,
             temperature=identity_temperature,
         )
     loss_retrieval = retrieval_loss(
@@ -245,6 +252,14 @@ def compute_loss(
     return loss, {
         "grounding": loss_ground.detach(),
         "identity": loss_identity.detach(),
+        "identity_observations": identity_counts.sum(),
+        "identity_classes": scores.new_tensor(len(identity_counts), dtype=torch.long),
+        "identity_batches": scores.new_tensor(1, dtype=torch.long),
+        "identity_valid_anchors": identity_counts[identity_counts > 1].sum(),
+        "identity_positive_pairs": (identity_counts * (identity_counts - 1) // 2).sum(),
+        "identity_extra_crops": scores.new_tensor(
+            extra_labels.numel(), dtype=torch.long
+        ),
         "retrieval": loss_retrieval.detach(),
         "state": loss_state.detach(),
         "grounding_tp": (predicted & expected).sum(),

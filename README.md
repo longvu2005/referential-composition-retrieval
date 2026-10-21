@@ -158,9 +158,11 @@ memory cache. Cached tensors retain their original precision, and FDA normalizes
 matched target rows in FP32.
 
 Visual caches do not store GT labels. Train-only crop-to-ID alignment is prepared
-before epoch 1 for the unique train query and Full Positive images, then reused
-from `cache.supervision_cache`. Negative targets need no crop ID labels; their
-state supervision still uses the complete train image-level identity pools.
+before epoch 1 and reused from `cache.supervision_cache`. With
+`train.identity_sampling.max_crops > 0`, this covers the complete train gallery.
+Compatible query/positive labels from older runs are retained; only missing
+train images are aligned. With auxiliary sampling disabled, only query and
+Full Positive images need preparation.
 Prepare the labels separately before launching a training job with:
 
 ```bash
@@ -171,10 +173,35 @@ This command needs completed DINO/FAFA image caches but no encoder weights or
 FAFA query cache. It reads crop boxes through mapped shards without copying
 full scene/person feature payloads. `train` also prepares any missing labels
 automatically, before loading BERT or starting an epoch. Training batches only
-look up these prepared labels;
-they do not align heads, open raw images, or rewrite the supervision file.
+look up these prepared labels; they do not align heads, open raw images, or
+rewrite the supervision file.
 Changed cache IDs, train heads or scene size invalidate the supervision cache.
-The alignment algorithm and all retrieval losses remain unchanged.
+The alignment algorithm, visual crops and retrieval candidate sampling remain
+unchanged.
+
+Identity loss keeps the unique annotated query/Full Positive crops and adds a
+bounded auxiliary batch from the train gallery. Each query Subject ID can draw
+up to `crops_per_identity` extra observations from different images, regardless
+of retrieval conditions or whether other Subjects co-occur. Up to
+`random_identities` additional train IDs supply more identity classes, including
+IDs absent from the query set. Random IDs must have observations in at least two
+images. Already-used query/positive images and duplicate crops are excluded.
+Unknown/unmatched detector crops never enter this pool.
+
+The default config requests two crops per ID and eight additional random IDs,
+with at most 128 extra crops per step. Short pools use fewer crops. Features come
+only from the pooled FAFA person index and run through the shared person/identity
+projection; auxiliary images do not load scenes or native query/target tokens,
+or enter fine retrieval. Identity sampling has its own seeded generator so
+retrieval candidate draws are unchanged. `max_crops: 0` restores the original
+query/positive-only identity objective; older configs without this section also
+retain that behavior. `identity_weight: 0` skips the auxiliary pool entirely.
+
+Training logs `identity_extra_crops`, `identity_classes_per_batch`,
+`identity_valid_anchor_rate` (observations with another same-ID crop), and
+`identity_positive_pairs` (unordered pairs). Use validation Full-mAP and matching
+quality to compare the new objective with `max_crops: 0`; more identity data does
+not guarantee better retrieval.
 
 Older cache files remain readable; their `identity_ids` are discarded by the
 feature API. To remove that metadata physically, run this once on a **writable

@@ -254,6 +254,48 @@ def test_positive_targets_supply_identity_pairs_and_gradients() -> None:
     assert grad[:, :, 2:].count_nonzero() == 0
 
 
+def test_gallery_identity_pairs_have_gradients_and_preserve_other_losses():
+    torch.manual_seed(43)
+    model = RCRModel(8, 6, 2).eval()
+    batch = _batch()
+    batch["query_identity_labels"].fill_(-1)
+    batch["target_identity_labels"].fill_(-1)
+    _, before = compute_loss(model, batch, (2, 3))
+    people = torch.randn(4, 8, requires_grad=True)
+    batch["extra_identity_persons"] = people
+    batch["extra_identity_labels"] = torch.tensor([0, 0, 1, 1])
+    loss, after = compute_loss(
+        model, batch, (2, 3), grounding_weight=0, identity_weight=1,
+        retrieval_weight=0, state_weight=0,
+    )
+    expected = identity_loss(model.encode_identity(people), torch.tensor([0, 0, 1, 1]))
+    torch.testing.assert_close(loss, expected)
+    for key in ("grounding", "retrieval"):
+        torch.testing.assert_close(after[key], before[key], rtol=0, atol=0)
+    # Compare state under its normal nonzero weight, too.
+    _, all_parts = compute_loss(model, batch, (2, 3))
+    torch.testing.assert_close(all_parts["state"], before["state"], rtol=0, atol=0)
+    assert after["identity_observations"] == after["identity_valid_anchors"] == 4
+    assert after["identity_positive_pairs"] == 2
+    assert after["identity_extra_crops"] == 4
+    loss.backward()
+    assert (people.grad.norm(dim=-1) > 0).all()
+    assert model.person_proj[0].weight.grad.norm() > 0
+    assert model.identity_head.proj.weight.grad.norm() > 0
+
+
+def test_disabled_identity_weight_does_not_encode_auxiliary_crops(monkeypatch):
+    model = RCRModel(8, 6, 2)
+    batch = _batch()
+    batch["extra_identity_persons"] = torch.full((2, 8), float("nan"))
+    batch["extra_identity_labels"] = torch.tensor([0, 0])
+    monkeypatch.setattr(
+        model, "encode_identity", lambda *a: pytest.fail("encoded crops")
+    )
+    loss, parts = compute_loss(model, batch, (2, 3), identity_weight=0)
+    assert torch.isfinite(loss) and parts["identity"] == 0
+
+
 def test_identity_observation_masks_exclude_duplicate_crops() -> None:
     model = RCRModel(8, 6, 2).eval()
     batch = _batch()

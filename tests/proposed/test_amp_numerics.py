@@ -71,6 +71,8 @@ def test_padded_target_batch_has_finite_retrieval_loss_and_real_update(device, s
     torch.manual_seed(seed)
     model = RCRModel(8, 6, 2).to(device).train()
     batch = {name: value.to(device) for name, value in _batch().items()}
+    batch["extra_identity_persons"] = torch.randn(4, 8, device=device)
+    batch["extra_identity_labels"] = torch.tensor([0, 0, 8, 8], device=device)
     batch["target_boxes"][:, :, -1] = 0
     batch["target_persons"][:, :, -1] = 0
     batch["target_mask"][:, :, -1] = False

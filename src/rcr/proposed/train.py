@@ -31,6 +31,7 @@ from rcr.proposed.batch import (
 )
 from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.encoders import QueryTextCache, load_text_modules
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
@@ -141,6 +142,12 @@ def _diagnostics(counts: dict) -> dict:
         "grounding_complete_rate": counts.get("grounding_complete_subjects", 0)
         / subjects,
         "state_pairs": counts.get("state_pairs", 0),
+        "identity_valid_anchor_rate": counts.get("identity_valid_anchors", 0)
+        / max(counts.get("identity_observations", 0), 1),
+        "identity_positive_pairs": counts.get("identity_positive_pairs", 0),
+        "identity_extra_crops": counts.get("identity_extra_crops", 0),
+        "identity_classes_per_batch": counts.get("identity_classes", 0)
+        / max(counts.get("identity_batches", 0), 1),
         "state_active_query_rate": counts.get("state_active_queries", 0)
         / max(counts.get("queries", 0), 1),
         "fine_coverage": counts.get("fine_coverage_sum", 0)
@@ -224,6 +231,10 @@ def train(cfg: dict) -> Path:
     evaluation_cfg = cfg.get("evaluation", {"enabled": False})
     output_cfg = cfg["output"]
     sampling_cfg = sampling_settings(train_cfg.get("sampling", {}))
+    identity_cfg = identity_sampling_settings(train_cfg.get("identity_sampling", {}))
+    use_identity_crops = (
+        identity_cfg["max_crops"] > 0 and loss_cfg.get("identity_weight", 0.1) != 0
+    )
     cache_cfg = cfg.get("cache", {})
     prefetch = cache_cfg.get("prefetch_batches", 0)
     if prefetch not in (0, 1):
@@ -279,7 +290,10 @@ def train(cfg: dict) -> Path:
         scene_size=cfg.get("image_encoder", {}).get("scene_size"),
         cache_file=cache_cfg.get("supervision_cache"),
     )
-    supervision.prepare(samples)
+    supervision.prepare(samples, all_train=use_identity_crops)
+    identity_sampler = (
+        IdentityCropSampler(supervision, identity_cfg) if use_identity_crops else None
+    )
     supervision_seconds = perf_counter() - supervision_start
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
@@ -324,7 +338,7 @@ def train(cfg: dict) -> Path:
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     def prepare(job):
-        rows, candidates, stats = job
+        rows, candidates, stats, identity_crops = job
         cpu_times = {}
         prepare_start = perf_counter()
         visual = prepare_visual_batch(
@@ -333,6 +347,7 @@ def train(cfg: dict) -> Path:
             cache,
             supervision=supervision,
             state_image_ids=[state_images[row["sample_id"]] for row in rows],
+            identity_crops=identity_crops,
             timings=cpu_times,
         )
         start = perf_counter()
@@ -366,6 +381,9 @@ def train(cfg: dict) -> Path:
         "supervision_cache": cache_cfg.get("supervision_cache"),
         "supervision_cached_images": len(supervision._ids),
         "supervision_prepare_seconds": supervision_seconds,
+        "identity_sampling": identity_cfg,
+        "identity_sampling_enabled": use_identity_crops,
+        "identity_pool_ids": len(identity_sampler.pools) if identity_sampler else 0,
     }
     write_json(output / "runtime.json", runtime)
     print(
@@ -398,6 +416,7 @@ def train(cfg: dict) -> Path:
         {
             "num_queries": len(samples),
             "sampling": sampling_cfg,
+            "identity_sampling": identity_cfg,
             "case_balanced": train_cfg.get("case_balanced", True),
             "excluded_negative_pairs": sum(map(len, excluded.values())),
             "conflicts": positive_conflicts(samples),
@@ -459,6 +478,8 @@ def train(cfg: dict) -> Path:
                 )
                 mining_seconds = perf_counter() - mining_start
             generator = torch.Generator().manual_seed(seed + epoch)
+            # Auxiliary crop sampling cannot change query/candidate RNG draws.
+            identity_generator = torch.Generator().manual_seed(seed + epoch + 1_000_003)
             batches = training_batches(
                 samples,
                 train_cfg["batch_size"],
@@ -481,12 +502,15 @@ def train(cfg: dict) -> Path:
             timings.update({
                 f"prepare_{name}": 0.0
                 for name in (
-                    "scene", "labels", "fafa", "tokens", "pin", "total",
+                    "scene", "labels", "identity", "fafa", "tokens", "pin", "total",
                 )
             })
             steps = 0
 
-            def jobs(batches=batches, generator=generator, hard_pools=hard_pools):
+            def jobs(
+                batches=batches, generator=generator, hard_pools=hard_pools,
+                identity_generator=identity_generator,
+            ):
                 for rows in batches:
                     stats = {}
                     candidates = sample_candidates(
@@ -503,7 +527,11 @@ def train(cfg: dict) -> Path:
                         index=candidate_index,
                         positives_per_query=sampling_cfg["positives_per_query"],
                     )
-                    yield rows, candidates, stats
+                    identity_crops = (
+                        identity_sampler.sample(rows, candidates, identity_generator)
+                        if identity_sampler is not None else []
+                    )
+                    yield rows, candidates, stats, identity_crops
 
             train_start = perf_counter()
             with prefetch_batches(jobs(), prepare, prefetch) as prepared:
