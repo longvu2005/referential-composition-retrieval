@@ -139,7 +139,7 @@ class _Extractor:
         count = int(self.source.mask[i].sum())
         if count == 0:
             return
-        item = self.source._load_item(i)
+        item = self.source.load_geometry(i)
         with Image.open(self.data.image_path(image_id)) as image_file:
             image = image_file.convert("RGB")
             boxes = item.get("boxes_pixel")

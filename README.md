@@ -134,28 +134,51 @@ modes on your own cache without training:
 
 ### Caches
 
-The proposed pipeline keeps three independent caches:
+The proposed pipeline keeps three independent visual caches:
 
 - `data.dino_cache`: DINO scenes and detections;
 - `data.fafa_image_cache`: FAFA person features and target tokens;
 - `data.fafa_query_cache`: multimodal query features.
 
+DINO detections fix the person boxes and crop order. FAFA image and query
+extraction use those same boxes on the original RGB images; GT never changes a
+crop or selects which people enter a visual cache. Training reads the cached
+features and does not open or crop the original images.
+
 Completed caches are reused automatically. Build only one stage with
 `--cache-stage dino`, `fafa-image`, or `fafa-query`. Query text changes invalidate
 only the query cache. FAFA's text budget comes from `checkpoint.max_txt_len` in
-`configs/fafa.yaml` (currently 32 tokens). Use a separate query-cache directory
+`configs/fafa.yaml`. Use a separate query-cache directory
 when changing that policy; image features remain reusable.
 
-`cache.lru_mib` is one shared CPU budget for scenes and native FAFA target/query
-shards. `cache.text_lru_mib` separately bounds frozen BERT output tensors (256 MiB
-by default); its projection is recomputed and trained every step. Set either
-budget to zero to disable that cache. Cached tensors retain their original
-precision, and FDA normalizes matched target rows in FP32.
+`cache.lru_mib` bounds scene reads; `cache.native_lru_mib` independently bounds
+FAFA target/query shards. `cache.text_lru_mib` bounds frozen BERT output tensors;
+its projection is recomputed and trained every step. A zero budget disables that
+memory cache. Cached tensors retain their original precision, and FDA normalizes
+matched target rows in FP32.
 
-Visual caches no longer store GT labels. Train-only alignment is computed lazily
-in memory from GT heads and the existing predicted pixel boxes. Older cache files
-remain readable; their `identity_ids` are discarded by the feature API. To remove
-that metadata physically, run this once on a **writable DINO cache**:
+Visual caches do not store GT labels. Train-only crop-to-ID alignment is prepared
+before epoch 1 for the unique train query and Full Positive images, then reused
+from `cache.supervision_cache`. Negative targets need no crop ID labels; their
+state supervision still uses the complete train image-level identity pools.
+Prepare the labels separately before launching a training job with:
+
+```bash
+.venv-proposed/bin/python tools/run.py prepare-supervision --config configs/proposed.yaml
+```
+
+This command needs completed DINO/FAFA image caches but no encoder weights or
+FAFA query cache. It reads crop boxes through mapped shards without copying
+full scene/person feature payloads. `train` also prepares any missing labels
+automatically, before loading BERT or starting an epoch. Training batches only
+look up these prepared labels;
+they do not align heads, open raw images, or rewrite the supervision file.
+Changed cache IDs, train heads or scene size invalidate the supervision cache.
+The alignment algorithm and all retrieval losses remain unchanged.
+
+Older cache files remain readable; their `identity_ids` are discarded by the
+feature API. To remove that metadata physically, run this once on a **writable
+DINO cache**:
 
 ```bash
 .venv-proposed/bin/python tools/data/clean_cache.py --cache /path/to/dino-cache

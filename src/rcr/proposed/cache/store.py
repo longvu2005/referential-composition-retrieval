@@ -165,12 +165,12 @@ class GalleryCache:
             persons[n, mask[n]] = self.person_row(index)
         return persons, mask
 
-    def _read_feature(self, index: int) -> dict:
+    def _read_feature(self, index: int, *, geometry_only: bool = False) -> dict:
         item = torch.load(
             self.root / "features" / f"{index}.pt",
             map_location="cpu",
             weights_only=True,
-            mmap=self.mmap_shards,
+            mmap=geometry_only or self.mmap_shards,
         )
         if item.get("cache_id") != self.cache_id or (
             "image_id" in item and item["image_id"] != self.image_ids[index]
@@ -178,11 +178,28 @@ class GalleryCache:
             raise ValueError(f"cache feature {index} does not match index.pt")
         # Legacy shards can contain identity_ids. They never enter the feature
         # API or its LRU; training computes fresh alignment from train GT only.
+        names = (
+            ("boxes_scene", "boxes_pixel")
+            if geometry_only
+            else ("scene", "persons", "boxes_scene", "boxes_pixel", "patch_hw")
+        )
         return {
             key: item[key]
-            for key in ("scene", "persons", "boxes_scene", "boxes_pixel", "patch_hw")
+            for key in names
             if key in item
         }
+
+    def load_geometry(self, index: int) -> dict:
+        """Read immutable crop boxes without loading full feature payloads."""
+        source = self._scene_cache or self
+        item = source._read_feature(index, geometry_only=True)
+        if source.format_version >= 2:
+            count = int(source.mask[index].sum())
+            if item["boxes_scene"].shape != (count, 4) or (
+                "boxes_pixel" in item and item["boxes_pixel"].shape != (count, 4)
+            ):
+                raise ValueError("cache person box count differs from index.pt")
+        return item
 
     def _load_item(self, index: int) -> dict:
         if self._scene_cache is not None:

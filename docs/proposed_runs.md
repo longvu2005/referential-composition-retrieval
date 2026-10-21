@@ -53,6 +53,10 @@ checkpoint, changing configs/seeds or running only one cache stage.
 # Or ensure all three caches; compatible completed stages are skipped.
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 
+# Train-only labels: align each unique query/Full Positive image once.
+# Reuses the same immutable crop boxes; no encoder or query cache is loaded.
+.venv-proposed/bin/python tools/run.py prepare-supervision --config configs/proposed.yaml
+
 # Train from cached features, select best.pt, retrieve/evaluate complete val.
 .venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --train --splits val
 
@@ -69,7 +73,14 @@ Equivalent one-command initial pipeline:
 .venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --prepare --build-cache --train --splits val
 ```
 
-For training another seed, reuse the cache and use a separate output directory.
+Training also prepares missing labels before epoch 1, so the one-command pipeline
+remains sufficient. The preparation progress is separate from epoch timing;
+`runtime.json` records `supervision_prepare_seconds`. A compatible
+`cache.supervision_cache` makes this pass a lookup only. Existing visual caches
+and crops do not need rebuilding for this change. Legacy sources without pixel
+boxes need raw image headers once during supervision preparation, not in batches.
+
+For training another seed, reuse all caches and use a separate output directory.
 `run --train` sets its checkpoint to that directory's `best.pt` automatically:
 
 ```bash

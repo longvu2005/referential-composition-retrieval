@@ -80,10 +80,18 @@ def test_train_checkpoints_metrics_and_retrieve(
     for rows in data.gt_head_boxes_by_image.values():
         for row in rows:
             row.update(x=0.2, y=0.1, width=0.2, height=0.2)
-    cache._get_item = lambda i: {
-        "boxes_pixel": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
-        "boxes_scene": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
-    }
+    batch_jobs_started = False
+    geometry_reads = []
+
+    def load_geometry(i):
+        assert not batch_jobs_started, "GT alignment happened inside a train batch"
+        geometry_reads.append(i)
+        return {
+            "boxes_pixel": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
+            "boxes_scene": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
+        }
+
+    cache.load_geometry = load_geometry
     cache.validate_gallery = lambda ids: None
     for module in (train_proposed, retrieve_proposed, evaluate_proposed):
         monkeypatch.setattr(module, "load_rcr_data", lambda *args: data)
@@ -98,6 +106,8 @@ def test_train_checkpoints_metrics_and_retrieve(
     main_thread = threading.get_ident()
 
     def sample_train_gallery(samples, gallery_ids, *args, **kwargs):
+        nonlocal batch_jobs_started
+        batch_jobs_started = True
         assert threading.get_ident() == main_thread
         assert gallery_ids == ["q", "a", "b"]
         return real_sample(samples, gallery_ids, *args, **kwargs)
@@ -251,7 +261,7 @@ def test_train_checkpoints_metrics_and_retrieve(
     assert [row["epoch"] for row in epoch_logs] == [1, 2, 3]
     assert all("epoch/state_loss" in row for row in epoch_logs)
     prep_keys = (
-        "scene", "labels", "fafa", "save", "tokens", "pin", "total",
+        "scene", "labels", "fafa", "tokens", "pin", "total",
     )
     for row in epoch_logs:
         for name in prep_keys:
@@ -261,6 +271,8 @@ def test_train_checkpoints_metrics_and_retrieve(
         )
     runtime = json.loads((output / "runtime.json").read_text())
     assert runtime["device"] == "cpu" and not runtime["amp_enabled"]
+    assert geometry_reads == [cache.by_id["q"], cache.by_id["a"]]
+    assert runtime["supervision_prepare_seconds"] >= 0
     assert runtime["batch_size"] * runtime["candidates"] == 4
     time_keys = (
         "mining",

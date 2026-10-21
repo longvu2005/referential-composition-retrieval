@@ -272,12 +272,15 @@ def train(cfg: dict) -> Path:
     if expected_backend is not None and expected_backend != actual_backend:
         raise ValueError("cache person encoder differs from the training config")
     candidate_ids = split_image_ids(data, "train")
+    supervision_start = perf_counter()
     supervision = TrainSupervision(
         data,
         cache,
         scene_size=cfg.get("image_encoder", {}).get("scene_size"),
         cache_file=cache_cfg.get("supervision_cache"),
     )
+    supervision.prepare(samples)
+    supervision_seconds = perf_counter() - supervision_start
     identity_pools = identity_candidate_pools(data, samples, candidate_ids)
     state_images = {key: set(ids) for key, ids in identity_pools.items()}
     excluded = negative_exclusions(samples)
@@ -333,9 +336,6 @@ def train(cfg: dict) -> Path:
             timings=cpu_times,
         )
         start = perf_counter()
-        supervision.save()
-        cpu_times["save"] = perf_counter() - start
-        start = perf_counter()
         tokens = text_cache.batch(rows)
         cpu_times["tokens"] = perf_counter() - start
         start = perf_counter()
@@ -365,6 +365,7 @@ def train(cfg: dict) -> Path:
         "native_lru_mib": cache_cfg.get("native_lru_mib", 0),
         "supervision_cache": cache_cfg.get("supervision_cache"),
         "supervision_cached_images": len(supervision._ids),
+        "supervision_prepare_seconds": supervision_seconds,
     }
     write_json(output / "runtime.json", runtime)
     print(
@@ -480,7 +481,7 @@ def train(cfg: dict) -> Path:
             timings.update({
                 f"prepare_{name}": 0.0
                 for name in (
-                    "scene", "labels", "fafa", "save", "tokens", "pin", "total",
+                    "scene", "labels", "fafa", "tokens", "pin", "total",
                 )
             })
             steps = 0

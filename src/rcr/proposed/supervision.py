@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 from PIL import Image
+from tqdm import tqdm
 
-from rcr.common.data import split_image_ids
+from rcr.common.data import load_rcr_data, split_image_ids, split_samples
 from rcr.common.io import atomic_write_text
 from rcr.common.vision import match_heads_to_persons
 
@@ -51,6 +52,7 @@ class TrainSupervision:
         self.scene_size = scene_size
         self._ids = {}
         self._saved_count = 0
+        self._prepared = False
         self.cache_file = Path(cache_file) if cache_file is not None else None
         if self.cache_file is None:
             return
@@ -80,7 +82,7 @@ class TrainSupervision:
                 self._saved_count = len(self._ids)
 
     def save(self):
-        """Publish completed train alignments after a CPU batch."""
+        """Publish completed train alignments atomically."""
         if self.cache_file is None or len(self._ids) == self._saved_count:
             return
         atomic_write_text(
@@ -92,25 +94,80 @@ class TrainSupervision:
         )
         self._saved_count = len(self._ids)
 
+    def _load_image_ids(self, image_id):
+        if image_id not in self.heads:
+            raise ValueError(
+                f"train supervision cannot read non-train image {image_id}"
+            )
+        if image_id not in self._ids:
+            if self._prepared:
+                raise RuntimeError(f"train labels were not prepared for {image_id}")
+            item = self.cache.load_geometry(self.cache.by_id[image_id])
+            self._ids[image_id] = align_identities(
+                item,
+                self.heads[image_id],
+                image_path=self.image_paths[image_id],
+                scene_size=self.scene_size,
+            )
+        return self._ids[image_id]
+
+    def prepare(self, samples):
+        """Align the unique train query/positive images before any training step."""
+        required = set()
+        for sample in samples:
+            required.add(sample["query_image_id"])
+            required.update(
+                sample["positive_image_ids"]
+                if "positive_image_ids" in sample
+                else [sample["target_image_id"]]
+            )
+        if not required <= self.heads.keys():
+            raise ValueError("train supervision cannot prepare non-train images")
+        # Canonical gallery order also avoids random shard seeks in this pass.
+        missing = [i for i in self.heads if i in required and i not in self._ids]
+        self._prepared = False
+        print(
+            f"Train supervision: {len(required) - len(missing)}/{len(required)} "
+            f"images cached; preparing {len(missing)} before epoch 1",
+            flush=True,
+        )
+        try:
+            for image_id in tqdm(missing, desc="prepare train supervision"):
+                self._load_image_ids(image_id)
+        finally:
+            self.save()
+        self._prepared = True
+
     def load_ids(self, image_ids, max_people):
         result = []
         for image_id in image_ids:
-            if image_id not in self.heads:
-                raise ValueError(
-                    f"train supervision cannot read non-train image {image_id}"
-                )
-            if image_id not in self._ids:
-                item = self.cache._get_item(self.cache.by_id[image_id])
-                self._ids[image_id] = align_identities(
-                    item,
-                    self.heads[image_id],
-                    image_path=self.image_paths[image_id],
-                    scene_size=self.scene_size,
-                )
-            ids = self._ids[image_id]
+            ids = self._load_image_ids(image_id)
             if len(ids) > max_people:
                 raise ValueError(
                     "supervision crop order/count differs from visual batch"
                 )
             result.append([*ids, *([None] * (max_people - len(ids)))])
         return result
+
+
+def prepare_train_supervision(cfg):
+    """Prepare reusable train labels without loading encoders or query features."""
+    from rcr.proposed.cache.store import GalleryCache
+
+    data_cfg = cfg["data"]
+    cache_file = cfg.get("cache", {}).get("supervision_cache")
+    if cache_file is None:
+        raise ValueError("prepare-supervision requires cache.supervision_cache")
+    data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
+    cache = GalleryCache(
+        data_cfg["fafa_image_cache"], scene_root=data_cfg.get("dino_cache")
+    )
+    cache.validate_gallery(data.gallery_ids)
+    supervision = TrainSupervision(
+        data,
+        cache,
+        scene_size=cfg.get("image_encoder", {}).get("scene_size"),
+        cache_file=cache_file,
+    )
+    supervision.prepare(split_samples(data, "train"))
+    return supervision.cache_file

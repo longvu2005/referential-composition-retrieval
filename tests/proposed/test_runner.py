@@ -437,3 +437,60 @@ def test_cache_extraction_needs_only_public_export(experiment, local_stages):
         assert (Path(cfg["data"][key]) / "index.pt").is_file()
     for feature in (Path(cfg["data"]["dino_cache"]) / "features").glob("*.pt"):
         assert "identity_ids" not in torch.load(feature, weights_only=True)
+
+
+def test_prepare_supervision_uses_only_train_boxes_and_reuses_labels(
+    experiment, local_stages, monkeypatch
+):
+    from rcr.proposed import supervision
+    from rcr.proposed.cache.store import GalleryCache
+
+    cfg, path = experiment
+    cli.main(["build-cache", "--config", str(path)])
+    cache_file = path.parent / "train-supervision.json"
+    cfg["cache"]["supervision_cache"] = str(cache_file)
+    path.write_text(yaml.safe_dump(cfg))
+    before = {
+        p: p.read_bytes()
+        for key in ("dino_cache", "fafa_image_cache", "fafa_query_cache")
+        for p in Path(cfg["data"][key]).rglob("*.pt")
+    }
+
+    def fail(*args, **kwargs):
+        pytest.fail("preparing supervision must not load images or full features")
+
+    monkeypatch.setattr(GalleryCache, "_get_item", fail)
+    monkeypatch.setattr(GalleryCache, "person_row", fail)
+    monkeypatch.setattr(Image, "open", fail)
+    for loader in (
+        sys.modules["transformers"].AutoModel,
+        sys.modules["transformers"].AutoTokenizer,
+    ):
+        monkeypatch.setattr(loader, "from_pretrained", fail)
+    assert cli.main(["prepare-supervision", "--config", str(path)]) == cache_file
+    assert set(json.loads(cache_file.read_text())["identities"]) == {
+        "train_q", "train_a"
+    }
+    assert {p: p.read_bytes() for p in before} == before
+
+    monkeypatch.setattr(GalleryCache, "load_geometry", fail)
+    monkeypatch.setattr(supervision, "align_identities", fail)
+    monkeypatch.setattr(supervision, "atomic_write_text", fail)
+    assert cli.main(["prepare-supervision", "--config", str(path)]) == cache_file
+
+
+def test_fafa_build_uses_shared_boxes_without_reading_scene_features(
+    experiment, local_stages, monkeypatch
+):
+    from rcr.proposed.cache.store import GalleryCache
+
+    cfg, path = experiment
+    cli.main(["build-cache", "--config", str(path), "--cache-stage", "dino"])
+
+    def fail(*args, **kwargs):
+        pytest.fail("FAFA crops must read shared boxes, not full DINO features")
+
+    monkeypatch.setattr(GalleryCache, "_load_item", fail)
+    cli.main(["build-cache", "--config", str(path), "--cache-stage", "fafa"])
+    for key in ("fafa_image_cache", "fafa_query_cache"):
+        assert (Path(cfg["data"][key]) / "index.pt").is_file()

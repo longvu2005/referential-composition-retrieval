@@ -158,7 +158,16 @@ def test_persisted_alignment_is_invalidated_when_train_inputs_change(
     if change == "train_heads":
         data.gt_head_boxes_by_image["q"][0]["identity_id"] = "fresh"
     elif change == "cache_id":
-        cache.cache_id = "different-crops"
+        # Simulate a completed new cache, including its immutable shard IDs.
+        for tensor_path in (tmp_path / "features").glob("*.pt"):
+            item = torch.load(tensor_path, weights_only=True)
+            item["cache_id"] = "different-crops"
+            torch.save(item, tensor_path)
+        index_path = tmp_path / "index.pt"
+        index = torch.load(index_path, weights_only=True)
+        index["cache_id"] = "different-crops"
+        torch.save(index, index_path)
+        cache = GalleryCache(tmp_path)
     elif change == "scene_size":
         size = [32, 48]
     else:

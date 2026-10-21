@@ -26,6 +26,7 @@ def main(argv=None):
         default="all",
     )
     commands.add_parser("train", parents=[shared])
+    commands.add_parser("prepare-supervision", parents=[shared])
     for name in ("retrieve", "evaluate", "run"):
         command = commands.add_parser(name, parents=[shared])
         command.add_argument(
@@ -58,8 +59,13 @@ def main(argv=None):
     method = cfg.get("method")
     if method not in ("proposed", "clip", "fafa"):
         parser.error("method must be proposed, clip or fafa")
-    if command in ("train", "build-cache") and method != "proposed":
-        parser.error("train/build-cache are only available for proposed")
+    if (
+        command in ("train", "build-cache", "prepare-supervision")
+        and method != "proposed"
+    ):
+        parser.error(
+            "train/build-cache/prepare-supervision are only available for proposed"
+        )
     if command == "run":
         if (args.train or args.build_cache) and method != "proposed":
             parser.error("--train/--build-cache are only available for proposed")
@@ -99,6 +105,10 @@ def main(argv=None):
         from rcr.proposed.train import train
 
         return train(cfg)
+    if command == "prepare-supervision":
+        from rcr.proposed.supervision import prepare_train_supervision
+
+        return prepare_train_supervision(cfg)
     splits = list(
         dict.fromkeys(
             args.splits

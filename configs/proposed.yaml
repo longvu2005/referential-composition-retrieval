@@ -29,7 +29,7 @@ cache:
   storage_dtype: float16
   lru_mib: 1024       # scenes only; FAFA shards cannot evict scenes
   native_lru_mib: 256  # independent FAFA target/query budget
-  supervision_cache: cache/train-supervision.json  # train-only GT alignment
+  supervision_cache: cache/train-supervision.json  # query/positive GT prepared before train
   mmap_shards: false  # Eager scene/target reads, as in ec5a2a2; large indices stay mmap.
   text_lru_mib: 256   # frozen BERT outputs only; projection remains trainable
   prefetch_batches: 1  # 0 disables; at most one CPU batch ahead
