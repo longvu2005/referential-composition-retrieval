@@ -116,6 +116,23 @@ class TinyCache:
         return torch.ones(len(indices), max_people, 3, 5)
 
 
+class WandbRun:
+    def __init__(self):
+        self.metrics = []
+        self.logs = []
+        self.summary = {}
+        self.finished = False
+
+    def define_metric(self, *args, **kwargs):
+        self.metrics.append((args, kwargs))
+
+    def log(self, values):
+        self.logs.append(values)
+
+    def finish(self):
+        self.finished = True
+
+
 def _sample(sample_id, query, target):
     return {
         "sample_id": sample_id,
@@ -133,6 +150,13 @@ def _sample(sample_id, query, target):
 def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     samples = [_sample("train", "q", "a"), _sample("val", "vq", "va")]
     cache = TinyCache()
+    wandb_run = WandbRun()
+    wandb_init = {}
+
+    def init_wandb(**kwargs):
+        wandb_init.update(kwargs)
+        return wandb_run
+
     data = SimpleNamespace(
         samples=samples,
         samples_by_id={row["sample_id"]: row for row in samples},
@@ -173,6 +197,7 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
             ),
         ),
     )
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init_wandb))
 
     cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text(encoding="utf-8"))
     cfg["data"] = {
@@ -207,3 +232,20 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     torch.testing.assert_close(
         restored.proj.weight, saved["text_encoder"]["projection"]["weight"]
     )
+
+    assert wandb_init["project"] == "referential-composition-retrieval"
+    assert "data" not in wandb_init["config"]
+    assert wandb_init["config"]["cache"]["id"] == "tiny"
+    assert len(wandb_run.metrics) == 5
+    assert wandb_run.logs[0]["global_step"] == 1
+    assert "train/loss" in wandb_run.logs[0]
+    assert wandb_run.logs[-1]["epoch"] == 1
+    assert "val/checkpoint_score" in wandb_run.logs[-1]
+    assert wandb_run.summary["best_epoch"] == 1
+    assert wandb_run.finished
+
+
+def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "wandb", None)
+    cfg = {"wandb": {"enabled": False}}
+    assert training._wandb_run(cfg, tmp_path, None, 1, 1) is None

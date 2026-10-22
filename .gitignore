@@ -33,6 +33,7 @@ venv/
 # Runtime artifacts
 /cache/
 /runs/
+/wandb/
 *.log
 *.tmp
 

@@ -75,6 +75,13 @@ python tools/run.py run --config configs/proposed.yaml --train --splits val \
   --set train.seed=1 output.dir=runs/proposed-seed1
 ```
 
+W&B tracking is configured by the `wandb` block in `configs/proposed.yaml`.
+Each run records only research configuration and cache provenance, not local
+dataset paths. It logs losses, gradient norm and learning rates every
+`log_every_steps`, then epoch means and validation metrics. Set `mode: offline`
+to sync later with `wandb sync`, or set `enabled: false` for untracked smoke
+tests.
+
 ## 4. Calibrate retrieval weights
 
 ```bash

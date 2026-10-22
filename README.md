@@ -120,6 +120,11 @@ python tools/run.py run --config configs/proposed.yaml --train --splits val \
   --set train.seed=1 output.dir=runs/proposed-seed1
 ```
 
+Training logs step losses, gradient norm, learning rates, epoch means,
+validation metrics and the best checkpoint summary to W&B. Authenticate once
+with `wandb login`; use `--set wandb.mode=offline` when a machine cannot sync,
+or `--set wandb.enabled=false` to disable tracking for a smoke test.
+
 ## Caches
 
 | Config key | Contents | Depends on query text |

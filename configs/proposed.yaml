@@ -94,6 +94,12 @@ candidate_ks: [100, 500]
 evaluation:
   enabled: true
   every_epochs: 2
+wandb:
+  enabled: true
+  project: referential-composition-retrieval
+  name: proposed
+  mode: online           # Use offline to defer syncing, or disabled to suppress logging.
+  log_every_steps: 20
 runtime:
   device: cuda
 checkpoint: runs/proposed-fafa-unified/best.pt

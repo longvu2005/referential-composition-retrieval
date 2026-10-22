@@ -37,6 +37,74 @@ from rcr.proposed.sampling import (
 from rcr.proposed.supervision import TrainSupervision
 
 
+def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples):
+    """Start optional experiment tracking without exposing local data paths."""
+    wandb_cfg = cfg.get("wandb", {})
+    if not wandb_cfg.get("enabled", False):
+        return None
+
+    log_every = int(wandb_cfg.get("log_every_steps", 20))
+    if log_every < 1:
+        raise ValueError("wandb.log_every_steps must be at least 1")
+
+    try:
+        import wandb
+    except ImportError as error:
+        raise RuntimeError(
+            "W&B tracking is enabled but wandb is not installed; "
+            "install the proposed dependencies or set wandb.enabled=false"
+        ) from error
+
+    tracked_config = {
+        key: cfg[key]
+        for key in (
+            "model",
+            "train",
+            "optimizer",
+            "loss",
+            "retrieval",
+            "candidate_ks",
+        )
+    }
+    tracked_config.update(
+        evaluation=cfg.get("evaluation", {"enabled": False}),
+        cache={
+            "id": cache.cache_id,
+            "patch_hw": list(cache.patch_hw),
+            "scene_dim": cache.scene_dim,
+            "person_dim": cache.person_dim,
+            "encoders": cache.encoder_metadata,
+        },
+        num_train_samples=num_train_samples,
+        num_val_samples=num_val_samples,
+    )
+    run = wandb.init(
+        project=wandb_cfg.get("project", "referential-composition-retrieval"),
+        name=wandb_cfg.get("name"),
+        mode=wandb_cfg.get("mode", "online"),
+        dir=str(output),
+        config=tracked_config,
+    )
+    if run is None:
+        raise RuntimeError("wandb.init() did not return a run")
+    run.define_metric("global_step")
+    run.define_metric("train/*", step_metric="global_step")
+    run.define_metric("epoch")
+    run.define_metric("epoch/*", step_metric="epoch")
+    run.define_metric("val/*", step_metric="epoch")
+    return run
+
+
+def _gradient_norm(*modules):
+    """Compute the global L2 gradient norm without changing gradients."""
+    squared_norm = 0.0
+    for module in modules:
+        for parameter in module.parameters():
+            if parameter.grad is not None:
+                squared_norm += float(parameter.grad.detach().float().square().sum())
+    return squared_norm**0.5
+
+
 def _selection_metrics(result):
     full_map = float(result["overall"]["full_map"])
     cases = [
@@ -257,6 +325,11 @@ def train(cfg: dict) -> Path:
         flush=True,
     )
 
+    run = _wandb_run(cfg, output, cache, len(train_samples), len(val_samples))
+    log_every = (
+        int(cfg.get("wandb", {}).get("log_every_steps", 20)) if run is not None else 0
+    )
+    global_step = 0
     best = {
         "epoch": None,
         "full_map": None,
@@ -350,6 +423,13 @@ def train(cfg: dict) -> Path:
                     f"{[row['sample_id'] for row in rows]}"
                 )
             scaler.scale(loss).backward()
+            global_step += 1
+            should_log = run is not None and (
+                global_step == 1 or global_step % log_every == 0
+            )
+            if should_log:
+                scaler.unscale_(optimizer)
+                gradient_norm = _gradient_norm(model, text_encoder)
             scaler.step(optimizer)
             scaler.update()
 
@@ -360,6 +440,16 @@ def train(cfg: dict) -> Path:
             for name, value in values.items():
                 totals[name] += value * len(rows)
             progress.set_postfix(loss=f"{values['loss']:.4f}")
+            if should_log:
+                run.log(
+                    {
+                        "global_step": global_step,
+                        **{f"train/{name}": value for name, value in values.items()},
+                        "train/gradient_norm": gradient_norm,
+                        "train/model_lr": optimizer.param_groups[0]["lr"],
+                        "train/text_lr": optimizer.param_groups[1]["lr"],
+                    }
+                )
 
         epoch_log = {
             "epoch": epoch,
@@ -422,4 +512,22 @@ def train(cfg: dict) -> Path:
         with (output / "history.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(epoch_log) + "\n")
 
+        if run is not None:
+            tracked_epoch = {
+                "epoch": epoch,
+                **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
+            }
+            if should_evaluate:
+                tracked_epoch.update(
+                    {f"val/{name}": value for name, value in metrics.items()}
+                )
+            run.log(tracked_epoch)
+            if is_best:
+                run.summary["best_epoch"] = best["epoch"]
+                run.summary["best_val_full_map"] = best["full_map"]
+                run.summary["best_val_macro_full_map"] = best["macro_full_map"]
+                run.summary["best_val_checkpoint_score"] = best["score"]
+
+    if run is not None:
+        run.finish()
     return output / ("best.pt" if best["epoch"] is not None else "last.pt")

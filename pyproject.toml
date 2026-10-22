@@ -24,6 +24,7 @@ proposed = [
     "scipy>=1.11,<2",  # Fine partial one-to-one identity assignment.
     "transformers>=4.56,<5",
     "torchvision>=0.17,<1",
+    "wandb>=0.18,<1",
 ]
 clip = [
     "torch>=2.2,<3",
