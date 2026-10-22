@@ -11,6 +11,8 @@ from rcr.common.config import load_config, override_config
 from rcr.common.data import load_rcr_data
 from rcr.common.io import output_directory, write_json, write_summary
 from rcr.evaluation.runner import evaluate_run
+from rcr.proposed.nn.model import DEFAULT_COARSE_BETA
+from rcr.proposed.ranking import retrieval_settings
 from rcr.proposed.retrieve import retrieve_weight_grid
 
 
@@ -33,12 +35,16 @@ def calibrate(settings: dict) -> list[dict]:
     cfg = load_config(settings["model_config"])
     if cfg["method"] != "proposed":
         raise ValueError("calibration requires method=proposed")
+    cfg["retrieval"] = retrieval_settings(
+        cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
+    )
     if max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]:
         raise ValueError("candidate_ks cannot exceed top_m")
     root = Path(settings["output_dir"])
     cfg = override_config(cfg, {"output.dir": str(root), "split": "val"})
     cfg.pop("selected_checkpoint_sha256", None)
     cfg.pop("selected_validation_sha256", None)
+    cfg.pop("selected_retrieval", None)
     root.mkdir(parents=True, exist_ok=True)
     for filename in ("summary.csv", "selection.json", "selected.yaml"):
         (root / filename).unlink(missing_ok=True)
@@ -67,6 +73,8 @@ def calibrate(settings: dict) -> list[dict]:
                 "split": "val",
                 "coarse_beta": beta,
                 "fine_coarse_weight": fine_weight,
+                "fine_score_mode": cfg["retrieval"]["fine_score_mode"],
+                "context_weight": cfg["retrieval"]["context_weight"],
                 "checkpoint_sha256": metadata["checkpoint_sha256"],
                 "validation_sha256": metadata["validation_sha256"],
                 **metrics["overall"],
@@ -91,6 +99,16 @@ def calibrate(settings: dict) -> list[dict]:
     )
     for key in ("checkpoint_sha256", "validation_sha256"):
         selected[f"selected_{key}"] = best[key]
+    selected["selected_retrieval"] = {
+        key: selected["retrieval"][key]
+        for key in (
+            "fine_score_mode",
+            "context_weight",
+            "coarse_beta",
+            "fine_coarse_weight",
+            "top_m",
+        )
+    }
     (root / "selected.yaml").write_text(
         yaml.safe_dump(selected, sort_keys=False), encoding="utf-8"
     )

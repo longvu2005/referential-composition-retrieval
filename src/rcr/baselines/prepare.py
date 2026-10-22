@@ -95,13 +95,9 @@ def prepare(cfg: dict, *, force: bool = False) -> None:
         prepare_fafa_model(cfg, force=force)
         selector = cfg["localization"]["query_selector"]
         prepare_clip(selector["model"], selector["checkpoint"], force)
-        detector = cfg["localization"]["detector"]
-        download(
-            detector["source_url"],
-            Path(detector["checkpoint"]),
-            force=force,
-            expected_hash=detector["hash_prefix"],
-        )
+        from rcr.baselines.fafa_detector import prepare_detector
+
+        prepare_detector(cfg["localization"]["detector"], force=force)
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
     print("Baseline artifacts ready", flush=True)

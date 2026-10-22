@@ -1,4 +1,5 @@
 # Only two inference weights are selected, using the complete validation split.
+# fine_score_mode=context_zscore and context_weight=0.03 stay fixed in model_config.
 model_config: configs/proposed.yaml
 output_dir: runs/calibration
 coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]

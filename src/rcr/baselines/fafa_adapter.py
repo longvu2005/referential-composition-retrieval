@@ -7,7 +7,6 @@ remain text; independent FAFA components do not provide joint relation reasoning
 
 from __future__ import annotations
 
-import json
 import re
 
 import numpy as np
@@ -19,45 +18,45 @@ from tqdm import tqdm
 
 from rcr.baselines.clip import load_clip
 from rcr.common.data import sample_selection_texts
-from rcr.common.io import cache_directory, image_signature, sha256_file
 
-ADAPTER_VERSION = "rcr-fafa-predicted-set-v2"
-# Detection and gallery encoding are unchanged by the case-free query policy.
-VISUAL_CACHE_VERSION = "rcr-fafa-predicted-set-v1"
+ADAPTER_VERSION = "rcr-fafa-cpr-partial-setmatch-v3"
+VISUAL_CACHE_VERSION = "rcr-fafa-groundingdino-v2"
 
 
 def subject_changes(sample: dict) -> list[str]:
-    """Split explicit independent Subject clauses; preserve relations without GT."""
-    subject_ids = [subject["subject_id"] for subject in sample["subjects"]]
-    text = sample["final_change"].removeprefix("then retrieve target images where ")
-    parts = re.split(r"\s+and\s+(?=Subject\s+\d+\b)", text)
-    by_id = {}
-    for part in parts:
-        match = re.match(r"Subject\s+(\d+)\b", part)
-        mentions = set(map(int, re.findall(r"\bSubject\s+(\d+)\b", part)))
-        if (
-            not match
-            or not part[match.end() :].strip(" .,;")
-            or mentions != {int(match[1])}
-            or int(match[1]) in by_id
-        ):
-            by_id = {}
-            break
-        by_id[int(match[1])] = part
-    # If the text cannot be decomposed safely, each Subject receives the intact
-    # condition. Never guess a missing subject-specific modification.
-    independent = set(by_id) == set(subject_ids)
-    changes = []
-    for subject_id in subject_ids:
-        condition = by_id[subject_id] if independent else text
+    """Replicate CPR Benchmark's case-free native modification text routing.
 
-        def replace(match, current_id=subject_id):
-            if int(match[1]) == current_id:
-                return "the reference person"
-            return f"the other referenced person (Subject {match[1]})"
-
-        changes.append(re.sub(r"\bSubject\s+(\d+)\b", replace, condition))
-    return changes
+    Independent clauses lose their ``Subject N`` prefix. Relational/ambiguous
+    clauses remain intact for each Subject; no identity or case labels are used.
+    """
+    ids = [int(subject["subject_id"]) for subject in sample["subjects"]]
+    text = sample["final_change"].removeprefix(
+        "then retrieve target images where "
+    ).strip()
+    mentions = list(re.finditer(r"\bSubject\s+(\d+)\b", text, re.IGNORECASE))
+    independent = (
+        len(mentions) == len(ids)
+        and {int(m[1]) for m in mentions} == set(ids)
+        and bool(mentions)
+        and mentions[0].start() == 0
+    )
+    result = {}
+    if independent:
+        for i, mention in enumerate(mentions):
+            end = mentions[i + 1].start() if i + 1 < len(mentions) else len(text)
+            fragment = text[mention.end() : end].strip()
+            if i + 1 < len(mentions):
+                connector = re.search(r"(?:[,;]?\s+and|[,;]?\s+while|[,;])\s*$",
+                                      fragment, re.IGNORECASE)
+                if connector is None:
+                    independent = False
+                    break
+                fragment = fragment[: connector.start()].strip()
+            if not fragment:
+                independent = False
+                break
+            result[int(mention[1])] = fragment
+    return [result[subject_id] for subject_id in ids] if independent else [text] * len(ids)
 
 
 def select_subject_members(
@@ -72,7 +71,7 @@ def select_subject_members(
 
     Anchor assignment is maximum-sum one-to-one matching. An unused crop is an
     extra member when its cosine score passes the absolute threshold and lies
-    within ``margin`` of that Subject's best score. Competing Subjects assign it
+    within ``margin`` of that Subject's assigned anchor. Competing Subjects assign it
     to the highest-scoring eligible Subject. The same rule applies to every
     query; no case label or GT cardinality is read.
     """
@@ -88,7 +87,7 @@ def select_subject_members(
     for row, col in zip(rows, cols, strict=True):
         selected[int(row)].append(int(col))
     used = set(cols.tolist())
-    row_best = similarity.max(axis=1)
+    anchors = {int(row): int(col) for row, col in zip(rows, cols, strict=True)}
     valid_extra = np.ones(npersons, dtype=bool) if valid_extra is None else valid_extra
     # Stable high-confidence order makes the per-Subject cap deterministic.
     order = np.argsort(-similarity.max(axis=0), kind="stable")
@@ -100,28 +99,13 @@ def select_subject_members(
             for row in range(ns)
             if len(selected[row]) < max_members
             and similarity[row, col] >= threshold
-            and similarity[row, col] >= row_best[row] - margin
+            and similarity[row, col] >= similarity[row, anchors[row]] - margin
         ]
         if eligible:
             row = max(eligible, key=lambda x, c=col: (similarity[x, c], -x))
             selected[row].append(int(col))
     return selected
 
-
-def setmatch_score(matrix: np.ndarray, unmatched_score: float = -1.0) -> float:
-    """Native adapter rule: max-sum Hungarian, then minimum matched score."""
-    if matrix.ndim != 2 or matrix.shape[0] < 1 or not np.isfinite(matrix).all():
-        raise ValueError("SetMatch needs a finite, non-empty component score matrix")
-    if not np.isfinite(unmatched_score):
-        raise ValueError("unmatched_score must be finite")
-    ncomponents, npersons = matrix.shape
-    if npersons < ncomponents:
-        matrix = np.concatenate(
-            [matrix, np.full((ncomponents, ncomponents - npersons), unmatched_score)],
-            axis=1,
-        )
-    rows, cols = linear_sum_assignment(-matrix)
-    return float(matrix[rows, cols].min())
 
 
 def choose_boxes(candidates: list[dict], threshold: float, required: int) -> list[dict]:
@@ -133,78 +117,6 @@ def choose_boxes(candidates: list[dict], threshold: float, required: int) -> lis
             selected.append(box)
     return selected
 
-
-@torch.inference_mode()
-def detect_gallery(data, gallery_ids: list[str], cfg: dict, device):
-    from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
-    from torchvision.transforms.functional import pil_to_tensor
-
-    if cfg["backend"] != "torchvision_fasterrcnn_resnet50_fpn_v2":
-        raise ValueError("unsupported FAFA detector backend")
-    if int(cfg["max_persons_per_image"]) < 1:
-        raise ValueError("max_persons_per_image must be positive")
-
-    signature = {
-        "version": VISUAL_CACHE_VERSION,
-        "detector": cfg,
-        "device_type": device.type,
-        "checkpoint_sha256": sha256_file(cfg["checkpoint"]),
-        "images": image_signature(data, gallery_ids),
-    }
-    directory = cache_directory(cfg["cache_dir"], signature)
-    path = directory / "candidates.json"
-    if path.is_file():
-        candidates = json.loads(path.read_text(encoding="utf-8"))
-        if len(candidates) == len(gallery_ids) and all(candidates):
-            print(f"Detector cache: {path}", flush=True)
-            return candidates, directory
-    model = fasterrcnn_resnet50_fpn_v2(weights=None, weights_backbone=None)
-    model.load_state_dict(
-        torch.load(cfg["checkpoint"], map_location="cpu", weights_only=True)
-    )
-    model.to(device).eval()
-    candidates = []
-    for image_id in tqdm(gallery_ids, desc="FAFA person detection", unit="image"):
-        with Image.open(data.image_path(image_id)) as source:
-            image = source.convert("RGB")
-            prediction = model([pil_to_tensor(image).float().div(255).to(device)])[0]
-            boxes = []
-            order = prediction["scores"].argsort(descending=True)
-            for index in order.tolist():
-                if int(prediction["labels"][index]) != 1:
-                    continue
-                x1, y1, x2, y2 = prediction["boxes"][index].tolist()
-                x1, y1 = (
-                    max(0, min(x1, image.width - 1)),
-                    max(0, min(y1, image.height - 1)),
-                )
-                x2 = max(x1 + 1, min(x2, image.width))
-                y2 = max(y1 + 1, min(y2, image.height))
-                boxes.append(
-                    {
-                        "box": [x1, y1, x2, y2],
-                        "score": float(prediction["scores"][index]),
-                        "fallback": False,
-                    }
-                )
-                if len(boxes) == int(cfg["max_persons_per_image"]):
-                    break
-            if not boxes:
-                boxes = [
-                    {
-                        "box": [0, 0, image.width, image.height],
-                        "score": -1.0,
-                        "fallback": True,
-                    }
-                ]
-            candidates.append(boxes)
-    del model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(candidates), encoding="utf-8")
-    temporary.replace(path)
-    return candidates, directory
 
 
 @torch.inference_mode()

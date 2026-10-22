@@ -60,6 +60,24 @@ def _retrieve(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     train_cfg = checkpoint["config"]
     model_cfg = train_cfg["model"]
+    settings = retrieval_settings(
+        cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
+    )
+    if (
+        any(
+            key in cfg
+            for key in ("selected_checkpoint_sha256", "selected_validation_sha256")
+        )
+        and "selected_retrieval" not in cfg
+    ):
+        raise ValueError(
+            "selected config predates the scoring contract; rerun val calibration"
+        )
+    selected = cfg.get("selected_retrieval", {})
+    if any(settings.get(key) != value for key, value in selected.items()):
+        raise ValueError(
+            "retrieval settings changed since val selection; rerun the sweep"
+        )
     if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
             "checkpoint architecture is incompatible; train FAFA-native V1 "
@@ -147,7 +165,6 @@ def _retrieve(
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
-    settings = retrieval_settings(cfg["retrieval"], model.coarse_beta)
     is_grid = weights is not None
     weights = (
         weights
@@ -190,6 +207,10 @@ def _retrieve(
                 "method": "proposed",
                 "config": run_cfg,
                 "retrieval": run_cfg["retrieval"],
+                "score_schema_version": output["score_schema_version"],
+                "score_config": output["score_config"],
+                "fine_score_mode": settings["fine_score_mode"],
+                "context_weight": settings["context_weight"],
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha256,
                 "validation_sha256": validation_sha256,

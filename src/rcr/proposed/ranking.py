@@ -20,6 +20,10 @@ from rcr.proposed.scores import (
     identity_scores_batched,
 )
 
+SCORE_SCHEMA_VERSION = 1
+SCORE_EPS = 1e-6
+FINE_SCORE_MODES = ("legacy_raw", "context_zscore")
+
 
 def _encode_gallery_identity(
     cache: GalleryCache,
@@ -98,19 +102,117 @@ def _encode_gallery_state(
     return state
 
 
-def _zscore_1d(values: Tensor, eps: float = 1e-6) -> Tensor:
+def _score_statistics(values: Tensor) -> tuple[Tensor, Tensor]:
+    values = values.float()
+    if values.ndim != 1 or not values.numel() or not torch.isfinite(values).all():
+        raise ValueError("score statistics require a non-empty finite 1D tensor")
+    # Repeated FP32 values can have a rounded mean different from that value.
+    if (values == values[0]).all():
+        return values[0], values.new_zeros(())
+    mean, std = values.mean(), values.std(unbiased=False)
+    if not torch.isfinite(mean) or not torch.isfinite(std):
+        raise ValueError("score statistics overflowed float32")
+    return mean, std
+
+
+def _zscore_1d(values: Tensor, eps: float = SCORE_EPS) -> Tensor:
     """Population z-score for one finite score vector; constants become zero."""
     values = values.float()
     if values.numel() == 0:
         return values
-    return (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
+    mean, std = _score_statistics(values)
+    return (values - mean) / std.clamp_min(eps)
+
+
+def fine_score_components(
+    binding: Tensor,
+    context: Tensor,
+    coverage: Tensor,
+    binding_scale: float,
+    fine_score_mode: str = "context_zscore",
+    context_weight: float = 0.03,
+) -> dict[str, Tensor]:
+    """Score one complete Coarse Top-M, never an inference mini-batch.
+
+    Raw gamma and both-z-score are offline ablations only. All vectors retain
+    candidate order. Non-finite fine evidence is an error, including at C=0.
+    """
+    if (
+        binding.ndim != 1
+        or binding.shape != context.shape
+        or binding.shape != coverage.shape
+    ):
+        raise ValueError("binding, context and coverage must be matching 1D tensors")
+    if fine_score_mode not in (*FINE_SCORE_MODES, "raw_gamma", "both_zscore"):
+        raise ValueError(f"unknown fine_score_mode: {fine_score_mode!r}")
+    if any(not math.isfinite(x) or x < 0 for x in (binding_scale, context_weight)):
+        raise ValueError(
+            "binding scale and context weight must be finite and nonnegative"
+        )
+    binding, context, coverage = binding.float(), context.float(), coverage.float()
+    if not all(torch.isfinite(x).all() for x in (binding, context, coverage)):
+        raise ValueError("fine score components contain NaN/Inf")
+    gated = coverage * context
+    mean, std = _score_statistics(gated)
+    scaled_binding = binding_scale * binding
+    raw = scaled_binding + gated
+    if fine_score_mode == "legacy_raw":
+        fine = raw
+    elif fine_score_mode == "raw_gamma":
+        fine = scaled_binding + context_weight * gated
+    else:
+        fine = (
+            _zscore_1d(scaled_binding)
+            if fine_score_mode == "both_zscore"
+            else scaled_binding
+        ) + context_weight * ((gated - mean) / std.clamp_min(SCORE_EPS))
+    if not torch.isfinite(raw).all() or not torch.isfinite(fine).all():
+        raise ValueError("fine scores overflowed float32")
+    return {
+        "gated_context": gated,
+        "fine_raw_scores": raw,
+        "fine_scores": fine,
+        "context_mean": mean,
+        "context_std": std,
+    }
+
+
+def rerank_topm(order: Tensor, top_indices: Tensor, scores: Tensor) -> Tensor:
+    """Stable shortlist sort; ties retain Coarse order, tail is unchanged."""
+    ranked = top_indices[torch.argsort(scores, descending=True, stable=True)]
+    return torch.cat((ranked, order[len(top_indices) :]))
+
+
+def score_configuration(settings: dict, binding_scale: float) -> dict:
+    """Weights-only-safe convention shared by artifacts and run metadata."""
+    return {
+        **{
+            key: settings[key]
+            for key in (
+                "fine_score_mode",
+                "context_weight",
+                "coarse_beta",
+                "fine_coarse_weight",
+                "top_m",
+            )
+        },
+        "binding_scale": binding_scale,
+        "normalization": "per_query_coarse_topm_population",
+        "normalization_dtype": "float32",
+        "normalization_device": "cpu",
+        "eps": SCORE_EPS,
+        "std_unbiased": False,
+        "score_alignment": "coarse_topm",
+        "tie_break": "stable_coarse_order_then_canonical_gallery",
+        "nonfinite_coarse": "masked_in_fusion_when_weight_positive",
+    }
 
 
 def fuse_fine_coarse_scores(
     fine: Tensor,
     coarse: Tensor,
     weight: float,
-    eps: float = 1e-6,
+    eps: float = SCORE_EPS,
 ) -> Tensor:
     """Fuse fine and coarse evidence inside the same Top-M shortlist.
 
@@ -136,6 +238,8 @@ def fuse_fine_coarse_scores(
         fused[valid] = _zscore_1d(fine[valid], eps) + weight * _zscore_1d(
             coarse[valid], eps
         )
+        if not torch.isfinite(fused[valid]).all():
+            raise ValueError("fine/coarse fusion overflowed float32")
     return fused
 
 
@@ -148,6 +252,8 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coarse_batch_size",
         "coarse_beta",
         "fine_coarse_weight",
+        "fine_score_mode",
+        "context_weight",
     }
     if unknown:
         raise ValueError(f"unknown retrieval settings: {', '.join(sorted(unknown))}")
@@ -155,18 +261,25 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coarse_batch_size": 512,
         "coarse_beta": default_beta,
         "fine_coarse_weight": 0.0,
+        "fine_score_mode": "context_zscore",
+        "context_weight": 0.03,
         **cfg,
     }
     if settings["coarse_beta"] is None:
         settings["coarse_beta"] = default_beta
     sizes = ("top_m", "fine_batch_size", "identity_batch_size", "coarse_batch_size")
-    if any(key in settings and settings[key] < 1 for key in sizes):
+    if any(
+        key in settings and (type(settings[key]) is not int or settings[key] < 1)
+        for key in sizes
+    ):
         raise ValueError("retrieval batch sizes and top_m must be positive")
     if any(
         not math.isfinite(float(settings[key])) or settings[key] < 0
-        for key in ("coarse_beta", "fine_coarse_weight")
+        for key in ("coarse_beta", "fine_coarse_weight", "context_weight")
     ):
         raise ValueError("retrieval weights must be finite and nonnegative")
+    if settings["fine_score_mode"] not in FINE_SCORE_MODES:
+        raise ValueError(f"unknown fine_score_mode: {settings['fine_score_mode']!r}")
     return settings
 
 
@@ -203,6 +316,8 @@ def retrieve_rankings(
     coarse_batch_size: int = 512,
     coarse_beta: float | None = None,
     fine_coarse_weight: float = 0.0,
+    fine_score_mode: str = "context_zscore",
+    context_weight: float = 0.03,
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Any]:
@@ -214,6 +329,8 @@ def retrieve_rankings(
         "coarse_batch_size": coarse_batch_size,
         "coarse_beta": coarse_beta,
         "fine_coarse_weight": fine_coarse_weight,
+        "fine_score_mode": fine_score_mode,
+        "context_weight": context_weight,
     }
     settings = retrieval_settings(settings, model.coarse_beta)
     return rank_weight_grid(
@@ -274,6 +391,7 @@ def rank_weight_grid(
     fine_batch_size, identity_batch_size, coarse_batch_size = (
         settings[key] for key in batch_keys
     )
+    binding_scale = model.binding_scale.item()
     gallery_ids, gallery_by_id, image_indices = _gallery_scope(
         cache, gallery_ids, samples, "retrieval"
     )
@@ -304,6 +422,13 @@ def rank_weight_grid(
                     "fafa_binding",
                     "context",
                     "coverage",
+                    "coarse_topm_scores",
+                    "gated_context",
+                    "fine_raw_scores",
+                    "fine_scores",
+                    "fused_topm_scores",
+                    "context_mean",
+                    "context_std",
                 )
             }
             for _ in weights
@@ -346,13 +471,13 @@ def rank_weight_grid(
                         for start in range(0, len(gallery_ids), coarse_batch_size)
                     ]
                 )
-            fine_scores = torch.empty(len(gallery_ids), device=device)
             components = {
-                key: torch.empty_like(fine_scores)
+                key: torch.empty(len(gallery_ids), device=device, dtype=torch.float32)
                 for key in ("binding", "context", "coverage")
             }
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             coarse_orders = {}
+            fine_shortlists = {}
             for output, (beta, fine_coarse_weight) in zip(
                 outputs, weights, strict=True
             ):
@@ -388,20 +513,36 @@ def rank_weight_grid(
                         ).to(device),
                         return_details=True,
                     )
-                    fine_scores[local] = details["score"]
                     for key in components:
                         components[key][local] = details[key]
                     fine_done[local] = True
-                scores = fine_scores
+                if coarse_key not in fine_shortlists:
+                    # CPU FP32 scoring makes saved-score replay use the exact
+                    # same reductions/sort, including after accelerator inference.
+                    raw = {
+                        key: value[top_indices].float().cpu()
+                        for key, value in components.items()
+                    }
+                    scored = fine_score_components(
+                        **raw,
+                        binding_scale=binding_scale,
+                        fine_score_mode=settings["fine_score_mode"],
+                        context_weight=settings["context_weight"],
+                    )
+                    fine_shortlists[coarse_key] = (
+                        raw,
+                        scored,
+                        top_indices.cpu(),
+                        order.cpu(),
+                        coarse[top_indices].float().cpu(),
+                    )
+                raw, scored, top_indices, order_cpu, coarse_topm = fine_shortlists[
+                    coarse_key
+                ]
                 # Diagnostics use exactly this shortlist and identity assignment.
                 # They do not claim an unconstrained full-gallery FAFA baseline.
-                fafa_only = top_indices[
-                    torch.argsort(
-                        components["binding"][top_indices], descending=True, stable=True
-                    )
-                ]
                 output["fafa_rankings"].append(
-                    torch.cat((fafa_only, order[len(top_indices) :]))[:ranking_limit]
+                    rerank_topm(order_cpu, top_indices, raw["binding"])[:ranking_limit]
                     .to(torch.int32)
                     .cpu()
                 )
@@ -410,42 +551,50 @@ def rank_weight_grid(
                     ("context", "context"),
                     ("coverage", "coverage"),
                 ):
-                    output[field].append(
-                        components[key][top_indices][:ranking_limit].cpu()
-                    )
-                fine_only = top_indices[
-                    torch.argsort(scores[top_indices], descending=True, stable=True)
-                ]
+                    output[field].append(raw[key])
                 output["fine_rankings"].append(
-                    torch.cat((fine_only, order[len(top_indices) :]))[:ranking_limit]
+                    rerank_topm(order_cpu, top_indices, scored["fine_scores"])[
+                        :ranking_limit
+                    ]
                     .to(torch.int32)
                     .cpu()
                 )
                 rerank_scores = fuse_fine_coarse_scores(
-                    scores[top_indices],
-                    coarse[top_indices],
+                    scored["fine_scores"],
+                    coarse_topm,
                     float(fine_coarse_weight),
                 )
-                fine_order = top_indices[
-                    torch.argsort(rerank_scores, descending=True, stable=True)
-                ]
-                final_order = torch.cat((fine_order, order[len(top_indices) :]))
+                for field, value in {
+                    **scored,
+                    "coarse_topm_scores": coarse_topm,
+                    "fused_topm_scores": rerank_scores,
+                }.items():
+                    output[field].append(value)
+                final_order = rerank_topm(order_cpu, top_indices, rerank_scores)
                 output["rankings"].append(
                     final_order[:ranking_limit].to(torch.int32).cpu()
                 )
                 output["coarse_rankings"].append(
                     order[:ranking_limit].to(torch.int32).cpu()
                 )
-                output["coarse_topm"].append(
-                    top_indices[:ranking_limit].to(torch.int32).cpu()
-                )
+                output["coarse_topm"].append(top_indices.to(torch.int32))
         return [
             {
                 "sample_ids": [sample["sample_id"] for sample in samples],
                 "gallery_ids": gallery_ids,
+                "score_schema_version": SCORE_SCHEMA_VERSION,
+                "binding_scale": binding_scale,
+                "score_config": score_configuration(
+                    {
+                        **settings,
+                        "coarse_beta": beta,
+                        "fine_coarse_weight": fine_weight,
+                    },
+                    binding_scale,
+                ),
                 **{key: torch.stack(rows) for key, rows in output.items()},
             }
-            for output in outputs
+            for output, (beta, fine_weight) in zip(outputs, weights, strict=True)
         ]
 
 

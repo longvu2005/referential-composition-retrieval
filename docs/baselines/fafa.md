@@ -11,20 +11,24 @@ missing/unexpected state keys; upstream loading uses `strict=False`.
 The [official source](https://github.com/Delong-liu-bupt/Composed_Person_Retrieval/tree/0cc16936f031f7ad166be4cce1be33d0b44b728e/FAFA_SynCPR)
 is unchanged and pinned to `0cc16936f031f7ad166be4cce1be33d0b44b728e`.
 See [native model/extraction](https://github.com/Delong-liu-bupt/Composed_Person_Retrieval/blob/0cc16936f031f7ad166be4cce1be33d0b44b728e/FAFA_SynCPR/src/lavis/models/blip2_models/blip2_fafa_cpr.py).
-`fafa.py` integrates native FAFA; `fafa_adapter.py` implements RCR localization,
-Subject prediction and SetMatch. These adapter components are not official FAFA.
+`fafa.py` integrates native FAFA; `fafa_adapter.py` implements query Subject
+prediction and text routing; `fafa_detector.py` ports pinned CPR Grounding DINO,
+and `fafa_matching.py` ports mean Partial SetMatch. These adapters are not official FAFA.
 
 ## 2. Inputs, preprocessing and features
 
-Faster R-CNN ResNet50-FPN-v2 with COCO weights predicts people on RGB scenes.
-Keep up to 10 candidates, threshold 0.55, and lower-score candidates if required
-for public Subject slots (query) or one crop (gallery). No detections cause a
-whole-scene fallback; fallback crops never become extra group members.
+Pinned Grounding DINO Swin-T OGC at commit `856dde20` predicts people with
+prompt `person`, box threshold 0.35, NMS IoU 0.50, minimum 4px crops and up to
+10 candidates. Crops clip to the image and floor/ceil coordinate boundaries.
+The deterministic batch-2 / 1.3-padding-ratio and pure PyTorch deformable
+attention settings match `cpr_baseline_bench/cpr_person`. Zero detections give
+one flagged full-scene fallback; any missing Subject anchors are padded with
+flagged scene fallbacks. Fallbacks are never extra group members.
 
 OpenAI CLIP ViT-B/32 selects crops using `final_desc` clauses, native CLIP
 preprocessing and normalized cosine similarity. Hungarian anchors are disjoint.
-Every query may add unused crops above similarity 0.20 and within 0.03 of a
-Subject's best score, cap 5 members per Subject. Competing Subjects select the
+Every query may add unused crops above similarity 0.20 and within 0.03 of its
+assigned Subject anchor, cap 5 members per Subject. Competing Subjects select the
 highest eligible similarity. Membership is predicted from image/text similarity;
 no `case_type`, GT boxes, identity counts or positives are read. An INDIVIDUAL
 annotation does not force one member. Count selector text truncation in metadata.
@@ -33,8 +37,9 @@ Reference crop plus condition enters native `extract_features().multimodal_embed
 Gallery crops use `extract_target_features(mode="mean")`, retaining target tokens
 (upstream's mode argument does not mean-pool them). Use native
 `squarepad_transform_test(224, need_size=(384,192))` and eval caption processing.
-The pinned pretrain config defaults to 32 tokens; `configs/fafa.yaml` explicitly
-sets `checkpoint.max_txt_len=32`. Longer conditions may still be truncated.
+The baseline and Proposed share `configs/fafa.yaml` with
+`checkpoint.max_txt_len=128` and `processors["eval"].max_words=128`.
+The upstream 32-token default is explicitly overridden in both workflows.
 
 ## 3. Retrieval equations
 
@@ -48,16 +53,19 @@ u_c^\top v_{g,j,l},\quad k'=\min(6,L).
 This matches native soft FDA inference, without training-temperature division.
 `use_soft=false` uses maximum token similarity. `fda_alpha=0.5` is retained in
 settings, not an additional inference scoring coefficient. Single-component
-scene scoring takes the maximum across target crops. Multiple components pad
-insufficient crops with `unmatched_score=-1`, then use:
+scene scoring takes the maximum across target crops. For
+multiple components let `K` be the number of query components, `N` the number of
+predicted gallery persons, `m=min(K,N)` and `b=-1`. Rectangular Hungarian matches
+exactly `m` real pairs maximizing their sum. Final aggregation is the CPR mean:
 
 \[
-\pi^*=\arg\max_{\pi\text{ injective}}\sum_c A_{c,\pi(c)}(g),\qquad
-s(q,g)=\min_c A_{c,\pi^*(c)}(g).
+\pi^*=\arg\max_{\pi}\sum_{(c,j)\in\pi} A_{c,j}(g),\qquad
+s(q,g)=\frac{\sum_{(c,j)\in\pi^*}A_{c,j}(g)+(K-m)b}{K}.
 \]
 
-Hungarian maximizes the **sum**, then aggregation takes the **minimum**; assignment
-is not bottleneck-optimal. Rank the full split gallery, excluding self.
+This gives partial credit when `K>N`, unlike the legacy max-sum/min adapter.
+Real pair matches are mandatory; unmatched penalty is fixed and not tuned.
+Rank the full split gallery, excluding self.
 
 ## 4. RCR adaptation from text
 
@@ -68,10 +76,11 @@ The adapter reads public Subject slots and text, without a case label.
 | One explicit clause per Subject, separated by `and Subject N`, each mentioning only its own Subject | Split into Subject-specific conditions |
 | Cross-Subject references, missing/duplicate clauses or ambiguous boundaries | Retain the full condition for every Subject |
 
-Own Subject mentions become `the reference person`; other Subject mentions remain
-explicit other-person references. Each component matches a different target crop.
-One predicted component uses maximum FDA across target crops; multiple components
-use SetMatch. There is no oracle membership/cardinality or target-box access.
+Independent conditions use the native modification text after removing their
+`Subject N` prefix; cross-Subject/ambiguous conditions remain intact for every
+Subject, matching CPR Benchmark's `prepare_data.query_texts`. Each predicted
+member receives its Subject condition and matches a distinct gallery person.
+There is no oracle membership/cardinality or target-box access.
 
 ## 5. Hyperparameters and validation
 
@@ -103,19 +112,24 @@ Use the isolated FAFA environment in [baselines](../baselines.md):
 Preparation obtains pinned source, released checkpoint, detector, CLIP selector
 and base runtime assets. Inference blocks network model downloads and fails
 clearly on missing assets. It can require substantial RAM/disk/GPU resources.
-Cache detection, gallery/query features and component scores with input/model
-provenance. Defaults: gallery fp16, query/scoring fp32. Save complete config,
+Cache detector candidates, gallery/query features and component scores with
+input/model provenance. Detector builds are journaled and resumable. A warm
+feature cache skips FAFA construction. Defaults: gallery fp16, query/scoring
+fp32. Save complete config,
 three checkpoint hashes, official commit, membership/fallback/truncation statistics.
 Outputs: `runs/fafa/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.
 
-The case-free policy is adapter v2. Existing detection and gallery-feature caches
-remain reusable; query features and component scores use the new adapter version.
+The CPR parity policy is adapter v3. The new detector and normalized crop
+convention intentionally invalidate old Faster R-CNN/FAFA gallery caches.
+Query-text policy and membership changes invalidate query features/scores too.
 Old `protocol.json` locks are stale: rerun complete validation before test.
+The RCR split-specific gallery and official ID/Full evaluator stay unchanged;
+CPR Benchmark's pooled 30,552-image gallery is not transferred.
 
 ## 8. Limitations
 
 Detection/CLIP selection errors, extra/missed members and scene fallbacks can
 dominate results. Group/relation conditions are approximated independently;
 there is no joint scene-relation reasoner, and crop context can be insufficient.
-Short native text context may truncate conditions. The adapter fallback and
-max-sum/min SetMatch conventions must be reported explicitly.
+Conditions exceeding 128 FAFA tokens may be truncated. Report the
+pinned detector, max-sum/mean Partial SetMatch and missing-person score.

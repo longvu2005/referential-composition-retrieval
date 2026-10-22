@@ -36,6 +36,20 @@ L = L_ground + lambda_id L_id + L_retrieval + lambda_state L_state
 change only from images that contain the required identities. See
 [docs/proposed_method.md](docs/proposed_method.md) for the complete equations.
 
+Training retains the raw fine score `alpha * B_FAFA + coverage * context`.
+Validation/retrieval instead use Context z-score with fixed weight 0.03:
+
+```text
+S_fine = alpha * B_FAFA + 0.03 * z_topM(coverage * context)
+```
+
+`alpha` is the checkpoint's learned binding scale. Normalization uses one complete
+Coarse Top-M per query, FP32 population standard deviation and epsilon `1e-6`.
+Constants contribute zero; inference batch sizes do not define normalization
+groups. Set `retrieval.fine_score_mode=legacy_raw` to restore raw fine scoring.
+Final fusion remains `z(S_fine) + fine_coarse_weight * z(S_coarse)` on common finite
+Coarse support; weight zero returns the fine score directly.
+
 Inference receives only images, text and public Subject slots. Case labels,
 identity labels, head boxes and positive sets are used only for training or
 evaluation. `load_rcr_inputs()` enforces this boundary.
@@ -166,7 +180,8 @@ validation-selected `best.pt`. Checkpoints contain learned weights and frozen-mo
 provenance, but no optimizer state or duplicate frozen BERT weights. Retrieval
 writes one directory per split with:
 
-- `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings;
+- `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings, plus raw and
+  normalized score components aligned with `coarse_topm`;
 - `run.json`: configuration, checkpoint, cache and benchmark provenance;
 - `metrics.json`: overall and by-case metrics.
 
@@ -174,6 +189,22 @@ writes one directory per split with:
 validation Full-mAP. `configs/calibration.yaml` then selects `coarse_beta` and
 `fine_coarse_weight` on validation. Test labels never select a checkpoint or
 weight.
+
+Score schema 1 adds `coarse_topm_scores`, `gated_context`, `fine_raw_scores`,
+`fine_scores`, `fused_topm_scores`, `context_mean`, `context_std`, `binding_scale`
+and `score_config`. It supports CPU replay on the saved shortlist without a
+checkpoint or pretrained caches:
+
+```bash
+python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+  --output-dir runs/replay/val --mode context_zscore --context-weight 0.03 \
+  --fine-coarse-weight 0.4
+```
+
+See [docs/proposed_runs.md](docs/proposed_runs.md) for the full schema and offline
+ablations. Existing checkpoints need no migration. The evaluator still accepts
+old rankings; offline replay requires the new score components. Changing
+`coarse_beta` may change shortlist membership and requires retrieval again.
 
 ## Development
 

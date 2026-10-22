@@ -13,7 +13,6 @@ import socket
 import subprocess
 import sys
 from contextlib import contextmanager
-from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -27,9 +26,9 @@ from rcr.baselines.fafa_adapter import (
     VISUAL_CACHE_VERSION,
     build_query_components,
     choose_boxes,
-    detect_gallery,
-    setmatch_score,
 )
+from rcr.baselines.fafa_detector import detect_gallery
+from rcr.baselines.fafa_matching import aggregate_people
 from rcr.common.io import cache_directory, output_directory, preserve_run, sha256_file
 
 
@@ -423,37 +422,47 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     if policy != text_policy({}):
         query_signature["text_policy"] = policy
     query_dir = cache_directory(gallery_dir / "queries", query_signature)
-    model, processors, preprocess, load_info = load_fafa(cfg, device)
-    print(
-        f"FAFA checkpoint: {len(load_info['missing_keys'])} missing / "
-        f"{len(load_info['unexpected_keys'])} unexpected keys",
-        flush=True,
-    )
     runtime = cfg["runtime"]
-    gallery_features = encode_crops(
-        model,
-        processors,
-        preprocess,
-        gallery_items,
-        runtime,
-        device,
-        query=False,
-        path=gallery_dir / "gallery.npy",
-    )
-    query_features = encode_crops(
-        model,
-        processors,
-        preprocess,
-        query_items,
-        runtime,
-        device,
-        query=True,
-        path=query_dir / "query.npy",
-    )
-    del model
-    gc.collect()
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    gallery_path = gallery_dir / "gallery.npy"
+    query_path = query_dir / "query.npy"
+    # As in CPR Benchmark, skip native FAFA construction on a warm feature cache.
+    # Re-encode both sides if the expected rank/count is not present.
+    def cached(path, expected, ndim):
+        try:
+            features = np.load(path, mmap_mode="r", allow_pickle=False)
+            if (features.ndim == ndim and len(features) == expected
+                    and features.dtype in (np.float16, np.float32)):
+                return features
+        except (OSError, ValueError, EOFError):
+            pass
+        return None
+
+    gallery_features = cached(gallery_path, len(gallery_items), 3)
+    query_features = cached(query_path, len(query_items), 2)
+    if gallery_features is not None and query_features is not None:
+        load_info = {"missing_keys": None, "unexpected_keys": None,
+                     "text_policy": text_policy(cfg), "model_loaded_this_run": False}
+        print("FAFA feature caches ready; skipping model construction", flush=True)
+    else:
+        model, processors, preprocess, load_info = load_fafa(cfg, device)
+        print(
+            f"FAFA checkpoint: {len(load_info['missing_keys'])} missing / "
+            f"{len(load_info['unexpected_keys'])} unexpected keys",
+            flush=True,
+        )
+        gallery_features = encode_crops(
+            model, processors, preprocess, gallery_items, runtime, device,
+            query=False, path=gallery_path,
+        )
+        query_features = encode_crops(
+            model, processors, preprocess, query_items, runtime, device,
+            query=True, path=query_path,
+        )
+        load_info["model_loaded_this_run"] = True
+        del model
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
     component_scores = score_components(
         query_features,
         gallery_features,
@@ -469,15 +478,12 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     scores = np.lib.format.open_memmap(
         temporary, mode="w+", dtype=np.float32, shape=(len(samples), len(gallery_ids))
     )
-    for qi in tqdm(range(len(samples)), desc="FAFA SetMatch", unit="query"):
+    offsets = np.asarray(gallery_offsets, dtype=np.int64)
+    for qi in tqdm(range(len(samples)), desc="FAFA Partial SetMatch", unit="query"):
         matrix = component_scores[query_offsets[qi] : query_offsets[qi + 1]]
-        if len(matrix) == 1:
-            scores[qi] = np.maximum.reduceat(matrix[0], gallery_offsets[:-1])
-        else:
-            for gi, (start, stop) in enumerate(pairwise(gallery_offsets)):
-                scores[qi, gi] = setmatch_score(
-                    matrix[:, start:stop], float(cfg["setmatch"]["unmatched_score"])
-                )
+        scores[qi] = aggregate_people(
+            matrix, offsets, float(cfg["setmatch"]["unmatched_score"])
+        )
     scores.flush()
     del scores
     temporary.replace(output / "scores.npy")

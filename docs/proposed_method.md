@@ -176,7 +176,8 @@ a proof of correct semantic ownership.
 ```text
 C_s = sum_i w_si [pi(i) is not null]       # zero for an empty query Subject
 C = mean_active_subjects C_s
-S_fine = softplus(binding_log_scale) * B_FAFA + C * S_context
+alpha = softplus(binding_log_scale)
+S_fine_raw = alpha * B_FAFA + C * S_context
 ```
 
 The scale starts at 1. An entirely unmatched query has zero context contribution
@@ -214,11 +215,37 @@ L = L_ground + 0.1 L_id + L_ret + L_global_state
 Within Top-M:
 
 ```text
+gated_context = C * S_context
+z(x) = (float32(x) - mean(x)) / max(std(x, unbiased=False), 1e-6)
+S_fine = alpha * B_FAFA + 0.03 * z_topM(gated_context)
 S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 ```
 
-Weight zero uses raw fine scores (the same ordering). The remaining gallery keeps
-coarse order. Periodic evaluation, checkpoint selection, candidate sampling, AMP
+`L_ret` continues to use `S_fine_raw` from `score_target()`. Training batches do
+not define inference normalization groups. Periodic validation, standalone
+retrieval and calibration all use `retrieval.fine_score_mode: context_zscore`
+with `context_weight: 0.03` by default. Context normalization happens **after**
+coverage gating and after all Top-M candidates have been scored, in original
+Coarse order. Each query has independent statistics. A constant vector, zero
+coverage or M=1 contributes zero normalized context. NaN/Inf fine components
+and FP32 arithmetic overflow raise explicit errors.
+
+Ranking arithmetic and stable shortlist sorting run on CPU FP32, shared with
+offline replay. Model forwards retain their configured device/chunking. Small
+floating point differences between differently sized model-forward batches may
+remain; changing batch sizes never changes the normalization population.
+
+Final fusion normalizes both branches on common **finite Coarse** support. A
+positive fusion weight leaves unsupported candidates at minus infinity; weight
+zero uses `S_fine` directly and preserves the previous policy of ignoring Coarse
+support. The context statistics above always use the entire Top-M. These are two
+distinct normalization steps. Fine/FAFA/fused ties retain Coarse order; Coarse
+ties retain canonical gallery order. The remaining gallery keeps coarse order.
+
+`retrieval.fine_score_mode: legacy_raw` uses `S_fine_raw` as the fine ranking score
+and ignores `context_weight`. No architecture, weights, losses, optimizer or
+`ARCHITECTURE_VERSION` changes are required; old compatible checkpoints load
+their learned `binding_scale` normally. Periodic evaluation, candidate sampling, AMP
 and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
 
@@ -273,3 +300,14 @@ order outside it; it is not the full-gallery FAFA + SetMatch baseline.
 `fafa_binding`, `context` and `coverage` are aligned with `coarse_topm` in each
 saved output. The evaluator reports `fafa_*` metrics with the shared official
 protocol. These scores separate embedding quality from context/fusion effects.
+
+Score schema 1 also stores the actual Coarse scores and complete fine/fused score
+components for every computed shortlist candidate; all `[N,M]` fields share
+Coarse Top-M order. Per-query context mean/std, the learned binding scale and
+normalization/fusion configuration make rankings reproducible on CPU. Calibration
+reuses raw query-target components across weight pairs; it recomputes context
+statistics for each distinct Coarse shortlist, never across queries or chunks.
+Only `coarse_beta` and `fine_coarse_weight` enter the validation grid. Context
+mode/weight remain fixed and are recorded in `selected.yaml`, together with the
+selected pair, Top-M, checkpoint SHA256 and validation fingerprint. Retrieval
+rejects modifications to the selected scoring settings; batch sizes may change.

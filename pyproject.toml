@@ -40,6 +40,10 @@ fafa = [
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
     "scipy>=1.11,<2",
     "gdown>=5.2,<7",
+    # Pinned Grounding DINO source is imported without compiling its CUDA extension.
+    "addict>=2.4,<3",
+    "yapf==0.40.1",
+    "supervision==0.22.0",
     "pandas>=2,<3",
     "omegaconf>=2.3,<3",
     "iopath>=0.1.10,<0.2",

@@ -223,6 +223,8 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     assert checkpoint.name == "best.pt"
     assert saved["best_epoch"] == 1
     assert saved["state_supervised_pairs"] > 0
+    assert saved["config"]["retrieval"]["fine_score_mode"] == "context_zscore"
+    assert saved["config"]["retrieval"]["context_weight"] == 0.03
     assert "optimizer" not in saved and "scaler" not in saved
     assert set(saved["text_encoder"]) == {"projection", "markers"}
 

@@ -25,8 +25,12 @@ from rcr.proposed.nn.encoders import (
     load_text_modules,
     text_encoder_state,
 )
-from rcr.proposed.nn.model import RCRModel
-from rcr.proposed.ranking import mine_hard_negatives, retrieve_rankings
+from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
+from rcr.proposed.ranking import (
+    mine_hard_negatives,
+    retrieval_settings,
+    retrieve_rankings,
+)
 from rcr.proposed.sampling import (
     CandidateIndex,
     identity_candidate_pools,
@@ -203,6 +207,12 @@ def _make_checkpoint(
 def train(cfg: dict) -> Path:
     """Train on ``train`` and select ``best.pt`` only from validation mAP."""
     validate_training_schedule(cfg)
+    cfg = {
+        **cfg,
+        "retrieval": retrieval_settings(
+            cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
+        ),
+    }
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
