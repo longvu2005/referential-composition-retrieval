@@ -12,18 +12,27 @@ The [official source](https://github.com/Delong-liu-bupt/Composed_Person_Retriev
 is unchanged and pinned to `0cc16936f031f7ad166be4cce1be33d0b44b728e`.
 See [native model/extraction](https://github.com/Delong-liu-bupt/Composed_Person_Retrieval/blob/0cc16936f031f7ad166be4cce1be33d0b44b728e/FAFA_SynCPR/src/lavis/models/blip2_models/blip2_fafa_cpr.py).
 `fafa.py` integrates native FAFA; `fafa_adapter.py` implements query Subject
-prediction and text routing; `fafa_detector.py` ports pinned CPR Grounding DINO,
+prediction and text routing; `fafa_detector.py` reads Proposed DINO Tiny boxes,
 and `fafa_matching.py` ports mean Partial SetMatch. These adapters are not official FAFA.
 
 ## 2. Inputs, preprocessing and features
 
-Pinned Grounding DINO Swin-T OGC at commit `856dde20` predicts people with
-prompt `person`, box threshold 0.35, NMS IoU 0.50, minimum 4px crops and up to
-10 candidates. Crops clip to the image and floor/ceil coordinate boundaries.
-The deterministic batch-2 / 1.3-padding-ratio and pure PyTorch deformable
-attention settings match `cpr_baseline_bench/cpr_person`. Zero detections give
-one flagged full-scene fallback; any missing Subject anchors are padded with
-flagged scene fallbacks. Fallbacks are never extra group members.
+FAFA reads the same Grounding DINO Tiny person boxes as Proposed from
+`cache/proposed-dino` (model `IDEA-Research/grounding-dino-tiny`, box threshold
+0.30, text threshold 0.25). Detector inference is not repeated. The shared
+cache must have a complete `index.pt`, matching gallery IDs/order and detector
+metadata, plus intact geometry shards. For older cache manifests that lack
+metadata, `allow_legacy_cache` is disabled by default; explicit opt-in is
+permitted only when the original detector settings were verified independently.
+All eligible boxes retain Proposed's
+order and floating-point pixel coordinates: no extra NMS, floor/ceil,
+confidence filtering or person cap is applied. Proposed's cache does not
+contain detection confidences; score 1.0 means only "already accepted".
+Zero detections yield a flagged full-scene fallback for FAFA, and missing
+Subject anchors are padded with flagged fallbacks. Fallbacks cannot become
+extra group members. The FAFA baseline still builds its own multimodal
+query features and FDA scores; the shared cache is boxes only, not a
+reuse of Proposed's learned model features.
 
 OpenAI CLIP ViT-B/32 selects crops using `final_desc` clauses, native CLIP
 preprocessing and normalized cosine similarity. Hungarian anchors are disjoint.
@@ -112,15 +121,17 @@ Use the isolated FAFA environment in [baselines](../baselines.md):
 Preparation obtains pinned source, released checkpoint, detector, CLIP selector
 and base runtime assets. Inference blocks network model downloads and fails
 clearly on missing assets. It can require substantial RAM/disk/GPU resources.
-Cache detector candidates, gallery/query features and component scores with
-input/model provenance. Detector builds are journaled and resumable. A warm
+Read existing DINO detections and cache FAFA gallery/query features and
+component scores with input/model provenance. The DINO `cache_id` is included
+in FAFA feature cache fingerprints. A warm
 feature cache skips FAFA construction. Defaults: gallery fp16, query/scoring
 fp32. Save complete config,
-three checkpoint hashes, official commit, membership/fallback/truncation statistics.
+FAFA and CLIP checkpoint hashes, DINO cache ID, official FAFA commit, and
+membership/fallback/truncation statistics.
 Outputs: `runs/fafa/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.
 
-The CPR parity policy is adapter v3. The new detector and normalized crop
-convention intentionally invalidate old Faster R-CNN/FAFA gallery caches.
+The CPR text/matching policy remains adapter v3. Changing to the Proposed
+DINO cache invalidates old detector-specific FAFA gallery feature caches.
 Query-text policy and membership changes invalidate query features/scores too.
 Old `protocol.json` locks are stale: rerun complete validation before test.
 The RCR split-specific gallery and official ID/Full evaluator stay unchanged;

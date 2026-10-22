@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from scipy.optimize import linear_sum_assignment
 
-from rcr.baselines.fafa_detector import filter_person_boxes, _split_batch
 from rcr.baselines.fafa_matching import aggregate_people, partial_setmatch
 from rcr.baselines.fafa_adapter import select_subject_members, subject_changes
 
@@ -65,22 +64,6 @@ def test_cpr_text_independent_and_relational():
     ]
 
 
-def test_detector_floor_ceil_nms_and_limits():
-    cfg = {"box_threshold": .35, "min_box_size_px": 4, "nms_iou_threshold": .5,
-           "max_persons_per_image": 10}
-    boxes = [[.5,.5,.4,.4], [.51,.5,.4,.4], [.1,.1,.02,.02]]
-    filtered, conf = filter_person_boxes(boxes, [.9,.8,.7], 100, 100, cfg)
-    assert filtered.tolist() == [[30, 30, 70, 70]]
-    assert conf.tolist() == pytest.approx([.9])
-
-
-def test_detector_forward_splits_by_padding_ratio():
-    import torch
-    ts = [torch.zeros(3, 10, 10), torch.zeros(3, 10, 10), torch.zeros(3, 100, 10)]
-    batches = list(_split_batch(ts, [1]*3, [1]*3, 1.3))
-    assert [len(b[0]) for b in batches] == [2, 1]
-
-
 def test_baseline_and_proposed_share_128_token_policy():
     from pathlib import Path
 
@@ -104,3 +87,105 @@ def test_native_fafa_text_policy_matches_cpr_128():
     assert text_policy({"checkpoint": {"max_txt_len": 128}}) == {
         "max_txt_len": 128, "max_words": 128,
     }
+
+
+def test_shared_detector_reads_proposed_boxes_without_renormalization(tmp_path):
+    import torch
+    from PIL import Image
+    from types import SimpleNamespace
+    from rcr.baselines.fafa_detector import candidates_from_cache
+
+    image_paths = []
+    for i, size in enumerate(((160, 100), (120, 80))):
+        path = tmp_path / f"{i}.png"
+        Image.new("RGB", size).save(path)
+        image_paths.append(path)
+
+    class FakeCache:
+        by_id = {"first": 0, "empty": 1}
+        mask = torch.tensor([[True, True], [False, False]])
+
+        def load_geometry(self, index):
+            if index == 0:
+                return {"boxes_pixel": torch.tensor([
+                    [7.25, 3.5, 58.75, 77.5], [15.0, 9.0, 100.0, 85.0],
+                ])}
+            return {"boxes_pixel": torch.empty(0, 4)}
+
+    data = SimpleNamespace(image_path=lambda iid: image_paths[FakeCache.by_id[iid]])
+    cfg = {"scene_size": [224, 224]}
+    candidates = candidates_from_cache(data, ["first", "empty"], FakeCache(), cfg)
+    assert [x["box"] for x in candidates[0]] == [
+        [7.25, 3.5, 58.75, 77.5], [15., 9., 100., 85.],
+    ]
+    assert all(x["score"] == 1.0 and not x["fallback"] for x in candidates[0])
+    assert candidates[1] == [{
+        "box": [0, 0, 120, 80], "score": -1.0, "fallback": True,
+    }]
+
+
+def test_proposed_dino_settings_match_fafa_baseline():
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    proposed = yaml.safe_load((root / "configs/proposed.yaml").read_text())
+    fafa = yaml.safe_load((root / "configs/fafa.yaml").read_text())
+    detector = fafa["localization"]["detector"]
+    assert detector["backend"] == "proposed_dino_tiny_cache"
+    assert detector["cache_dir"] == proposed["data"]["dino_cache"]
+    assert detector["model"] == proposed["detector"]["model"]
+    assert detector["threshold"] == proposed["detector"]["threshold"]
+    assert detector["text_threshold"] == proposed["detector"]["text_threshold"]
+    assert detector["scene_size"] == proposed["image_encoder"]["scene_size"]
+    assert fafa["checkpoint"]["max_txt_len"] == 128
+
+
+def test_shared_dino_cache_rejects_wrong_detector_metadata(tmp_path, monkeypatch):
+    import torch
+    from pathlib import Path
+    from rcr.baselines.fafa_detector import detect_gallery
+    from rcr.proposed.cache import store
+
+    class FakeCache:
+        cache_id = "verified-id"
+        image_ids = ["image-1"]
+        by_id = {"image-1": 0}
+        mask = torch.tensor([[True]])
+        encoder_metadata = {
+            "detector": {
+                "model": "IDEA-Research/grounding-dino-tiny",
+                "threshold": 0.3, "text_threshold": 0.25,
+            },
+            "image_encoder": {"scene_size": [224, 224]},
+        }
+
+        def validate_gallery(self, image_ids):
+            assert image_ids == self.image_ids
+
+        def load_geometry(self, index):
+            return {"boxes_pixel": torch.tensor([[1., 2., 30., 40.]])}
+
+    from PIL import Image
+    path = tmp_path / "input.png"
+    Image.new("RGB", (100, 80)).save(path)
+    monkeypatch.setattr(store, "GalleryCache", lambda _: FakeCache())
+    from types import SimpleNamespace
+    data = SimpleNamespace(gallery_ids=["image-1"], image_path=lambda _: path)
+    cfg = {
+        "backend": "proposed_dino_tiny_cache", "cache_dir": str(tmp_path),
+        "model": "IDEA-Research/grounding-dino-tiny", "threshold": 0.3,
+        "text_threshold": 0.25, "scene_size": [224, 224],
+    }
+    candidates, cache_id = detect_gallery(data, ["image-1"], cfg, torch.device("cpu"))
+    assert candidates[0][0]["box"] == [1., 2., 30., 40.]
+    assert cache_id.endswith("#cache_id=verified-id")
+    with pytest.raises(ValueError, match="provenance"):
+        detect_gallery(data, ["image-1"], {**cfg, "threshold": 0.4}, torch.device("cpu"))
+    FakeCache.encoder_metadata["detector"] = None
+    with pytest.raises(ValueError, match="lacks detector provenance"):
+        detect_gallery(data, ["image-1"], cfg, torch.device("cpu"))
+    _, uncertain = detect_gallery(
+        data, ["image-1"], {**cfg, "allow_legacy_cache": True},
+        torch.device("cpu"),
+    )
+    assert uncertain.endswith("#legacy-unverified")
