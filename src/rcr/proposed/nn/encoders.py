@@ -12,6 +12,28 @@ from rcr.common.data import sample_selection_texts
 SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
 
 
+def _autocast_dtype(device_type: str):
+    """Return the active AMP dtype across old and new PyTorch APIs."""
+    try:
+        enabled = torch.is_autocast_enabled(device_type)
+    except TypeError:
+        if device_type == "cuda":
+            enabled = torch.is_autocast_enabled()
+        elif device_type == "cpu":
+            enabled = getattr(torch, "is_autocast_cpu_enabled", lambda: False)()
+        else:
+            enabled = False
+    if not enabled:
+        return None
+
+    try:
+        return torch.get_autocast_dtype(device_type)
+    except (AttributeError, TypeError):
+        suffix = "gpu" if device_type == "cuda" else device_type
+        getter = getattr(torch, f"get_autocast_{suffix}_dtype", None)
+        return getter() if getter is not None else None
+
+
 def load_text_modules(
     model_name: str,
     dim: int,
@@ -250,12 +272,7 @@ class TextEncoder(nn.Module):
     def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
         # Include the complete padded row and mask: left padding changes BERT's
         # absolute positions. A changed instruction/mask must never reuse a row.
-        device_type = input_ids.device.type
-        precision = (
-            torch.get_autocast_dtype(device_type)
-            if torch.is_autocast_enabled(device_type)
-            else None
-        )
+        precision = _autocast_dtype(input_ids.device.type)
         backbone_dtype = next(self.backbone.parameters()).dtype
         keys = [
             (str(input_ids.device), backbone_dtype, precision, ids, mask)

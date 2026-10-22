@@ -210,7 +210,10 @@ def train(cfg: dict) -> Path:
         weight_decay=cfg["optimizer"]["weight_decay"],
     )
     amp = bool(cfg["train"].get("amp", False)) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    if hasattr(getattr(torch, "amp", None), "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
     output = Path(cfg["output"]["dir"])
     output.mkdir(parents=True, exist_ok=True)
