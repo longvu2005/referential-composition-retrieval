@@ -167,21 +167,6 @@ def prepare_visual_batch(
         "query_identity_labels": query_labels,
         "query_identity_mask": query_identity_mask,
         "grounding_targets": grounding_targets,
-        "grounding_complete": torch.tensor(
-            [
-                [
-                    set(map(str, subject["identity_ids"]))
-                    <= {
-                        str(identity)
-                        for identity in identities
-                        if identity is not None
-                    }
-                    for subject in sample["subjects"]
-                ]
-                for sample, identities in zip(samples, q_ids, strict=True)
-            ],
-            dtype=torch.bool,
-        ),
         "target_scene": t_scene.unflatten(0, (batch_size, candidates_per_query)),
         "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
         "target_boxes": t_boxes.unflatten(0, (batch_size, candidates_per_query)),
@@ -212,12 +197,6 @@ def prepare_visual_batch(
     return batch
 
 
-def finish_batch(visual, tokens, text_encoder, device):
-    """Move tensors to the accelerator and apply the trainable text projection."""
-    visual = {key: value.to(device, non_blocking=True) for key, value in visual.items()}
-    return {**visual, **encode_tokenized_text(tokens, text_encoder, device)}
-
-
 def build_batch(
     samples: list[dict],
     candidate_image_ids: list[list[str]],
@@ -240,4 +219,6 @@ def build_batch(
         state_image_ids=state_image_ids,
         identity_crops=identity_crops,
     )
-    return finish_batch(visual, text_cache.batch(samples), text_encoder, device)
+    visual = {key: value.to(device) for key, value in visual.items()}
+    text = encode_tokenized_text(text_cache.batch(samples), text_encoder, device)
+    return {**visual, **text}

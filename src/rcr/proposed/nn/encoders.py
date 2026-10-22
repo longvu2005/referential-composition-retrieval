@@ -40,6 +40,7 @@ def load_text_modules(
     device: torch.device | str,
     *,
     tokenizer_source=None,
+    revision: str | None = None,
     add_subject_markers: bool = False,
     cache_mib: int = 0,
 ):
@@ -51,9 +52,35 @@ def load_text_modules(
         tokenizer.add_special_tokens(
             {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
         )
-    backbone = AutoModel.from_pretrained(model_name)
+    backbone = AutoModel.from_pretrained(model_name, revision=revision)
     backbone.resize_token_embeddings(len(tokenizer))
     return tokenizer, TextEncoder(backbone, dim, cache_mib=cache_mib).to(device)
+
+
+def text_encoder_state(text_encoder: nn.Module, tokenizer) -> dict:
+    """Save trainable text state without copying the frozen BERT backbone."""
+    embedding = text_encoder.backbone.get_input_embeddings().weight
+    return {
+        "projection": text_encoder.proj.state_dict(),
+        "markers": {
+            token: embedding[tokenizer.convert_tokens_to_ids(token)].detach().cpu()
+            for token in SUBJECT_MARKERS.values()
+        },
+    }
+
+
+def load_text_encoder_state(text_encoder: nn.Module, tokenizer, state: dict) -> None:
+    """Load compact checkpoints and the original full-state format."""
+    if "projection" not in state:
+        text_encoder.load_state_dict(state)
+        return
+
+    text_encoder.proj.load_state_dict(state["projection"])
+    embedding = text_encoder.backbone.get_input_embeddings().weight
+    with torch.no_grad():
+        for token in SUBJECT_MARKERS.values():
+            index = tokenizer.convert_tokens_to_ids(token)
+            embedding[index].copy_(state["markers"][token])
 
 
 class QueryTextCache:

@@ -9,6 +9,7 @@ import yaml
 from torch import nn
 
 from rcr.proposed import train as training
+from rcr.proposed.nn.encoders import TextEncoder, load_text_encoder_state
 
 
 class Tokenizer:
@@ -27,9 +28,7 @@ class Tokenizer:
     def __call__(self, texts, padding=True, return_tensors=None):
         del padding, return_tensors
         texts = [texts] if isinstance(texts, str) else texts
-        rows = [
-            [1 if word == "[S1]" else 2 for word in text.split()] for text in texts
-        ]
+        rows = [[1 if word == "[S1]" else 2 for word in text.split()] for text in texts]
         length = max(map(len, rows))
         ids = torch.zeros(len(rows), length, dtype=torch.long)
         mask = torch.zeros_like(ids)
@@ -50,6 +49,9 @@ class TextBackbone(nn.Module):
 
     def resize_token_embeddings(self, _size):
         pass
+
+    def get_input_embeddings(self):
+        return self.embedding
 
     def forward(self, input_ids, attention_mask):
         del attention_mask
@@ -182,7 +184,7 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     }
     cfg["cache"]["supervision_cache"] = str(tmp_path / "supervision.json")
     cfg["runtime"]["device"] = "cpu"
-    cfg["model"].update(dim=8, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
+    cfg["model"].update(dim=6, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
     cfg["train"].update(epochs=1, batch_size=1, candidates=2, amp=False)
     cfg["evaluation"]["every_epochs"] = 1
     cfg["retrieval"].update(
@@ -196,3 +198,12 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     assert checkpoint.name == "best.pt"
     assert saved["best_epoch"] == 1
     assert saved["state_supervised_pairs"] > 0
+    assert "optimizer" not in saved and "scaler" not in saved
+    assert set(saved["text_encoder"]) == {"projection", "markers"}
+
+    tokenizer = Tokenizer()
+    restored = TextEncoder(TextBackbone(), dim=6)
+    load_text_encoder_state(restored, tokenizer, saved["text_encoder"])
+    torch.testing.assert_close(
+        restored.proj.weight, saved["text_encoder"]["projection"]["weight"]
+    )

@@ -12,10 +12,14 @@ from rcr.common.io import sha256_file
 
 
 def download(url: str, path: Path, *, force: bool, expected_hash: str | None = None):
-    if path.is_file() and path.stat().st_size and not force:
-        if expected_hash is None or sha256_file(path).startswith(expected_hash):
-            print(f"Already prepared: {path}", flush=True)
-            return
+    if (
+        path.is_file()
+        and path.stat().st_size
+        and not force
+        and (expected_hash is None or sha256_file(path).startswith(expected_hash))
+    ):
+        print(f"Already prepared: {path}", flush=True)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".part")
     digest = hashlib.sha256()

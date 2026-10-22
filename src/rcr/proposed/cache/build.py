@@ -86,9 +86,10 @@ def check_cache_config(
         if actual.get("spec") != fafa_spec(native_cfg):
             raise ValueError("cache FAFA checkpoint/source/preprocessing spec differs")
         checkpoint = Path(native_cfg["checkpoint"]["path"])
-        if checkpoint.is_file():
-            if actual.get("checkpoint_sha256") != sha256_file(checkpoint):
-                raise ValueError("cache FAFA checkpoint weights differ")
+        if checkpoint.is_file() and actual.get("checkpoint_sha256") != sha256_file(
+            checkpoint
+        ):
+            raise ValueError("cache FAFA checkpoint weights differ")
 
 
 def existing_cache(

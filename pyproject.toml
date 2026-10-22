@@ -20,15 +20,15 @@ dependencies = [
 
 [project.optional-dependencies]
 proposed = [
-    "torch>=2.4,<3",
+    "torch>=2.2,<3",
     "scipy>=1.11,<2",  # Fine partial one-to-one identity assignment.
     "transformers>=4.56,<5",
-    "torchvision>=0.19,<1",
+    "torchvision>=0.17,<1",
 ]
 clip = [
-    "torch>=2.4,<3",
+    "torch>=2.2,<3",
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
-    "torchvision>=0.19,<1",
+    "torchvision>=0.17,<1",
 ]
 # Official FAFA is imported from the pinned source, not a PyPI LAVIS fork.
 # Keep this extra in its own environment: its Transformers pin conflicts with proposed.
@@ -58,16 +58,15 @@ fafa = [
     "huggingface-hub>=0.20,<1",
 ]
 dataset = [
-    "torch>=2.4,<3",
+    "torch>=2.2,<3",
     "open-clip-torch>=3.3,<4",
 ]
 evaluation = [
-    "torch>=2.4,<3",  # Decode saved rankings.pt; no model encoders needed.
+    "torch>=2.2,<3",  # Decode saved rankings.pt; no model encoders needed.
 ]
 dev = [
-    "torch>=2.4,<3",  # CPU contracts for all methods.
+    "torch>=2.2,<3",  # Old/new AMP APIs are both covered by CPU contracts.
     "pytest>=8.0",
-    "pytest-cov>=5.0",
     "scipy>=1.11,<2",  # CPU FAFA adapter contract tests (no native weights).
     "ruff>=0.6",
 ]
@@ -99,12 +98,3 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["labelstudio", "rcr", "tools"]
-
-
-[tool.ruff.lint.per-file-ignores]
-# These modules re-export shared pytest fixtures under their public names.
-"tests/baselines/test_fafa_text.py" = ["F811"]
-"tests/proposed/test_amp_numerics.py" = ["F811"]
-"tests/proposed/test_compact_cache.py" = ["F811"]
-"tests/proposed/test_fafa_cache_lifecycle.py" = ["F811"]
-"tests/proposed/test_native_fafa.py" = ["F811"]

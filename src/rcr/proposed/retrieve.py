@@ -21,7 +21,7 @@ from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
 from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache
-from rcr.proposed.nn.encoders import load_text_modules
+from rcr.proposed.nn.encoders import load_text_encoder_state, load_text_modules
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     rank_weight_grid,
@@ -130,9 +130,13 @@ def _retrieve(
 
     tokenizer_path = checkpoint_path.parent / "tokenizer"
     tokenizer, text_encoder = load_text_modules(
-        model_cfg["text_model"], dim, device, tokenizer_source=tokenizer_path
+        model_cfg["text_model"],
+        dim,
+        device,
+        tokenizer_source=tokenizer_path,
+        revision=checkpoint.get("text_model_revision"),
     )
-    text_encoder.load_state_dict(checkpoint["text_encoder"])
+    load_text_encoder_state(text_encoder, tokenizer, checkpoint["text_encoder"])
 
     max_subjects = checkpoint["model"]["composition.role.weight"].shape[0]
     model = RCRModel.from_config(

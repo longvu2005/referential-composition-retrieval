@@ -33,12 +33,6 @@ def _index_metadata(index_lines: Iterable[str], keep_ids: set[str] | None = None
     return boxes_by_image, images_by_identity
 
 
-def select_unfinished_records(
-    records: Iterable[dict], completed_ids: set[str]
-) -> list[dict]:
-    return [row for row in records if row["sample_id"] not in completed_ids]
-
-
 def merge_handoff_catalog(
     existing: Iterable[dict], prepared: Iterable[dict]
 ) -> list[dict]:
@@ -188,20 +182,19 @@ def prepare_positive_set_inputs(
                 )
             non_seed = ranked
 
-        candidates = []
-        for image_id in [seed_id, *non_seed]:
-            candidates.append(
-                {
-                    "image_id": image_id,
-                    "image_url": image_by_id[image_id]["url"],
-                    "is_seed": image_id == seed_id,
-                    "subject_boxes": [
-                        {"subject_id": subject_by_identity[x["identity_id"]], **x}
-                        for x in boxes_by_image[image_id]
-                        if x["identity_id"] in subject_by_identity
-                    ],
-                }
-            )
+        candidates = [
+            {
+                "image_id": image_id,
+                "image_url": image_by_id[image_id]["url"],
+                "is_seed": image_id == seed_id,
+                "subject_boxes": [
+                    {"subject_id": subject_by_identity[x["identity_id"]], **x}
+                    for x in boxes_by_image[image_id]
+                    if x["identity_id"] in subject_by_identity
+                ],
+            }
+            for image_id in [seed_id, *non_seed]
+        ]
 
         outputs.append(
             {

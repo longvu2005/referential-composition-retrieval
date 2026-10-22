@@ -116,7 +116,7 @@ def save_run(cfg, data, output, details, elapsed_seconds, *, query_subset=False)
 
 def _grid(cfg):
     tuning = cfg["tuning"]
-    grid = sorted(set(float(x) for x in tuning["image_weights"]))
+    grid = sorted({float(x) for x in tuning["image_weights"]})
     if not grid or not np.isfinite(grid).all() or min(grid) < 0 or max(grid) > 1:
         raise ValueError("tuning.image_weights must be a non-empty grid in [0, 1]")
     if tuning["metric"] != "full_map":

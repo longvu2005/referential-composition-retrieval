@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from contextlib import suppress
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -99,10 +100,8 @@ def runtime_metadata(device) -> dict:
         "scipy",
         "PyYAML",
     ):
-        try:
+        with suppress(PackageNotFoundError):
             packages[name] = version(name)
-        except PackageNotFoundError:
-            pass
     dirty = git("status", "--porcelain", "--untracked-files=normal")
     return {
         "created_at": datetime.now(UTC).isoformat(),

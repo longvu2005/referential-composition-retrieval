@@ -207,14 +207,14 @@ def retrieve_rankings(
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Any]:
     """Single-run interface shared by training validation and standalone use."""
-    settings = dict(
-        top_m=top_m,
-        fine_batch_size=fine_batch_size,
-        identity_batch_size=identity_batch_size,
-        coarse_batch_size=coarse_batch_size,
-        coarse_beta=coarse_beta,
-        fine_coarse_weight=fine_coarse_weight,
-    )
+    settings = {
+        "top_m": top_m,
+        "fine_batch_size": fine_batch_size,
+        "identity_batch_size": identity_batch_size,
+        "coarse_batch_size": coarse_batch_size,
+        "coarse_beta": coarse_beta,
+        "fine_coarse_weight": fine_coarse_weight,
+    }
     settings = retrieval_settings(settings, model.coarse_beta)
     return rank_weight_grid(
         samples,
@@ -374,9 +374,7 @@ def rank_weight_grid(
                 missing = top_indices[~fine_done[top_indices]]
                 for start in range(0, len(missing), fine_batch_size):
                     local = missing[start : start + fine_batch_size]
-                    scene, persons, boxes, mask = cache.load(
-                        image_indices[local.cpu()]
-                    )
+                    scene, persons, boxes, mask = cache.load(image_indices[local.cpu()])
                     count = len(local)
                     details = model.score_target(
                         query.repeat_candidates(count),
@@ -533,12 +531,8 @@ def mine_hard_negatives(
                 identity = query_identity.new_empty(len(rows), len(gallery_ids))
                 offset = 0
                 for people_cpu, mask_cpu in gallery_identity:
-                    for j in range(
-                        0, len(people_cpu), settings["coarse_batch_size"]
-                    ):
-                        stop = min(
-                            j + settings["coarse_batch_size"], len(people_cpu)
-                        )
+                    for j in range(0, len(people_cpu), settings["coarse_batch_size"]):
+                        stop = min(j + settings["coarse_batch_size"], len(people_cpu))
                         identity[:, offset + j : offset + stop] = (
                             identity_scores_batched(
                                 query_identity,
@@ -556,9 +550,7 @@ def mine_hard_negatives(
                         text["change"], text["change_mask"]
                     )
                     state = query_identity.new_empty(len(rows), len(gallery_ids))
-                    for j in range(
-                        0, len(gallery_ids), settings["coarse_batch_size"]
-                    ):
+                    for j in range(0, len(gallery_ids), settings["coarse_batch_size"]):
                         stop = j + settings["coarse_batch_size"]
                         state[:, j:stop] = (
                             query_state @ gallery_state[j:stop].to(device).T

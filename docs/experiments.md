@@ -87,5 +87,6 @@ they are not pretrained validation/test experiments:
 
 ```bash
 python -m pytest -q
-python -m ruff check src scripts tests labelstudio
+python -m ruff check src tools tests labelstudio
+python -m ruff format --check src tools tests labelstudio
 ```

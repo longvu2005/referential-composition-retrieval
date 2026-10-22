@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 from contextlib import contextmanager
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -383,8 +384,10 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     gallery_items = []
     gallery_offsets = [0]
     for image_id, boxes in zip(gallery_ids, candidates, strict=True):
-        for box in choose_boxes(boxes, float(detector["score_threshold"]), 1):
-            gallery_items.append((str(data.image_path(image_id)), box["box"], ""))
+        gallery_items.extend(
+            (str(data.image_path(image_id)), box["box"], "")
+            for box in choose_boxes(boxes, float(detector["score_threshold"]), 1)
+        )
         gallery_offsets.append(len(gallery_items))
     query_items = []
     query_offsets = [0]
@@ -471,9 +474,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         if len(matrix) == 1:
             scores[qi] = np.maximum.reduceat(matrix[0], gallery_offsets[:-1])
         else:
-            for gi, (start, stop) in enumerate(
-                zip(gallery_offsets[:-1], gallery_offsets[1:], strict=True)
-            ):
+            for gi, (start, stop) in enumerate(pairwise(gallery_offsets)):
                 scores[qi, gi] = setmatch_score(
                     matrix[:, start:stop], float(cfg["setmatch"]["unmatched_score"])
                 )

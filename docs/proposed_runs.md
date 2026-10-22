@@ -117,6 +117,9 @@ original letterbox transform. Keep the original DINOv3 ViT-B/16, 224 x 224 scene
 contains overall and by-case metrics. Split retrieval output additionally stores
 coarse, fine, fused and FAFA diagnostic rankings. The FAFA diagnostic reranks the
 same coarse Top-M with FDA binding only; it is not the standalone FAFA baseline.
+Checkpoints are inference/reproducibility artifacts, not resumable trainer states:
+they omit optimizer/scaler state and store only the learned text projection,
+Subject-marker embeddings and frozen BERT revision.
 
 For a fair ablation, change one owned component, keep data/evaluation fixed, and
 record the commit, full YAML, seed, runtime and validation result.

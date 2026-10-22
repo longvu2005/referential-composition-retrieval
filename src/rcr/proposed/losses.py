@@ -9,9 +9,7 @@ from rcr.proposed.nn.model import RCRModel
 
 def grounding_loss(logits: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
     logits = logits.float().masked_fill(~mask, 0)
-    loss = F.binary_cross_entropy_with_logits(
-        logits, targets.float(), reduction="none"
-    )
+    loss = F.binary_cross_entropy_with_logits(logits, targets.float(), reduction="none")
     return (loss * mask).sum() / mask.sum().clamp_min(1)
 
 
@@ -40,9 +38,7 @@ def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
     return per_anchor[valid].mean()
 
 
-def retrieval_loss(
-    scores: Tensor, positive: Tensor, valid_mask: Tensor | None = None
-):
+def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None = None):
     """Pairwise softplus ranking over every positive-negative pair."""
     scores = scores.float()
     valid = torch.ones_like(positive) if valid_mask is None else valid_mask.bool()
@@ -100,24 +96,11 @@ def compute_loss(
     if "subject_mask" in batch:
         grounding_mask = grounding_mask & batch["subject_mask"][:, :, None]
     grounding_mask = grounding_mask & (batch["query_identity_labels"][:, None] >= 0)
-    grounding_mask = grounding_mask & batch["grounding_targets"].any(
-        -1, keepdim=True
-    )
-    ground = grounding_loss(
-        query.logits, batch["grounding_targets"], grounding_mask
-    )
+    grounding_mask = grounding_mask & batch["grounding_targets"].any(-1, keepdim=True)
+    ground = grounding_loss(query.logits, batch["grounding_targets"], grounding_mask)
 
-    query_keep = (
-        (batch["query_identity_labels"] >= 0)
-        & batch["query_person_mask"]
-        & batch["query_identity_mask"]
-    )
-    target_keep = (
-        (batch["target_identity_labels"] >= 0)
-        & batch["target_mask"]
-        & batch["target_identity_mask"]
-        & batch["positive_mask"][:, :, None]
-    )
+    query_keep = batch["query_identity_mask"]
+    target_keep = batch["target_identity_mask"]
     labels = torch.cat(
         (
             batch["query_identity_labels"][query_keep],
@@ -136,22 +119,17 @@ def compute_loss(
             features.append(model.encode_identity(batch["extra_identity_persons"]))
         identity = identity_loss(torch.cat(features), labels, identity_temperature)
 
-    retrieval = retrieval_loss(
-        scores, batch["positive_mask"], batch.get("candidate_mask")
-    )
+    retrieval = retrieval_loss(scores, batch["positive_mask"])
 
     state = scores.new_zeros(())
     if state_weight:
-        state_mask = batch["state_mask"]
-        if "candidate_mask" in batch:
-            state_mask = state_mask & batch["candidate_mask"]
         text_state = model.encode_text_state(batch["change"], batch["change_mask"])
         image_state = model.encode_image_state(batch["target_scene"].mean(-2))
         state_scores = torch.einsum("bd,bcd->bc", text_state, image_state)
         state = retrieval_loss(
             state_scores / state_temperature,
             batch["positive_mask"],
-            state_mask,
+            batch["state_mask"],
         )
 
     total = (

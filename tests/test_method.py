@@ -17,9 +17,7 @@ def _boxes(batch, people):
 def test_subject_membership_is_variable_sized_and_exclusive():
     logits = torch.tensor([[[5.0, 4.0, -5.0], [-5.0, -4.0, 5.0]]])
     membership = exclusive_membership(logits, torch.ones(1, 2, dtype=torch.bool))
-    assert (membership > 0).tolist() == [
-        [[True, True, False], [False, False, True]]
-    ]
+    assert (membership > 0).tolist() == [[[True, True, False], [False, False, True]]]
     assert ((membership > 0).sum(1) <= 1).all()
     assert not membership.requires_grad
 
@@ -44,9 +42,7 @@ def test_losses_rank_positives_and_same_identity_together():
         [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]],
         requires_grad=True,
     )
-    bad = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1], [0.1, 0.9]]
-    )
+    bad = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.9, 0.1], [0.1, 0.9]])
     assert identity_loss(good, labels) < identity_loss(bad, labels)
 
     scores = torch.tensor([[2.0, 0.0, 1.0]], requires_grad=True)
@@ -91,6 +87,4 @@ def test_fine_coarse_fusion_uses_common_shortlist_statistics():
     fused = fuse_fine_coarse_scores(fine, coarse, weight=0.5)
     assert fused.shape == fine.shape
     assert torch.isfinite(fused).all()
-    torch.testing.assert_close(
-        fuse_fine_coarse_scores(fine, coarse, weight=0), fine
-    )
+    torch.testing.assert_close(fuse_fine_coarse_scores(fine, coarse, weight=0), fine)

@@ -62,8 +62,9 @@ utilities`. Files under `nn/` contain the method; `train.py` owns optimization;
 
 ## Setup
 
-Python 3.11 or 3.12 is supported. Proposed/DINO and native FAFA require separate
-environments because their Transformers versions conflict.
+Python 3.11 or 3.12 and PyTorch 2.2 or newer are supported. Proposed/DINO and
+native FAFA require separate environments because their Transformers versions
+conflict.
 
 ```bash
 PYTHON=python3.11 bash scripts/setup.bash proposed
@@ -156,7 +157,9 @@ audits are documented in [dataset/README.md](dataset/README.md).
 ## Outputs
 
 Training writes `config.yaml`, `runtime.json`, `history.jsonl`, `last.pt`, and the
-validation-selected `best.pt`. Retrieval writes one directory per split with:
+validation-selected `best.pt`. Checkpoints contain learned weights and frozen-model
+provenance, but no optimizer state or duplicate frozen BERT weights. Retrieval
+writes one directory per split with:
 
 - `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings;
 - `run.json`: configuration, checkpoint, cache and benchmark provenance;
@@ -173,6 +176,7 @@ weight.
 bash scripts/setup.bash dev
 .venv-dev/bin/python -m pytest -q
 .venv-dev/bin/python -m ruff check src tools tests labelstudio
+.venv-dev/bin/python -m ruff format --check src tools tests labelstudio
 ```
 
 When changing the method, edit the module that owns the equation, use a new

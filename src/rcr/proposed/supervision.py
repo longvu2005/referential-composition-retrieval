@@ -74,7 +74,7 @@ class TrainSupervision:
         self.key = hashlib.sha256(
             json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        if self.cache_file is not None and self.cache_file.is_file():
+        if self.cache_file.is_file():
             stored = json.loads(self.cache_file.read_text(encoding="utf-8"))
             if stored.get("key") == self.key:
                 self._ids = stored["identities"]
@@ -117,11 +117,7 @@ class TrainSupervision:
         required = set()
         for sample in samples:
             required.add(sample["query_image_id"])
-            required.update(
-                sample["positive_image_ids"]
-                if "positive_image_ids" in sample
-                else [sample["target_image_id"]]
-            )
+            required.update(sample["positive_image_ids"])
         if not required <= self.heads.keys():
             raise ValueError("train supervision cannot prepare non-train images")
         if all_train:
@@ -168,6 +164,7 @@ def prepare_train_supervision(cfg):
     """Prepare reusable train labels without loading encoders or query features."""
     from rcr.proposed.cache.store import GalleryCache
     from rcr.proposed.identity import identity_sampling_settings
+
     data_cfg = cfg["data"]
     cache_file = cfg.get("cache", {}).get("supervision_cache")
     if cache_file is None:

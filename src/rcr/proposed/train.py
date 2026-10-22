@@ -20,7 +20,11 @@ from rcr.proposed.cache.build import check_query_text_config
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss
-from rcr.proposed.nn.encoders import QueryTextCache, load_text_modules
+from rcr.proposed.nn.encoders import (
+    QueryTextCache,
+    load_text_modules,
+    text_encoder_state,
+)
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.ranking import mine_hard_negatives, retrieve_rankings
 from rcr.proposed.sampling import (
@@ -95,8 +99,7 @@ def _make_checkpoint(
     epoch,
     model,
     text_encoder,
-    optimizer,
-    scaler,
+    tokenizer,
     cfg,
     cache,
     dim,
@@ -108,9 +111,10 @@ def _make_checkpoint(
     return {
         "epoch": epoch,
         "model": model.state_dict(),
-        "text_encoder": text_encoder.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scaler": scaler.state_dict(),
+        "text_encoder": text_encoder_state(text_encoder, tokenizer),
+        "text_model_revision": getattr(
+            text_encoder.backbone.config, "_commit_hash", None
+        ),
         "config": cfg,
         "dim": dim,
         "input_dim": scene_dim,
@@ -270,9 +274,7 @@ def train(cfg: dict) -> Path:
             cfg["train"]["seed"] + epoch + 1_000_002
         )
         epoch_index = epoch - 1
-        hard_quota = int(
-            (cfg["train"]["candidates"] - 1) * sampling["hard_fraction"]
-        )
+        hard_quota = int((cfg["train"]["candidates"] - 1) * sampling["hard_fraction"])
         if (
             hard_quota
             and epoch_index >= sampling["warmup_epochs"]
@@ -303,10 +305,9 @@ def train(cfg: dict) -> Path:
         )
         model.train()
         text_encoder.train()
-        totals = {
-            name: 0.0
-            for name in ("loss", "grounding", "identity", "retrieval", "state")
-        }
+        totals = dict.fromkeys(
+            ("loss", "grounding", "identity", "retrieval", "state"), 0.0
+        )
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs}")
         for rows in progress:
             candidates = sample_candidates(
@@ -405,8 +406,7 @@ def train(cfg: dict) -> Path:
             epoch=epoch,
             model=model,
             text_encoder=text_encoder,
-            optimizer=optimizer,
-            scaler=scaler,
+            tokenizer=tokenizer,
             cfg=cfg,
             cache=cache,
             dim=dim,

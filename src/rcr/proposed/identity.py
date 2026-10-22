@@ -61,8 +61,7 @@ class IdentityCropSampler:
         if other:
             order = torch.randperm(len(other), generator=generator).tolist()
             other = [
-                other[index]
-                for index in order[: self.settings["random_identities"]]
+                other[index] for index in order[: self.settings["random_identities"]]
             ]
 
         per_identity = self.settings["crops_per_identity"]

@@ -183,11 +183,7 @@ class GalleryCache:
             if geometry_only
             else ("scene", "persons", "boxes_scene", "boxes_pixel", "patch_hw")
         )
-        return {
-            key: item[key]
-            for key in names
-            if key in item
-        }
+        return {key: item[key] for key in names if key in item}
 
     def load_geometry(self, index: int) -> dict:
         """Read immutable crop boxes without loading full feature payloads."""

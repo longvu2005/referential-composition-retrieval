@@ -82,9 +82,12 @@ def main(argv=None):
         parser.error("--modes is only available for CLIP")
     if getattr(args, "max_queries", None) is not None and args.max_queries < 1:
         parser.error("--max-queries must be positive")
-    if method == "proposed" and command in ("train", "retrieve", "run"):
-        if max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]:
-            parser.error("candidate_ks cannot exceed top_m")
+    if (
+        method == "proposed"
+        and command in ("train", "retrieve", "run")
+        and max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]
+    ):
+        parser.error("candidate_ks cannot exceed top_m")
 
     if command == "prepare" or getattr(args, "prepare", False):
         if method == "proposed":
@@ -96,7 +99,7 @@ def main(argv=None):
 
             prepare(cfg, force=args.force)
         if command == "prepare":
-            return
+            return None
     if command == "build-cache":
         from rcr.proposed.cache.build import prepare_cache
 
@@ -151,6 +154,7 @@ def main(argv=None):
                 retrieve(run_cfg, max_queries=args.max_queries)
             else:
                 evaluate_run(run_cfg, max_queries=args.max_queries)
+    return None
 
 
 if __name__ == "__main__":
