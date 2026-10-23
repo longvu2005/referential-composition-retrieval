@@ -1,7 +1,9 @@
-"""Replay a complete saved Coarse Top-M on CPU, without model weights or caches."""
+"""Replay saved scores on CPU, including new shortlists from a full tuning export."""
 
 import argparse
 import json
+import math
+from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -11,10 +13,12 @@ from rcr.evaluation.provenance import runtime_metadata
 from rcr.proposed.ranking import (
     SCORE_EPS,
     SCORE_SCHEMA_VERSION,
+    TUNING_CONVENTIONS,
     fine_score_components,
     fuse_fine_coarse_scores,
     rerank_topm,
 )
+from rcr.proposed.scores import combine_scores
 
 
 def _validate_artifact(output: dict) -> None:
@@ -67,6 +71,8 @@ def _validate_artifact(output: dict) -> None:
         or len(set(output["gallery_ids"])) != g
     ):
         raise ValueError("offline replay requires non-empty unique sample/gallery IDs")
+    if type(config["top_m"]) is not int or config["top_m"] < 1:
+        raise ValueError("top_m must be a positive integer")
     top, coarse = output["coarse_topm"], output["coarse_rankings"]
     for key, value in (("coarse_topm", top), ("coarse_rankings", coarse)):
         if (
@@ -96,6 +102,76 @@ def _validate_artifact(output: dict) -> None:
             raise ValueError(f"{key} must be float32 with shape coarse_topm")
 
 
+def _validate_tuning(output: dict) -> dict:
+    """Reject incomplete/full-gallery exports before changing any shortlist."""
+    tuning = output["tuning_scores"]
+    if not isinstance(tuning, dict) or any(
+        tuning.get(key) != value for key, value in TUNING_CONVENTIONS.items()
+    ):
+        raise ValueError("incompatible full-gallery tuning_scores contract")
+    required = {
+        "query_indices",
+        "identity_scores",
+        "state_scores",
+        "state_trained",
+        "fixed_fine_matching",
+        "fafa_binding",
+        "context",
+        "coverage",
+    }
+    if missing := required - tuning.keys():
+        raise ValueError(
+            f"tuning_scores is missing fields: {', '.join(sorted(missing))}"
+        )
+    n, g = len(output["sample_ids"]), len(output["gallery_ids"])
+    indices = tuning.get("query_indices")
+    if (
+        not isinstance(indices, torch.Tensor)
+        or indices.dtype not in (torch.int32, torch.int64)
+        or indices.shape != (n,)
+        or indices.min() < 0
+        or indices.max() >= g
+    ):
+        raise ValueError(
+            "tuning query_indices must identify one gallery image per query"
+        )
+    if (output["coarse_rankings"].cpu() == indices.cpu()[:, None]).any():
+        raise ValueError("tuning query_indices disagree with self-excluded rankings")
+    if type(tuning.get("state_trained")) is not bool:
+        raise ValueError(
+            "tuning_scores must record whether the state branch is trained"
+        )
+    if not isinstance(tuning.get("fixed_fine_matching"), dict):
+        raise ValueError("tuning_scores must record the fixed fine matching settings")
+    if not isinstance(tuning.get("provenance", {}), dict):
+        raise ValueError("tuning provenance must be a metadata dictionary")
+    fields = ["identity_scores", "fafa_binding", "context", "coverage"]
+    if tuning["state_trained"]:
+        fields.append("state_scores")
+    elif tuning.get("state_scores") is not None:
+        raise ValueError("untrained state scores must not be exported")
+    for key in fields:
+        value = tuning.get(key)
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.shape != (n, g)
+            or value.dtype != torch.float32
+        ):
+            raise ValueError(
+                f"tuning {key} must be float32 aligned with the full gallery"
+            )
+    top = output["coarse_topm"].long().cpu()
+    for key in ("fafa_binding", "context", "coverage"):
+        value = tuning[key].cpu()
+        if not torch.isfinite(value).all():
+            raise ValueError(f"tuning {key} contains NaN/Inf")
+        if not torch.equal(value.gather(1, top), output[key].cpu()):
+            raise ValueError(f"tuning {key} is misaligned with saved Coarse Top-M")
+        if value[torch.arange(n), indices.long().cpu()].count_nonzero():
+            raise ValueError("self-excluded fine scores must use the zero sentinel")
+    return tuning
+
+
 @torch.inference_mode()
 def replay_rankings(
     output: dict,
@@ -103,37 +179,91 @@ def replay_rankings(
     fine_score_mode: str | None = None,
     context_weight: float | None = None,
     fine_coarse_weight: float | None = None,
+    coarse_beta: float | None = None,
+    top_m: int | None = None,
 ) -> dict:
-    """Reweight only saved candidates; never infer Coarse scores from ranks."""
+    """Use full-gallery components for new beta/Top-M; retain schema-1 replay."""
     _validate_artifact(output)
     config = dict(output["score_config"])
     for key, value in (
         ("fine_score_mode", fine_score_mode),
         ("context_weight", context_weight),
         ("fine_coarse_weight", fine_coarse_weight),
+        ("coarse_beta", coarse_beta),
+        ("top_m", top_m),
     ):
         if value is not None:
             config[key] = value
+    if type(config["top_m"]) is not int or config["top_m"] < 1:
+        raise ValueError("top_m must be a positive integer")
+    if not math.isfinite(config["coarse_beta"]) or config["coarse_beta"] < 0:
+        raise ValueError("coarse_beta must be finite and nonnegative")
+    tuning = _validate_tuning(output) if "tuning_scores" in output else None
+    changed = any(
+        config[key] != output["score_config"][key] for key in ("coarse_beta", "top_m")
+    )
+    if changed and tuning is None:
+        raise ValueError(
+            "changing coarse_beta/top_m requires a full-gallery --save-tuning export; "
+            "saved Top-M scores cannot recover unseen candidates"
+        )
+    if (
+        tuning is not None
+        and config["coarse_beta"] != 0
+        and not tuning["state_trained"]
+    ):
+        raise ValueError("checkpoint state branch is untrained; use coarse_beta=0")
     rows = []
-    for i, top in enumerate(output["coarse_topm"].cpu()):
+    for i, saved_top in enumerate(output["coarse_topm"].cpu()):
+        if tuning is None:
+            top = saved_top.long()
+            order = output["coarse_rankings"][i].cpu()
+            coarse_topm = output["coarse_topm_scores"][i].cpu()
+            raw = {
+                key: output[key][i].cpu()
+                for key in ("fafa_binding", "context", "coverage")
+            }
+        else:
+            query_index = tuning["query_indices"][i].item()
+            state = tuning["state_scores"]
+            coarse = combine_scores(
+                tuning["identity_scores"][i].cpu(),
+                None if state is None else state[i].cpu(),
+                beta=config["coarse_beta"],
+                exclude_index=query_index,
+            )
+            order = torch.argsort(coarse, descending=True, stable=True)
+            order = order[order != query_index]
+            top = order[: config["top_m"]]
+            coarse_topm = coarse[top]
+            raw = {
+                key: tuning[key][i].cpu()[top]
+                for key in ("fafa_binding", "context", "coverage")
+            }
         scored = fine_score_components(
-            output["fafa_binding"][i].cpu(),
-            output["context"][i].cpu(),
-            output["coverage"][i].cpu(),
+            raw["fafa_binding"],
+            raw["context"],
+            raw["coverage"],
             output["binding_scale"],
             config["fine_score_mode"],
             config["context_weight"],
         )
         fused = fuse_fine_coarse_scores(
             scored["fine_scores"],
-            output["coarse_topm_scores"][i].cpu(),
+            coarse_topm,
             config["fine_coarse_weight"],
         )
-        order = output["coarse_rankings"][i].cpu()
         rows.append(
             {
+                **raw,
                 **scored,
+                "coarse_rankings": order.to(torch.int32),
+                "coarse_topm": top.to(torch.int32),
+                "coarse_topm_scores": coarse_topm,
                 "fused_topm_scores": fused,
+                "fafa_rankings": rerank_topm(order, top, raw["fafa_binding"]).to(
+                    torch.int32
+                ),
                 "fine_rankings": rerank_topm(order, top, scored["fine_scores"]).to(
                     torch.int32
                 ),
@@ -156,6 +286,8 @@ def main(argv=None):
     )
     parser.add_argument("--context-weight", type=float)
     parser.add_argument("--fine-coarse-weight", type=float)
+    parser.add_argument("--coarse-beta", type=float)
+    parser.add_argument("--top-m", type=int)
     args = parser.parse_args(argv)
     if args.output_dir.resolve() == args.rankings.parent.resolve():
         parser.error("use a separate output directory to retain the source artifact")
@@ -165,9 +297,18 @@ def main(argv=None):
         fine_score_mode=args.mode,
         context_weight=args.context_weight,
         fine_coarse_weight=args.fine_coarse_weight,
+        coarse_beta=args.coarse_beta,
+        top_m=args.top_m,
     )
     metadata_path = args.rankings.parent / "run.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+    embedded = output.get("tuning_scores", {}).get("provenance", {})
+    for key, value in embedded.items():
+        if key in metadata and metadata[key] != value:
+            raise ValueError(
+                f"run.json disagrees with embedded tuning provenance: {key}"
+            )
+    metadata = {**embedded, **metadata}
     retrieval = {
         **metadata.get("retrieval", {}),
         **{
@@ -181,6 +322,15 @@ def main(argv=None):
             )
         },
     }
+    metadata = deepcopy(metadata)
+    if isinstance(metadata.get("config"), dict):
+        metadata["config"]["retrieval"] = retrieval
+        for key in (
+            "selected_checkpoint_sha256",
+            "selected_validation_sha256",
+            "selected_retrieval",
+        ):
+            metadata["config"].pop(key, None)
     save_results(
         args.output_dir,
         output,
@@ -196,7 +346,9 @@ def main(argv=None):
             "replay": {
                 "source": str(args.rankings),
                 "source_sha256": sha256_file(args.rankings),
-                "scope": "same_coarse_topm",
+                "scope": (
+                    "full_gallery" if "tuning_scores" in output else "same_coarse_topm"
+                ),
             },
         },
     )

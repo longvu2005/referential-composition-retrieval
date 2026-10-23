@@ -204,7 +204,42 @@ python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
 See [docs/proposed_runs.md](docs/proposed_runs.md) for the full schema and offline
 ablations. Existing checkpoints need no migration. The evaluator still accepts
 old rankings; offline replay requires the new score components. Changing
-`coarse_beta` may change shortlist membership and requires retrieval again.
+With Top-M-only artifacts, changing `coarse_beta` may change shortlist membership
+and requires retrieval again.
+
+For offline tuning that can change the shortlist, export full-gallery raw scores
+once with the existing checkpoint and caches (validation only):
+
+```bash
+python tools/run.py run --config runs/proposed-fafa-unified/config.yaml \
+  --splits val --save-tuning --set output.dir=runs/proposed-tuning
+python -m rcr.proposed.replay runs/proposed-tuning/val/rankings.pt \
+  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
+  --context-weight 0.0288 --fine-coarse-weight 0.0064
+```
+
+`--save-tuning` scores every non-self query/gallery pair once and stores raw
+identity/state and FAFA/context/coverage scores inside `rankings.pt`. This extra
+work is opt-in and is not added to periodic training validation. Later replay
+needs only that file and CPU PyTorch; it rebuilds the complete Coarse ranking,
+new shortlist, its normalization and the new Coarse tail. No model, image
+features or backbone downloads are needed. Old Top-M-only artifacts retain their
+existing replay support but cannot recover candidates they never scored.
+See [docs/proposed_runs.md](docs/proposed_runs.md#full-gallery-tuning-export)
+for fields, cost, provenance and fixed matching settings.
+
+To search weights on the export and freeze a test-ready configuration without
+running model inference, use:
+
+```bash
+python tools/run.py calibrate --config configs/calibration_saved.yaml
+```
+
+This CPU-only path evaluates the complete validation split, writes
+`summary.csv`, `selection.json` and `selected.yaml`, and retains only the best
+full ranking under `selected/val/`. It checks the export's checkpoint fingerprint
+and exact validation text/labels/ordered gallery; no checkpoint file or visual
+feature cache is opened during this selection.
 
 ## Development
 

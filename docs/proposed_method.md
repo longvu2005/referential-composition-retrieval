@@ -311,3 +311,16 @@ Only `coarse_beta` and `fine_coarse_weight` enter the validation grid. Context
 mode/weight remain fixed and are recorded in `selected.yaml`, together with the
 selected pair, Top-M, checkpoint SHA256 and validation fingerprint. Retrieval
 rejects modifications to the selected scoring settings; batch sizes may change.
+
+For post-training studies that also change Coarse shortlist membership,
+`retrieve/run --save-tuning --splits val` exports raw Coarse identity/state and
+Fine binding/context/coverage scores on the complete split gallery. Each
+non-self pair is Fine-scored once. This explicit full-gallery pass is separate
+from periodic training validation and stores its fixed matching policy and
+provenance inside `rankings.pt`. CPU replay can then recompute beta, requested
+Top-M, context weight and final fusion without loading a model or feature cache.
+It recomputes Coarse eligibility/population statistics and the complete Coarse
+order before normalizing the new Fine shortlist. It never uses case labels,
+identity labels, positives or group cardinality for scoring. See
+[proposed_runs.md](proposed_runs.md#full-gallery-tuning-export) for the schema and
+limitations; exported scores cannot change the underlying matching or model.

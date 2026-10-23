@@ -208,7 +208,7 @@ be the query count, G the gallery size and M = min(requested Top-M, G-1).
 | `binding_scale` | float | Learned checkpoint alpha |
 | `score_config` | primitive dictionary | Mode, context/coarse/fusion weights, requested Top-M, alpha, epsilon, population/FP32/CPU normalization, alignment and tie/invalid policies |
 
-Only computed Fine candidates are serialized. Fine evidence must be finite;
+By default, only computed Fine candidates are serialized. Fine evidence must be finite;
 unsupported Coarse values retain their non-finite representation and are masked
 by positive-weight final fusion. `run.json` records the same score configuration,
 checkpoint epoch/hash, dataset/validation fingerprints, commit and dirty state.
@@ -252,6 +252,111 @@ data configuration and `--set output.dir=runs/replay-context` (the evaluator
 appends `/val` or `/test`).
 
 Old/missing/incompatible score schemas fail explicitly for replay; ranks cannot
-recover actual Coarse scores. These artifacts cannot replay a `coarse_beta`
+recover actual Coarse scores. These Top-M-only artifacts cannot replay a `coarse_beta`
 that changes shortlist membership: newly admitted candidates lack Fine evidence.
 Do any offline parameter selection on validation; freeze it before test.
+
+## Full-gallery tuning export
+
+Use the existing trained checkpoint and caches to make one validation export:
+
+```bash
+python tools/run.py run --config runs/proposed-fafa-unified/config.yaml \
+  --splits val --save-tuning --set output.dir=runs/proposed-tuning
+```
+
+`retrieve --save-tuning` is also available when evaluation will be run separately.
+The flag is Proposed/validation only. It never triggers training and is not
+passed to periodic training validation. If combined with `run --train`, only the
+standalone retrieval after checkpoint selection performs the full export.
+Use a new output root to keep the original run together.
+
+Ordinary Coarse Top-M forwards are performed first. The exporter then computes
+the remaining non-self Fine pairs, once per query/target, in the same bounded
+`fine_batch_size` chunks. This is necessary: a different beta can admit any
+previously unscored gallery image. It increases Fine pair count from approximately
+`N*M` to `N*(G-1)` for `N` queries and `G` gallery images. No raw images or native
+backbone extraction are repeated when the caches are complete.
+
+`rankings.pt` keeps score schema 1 and adds an independent `tuning_scores`
+dictionary; the evaluator's existing ranking/positive/metric protocol is unchanged:
+
+| Field inside `tuning_scores` | Format | Meaning |
+|---|---|---|
+| `schema_version`, `scope`, `score_alignment` | `1`, `full_gallery`, `gallery_ids` | Versioned complete-gallery contract |
+| `query_indices` | int64 `[N]` | Self index for each query in this exact ordered gallery |
+| `identity_scores` | float32 `[N,G]` | Raw complete-gallery Coarse identity branch |
+| `state_scores` | float32 `[N,G]` or `None` | Raw state branch, saved even if the original beta was zero, when trained |
+| `fafa_binding`, `context`, `coverage` | float32 `[N,G]` each | Raw Fine components before gating/normalization, for every non-self pair |
+| `state_trained` | bool | An untrained state branch remains disabled during replay |
+| `fixed_fine_matching` | primitive dictionary | Matching thresholds, missing penalty and duplicate policy used in this forward |
+| `normalization_dtype`, `normalization_device`, `eps`, `std_unbiased` | FP32, CPU, `1e-6`, `false` | Same arithmetic contract as direct retrieval |
+| `provenance` | primitive dictionary | Checkpoint/cache identifiers and benchmark/split fingerprints, embedded by standalone retrieval |
+
+Fine self entries are zero sentinels and are never ranked. Identity/state retain
+their original non-finite values; eligibility and self exclusion are recomputed
+for each beta by the shared `combine_scores` helper. Coarse normalization/sorting
+and shortlist Fine normalization/sorting run on CPU FP32 in both direct retrieval
+and replay. Model forwards still use the configured device. As before, changing
+model-forward batch shapes may produce small floating point differences; replay
+uses the actual exported values and needs no forwards.
+
+The extra raw arrays occupy approximately `20*N*G` bytes when state is trained,
+about 28.6 MiB at 264 queries / 5,684 images, plus IDs/metadata. They are stored
+once per file, rather than duplicating features/tokens/checkpoints. Keep all
+`rankings.pt` bytes when copying the export; logs/configs alone do not contain
+the score matrices.
+
+Now change beta, requested Top-M, context weight and final fusion weight offline:
+
+```bash
+python -m rcr.proposed.replay runs/proposed-tuning/val/rankings.pt \
+  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
+  --context-weight 0.0288 --fine-coarse-weight 0.0064
+python tools/run.py evaluate --config runs/proposed-fafa-unified/config.yaml \
+  --splits val --set output.dir=runs/replayed
+```
+
+These numbers illustrate the CLI; the export does not select an optimal beta.
+Replay rebuilds the whole Coarse ranking and its tail, gathers raw Fine evidence
+for the new shortlist, recomputes that shortlist's statistics, and regenerates
+coarse/Fine/FAFA/fused diagnostic rankings. The full-gallery matrices survive
+successive replays, including after reducing Top-M. Stable Coarse ties keep
+gallery order; shortlist ties keep the new Coarse order. An old/incomplete
+artifact fails explicitly if asked to change beta or Top-M.
+
+Keep evaluation `candidate_ks` no larger than the requested Top-M; reduce them
+in the evaluation config when testing a smaller shortlist. Validation labels
+belong only to the evaluator/weight selection. A single replay does not export a
+frozen test-selection config and removes stale selection guards from copied
+config metadata. Use offline calibration on the same export to freeze weights:
+
+```bash
+python tools/run.py calibrate --config configs/calibration_saved.yaml
+```
+
+`configs/calibration_saved.yaml` points to the original run config, exported
+`rankings.pt` and an output root. It accepts `coarse_beta`, `fine_coarse_weight`,
+optional `context_weight` and optional `top_m` grids. The mode stays fixed in
+`model_config`. No checkpoint, native library, backbone weights or visual cache
+is loaded; only the score file and benchmark annotations are read. Exported
+checkpoint hash and validation fingerprint are required, and partial query
+exports or changed text/labels/ordered gallery are rejected before publication.
+The objective is the shared evaluator's overall Full-mAP, with the first YAML
+grid tuple winning ties. This is validation selection, not an independent test
+estimate.
+
+Offline calibration writes `summary.csv`, `selection.json`, `selected.yaml` and
+the best `selected/val/{rankings.pt,run.json,metrics.json}`. It does not serialize
+one full-gallery artifact per grid tuple. Candidate-recall cutoffs are limited
+to each tested shortlist; the selected config retains suitable cutoffs.
+`selected.yaml` includes the same checkpoint/validation/scoring guards as online
+calibration and can be passed to the standard test retrieval command. The real
+checkpoint and caches are needed only when subsequently running that new test
+split.
+
+This supports score-weight/normalization/Top-M studies with fixed model weights,
+gallery, detections, matching rules and query text. Changing identity/member
+thresholds, missing penalties, FDA-k, the model or inputs still requires new
+forwards. Previously created Top-M-only artifacts cannot be upgraded without
+computing their missing Fine evidence once; no retraining is needed.

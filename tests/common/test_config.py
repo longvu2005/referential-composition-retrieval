@@ -69,3 +69,24 @@ assert not heavy & sys.modules.keys()
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        (["run", "--splits", "test", "--prepare"], "--splits val"),
+        (["retrieve", "--splits", "train"], "--splits val"),
+    ],
+)
+def test_tuning_export_rejects_nonvalidation_before_stages(arguments, message, capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main([*arguments, "--config", "configs/proposed.yaml", "--save-tuning"])
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_tuning_export_rejects_baseline_method_before_stages(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(["retrieve", "--config", "configs/fafa.yaml", "--save-tuning"])
+    assert error.value.code == 2
+    assert "only available for proposed" in capsys.readouterr().err

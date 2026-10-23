@@ -17,7 +17,9 @@ from rcr.common.io import (
 )
 
 
-def run_experiment(cfg, entrypoint, *, splits=("val",), build=False, train=False):
+def run_experiment(
+    cfg, entrypoint, *, splits=("val",), build=False, train=False, save_tuning=False
+):
     if train:
         validate_training_schedule(cfg)
     if train and not cfg["evaluation"]["enabled"]:
@@ -47,7 +49,8 @@ def run_experiment(cfg, entrypoint, *, splits=("val",), build=False, train=False
         stage("train")
     rows = []
     for split in splits:
-        stage("retrieve", "--splits", split)
+        options = ["--save-tuning"] if save_tuning else []
+        stage("retrieve", "--splits", split, *options)
         stage("evaluate", "--splits", split)
         directory = output_directory({**cfg, "split": split})
         metrics = json.loads((directory / "metrics.json").read_text(encoding="utf-8"))

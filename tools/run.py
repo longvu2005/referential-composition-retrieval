@@ -44,6 +44,12 @@ def main(argv=None):
                 command.add_argument(f"--{flag}", action="store_true")
         else:
             command.add_argument("--max-queries", type=int)
+        if name in ("retrieve", "run"):
+            command.add_argument(
+                "--save-tuning",
+                action="store_true",
+                help="Proposed val only: save full-gallery scores for offline tuning",
+            )
     commands.add_parser("calibrate", parents=[shared])
     args = parser.parse_args(argv)
 
@@ -80,6 +86,14 @@ def main(argv=None):
             parser.error("run --train requires validation to select best.pt")
     if getattr(args, "modes", None) and method != "clip":
         parser.error("--modes is only available for CLIP")
+    if getattr(args, "save_tuning", False) and method != "proposed":
+        parser.error("--save-tuning is only available for proposed")
+    if getattr(args, "save_tuning", False):
+        tuning_splits = args.splits or (
+            ["val"] if command == "run" else [cfg.get("split", "val")]
+        )
+        if list(dict.fromkeys(tuning_splits)) != ["val"]:
+            parser.error("--save-tuning requires --splits val")
     if getattr(args, "max_queries", None) is not None and args.max_queries < 1:
         parser.error("--max-queries must be positive")
     if (
@@ -127,6 +141,7 @@ def main(argv=None):
                 splits=splits,
                 build=args.build_cache,
                 train=args.train,
+                save_tuning=args.save_tuning,
             )
         from rcr.baselines.runner import run_experiment
 
@@ -146,7 +161,10 @@ def main(argv=None):
             if mode is not None:
                 run_cfg["mode"] = mode
             if command == "retrieve":
-                retrieve(run_cfg, max_queries=args.max_queries)
+                options = (
+                    {"save_tuning": args.save_tuning} if method == "proposed" else {}
+                )
+                retrieve(run_cfg, max_queries=args.max_queries, **options)
             else:
                 evaluate_run(run_cfg, max_queries=args.max_queries)
     return None

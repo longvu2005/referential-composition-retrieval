@@ -83,11 +83,11 @@ loss:
 retrieval:
   # Shared by periodic validation and standalone retrieval.
   fine_score_mode: context_zscore  # legacy_raw reproduces the old fine score
-  context_weight: 0.03            # fixed; normalize coverage * context over all Top-M
+  context_weight: 0.0325            # fixed; normalize coverage * context over all Top-M
   coarse_beta: 0.4              # joint validation calibration selects final pair
   # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
   # Calibrate both weights with configs/calibration.yaml after training.
-  fine_coarse_weight: 0.4
+  fine_coarse_weight: 0.025
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512

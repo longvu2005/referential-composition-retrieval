@@ -30,8 +30,10 @@ from rcr.proposed.ranking import (
 )
 
 
-def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
-    return _retrieve(cfg, max_queries=max_queries)[0]
+def retrieve(
+    cfg: dict, *, max_queries: int | None = None, save_tuning: bool = False
+) -> dict:
+    return _retrieve(cfg, max_queries=max_queries, save_tuning=save_tuning)[0]
 
 
 def retrieve_weight_grid(cfg: dict, weights: list[tuple[float, float]]) -> list[dict]:
@@ -48,10 +50,13 @@ def _retrieve(
     *,
     max_queries: int | None = None,
     weights: list[tuple[float, float]] | None = None,
+    save_tuning: bool = False,
 ) -> list[dict]:
     """Load the current model, rank, and save complete split results."""
     started = perf_counter()
     device = resolve_device(cfg)
+    if save_tuning and cfg["split"] != "val":
+        raise ValueError("tuning export requires the validation split")
 
     checkpoint_path = Path(cfg["checkpoint"])
     checkpoint_sha256 = sha256_file(checkpoint_path)
@@ -205,6 +210,8 @@ def _retrieve(
         settings=settings,
         weights=weights,
         description=cfg["split"],
+        save_tuning=save_tuning,
+        state_trained=not state_untrained,
     )
     elapsed = perf_counter() - started
     for index, (output, (beta, fine_weight)) in enumerate(
@@ -223,6 +230,18 @@ def _retrieve(
                 "dir": str(Path(cfg["output"]["dir"]) / f"grid_{index:03d}")
             }
         directory = output_directory(run_cfg)
+        benchmark = benchmark_metadata(data, cfg["split"], output)
+        if save_tuning:
+            # Keep the score file attributable when copied without run.json.
+            # Only fingerprints/summary metadata are added after model scoring.
+            output["tuning_scores"]["provenance"] = {
+                "checkpoint_sha256": checkpoint_sha256,
+                "validation_sha256": validation_sha256,
+                "cache_id": cache.cache_id,
+                "architecture_version": model.architecture_version,
+                "query_subset": len(samples) != full_num_queries,
+                **benchmark,
+            }
         save_results(
             directory,
             output,
@@ -232,12 +251,21 @@ def _retrieve(
                 "retrieval": run_cfg["retrieval"],
                 "score_schema_version": output["score_schema_version"],
                 "score_config": output["score_config"],
+                "tuning_export": (
+                    {
+                        "schema_version": output["tuning_scores"]["schema_version"],
+                        "scope": "full_gallery",
+                        "state_trained": not state_untrained,
+                    }
+                    if save_tuning
+                    else None
+                ),
                 "fine_score_mode": settings["fine_score_mode"],
                 "context_weight": settings["context_weight"],
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha256,
                 "validation_sha256": validation_sha256,
-                **benchmark_metadata(data, cfg["split"], output),
+                **benchmark,
                 **runtime_metadata(device),
                 "architecture_version": model.architecture_version,
                 "representation": "shared_person",
