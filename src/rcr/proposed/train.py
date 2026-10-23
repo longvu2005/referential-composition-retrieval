@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from rcr.common.config import validate_training_schedule
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
-from rcr.common.io import write_json
+from rcr.common.io import atomic_write_text, preserve_artifacts, write_json
 from rcr.common.runtime import resolve_device
 from rcr.common.torch_io import link_checkpoint, save_torch
 from rcr.dataset.audit import negative_exclusions
@@ -101,12 +101,14 @@ def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples):
 
 def _gradient_norm(*modules):
     """Compute the global L2 gradient norm without changing gradients."""
-    squared_norm = 0.0
+    squared_norms = []
     for module in modules:
         for parameter in module.parameters():
             if parameter.grad is not None:
-                squared_norm += float(parameter.grad.detach().float().square().sum())
-    return squared_norm**0.5
+                squared_norms.append(parameter.grad.detach().float().square().sum())
+    if not squared_norms:
+        return 0.0
+    return torch.stack(squared_norms).sum().sqrt().item()
 
 
 def _selection_metrics(result):
@@ -299,11 +301,22 @@ def train(cfg: dict) -> Path:
 
     output = Path(cfg["output"]["dir"])
     output.mkdir(parents=True, exist_ok=True)
-    (output / "config.yaml").write_text(
-        yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
+    preserve_artifacts(
+        output,
+        (
+            "best.pt",
+            "last.pt",
+            "config.yaml",
+            "history.jsonl",
+            "runtime.json",
+            "training_data.json",
+            "hard_negatives.json",
+            "tokenizer",
+            "evaluation",
+        ),
     )
-    (output / "history.jsonl").write_text("", encoding="utf-8")
-    (output / "best.pt").unlink(missing_ok=True)
+    atomic_write_text(output / "config.yaml", yaml.safe_dump(cfg, sort_keys=False))
+    atomic_write_text(output / "history.jsonl", "")
     tokenizer.save_pretrained(output / "tokenizer")
     write_json(
         output / "runtime.json",

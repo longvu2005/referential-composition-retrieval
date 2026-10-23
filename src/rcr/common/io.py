@@ -132,18 +132,22 @@ def preserve_file(path: str | Path) -> None:
         shutil.copy2(path, _history_directory(path.parent) / path.name)
 
 
-def preserve_run(directory: str | Path) -> None:
-    """Move a previous run together, before writing any new scores/rankings."""
+def preserve_artifacts(directory: str | Path, names: Iterable[str]) -> None:
+    """Move one related artifact set into a single history directory."""
     directory = Path(directory)
-    previous = [
-        directory / name
-        for name in ("scores.npy", "rankings.pt", "run.json", "metrics.json")
-        if (directory / name).is_file()
-    ]
+    previous = [directory / name for name in names if (directory / name).exists()]
     if previous:
         history = _history_directory(directory)
         for path in previous:
             path.replace(history / path.name)
+
+
+def preserve_run(directory: str | Path) -> None:
+    """Move a previous run together, before writing any new scores/rankings."""
+    directory = Path(directory)
+    preserve_artifacts(
+        directory, ("scores.npy", "rankings.pt", "run.json", "metrics.json")
+    )
 
 
 def cache_directory(root: str | Path, signature: dict) -> Path:

@@ -9,7 +9,11 @@ import yaml
 from torch import nn
 
 from rcr.proposed import train as training
-from rcr.proposed.nn.encoders import TextEncoder, load_text_encoder_state
+from rcr.proposed.nn.encoders import (
+    TextEncoder,
+    load_text_encoder_state,
+    text_encoder_state,
+)
 
 
 class Tokenizer:
@@ -56,6 +60,17 @@ class TextBackbone(nn.Module):
     def forward(self, input_ids, attention_mask):
         del attention_mask
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
+
+
+class CountingTextBackbone(TextBackbone):
+    def __init__(self, vocabulary=3):
+        super().__init__()
+        self.embedding = nn.Embedding(vocabulary, 8)
+        self.calls = 0
+
+    def forward(self, input_ids, attention_mask):
+        self.calls += 1
+        return super().forward(input_ids, attention_mask)
 
 
 class TinyCache:
@@ -251,3 +266,22 @@ def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "wandb", None)
     cfg = {"wandb": {"enabled": False}}
     assert training._wandb_run(cfg, tmp_path, None, 1, 1) is None
+
+
+def test_text_cache_reuses_right_padded_rows_and_marker_state_is_compact():
+    backbone = CountingTextBackbone(vocabulary=10_000)
+    encoder = TextEncoder(backbone, dim=8, cache_mib=1)
+    encoder(torch.tensor([[1, 2]]), torch.tensor([[1, 1]]))
+    output, mask = encoder(
+        torch.tensor([[1, 2, 0], [3, 4, 5]]),
+        torch.tensor([[1, 1, 0], [1, 1, 1]]),
+    )
+    assert backbone.calls == 2
+    assert len(encoder._hidden) == 2
+    assert output.shape == (2, 3, 8)
+    assert mask.tolist() == [[True, True, False], [True, True, True]]
+
+    state = text_encoder_state(encoder, Tokenizer())
+    storage = state["markers"]["[S1]"].untyped_storage()
+    marker = state["markers"]["[S1]"]
+    assert storage.nbytes() == marker.numel() * marker.element_size()

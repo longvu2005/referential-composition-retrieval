@@ -128,6 +128,18 @@ python tools/run.py run --config runs/calibration/selected.yaml --splits val
 
 ## Kaggle reuse
 
+To resume a FAFA image-cache export from a Kaggle notebook, use the downloader
+from the FAFA environment with explicit notebook coordinates:
+
+```bash
+.venv-fafa/bin/python download_fafa.py \
+  --output cache/fafa-images --user OWNER --kernel NOTEBOOK --version VERSION
+```
+
+Authentication uses the normal Kaggle client configuration. The downloader
+records its source in the resume state and refuses to continue that state with
+different notebook arguments.
+
 For the published legacy DINO cache, point `data.dino_cache` to the mounted
 directory containing `index.pt` and `features/`, keep
 `cache.allow_legacy_dino: true`, and put both FAFA caches in writable storage.

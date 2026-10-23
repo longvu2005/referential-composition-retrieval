@@ -139,6 +139,33 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
                 f"{label}: FAFA test requires validation-frozen adapter settings"
             )
         _hash(selection.get("context_sha256"), f"{label}: FAFA context")
+    if method == "proposed" and split == "test":
+        selected_checkpoint = config.get("selected_checkpoint_sha256")
+        selected_validation = config.get("selected_validation_sha256")
+        selected_retrieval = config.get("selected_retrieval")
+        selected_retrieval_keys = {
+            "fine_score_mode",
+            "context_weight",
+            "coarse_beta",
+            "fine_coarse_weight",
+            "top_m",
+        }
+        if (
+            selected_checkpoint != run.get("checkpoint_sha256")
+            or selected_validation != run.get("validation_sha256")
+            or not isinstance(selected_retrieval, dict)
+            or set(selected_retrieval) != selected_retrieval_keys
+        ):
+            raise ReportError(
+                f"{label}: proposed test requires validation-selected configuration"
+            )
+        retrieval = run.get("retrieval", config.get("retrieval", {}))
+        if any(
+            retrieval.get(key) != value for key, value in selected_retrieval.items()
+        ):
+            raise ReportError(
+                f"{label}: proposed retrieval settings differ from validation selection"
+            )
     if name in ("early_fusion", "late_fusion"):
         selection = run.get("fusion_selection", {})
         if (

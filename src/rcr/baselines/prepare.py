@@ -11,6 +11,17 @@ from tqdm import tqdm
 from rcr.common.io import sha256_file
 
 
+def require_shared_dino_cache(cfg: dict) -> None:
+    """Fail before FAFA setup when its immutable detector cache is absent."""
+    root = Path(cfg["localization"]["detector"]["cache_dir"])
+    if not (root / "index.pt").is_file() or (root / ".building").exists():
+        raise FileNotFoundError(
+            f"FAFA requires the completed shared DINO cache at {root}; run "
+            "`.venv-proposed/bin/python tools/run.py build-cache "
+            "--config configs/proposed.yaml --cache-stage dino` first"
+        )
+
+
 def download(url: str, path: Path, *, force: bool, expected_hash: str | None = None):
     if (
         path.is_file()
@@ -92,6 +103,7 @@ def prepare(cfg: dict, *, force: bool = False) -> None:
     if cfg["method"] == "clip":
         prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], force)
     elif cfg["method"] == "fafa":
+        require_shared_dino_cache(cfg)
         prepare_fafa_model(cfg, force=force)
         selector = cfg["localization"]["query_selector"]
         prepare_clip(selector["model"], selector["checkpoint"], force)

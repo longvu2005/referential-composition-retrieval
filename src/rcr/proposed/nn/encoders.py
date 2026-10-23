@@ -63,7 +63,9 @@ def text_encoder_state(text_encoder: nn.Module, tokenizer) -> dict:
     return {
         "projection": text_encoder.proj.state_dict(),
         "markers": {
-            token: embedding[tokenizer.convert_tokens_to_ids(token)].detach().cpu()
+            token: embedding[tokenizer.convert_tokens_to_ids(token)]
+            .detach()
+            .to(device="cpu", copy=True)
             for token in SUBJECT_MARKERS.values()
         },
     }
@@ -297,18 +299,27 @@ class TextEncoder(nn.Module):
 
     @torch.no_grad()
     def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        # Include the complete padded row and mask: left padding changes BERT's
-        # absolute positions. A changed instruction/mask must never reuse a row.
+        # Right padding does not change BERT's absolute positions. Canonicalize
+        # that common case while retaining complete rows for left/irregular masks.
         precision = _autocast_dtype(input_ids.device.type)
         backbone_dtype = next(self.backbone.parameters()).dtype
-        keys = [
-            (str(input_ids.device), backbone_dtype, precision, ids, mask)
-            for ids, mask in zip(
-                map(tuple, input_ids.cpu().tolist()),
-                map(tuple, attention_mask.cpu().tolist()),
-                strict=True,
+        id_rows = input_ids.detach().cpu().tolist()
+        mask_rows = attention_mask.detach().cpu().tolist()
+        keys = []
+        for ids, mask in zip(id_rows, mask_rows, strict=True):
+            length = sum(bool(value) for value in mask)
+            right_padded = length > 0 and all(mask[:length]) and not any(mask[length:])
+            if right_padded:
+                ids, mask = ids[:length], mask[:length]
+            keys.append(
+                (
+                    str(input_ids.device),
+                    backbone_dtype,
+                    precision,
+                    tuple(ids),
+                    tuple(mask),
+                )
             )
-        ]
         values, missing = {}, {}
         for n, key in enumerate(keys):
             if key in self._hidden:
@@ -325,7 +336,7 @@ class TextEncoder(nn.Module):
                 attention_mask=attention_mask[indices],
             ).last_hidden_state.cpu()
             for key, row in zip(missing, hidden, strict=True):
-                value = row.clone()
+                value = row[: len(key[-2])].clone()
                 values[key] = value
                 size = value.numel() * value.element_size()
                 if size <= self._hidden_limit:
@@ -336,7 +347,17 @@ class TextEncoder(nn.Module):
                         self._hidden_bytes -= removed.numel() * removed.element_size()
                     self._hidden[key] = value
                     self._hidden_bytes += size
-        return torch.stack([values[key] for key in keys]).to(input_ids.device)
+        length = input_ids.shape[1]
+        rows = []
+        for key in keys:
+            value = values[key]
+            if value.shape[0] == length:
+                rows.append(value)
+                continue
+            row = value.new_zeros(length, value.shape[-1])
+            row[: value.shape[0]] = value
+            rows.append(row)
+        return torch.stack(rows).to(input_ids.device)
 
 
 class IdentityHead(nn.Module):

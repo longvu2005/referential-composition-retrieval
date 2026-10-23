@@ -34,8 +34,9 @@ def _two_best(a, b):
         rr = np.arange(len(aa))
         aa[rr, ia[same]] = -np.inf
         bb[rr, ib[same]] = -np.inf
-        values[same] = np.maximum(a[same, ia[same]] + bb.max(axis=1),
-                                  aa.max(axis=1) + b[same, ib[same]])
+        values[same] = np.maximum(
+            a[same, ia[same]] + bb.max(axis=1), aa.max(axis=1) + b[same, ib[same]]
+        )
     return values
 
 
@@ -43,11 +44,18 @@ def aggregate_people(pair_scores, offsets, unmatched_score: float = -1.0):
     """Return one score per gallery image without per-image Hungarian for K<=2."""
     s = np.asarray(pair_scores, dtype=np.float64)
     offsets = np.asarray(offsets)
-    if (offsets.ndim != 1 or len(offsets) < 2 or offsets[0] != 0
-            or not np.issubdtype(offsets.dtype, np.integer)
-            or np.any(np.diff(offsets) < 0)
-            or s.ndim != 2 or s.shape[0] < 1 or s.shape[1] != offsets[-1]
-            or not np.isfinite(s).all() or not np.isfinite(unmatched_score)):
+    if (
+        offsets.ndim != 1
+        or len(offsets) < 2
+        or offsets[0] != 0
+        or not np.issubdtype(offsets.dtype, np.integer)
+        or np.any(np.diff(offsets) < 0)
+        or s.ndim != 2
+        or s.shape[0] < 1
+        or s.shape[1] != offsets[-1]
+        or not np.isfinite(s).all()
+        or not np.isfinite(unmatched_score)
+    ):
         raise ValueError("Invalid component-person scores or offsets")
     counts = np.diff(offsets)
     width = max(2, int(counts.max(initial=0)))
@@ -77,10 +85,11 @@ def aggregate_people(pair_scores, offsets, unmatched_score: float = -1.0):
     else:
         if np.any(two):
             vals = s[:, ids[two, :2]].transpose(1, 2, 0)
-            result[two] = (_two_best(vals[:, 0], vals[:, 1])
-                           + (k - 2) * unmatched_score) / k
+            result[two] = (
+                _two_best(vals[:, 0], vals[:, 1]) + (k - 2) * unmatched_score
+            ) / k
         for gi in np.flatnonzero(many):
             result[gi] = partial_setmatch(
-                s[:, offsets[gi]:offsets[gi + 1]], unmatched_score
+                s[:, offsets[gi] : offsets[gi + 1]], unmatched_score
             )
     return result.astype(np.float32)

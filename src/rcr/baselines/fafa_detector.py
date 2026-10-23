@@ -12,8 +12,10 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-def _pixel_boxes(geometry: dict, image_size: tuple[int, int],
-                 scene_size: tuple[int, int]) -> torch.Tensor:
+
+def _pixel_boxes(
+    geometry: dict, image_size: tuple[int, int], scene_size: tuple[int, int]
+) -> torch.Tensor:
     """Mirror Proposed's legacy boxes_to_pixels only when pixels are absent."""
     if "boxes_pixel" in geometry:
         return geometry["boxes_pixel"]
@@ -28,14 +30,18 @@ def _pixel_boxes(geometry: dict, image_size: tuple[int, int],
     size = boxes.new_tensor([scene_width, scene_height] * 2)
     offset = boxes.new_tensor([left, top, left, top])
     factors = boxes.new_tensor([resized_width / width, resized_height / height] * 2)
-    return (((boxes * size - offset) / factors).clamp(min=0)
-            .minimum(boxes.new_tensor([width, height] * 2)))
+    return (
+        ((boxes * size - offset) / factors)
+        .clamp(min=0)
+        .minimum(boxes.new_tensor([width, height] * 2))
+    )
 
 
 def candidates_from_cache(data, gallery_ids: list[str], cache, cfg: dict):
     """Preserve the same crop order and float pixel coordinates as Proposed."""
     candidates = []
-    scene_size = tuple(cfg["scene_size"])
+    scene_height, scene_width = cfg["scene_size"]
+    scene_size = (scene_width, scene_height)
     for image_id in tqdm(gallery_ids, desc="Shared DINO Tiny boxes", unit="image"):
         index = cache.by_id[image_id]
         geometry = cache.load_geometry(index)
@@ -44,25 +50,30 @@ def candidates_from_cache(data, gallery_ids: list[str], cache, cfg: dict):
         with Image.open(data.image_path(image_id)) as image:
             width, height = image.size
         boxes = _pixel_boxes(geometry, (width, height), scene_size)
-        if (boxes.shape != (count, 4) or not torch.isfinite(boxes).all()
-                or (boxes[:, 2:] <= boxes[:, :2]).any()
-                or (boxes < 0).any()
-                or (boxes[:, 0::2] > width).any()
-                or (boxes[:, 1::2] > height).any()):
+        if (
+            boxes.shape != (count, 4)
+            or not torch.isfinite(boxes).all()
+            or (boxes[:, 2:] <= boxes[:, :2]).any()
+            or (boxes < 0).any()
+            or (boxes[:, 0::2] > width).any()
+            or (boxes[:, 1::2] > height).any()
+        ):
             raise ValueError(f"Invalid cached DINO person boxes: {image_id}")
         if count:
             # Proposed records boxes, not detector scores. All boxes have
             # already passed its configured threshold; 1.0 is an eligibility
             # sentinel, NOT an inferred confidence or ranking criterion.
-            candidates.append([
-                {"box": box.tolist(), "score": 1.0, "fallback": False}
-                for box in boxes
-            ])
+            candidates.append(
+                [
+                    {"box": box.tolist(), "score": 1.0, "fallback": False}
+                    for box in boxes
+                ]
+            )
         else:
             # Proposed has zero persons; FAFA still requires a gallery crop.
-            candidates.append([{
-                "box": [0, 0, width, height], "score": -1.0, "fallback": True
-            }])
+            candidates.append(
+                [{"box": [0, 0, width, height], "score": -1.0, "fallback": True}]
+            )
     return candidates
 
 
@@ -96,7 +107,9 @@ def detect_gallery(data, gallery_ids: list[str], cfg: dict, device):
             "do not silently mix detector settings"
         )
     image_cfg = cache.encoder_metadata["image_encoder"]
-    if image_cfg is not None and tuple(image_cfg["scene_size"]) != tuple(cfg["scene_size"]):
+    if image_cfg is not None and tuple(image_cfg["scene_size"]) != tuple(
+        cfg["scene_size"]
+    ):
         raise ValueError("DINO scene_size differs; cannot invert legacy boxes")
     if any(image_id not in cache.by_id for image_id in gallery_ids):
         raise ValueError("FAFA gallery contains images missing from DINO cache")

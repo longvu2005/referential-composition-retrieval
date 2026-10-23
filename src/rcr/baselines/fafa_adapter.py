@@ -30,9 +30,11 @@ def subject_changes(sample: dict) -> list[str]:
     clauses remain intact for each Subject; no identity or case labels are used.
     """
     ids = [int(subject["subject_id"]) for subject in sample["subjects"]]
-    text = sample["final_change"].removeprefix(
-        "then retrieve target images where "
-    ).strip()
+    text = (
+        sample["final_change"]
+        .removeprefix("then retrieve target images where ")
+        .strip()
+    )
     mentions = list(re.finditer(r"\bSubject\s+(\d+)\b", text, re.IGNORECASE))
     independent = (
         len(mentions) == len(ids)
@@ -46,8 +48,9 @@ def subject_changes(sample: dict) -> list[str]:
             end = mentions[i + 1].start() if i + 1 < len(mentions) else len(text)
             fragment = text[mention.end() : end].strip()
             if i + 1 < len(mentions):
-                connector = re.search(r"(?:[,;]?\s+and|[,;]?\s+while|[,;])\s*$",
-                                      fragment, re.IGNORECASE)
+                connector = re.search(
+                    r"(?:[,;]?\s+and|[,;]?\s+while|[,;])\s*$", fragment, re.IGNORECASE
+                )
                 if connector is None:
                     independent = False
                     break
@@ -56,7 +59,9 @@ def subject_changes(sample: dict) -> list[str]:
                 independent = False
                 break
             result[int(mention[1])] = fragment
-    return [result[subject_id] for subject_id in ids] if independent else [text] * len(ids)
+    return (
+        [result[subject_id] for subject_id in ids] if independent else [text] * len(ids)
+    )
 
 
 def select_subject_members(
@@ -107,7 +112,6 @@ def select_subject_members(
     return selected
 
 
-
 def choose_boxes(candidates: list[dict], threshold: float, required: int) -> list[dict]:
     selected = [box for box in candidates if box["score"] >= threshold]
     for box in candidates:
@@ -116,7 +120,6 @@ def choose_boxes(candidates: list[dict], threshold: float, required: int) -> lis
         if box not in selected:
             selected.append(box)
     return selected
-
 
 
 @torch.inference_mode()

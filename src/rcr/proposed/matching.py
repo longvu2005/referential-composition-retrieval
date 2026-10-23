@@ -54,25 +54,27 @@ def unique_box_mask(
         return mask.bool().clone()
     if boxes.shape != (*mask.shape, 4):
         raise ValueError("boxes must have shape [B,K,4] matching the person mask")
-    coords = boxes.detach().float().cpu().numpy()
-    valid = mask.detach().bool().cpu().numpy().copy()
-    widths = np.maximum(coords[..., 2:] - coords[..., :2], 0)
+    coords = boxes.detach().float()
+    valid = mask.detach().bool().clone()
+    widths = (coords[..., 2:] - coords[..., :2]).clamp_min(0)
     area = widths.prod(-1)
-    priorities = area if priority is None else priority.detach().float().cpu().numpy()
+    priorities = area if priority is None else priority.detach().float()
     for n in range(len(coords)):
-        candidates = np.flatnonzero(valid[n])
-        order = candidates[np.argsort(-priorities[n, candidates], kind="stable")]
-        while len(order):
+        candidates = valid[n].nonzero(as_tuple=True)[0]
+        order = candidates[
+            torch.argsort(priorities[n, candidates], descending=True, stable=True)
+        ]
+        while order.numel():
             first, rest = order[0], order[1:]
-            low = np.maximum(coords[n, first, :2], coords[n, rest, :2])
-            high = np.minimum(coords[n, first, 2:], coords[n, rest, 2:])
-            intersection = np.maximum(high - low, 0).prod(-1)
+            low = torch.maximum(coords[n, first, :2], coords[n, rest, :2])
+            high = torch.minimum(coords[n, first, 2:], coords[n, rest, 2:])
+            intersection = (high - low).clamp_min(0).prod(-1)
             union = area[n, first] + area[n, rest] - intersection
-            iou = intersection / np.maximum(union, 1e-12)
+            iou = intersection / union.clamp_min(1e-12)
             duplicate = iou > threshold
             valid[n, rest[duplicate]] = False
             order = rest[~duplicate]
-    return torch.as_tensor(valid, device=mask.device, dtype=torch.bool)
+    return valid
 
 
 @torch.no_grad()

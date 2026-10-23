@@ -95,13 +95,16 @@ Use the same mode/split/subset when evaluating saved results.
 ## FAFA
 
 ```bash
+.venv-proposed/bin/python tools/run.py build-cache \
+  --config configs/proposed.yaml --cache-stage dino
 python tools/run.py run --config configs/fafa.yaml --prepare
 python tools/run.py run --config configs/fafa.yaml
 ```
 
 `prepare` gets the pinned official source, released checkpoint, CLIP selector,
-Faster R-CNN weights and FAFA runtime assets. Model code remains in the authors'
-checkout. The configured commit, runtime cache and checkpoint checks remain;
+and FAFA runtime assets. It validates the shared DINO cache but does not build it;
+use the Proposed environment for the first command above. Model code remains in
+the authors' checkout. The configured commit, runtime cache and checkpoint checks remain;
 `--force` refreshes prepared assets. Asset preparation can require substantial
 RAM, disk space and network access. Retrieval uses the prepared assets.
 

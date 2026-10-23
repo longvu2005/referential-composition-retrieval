@@ -43,7 +43,6 @@ def build_cache(
     detector_processor,
     image_encoder: nn.Module,
     scene_processor,
-    person_processor,
     device: torch.device | str,
     detector_threshold: float = 0.3,
     detector_text_threshold: float = 0.25,
@@ -87,6 +86,7 @@ def build_cache(
         "image_paths": [str(Path(path).resolve()) for path in image_paths],
         "encoders": encoder_metadata or {},
         "storage_dtype": storage_dtype,
+        "person_features": "geometry-only-v1",
     }
     if manifest_path.is_file():
         manifest = torch.load(manifest_path, map_location="cpu", weights_only=True)
@@ -145,17 +145,9 @@ def build_cache(
         elif patch_hw != current_hw:
             raise ValueError("scene processor must produce one fixed patch grid")
 
-        if len(persons):
-            person_crops = [image.crop(tuple(box.tolist())) for box in persons]
-
-            pixels = person_processor(images=person_crops, return_tensors="pt")[
-                "pixel_values"
-            ]
-            _, person_features, _ = image_encoder(pixels.to(device))
-
-        else:
-            dim = scene.shape[-1]
-            person_features = scene.new_empty(len(persons), dim)
+        # The active model replaces DINO person rows with frozen FAFA features.
+        # This source cache only needs person count/geometry plus scene patches.
+        person_features = scene.new_empty(len(persons), 0)
 
         scene_size = (int(scene_pixels.shape[-1]), int(scene_pixels.shape[-2]))
         boxes_scene = boxes_to_scene(persons, image.size, scene_size)
@@ -199,7 +191,10 @@ def build_cache(
             "image_ids": image_ids,
             "image_paths": [str(Path(path).resolve()) for path in image_paths],
             "scene_dim": all_global[0].shape[-1],
-            "person_encoder": {"backend": "dino"},
+            "person_encoder": {
+                "backend": "dino",
+                "features": "geometry_only",
+            },
             **(encoder_metadata or {}),
             "persons": person_index,
             "mask": mask,
@@ -270,7 +265,6 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
         detector_processor=detector_processor,
         image_encoder=image_encoder,
         scene_processor=_LetterboxProcessor(processor, image_cfg["scene_size"]),
-        person_processor=_LetterboxProcessor(processor, image_cfg["person_size"]),
         device=device,
         detector_threshold=detector_cfg["threshold"],
         detector_text_threshold=detector_cfg["text_threshold"],

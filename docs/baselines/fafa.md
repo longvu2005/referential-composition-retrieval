@@ -112,14 +112,17 @@ Record `rcr_training=false`.
 Use the isolated FAFA environment in [baselines](../baselines.md):
 
 ```bash
+.venv-proposed/bin/python tools/run.py build-cache \
+  --config configs/proposed.yaml --cache-stage dino
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits val
 # Once the test protocol is eligible:
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
 ```
 
-Preparation obtains pinned source, released checkpoint, detector, CLIP selector
-and base runtime assets. Inference blocks network model downloads and fails
+The first command builds the shared detector cache once. FAFA preparation obtains
+the pinned source, released checkpoint, CLIP selector and base runtime assets.
+Inference blocks network model downloads and fails
 clearly on missing assets. It can require substantial RAM/disk/GPU resources.
 Read existing DINO detections and cache FAFA gallery/query features and
 component scores with input/model provenance. The DINO `cache_id` is included

@@ -442,6 +442,8 @@ const state = {
   activeSubject: 1,
   assignment: new Map(),
   dirty: false,
+  saving: false,
+  loadVersion: 0,
   statusFilter: localStorage.getItem(STORAGE.status) || "pending",
   caseFilter: localStorage.getItem(STORAGE.case) || "all",
   search: "",
@@ -812,10 +814,18 @@ async function requestJson(url, options) {
 }
 
 async function loadTask(sampleId) {
+  const version = ++state.loadVersion;
   $("error").textContent = "";
   $("saved").textContent = "Loading…";
 
-  const data = await requestJson(`/api/task?id=${encodeURIComponent(sampleId)}`);
+  let data;
+  try {
+    data = await requestJson(`/api/task?id=${encodeURIComponent(sampleId)}`);
+  } catch (error) {
+    if (version !== state.loadVersion) return false;
+    throw error;
+  }
+  if (version !== state.loadVersion) return false;
   state.index = data.index;
   state.currentId = data.task.sample_id;
   state.task = data.task;
@@ -844,6 +854,7 @@ async function loadTask(sampleId) {
   renderCase();
   renderSubjects();
   renderBoxes();
+  return true;
 }
 
 async function requestLoad(sampleId) {
@@ -873,7 +884,11 @@ function nextPendingAfter(index) {
 }
 
 async function save(goNextPending) {
-  if (!state.task) return false;
+  if (!state.task || state.saving) return false;
+  state.saving = true;
+  const sampleId = state.task.sample_id;
+  const currentIndex = state.index;
+  const loadVersion = state.loadVersion;
 
   $("error").textContent = "";
   $("saved").textContent = "Saving…";
@@ -881,7 +896,7 @@ async function save(goNextPending) {
   $("saveNext").disabled = true;
 
   const payload = {
-    sample_id: state.task.sample_id,
+    sample_id: sampleId,
     case_type: state.task.case_type,
     subjects: subjectsPayload(),
     final_desc: $("finalDesc").value.trim(),
@@ -896,16 +911,18 @@ async function save(goNextPending) {
     });
 
     state.tasks = data.summary.tasks;
+    renderSummary();
+    renderTaskList();
+    if (state.currentId !== sampleId || state.loadVersion !== loadVersion) return true;
+
     state.completed = true;
     state.task.case_type = data.review.case_type;
     setDirty(false);
     $("saved").textContent = "Saved";
-    renderSummary();
-    renderTaskList();
     renderHeader();
 
     if (goNextPending) {
-      const next = nextPendingAfter(state.index);
+      const next = nextPendingAfter(currentIndex);
       if (next) {
         await loadTask(next.sample_id);
       } else {
@@ -918,6 +935,7 @@ async function save(goNextPending) {
     $("error").textContent = error.message;
     return false;
   } finally {
+    state.saving = false;
     $("saveOnly").disabled = false;
     $("saveNext").disabled = false;
   }

@@ -81,6 +81,14 @@ def test_model_forward_has_the_expected_gradient_boundary():
     assert model.identity_head.proj.weight.grad is None
 
 
+def test_reasoner_has_no_unused_cross_attention_and_loads_legacy_state():
+    model = RCRModel(dim=8, identity_dim=6, num_heads=2)
+    state = model.state_dict()
+    assert not any(key.startswith("reasoner.cross_attn.") for key in state)
+    state["reasoner.cross_attn.in_proj_weight"] = torch.zeros(24, 8)
+    model.load_state_dict(state)
+
+
 def test_fine_coarse_fusion_uses_common_shortlist_statistics():
     fine = torch.tensor([2.0, 1.0, 0.0])
     coarse = torch.tensor([0.0, 1.0, 2.0])

@@ -448,6 +448,8 @@ const state = {
   selected: new Set(),
   savedSelection: new Set(),
   dirty: false,
+  saving: false,
+  loadVersion: 0,
   statusFilter: localStorage.getItem(STORAGE.status) || "pending",
   caseFilter: localStorage.getItem(STORAGE.case) || "all",
   search: "",
@@ -752,15 +754,24 @@ async function requestJson(url, options) {
 }
 
 async function loadTask(sampleId) {
+  const version = ++state.loadVersion;
   $("error").textContent = "";
   $("saved").textContent = "Loading…";
 
-  const payload = await requestJson(`/api/task?id=${encodeURIComponent(sampleId)}`);
+  let payload;
+  try {
+    payload = await requestJson(`/api/task?id=${encodeURIComponent(sampleId)}`);
+  } catch (error) {
+    if (version !== state.loadVersion) return false;
+    throw error;
+  }
+  if (version !== state.loadVersion) return false;
   renderTask(payload);
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   renderSummary();
   localStorage.setItem(STORAGE.last, sampleId);
   $("saved").textContent = payload.is_completed ? "Loaded completed task" : "";
+  return true;
 }
 
 async function requestLoad(sampleId, force = false) {
@@ -790,7 +801,11 @@ function nextPendingAfter(index) {
 }
 
 async function save(goNextPending) {
-  if (!state.current) return false;
+  if (!state.current || state.saving) return false;
+  state.saving = true;
+  const sampleId = state.current.sample_id;
+  const currentIndex = state.currentIndex;
+  const loadVersion = state.loadVersion;
 
   $("error").textContent = "";
   $("saved").textContent = "Saving…";
@@ -806,24 +821,28 @@ async function save(goNextPending) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sample_id: state.current.sample_id,
+        sample_id: sampleId,
         positive_image_ids: positiveImageIds,
       }),
     });
 
     state.tasks = data.summary.tasks;
+    renderSummary(data.summary);
+    renderTaskList();
+    if (
+      state.current?.sample_id !== sampleId
+      || state.loadVersion !== loadVersion
+    ) return true;
+
     state.completed = true;
     state.savedSelection = new Set(data.positive.positive_image_ids);
     state.selected = new Set(data.positive.positive_image_ids);
     setDirty(false);
     $("saved").textContent = "Saved";
-
-    renderSummary(data.summary);
-    renderTaskList();
     renderHeader();
 
     if (goNextPending) {
-      const next = nextPendingAfter(state.currentIndex);
+      const next = nextPendingAfter(currentIndex);
       if (next) {
         await loadTask(next.sample_id);
       } else {
@@ -836,6 +855,7 @@ async function save(goNextPending) {
     $("error").textContent = error.message;
     return false;
   } finally {
+    state.saving = false;
     $("saveOnly").disabled = false;
     $("saveNext").disabled = false;
   }

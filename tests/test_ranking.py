@@ -376,6 +376,9 @@ def test_weight_grid_reuses_each_query_target_score(tiny_ranker, monkeypatch):
         outputs[2]["coarse_topm"][0].tolist()
     )
     assert len(calls) == len(set(calls)) == len(union)
+    for field in ("coarse_rankings", "fine_rankings", "fafa_binding", "fine_scores"):
+        assert outputs[0][field].data_ptr() == outputs[1][field].data_ptr()
+        assert outputs[2][field].data_ptr() == outputs[3][field].data_ptr()
     for output in outputs:
         assert torch.equal(replay_rankings(output)["rankings"], output["rankings"])
 

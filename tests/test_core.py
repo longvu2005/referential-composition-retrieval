@@ -15,7 +15,7 @@ from rcr.common.data import (
     split_inputs,
     split_samples,
 )
-from rcr.common.io import load_jsonl, write_jsonl
+from rcr.common.io import load_jsonl, preserve_artifacts, write_jsonl
 from rcr.dataset.text import parse_selection_texts
 
 
@@ -198,3 +198,75 @@ def test_inference_projection_is_allowlisted_and_detached(tmp_path):
     assert all(set(s) == {"subject_id"} for s in public["subjects"])
     public["subjects"][0]["subject_id"] = 9
     assert sample["subjects"][0]["subject_id"] == 1
+
+
+def test_preserve_artifacts_moves_one_run_into_one_history_entry(tmp_path):
+    (tmp_path / "best.pt").write_bytes(b"checkpoint")
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "config.json").write_text("{}", encoding="utf-8")
+
+    preserve_artifacts(tmp_path, ("best.pt", "tokenizer", "missing.json"))
+
+    assert not (tmp_path / "best.pt").exists()
+    assert not tokenizer.exists()
+    histories = list((tmp_path / ".history").iterdir())
+    assert len(histories) == 1
+    assert (histories[0] / "best.pt").read_bytes() == b"checkpoint"
+    assert (histories[0] / "tokenizer" / "config.json").read_text() == "{}"
+
+
+def test_dino_cache_keeps_person_geometry_without_crop_embeddings(
+    tmp_path, monkeypatch
+):
+    import torch
+    from PIL import Image
+    from torch import nn
+
+    from rcr.proposed.cache import dino
+    from rcr.proposed.cache.store import GalleryCache
+
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (100, 50), color="white").save(image_path)
+    monkeypatch.setattr(
+        dino,
+        "detect",
+        lambda *_args, **_kwargs: {"person": torch.tensor([[10.0, 5.0, 50.0, 45.0]])},
+    )
+
+    class SceneEncoder(nn.Module):
+        def forward(self, pixels):
+            scene = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+            return scene, scene.mean(dim=1), (1, 2)
+
+    def scene_processor(*, images, return_tensors):
+        assert images.size == (100, 50)
+        assert return_tensors == "pt"
+        return {"pixel_values": torch.zeros(1, 3, 16, 32)}
+
+    cache_root = tmp_path / "cache"
+    dino.build_cache(
+        image_ids=["image-1"],
+        image_paths=[image_path],
+        root=cache_root,
+        detector=nn.Identity(),
+        detector_processor=object(),
+        image_encoder=SceneEncoder(),
+        scene_processor=scene_processor,
+        device="cpu",
+        encoder_metadata={
+            "image_encoder": {"model": "fake"},
+            "detector": {"model": "fake"},
+        },
+    )
+
+    cache = GalleryCache(cache_root)
+    scene, persons, boxes, mask = cache.load(torch.tensor([0]))
+    assert scene.shape == (1, 2, 4)
+    assert persons.shape == (1, 1, 0)
+    assert boxes.shape == (1, 1, 4)
+    assert mask.tolist() == [[True]]
+    assert cache.encoder_metadata["person_encoder"] == {
+        "backend": "dino",
+        "features": "geometry_only",
+    }

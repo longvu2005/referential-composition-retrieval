@@ -9,12 +9,15 @@ from pathlib import Path
 import yaml
 
 from rcr.common.config import validate_training_schedule
-from rcr.common.io import output_directory, write_summary
+from rcr.common.io import (
+    atomic_write_text,
+    output_directory,
+    preserve_file,
+    write_summary,
+)
 
 
-def run_experiment(
-    cfg, entrypoint, *, splits=("val", "test"), build=False, train=False
-):
+def run_experiment(cfg, entrypoint, *, splits=("val",), build=False, train=False):
     if train:
         validate_training_schedule(cfg)
     if train and not cfg["evaluation"]["enabled"]:
@@ -28,8 +31,8 @@ def run_experiment(
         cfg.pop("selected_validation_sha256", None)
         cfg.pop("selected_retrieval", None)
     path = root / "run_config.yaml"
-    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    (root / "summary.csv").unlink(missing_ok=True)
+    preserve_file(path)
+    atomic_write_text(path, yaml.safe_dump(cfg, sort_keys=False))
 
     def stage(command, *options):
         print(f"Running {command}", flush=True)

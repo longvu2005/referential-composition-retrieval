@@ -31,9 +31,6 @@ class FineReasoner(nn.Module):
         self, dim: int, num_heads: int, mlp_ratio: int = 2, dropout: float = 0.0
     ) -> None:
         super().__init__()
-        self.cross_attn = nn.MultiheadAttention(
-            dim, num_heads, dropout=dropout, batch_first=True
-        )
         self.self_attn = nn.MultiheadAttention(
             dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -64,48 +61,21 @@ class FineReasoner(nn.Module):
         query_mask: Tensor | None = None,
         query_key_bias: Tensor | None = None,
         *,
-        aligned_offset: int | None = None,
+        aligned_offset: int,
         aligned_boxes: Tensor | None = None,
         matched_mask: Tensor | None = None,
     ) -> Tensor:
         """Return one fine retrieval score per query-target pair."""
 
-        target_padding = None if target_mask is None else ~target_mask.bool()
         query_padding = None if query_mask is None else ~query_mask.bool()
 
-        if aligned_offset is not None:
-            if query.shape[1] != aligned_offset + target.shape[1]:
-                raise ValueError(
-                    "aligned target tokens must match the query person tail"
-                )
-            if target_mask is not None:
-                target = target.masked_fill(~target_mask.bool()[..., None], 0)
-            # Each person token receives ONLY its assigned person's evidence.
-            # CLS/text learn relations in self-attention after role ownership is
-            # established. They do not select a fresh person from the target set.
-            update = torch.cat((torch.zeros_like(query[:, :aligned_offset]), target), 1)
-        elif target.shape[1] == 0:
-            # An undetected target contributes no person evidence.
-            update = torch.zeros_like(query)
-        else:
-            empty = None
-            if target_padding is not None:
-                # A key mask does not sanitize NaN/Inf in K/V. Remove padded
-                # values before the projections/attention, including empty rows.
-                target = target.masked_fill(target_padding[..., None], 0)
-                empty = target_padding.all(dim=1)
-                # Avoid an all-masked softmax, then remove its dummy update.
-                target_padding = target_padding.clone()
-                target_padding[empty, 0] = False
-            update, _ = self.cross_attn(
-                query,
-                target,
-                target,
-                key_padding_mask=target_padding,
-                need_weights=False,
-            )
-            if empty is not None:
-                update = update.masked_fill(empty[:, None, None], 0)
+        if query.shape[1] != aligned_offset + target.shape[1]:
+            raise ValueError("aligned target tokens must match the query person tail")
+        if target_mask is not None:
+            target = target.masked_fill(~target_mask.bool()[..., None], 0)
+        # Each person token receives only its assigned person's evidence. CLS/text
+        # read relations in the following self-attention rounds.
+        update = torch.cat((torch.zeros_like(query[:, :aligned_offset]), target), 1)
         query = self.norm_cross(query + self.dropout(update))
 
         attn_mask = None
@@ -117,7 +87,7 @@ class FineReasoner(nn.Module):
             attn_mask = attn_mask.repeat_interleave(self.self_attn.num_heads, dim=0)
             query_padding = None
         if aligned_boxes is not None:
-            if aligned_offset is None or matched_mask is None:
+            if matched_mask is None:
                 raise ValueError(
                     "aligned geometry requires token offset and matched mask"
                 )
@@ -175,6 +145,14 @@ class FineReasoner(nn.Module):
         query = self.norm_self(query + self.dropout(update))
         query = self.norm_out(query + self.ffn(query))
         return self.score(query[:, 0]).squeeze(-1)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints before the aligned-matching path was finalized contain an
+        # unused cross-attention block. Its weights never affected current scores.
+        for key in list(state_dict):
+            if key.startswith(f"{prefix}cross_attn."):
+                state_dict.pop(key)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _relation_bias(self, boxes: Tensor, mask: Tensor) -> Tensor:
         """Directed target geometry; null/unselected rows have neutral geometry."""

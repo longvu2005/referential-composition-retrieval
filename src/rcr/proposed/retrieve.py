@@ -55,6 +55,25 @@ def _retrieve(
 
     checkpoint_path = Path(cfg["checkpoint"])
     checkpoint_sha256 = sha256_file(checkpoint_path)
+    selection_keys = (
+        "selected_checkpoint_sha256",
+        "selected_validation_sha256",
+        "selected_retrieval",
+    )
+    selected_retrieval_keys = (
+        "fine_score_mode",
+        "context_weight",
+        "coarse_beta",
+        "fine_coarse_weight",
+        "top_m",
+    )
+    if cfg["split"] == "test":
+        missing = [key for key in selection_keys if key not in cfg]
+        if missing:
+            raise ValueError(
+                "test retrieval requires validation-selected configuration; "
+                "run calibration and use its selected.yaml"
+            )
     if cfg.get("selected_checkpoint_sha256", checkpoint_sha256) != checkpoint_sha256:
         raise ValueError("checkpoint changed since val selection; rerun the sweep")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -63,18 +82,21 @@ def _retrieve(
     settings = retrieval_settings(
         cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
-    if (
-        any(
-            key in cfg
-            for key in ("selected_checkpoint_sha256", "selected_validation_sha256")
-        )
-        and "selected_retrieval" not in cfg
-    ):
+    present = [key in cfg for key in selection_keys]
+    if any(present) and not all(present):
         raise ValueError(
             "selected config predates the scoring contract; rerun val calibration"
         )
-    selected = cfg.get("selected_retrieval", {})
-    if any(settings.get(key) != value for key, value in selected.items()):
+    selected = cfg.get("selected_retrieval")
+    if selected is not None and (
+        not isinstance(selected, dict) or set(selected) != set(selected_retrieval_keys)
+    ):
+        raise ValueError(
+            "selected retrieval contract is incomplete; rerun val calibration"
+        )
+    if selected is not None and any(
+        settings[key] != selected[key] for key in selected_retrieval_keys
+    ):
         raise ValueError(
             "retrieval settings changed since val selection; rerun the sweep"
         )
@@ -153,6 +175,7 @@ def _retrieve(
         device,
         tokenizer_source=tokenizer_path,
         revision=checkpoint.get("text_model_revision"),
+        cache_mib=cfg.get("cache", {}).get("text_lru_mib", 0),
     )
     load_text_encoder_state(text_encoder, tokenizer, checkpoint["text_encoder"])
 

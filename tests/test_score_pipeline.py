@@ -10,7 +10,9 @@ import torch
 import yaml
 
 from rcr.common.data import split_fingerprint
+from rcr.common.io import sha256_file, write_json
 from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.report import ReportError, load_run
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, retrieve
 from rcr.proposed.nn.encoders import TextEncoder
@@ -124,6 +126,65 @@ def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
         "git_commit",
         "git_dirty",
     } <= metadata.keys()
+
+    unselected_test = copy.deepcopy(cfg)
+    unselected_test["split"] = "test"
+    with pytest.raises(ValueError, match="validation-selected configuration"):
+        retrieve.retrieve(unselected_test)
+
+    incomplete_test = copy.deepcopy(unselected_test)
+    incomplete_test.update(
+        selected_checkpoint_sha256=metadata["checkpoint_sha256"],
+        selected_validation_sha256=metadata["validation_sha256"],
+        selected_retrieval={},
+    )
+    with pytest.raises(ValueError, match="retrieval contract is incomplete"):
+        retrieve.retrieve(incomplete_test)
+
+
+def test_report_rejects_test_without_complete_validation_selection(
+    saved_pipeline, tmp_path
+):
+    cfg, data, _ = saved_pipeline
+    retrieve.retrieve(cfg)
+    evaluate_run(cfg, data=data)
+    source = Path(cfg["output"]["dir"]) / "val"
+    run = json.loads((source / "run.json").read_text())
+    metrics = json.loads((source / "metrics.json").read_text())
+    run["split"] = "test"
+    run["config"]["split"] = "test"
+    metrics["provenance"]["split"] = "test"
+    directory = tmp_path / "report-test"
+    directory.mkdir()
+
+    def publish():
+        write_json(directory / "run.json", run)
+        metrics["provenance"]["run_sha256"] = sha256_file(directory / "run.json")
+        write_json(directory / "metrics.json", metrics)
+
+    publish()
+    with pytest.raises(ReportError, match="validation-selected configuration"):
+        load_run("proposed", directory, "test")
+
+    run["config"].update(
+        selected_checkpoint_sha256=run["checkpoint_sha256"],
+        selected_validation_sha256=run["validation_sha256"],
+        selected_retrieval={},
+    )
+    publish()
+    with pytest.raises(ReportError, match="validation-selected configuration"):
+        load_run("proposed", directory, "test")
+
+    keys = (
+        "fine_score_mode",
+        "context_weight",
+        "coarse_beta",
+        "fine_coarse_weight",
+        "top_m",
+    )
+    run["config"]["selected_retrieval"] = {key: run["retrieval"][key] for key in keys}
+    publish()
+    assert load_run("proposed", directory, "test")["run"] == run
 
 
 def test_calibration_freezes_full_scoring_config_and_retrieves_selected(

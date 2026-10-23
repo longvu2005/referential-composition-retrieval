@@ -29,7 +29,14 @@ from rcr.baselines.fafa_adapter import (
 )
 from rcr.baselines.fafa_detector import detect_gallery
 from rcr.baselines.fafa_matching import aggregate_people
-from rcr.common.io import cache_directory, output_directory, preserve_run, sha256_file
+from rcr.common.io import (
+    cache_directory,
+    image_signature,
+    output_directory,
+    preserve_run,
+    sha256_file,
+    write_json,
+)
 
 
 def official_source(cfg: dict, *, prepare: bool = False) -> Path:
@@ -377,9 +384,6 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     selector_sha = sha256_file(cfg["localization"]["query_selector"]["checkpoint"])
     detector = cfg["localization"]["detector"]
     candidates, detection_dir = detect_gallery(data, gallery_ids, detector, device)
-    grouped, selector_stats = build_query_components(
-        data, samples, gallery_ids, candidates, cfg["localization"], device
-    )
     gallery_items = []
     gallery_offsets = [0]
     for image_id, boxes in zip(gallery_ids, candidates, strict=True):
@@ -388,11 +392,6 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
             for box in choose_boxes(boxes, float(detector["score_threshold"]), 1)
         )
         gallery_offsets.append(len(gallery_items))
-    query_items = []
-    query_offsets = [0]
-    for components in grouped:
-        query_items.extend((path, box, caption) for path, box, caption, _ in components)
-        query_offsets.append(len(query_items))
     signature = {
         "version": VISUAL_CACHE_VERSION,
         "checkpoint_sha256": checkpoint_sha,
@@ -412,6 +411,52 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         "encoder_precision": "float16" if device.type == "cuda" else "float32",
     }
     gallery_dir = cache_directory(cfg["cache"]["dir"], signature)
+    selection_dir = cache_directory(
+        gallery_dir / "selections",
+        {
+            "version": ADAPTER_VERSION,
+            "selector_sha256": selector_sha,
+            "selector": cfg["localization"]["query_selector"],
+            "detector": cfg["localization"]["detector"],
+            "detection_cache": str(detection_dir),
+            "query_images": image_signature(
+                data,
+                list(dict.fromkeys(sample["query_image_id"] for sample in samples)),
+            ),
+            "samples": [
+                {
+                    "sample_id": sample["sample_id"],
+                    "query_image_id": sample["query_image_id"],
+                    "subject_ids": [
+                        int(subject["subject_id"]) for subject in sample["subjects"]
+                    ],
+                    "final_desc": sample["final_desc"],
+                    "final_change": sample["final_change"],
+                }
+                for sample in samples
+            ],
+        },
+    )
+    selection_path = selection_dir / "components.json"
+    try:
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        grouped = selection["grouped"]
+        selector_stats = selection["stats"]
+        print("FAFA reference selection cache ready; skipping CLIP", flush=True)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        grouped, selector_stats = build_query_components(
+            data, samples, gallery_ids, candidates, cfg["localization"], device
+        )
+        write_json(
+            selection_path,
+            {"grouped": grouped, "stats": selector_stats},
+        )
+
+    query_items = []
+    query_offsets = [0]
+    for components in grouped:
+        query_items.extend((path, box, caption) for path, box, caption, _ in components)
+        query_offsets.append(len(query_items))
     query_signature = {
         "version": ADAPTER_VERSION,
         "query_items": query_items,
@@ -425,13 +470,17 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     runtime = cfg["runtime"]
     gallery_path = gallery_dir / "gallery.npy"
     query_path = query_dir / "query.npy"
+
     # As in CPR Benchmark, skip native FAFA construction on a warm feature cache.
     # Re-encode both sides if the expected rank/count is not present.
     def cached(path, expected, ndim):
         try:
             features = np.load(path, mmap_mode="r", allow_pickle=False)
-            if (features.ndim == ndim and len(features) == expected
-                    and features.dtype in (np.float16, np.float32)):
+            if (
+                features.ndim == ndim
+                and len(features) == expected
+                and features.dtype in (np.float16, np.float32)
+            ):
                 return features
         except (OSError, ValueError, EOFError):
             pass
@@ -440,8 +489,12 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     gallery_features = cached(gallery_path, len(gallery_items), 3)
     query_features = cached(query_path, len(query_items), 2)
     if gallery_features is not None and query_features is not None:
-        load_info = {"missing_keys": None, "unexpected_keys": None,
-                     "text_policy": text_policy(cfg), "model_loaded_this_run": False}
+        load_info = {
+            "missing_keys": None,
+            "unexpected_keys": None,
+            "text_policy": text_policy(cfg),
+            "model_loaded_this_run": False,
+        }
         print("FAFA feature caches ready; skipping model construction", flush=True)
     else:
         model, processors, preprocess, load_info = load_fafa(cfg, device)
@@ -451,12 +504,24 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
             flush=True,
         )
         gallery_features = encode_crops(
-            model, processors, preprocess, gallery_items, runtime, device,
-            query=False, path=gallery_path,
+            model,
+            processors,
+            preprocess,
+            gallery_items,
+            runtime,
+            device,
+            query=False,
+            path=gallery_path,
         )
         query_features = encode_crops(
-            model, processors, preprocess, query_items, runtime, device,
-            query=True, path=query_path,
+            model,
+            processors,
+            preprocess,
+            query_items,
+            runtime,
+            device,
+            query=True,
+            path=query_path,
         )
         load_info["model_loaded_this_run"] = True
         del model

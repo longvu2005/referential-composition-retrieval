@@ -114,12 +114,7 @@ def main(argv=None):
         return prepare_train_supervision(cfg)
     splits = list(
         dict.fromkeys(
-            args.splits
-            or (
-                (["val", "test"] if method == "proposed" else ["val"])
-                if command == "run"
-                else [cfg.get("split", "val")]
-            )
+            args.splits or (["val"] if command == "run" else [cfg.get("split", "val")])
         )
     )
     if command == "run":

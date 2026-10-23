@@ -60,6 +60,8 @@ fafa = [
     "pycocoevalcap>=1.2,<2",
     "pycocotools>=2,<3",
     "requests>=2.31,<3",
+    # Used by download_fafa.py to resume Kaggle notebook-output downloads.
+    "kaggle>=1.7,<2",
     "huggingface-hub>=0.20,<1",
 ]
 dataset = [

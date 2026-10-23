@@ -9,7 +9,14 @@ import yaml
 
 from rcr.common.config import load_config, override_config
 from rcr.common.data import load_rcr_data
-from rcr.common.io import output_directory, write_json, write_summary
+from rcr.common.io import (
+    atomic_write_text,
+    output_directory,
+    preserve_artifacts,
+    preserve_file,
+    write_json,
+    write_summary,
+)
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA
 from rcr.proposed.ranking import retrieval_settings
@@ -46,10 +53,9 @@ def calibrate(settings: dict) -> list[dict]:
     cfg.pop("selected_validation_sha256", None)
     cfg.pop("selected_retrieval", None)
     root.mkdir(parents=True, exist_ok=True)
-    for filename in ("summary.csv", "selection.json", "selected.yaml"):
-        (root / filename).unlink(missing_ok=True)
-    (root / "calibration.yaml").write_text(
-        yaml.safe_dump(settings, sort_keys=False), encoding="utf-8"
+    preserve_file(root / "calibration.yaml")
+    atomic_write_text(
+        root / "calibration.yaml", yaml.safe_dump(settings, sort_keys=False)
     )
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     outputs = retrieve_weight_grid(cfg, weights)
@@ -109,9 +115,8 @@ def calibrate(settings: dict) -> list[dict]:
             "top_m",
         )
     }
-    (root / "selected.yaml").write_text(
-        yaml.safe_dump(selected, sort_keys=False), encoding="utf-8"
-    )
+    preserve_artifacts(root, ("selection.json", "selected.yaml"))
+    atomic_write_text(root / "selected.yaml", yaml.safe_dump(selected, sort_keys=False))
     write_json(
         root / "selection.json",
         {

@@ -410,29 +410,25 @@ def rank_weight_grid(
             if need_state
             else None
         )
-        outputs = [
-            {
-                key: []
-                for key in (
-                    "rankings",
-                    "coarse_rankings",
-                    "coarse_topm",
-                    "fine_rankings",
-                    "fafa_rankings",
-                    "fafa_binding",
-                    "context",
-                    "coverage",
-                    "coarse_topm_scores",
-                    "gated_context",
-                    "fine_raw_scores",
-                    "fine_scores",
-                    "fused_topm_scores",
-                    "context_mean",
-                    "context_std",
-                )
-            }
-            for _ in weights
-        ]
+        shared_fields = (
+            "coarse_rankings",
+            "coarse_topm",
+            "fine_rankings",
+            "fafa_rankings",
+            "fafa_binding",
+            "context",
+            "coverage",
+            "coarse_topm_scores",
+            "gated_context",
+            "fine_raw_scores",
+            "fine_scores",
+            "context_mean",
+            "context_std",
+        )
+        shared_outputs = {
+            beta: {key: [] for key in shared_fields} for beta, _ in weights
+        }
+        outputs = [{"rankings": [], "fused_topm_scores": []} for _ in weights]
         for sample in tqdm(samples, desc=description):
             query_index = gallery_by_id[sample["query_image_id"]]
             text = encode_query_text(
@@ -478,6 +474,7 @@ def rank_weight_grid(
             fine_done = torch.zeros(len(gallery_ids), dtype=torch.bool, device=device)
             coarse_orders = {}
             fine_shortlists = {}
+            recorded_shared = set()
             for output, (beta, fine_coarse_weight) in zip(
                 outputs, weights, strict=True
             ):
@@ -539,9 +536,22 @@ def rank_weight_grid(
                 raw, scored, top_indices, order_cpu, coarse_topm = fine_shortlists[
                     coarse_key
                 ]
+                rerank_scores = fuse_fine_coarse_scores(
+                    scored["fine_scores"],
+                    coarse_topm,
+                    float(fine_coarse_weight),
+                )
+                output["fused_topm_scores"].append(rerank_scores)
+                final_order = rerank_topm(order_cpu, top_indices, rerank_scores)
+                output["rankings"].append(
+                    final_order[:ranking_limit].to(torch.int32).cpu()
+                )
+                if coarse_key in recorded_shared:
+                    continue
+                recorded_shared.add(coarse_key)
+                shared = shared_outputs[coarse_key]
                 # Diagnostics use exactly this shortlist and identity assignment.
-                # They do not claim an unconstrained full-gallery FAFA baseline.
-                output["fafa_rankings"].append(
+                shared["fafa_rankings"].append(
                     rerank_topm(order_cpu, top_indices, raw["binding"])[:ranking_limit]
                     .to(torch.int32)
                     .cpu()
@@ -551,33 +561,25 @@ def rank_weight_grid(
                     ("context", "context"),
                     ("coverage", "coverage"),
                 ):
-                    output[field].append(raw[key])
-                output["fine_rankings"].append(
+                    shared[field].append(raw[key])
+                shared["fine_rankings"].append(
                     rerank_topm(order_cpu, top_indices, scored["fine_scores"])[
                         :ranking_limit
                     ]
                     .to(torch.int32)
                     .cpu()
                 )
-                rerank_scores = fuse_fine_coarse_scores(
-                    scored["fine_scores"],
-                    coarse_topm,
-                    float(fine_coarse_weight),
-                )
-                for field, value in {
-                    **scored,
-                    "coarse_topm_scores": coarse_topm,
-                    "fused_topm_scores": rerank_scores,
-                }.items():
-                    output[field].append(value)
-                final_order = rerank_topm(order_cpu, top_indices, rerank_scores)
-                output["rankings"].append(
-                    final_order[:ranking_limit].to(torch.int32).cpu()
-                )
-                output["coarse_rankings"].append(
+                for field, value in scored.items():
+                    shared[field].append(value)
+                shared["coarse_topm_scores"].append(coarse_topm)
+                shared["coarse_rankings"].append(
                     order[:ranking_limit].to(torch.int32).cpu()
                 )
-                output["coarse_topm"].append(top_indices.to(torch.int32))
+                shared["coarse_topm"].append(top_indices.to(torch.int32))
+        shared_tensors = {
+            beta: {key: torch.stack(rows) for key, rows in output.items()}
+            for beta, output in shared_outputs.items()
+        }
         return [
             {
                 "sample_ids": [sample["sample_id"] for sample in samples],
@@ -592,6 +594,7 @@ def rank_weight_grid(
                     },
                     binding_scale,
                 ),
+                **shared_tensors[beta],
                 **{key: torch.stack(rows) for key, rows in output.items()},
             }
             for output, (beta, fine_weight) in zip(outputs, weights, strict=True)

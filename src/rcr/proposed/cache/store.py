@@ -287,9 +287,7 @@ class GalleryCache:
                 self._global_rows[i] = self._get_item(i)["scene"].float().mean(0)
         return torch.stack([self._global_rows[i] for i in rows])
 
-    def load(
-        self, indices: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, list[list[str | None]], Tensor]:
+    def load(self, indices: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Load and pad full features for selected gallery images."""
 
         return self.load_groups(indices)[0]
