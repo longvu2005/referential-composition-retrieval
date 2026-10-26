@@ -216,23 +216,16 @@ def test_preserve_artifacts_moves_one_run_into_one_history_entry(tmp_path):
     assert (histories[0] / "tokenizer" / "config.json").read_text() == "{}"
 
 
-def test_scene_cache_keeps_native_global_and_person_geometry_without_crop_embeddings(
-    tmp_path, monkeypatch
-):
+def test_scene_cache_keeps_native_global_without_person_geometry(tmp_path):
     import torch
     from PIL import Image
     from torch import nn
 
     from rcr.proposed.cache import scene as scene_cache
-    from rcr.proposed.cache.store import GalleryCache
+    from rcr.proposed.cache.scene import SceneCache
 
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (100, 50), color="white").save(image_path)
-    monkeypatch.setattr(
-        scene_cache,
-        "detect",
-        lambda *_args, **_kwargs: {"person": torch.tensor([[10.0, 5.0, 50.0, 45.0]])},
-    )
 
     class SceneEncoder(nn.Module):
         def forward(self, pixels):
@@ -249,44 +242,35 @@ def test_scene_cache_keeps_native_global_and_person_geometry_without_crop_embedd
         image_ids=["image-1"],
         image_paths=[image_path],
         root=cache_root,
-        detector=nn.Identity(),
-        detector_processor=object(),
         image_encoder=SceneEncoder(),
         scene_processor=scene_processor,
         device="cpu",
         encoder_metadata={
             "image_encoder": {"model": "fake"},
-            "detector": {"model": "fake"},
         },
     )
 
-    cache = GalleryCache(cache_root)
-    scene, persons, boxes, mask = cache.load(torch.tensor([0]))
-    assert scene.shape == (1, 2, 4)
+    cache = SceneCache(cache_root)
+    assert cache._load_item(0)["scene"].shape == (2, 4)
     assert cache.global_dim == 2
     torch.testing.assert_close(
         cache.load_global_features(torch.tensor([0])), torch.tensor([[11.0, 12.0]])
     )
-    assert persons.shape == (1, 1, 0)
-    assert boxes.shape == (1, 1, 4)
-    assert mask.tolist() == [[True]]
-    assert cache.encoder_metadata["person_encoder"] == {
-        "backend": "clip",
-        "features": "geometry_only",
-    }
+    index = torch.load(cache_root / "index.pt", weights_only=True)
+    assert not {"persons", "mask", "detector", "boxes_pixel"} & index.keys()
+    assert set(cache._load_item(0)) == {"scene"}
 
 
-def test_interrupted_scene_cache_resumes_native_globals(tmp_path, monkeypatch):
+def test_interrupted_scene_cache_resumes_native_globals(tmp_path):
     import torch
     from PIL import Image
     from torch import nn
 
     from rcr.proposed.cache import scene
-    from rcr.proposed.cache.store import GalleryCache
+    from rcr.proposed.cache.scene import SceneCache
 
     path = tmp_path / "image.jpg"
     Image.new("RGB", (32, 16), color="white").save(path)
-    monkeypatch.setattr(scene, "detect", lambda *a, **kw: {"person": torch.empty(0, 4)})
 
     class Encoder(nn.Module):
         def __init__(self, fail=False):
@@ -304,17 +288,16 @@ def test_interrupted_scene_cache_resumes_native_globals(tmp_path, monkeypatch):
         image_ids=["a", "b"],
         image_paths=[path, path],
         root=tmp_path / "cache",
-        detector=nn.Identity(),
-        detector_processor=None,
         scene_processor=lambda **kw: {"pixel_values": torch.zeros(1, 3, 16, 32)},
         device="cpu",
+        encoder_metadata={"image_encoder": {"model": "fake"}},
     )
     with pytest.raises(RuntimeError, match="interrupted"):
         scene.build_cache(image_encoder=Encoder(fail=True), **kwargs)
     resumed = Encoder()
     scene.build_cache(image_encoder=resumed, **kwargs)
     assert resumed.calls == 1
-    cache = GalleryCache(kwargs["root"])
+    cache = SceneCache(kwargs["root"])
     assert cache.scene_dim == 4 and cache.global_dim == 2
     torch.testing.assert_close(
         cache.load_global_features(torch.tensor([0, 1])),

@@ -100,6 +100,8 @@ class TinyCache:
         self.patch_hw = (2, 2)
         self.scene_dim = self.person_dim = self.global_dim = 8
         self.cache_id = "tiny"
+        self.scene_cache_id = "tiny-scene"
+        self.detection_cache_id = "tiny-detections"
         self.encoder_metadata = {
             "image_encoder": None,
             "person_encoder": None,
@@ -235,6 +237,7 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
         "final_dir": "unused",
         "image_root": "unused",
         "scene_cache": "unused-scene",
+        "detection_cache": "unused-detections",
         "fafa_image_cache": "unused-fafa-images",
         "fafa_query_cache": "unused-fafa-queries",
     }
@@ -254,6 +257,8 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     assert checkpoint.name == "best.pt"
     assert saved["best_epoch"] == 1
     assert saved["config"]["checkpoint"] == str(checkpoint)
+    assert saved["scene_cache_id"] == cache.scene_cache_id
+    assert saved["detection_cache_id"] == cache.detection_cache_id
     assert saved["state_supervised_pairs"] > 0
     assert saved["config"]["retrieval"]["fine_score_mode"] == "context_zscore"
     assert (

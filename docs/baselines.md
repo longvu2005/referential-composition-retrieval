@@ -96,13 +96,13 @@ Use the same mode/split/subset when evaluating saved results.
 
 ```bash
 .venv-proposed/bin/python tools/run.py build-cache \
-  --config configs/proposed.yaml --cache-stage scene
+  --config configs/proposed.yaml --cache-stage detections
 python tools/run.py run --config configs/fafa.yaml --prepare
 python tools/run.py run --config configs/fafa.yaml
 ```
 
 `prepare` gets the pinned official source, released checkpoint, CLIP selector,
-and FAFA runtime assets. It validates the shared DINO cache but does not build it;
+and FAFA runtime assets. It validates the shared detection cache but does not build it;
 use the Proposed environment for the first command above. Model code remains in
 the authors' checkout. The configured commit, runtime cache and checkpoint checks remain;
 `--force` refreshes prepared assets. Asset preparation can require substantial

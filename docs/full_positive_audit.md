@@ -102,13 +102,14 @@ never from cached identity labels:
 
 ```bash
 .venv-proposed/bin/python tools/data/audit.py \
-  --cache cache/clip-b32-fafa-images --scene-cache cache/proposed-clip-b32 \
+  --detection-cache cache/grounding-dino-tiny \
   --image-root dataset/data/raw/images \
   --output runs/data_and_detection_audit.json
 ```
 
-Scene caches can be passed directly as `--cache` without `--scene-cache`. Legacy
-DINO scene sources lacking pixel boxes and scene-size metadata also need
+Detection diagnostics need no scene or FAFA features. Historical unified scene
+caches remain supported through `--cache`, with `--scene-cache` for a historical
+FAFA wrapper. Legacy DINO sources lacking pixel boxes and scene-size metadata need
 `--scene-size HEIGHT WIDTH` with the original letterbox size and accessible raw
 images. Coverage measures GT-to-detection alignment, not localization AP. GT for
 val/test is permitted in this diagnostic, separately from training/scoring.

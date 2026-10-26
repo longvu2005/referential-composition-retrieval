@@ -56,6 +56,7 @@ Or run the stages explicitly:
 
 ```bash
 .venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage detections
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage scene
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
@@ -73,16 +74,20 @@ bash scripts/methods/proposed.bash test
 
 ## Cache and checkpoint compatibility
 
-The scene key is now `data.scene_cache`; the source stage is `scene`.
-The three new default cache directories are `cache/proposed-clip-b32`,
-`cache/clip-b32-fafa-images` and `cache/clip-b32-fafa-queries`. The FAFA baseline
-detector cache path follows the new scene directory so both methods use the
-same detected person boxes. The detector and selector settings are unchanged.
+The detection key is `data.detection_cache` (stage `detections`); scene extraction
+uses `data.scene_cache` (stage `scene`) without running detection. Defaults are
+`cache/grounding-dino-tiny`, `cache/proposed-clip-b32`, `cache/fafa-person-images`
+and `cache/fafa-person-queries`. The FAFA baseline reads the same independent
+detection cache. Detector, selector and crop order are unchanged. FAFA features
+bind detection identity and no longer depend on the scene encoder.
 
 Build new caches and train new learned modules. Old DINO/BERT weights cannot
 resume this architecture, even where tensor widths happen to match. Cache
 validation checks the image/text checkpoint, revision, detector, source cache
-identity and separate scene/global dimensions. Old outputs remain available in
+identity and separate scene/global dimensions. Completed unified CLIP scene
+features can be reused and their boxes imported; format-7 FAFA caches must be
+built once in the new paths. See [detection migration](detection_cache.md).
+Old outputs remain available in
 their original directories, and historical score artifacts retain CPU replay.
 
 ## Validation

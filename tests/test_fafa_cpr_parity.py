@@ -123,9 +123,10 @@ def test_shared_detector_reads_proposed_boxes_without_renormalization(tmp_path):
                             [7.25, 3.5, 58.75, 77.5],
                             [15.0, 9.0, 100.0, 85.0],
                         ]
-                    )
+                    ),
+                    "image_size": (160, 100),
                 }
-            return {"boxes_pixel": torch.empty(0, 4)}
+            return {"boxes_pixel": torch.empty(0, 4), "image_size": (120, 80)}
 
     data = SimpleNamespace(image_path=lambda iid: image_paths[FakeCache.by_id[iid]])
     cfg = {"scene_size": [224, 224]}
@@ -144,31 +145,15 @@ def test_shared_detector_reads_proposed_boxes_without_renormalization(tmp_path):
     ]
 
 
-def test_shared_detector_inverts_legacy_non_square_scene_size(tmp_path):
-    from types import SimpleNamespace
-
+def test_legacy_non_square_coordinate_transform_roundtrip():
     import torch
-    from PIL import Image
 
-    from rcr.baselines.fafa_detector import candidates_from_cache
-    from rcr.proposed.cache.scene import boxes_to_scene
+    from rcr.common.geometry import boxes_to_pixels, boxes_to_scene
 
-    path = tmp_path / "input.png"
-    Image.new("RGB", (400, 200)).save(path)
     original = torch.tensor([[40.0, 20.0, 200.0, 100.0]])
 
-    class FakeCache:
-        by_id = {"image": 0}
-        mask = torch.tensor([[True]])
-
-        def load_geometry(self, _index):
-            return {"boxes_scene": boxes_to_scene(original, (400, 200), (256, 128))}
-
-    data = SimpleNamespace(image_path=lambda _image_id: path)
-    candidates = candidates_from_cache(
-        data, ["image"], FakeCache(), {"scene_size": [128, 256]}
-    )
-    torch.testing.assert_close(torch.tensor(candidates[0][0]["box"]), original[0])
+    scene = boxes_to_scene(original, (400, 200), (256, 128))
+    torch.testing.assert_close(boxes_to_pixels(scene, (400, 200), (256, 128)), original)
 
 
 def test_proposed_dino_settings_match_fafa_baseline():
@@ -180,72 +165,57 @@ def test_proposed_dino_settings_match_fafa_baseline():
     proposed = yaml.safe_load((root / "configs/proposed.yaml").read_text())
     fafa = yaml.safe_load((root / "configs/fafa.yaml").read_text())
     detector = fafa["localization"]["detector"]
-    assert detector["backend"] == "proposed_dino_tiny_cache"
-    assert detector["cache_dir"] == proposed["data"]["scene_cache"]
+    assert detector["backend"] == "grounding_dino_cache"
+    assert detector["cache_dir"] == proposed["data"]["detection_cache"]
     assert detector["model"] == proposed["detector"]["model"]
     assert detector["threshold"] == proposed["detector"]["threshold"]
     assert detector["text_threshold"] == proposed["detector"]["text_threshold"]
-    assert detector["scene_size"] == proposed["image_encoder"]["scene_size"]
+    assert "scene_size" not in detector
     assert fafa["checkpoint"]["max_txt_len"] == 128
 
 
 def test_shared_dino_cache_rejects_wrong_detector_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
 
     import torch
+    from PIL import Image
 
     from rcr.baselines.fafa_detector import detect_gallery
-    from rcr.proposed.cache import store
-
-    class FakeCache:
-        cache_id = "verified-id"
-        image_ids = ["image-1"]
-        by_id = {"image-1": 0}
-        mask = torch.tensor([[True]])
-        encoder_metadata = {
-            "detector": {
-                "model": "IDEA-Research/grounding-dino-tiny",
-                "threshold": 0.3,
-                "text_threshold": 0.25,
-            },
-            "image_encoder": {"scene_size": [224, 224]},
-        }
-
-        def validate_gallery(self, image_ids):
-            assert image_ids == self.image_ids
-
-        def load_geometry(self, index):
-            return {"boxes_pixel": torch.tensor([[1.0, 2.0, 30.0, 40.0]])}
-
-    from PIL import Image
+    from rcr.common import detection
 
     path = tmp_path / "input.png"
     Image.new("RGB", (100, 80)).save(path)
-    monkeypatch.setattr(store, "GalleryCache", lambda _: FakeCache())
-    from types import SimpleNamespace
-
-    data = SimpleNamespace(gallery_ids=["image-1"], image_path=lambda _: path)
-    cfg = {
-        "backend": "proposed_dino_tiny_cache",
-        "cache_dir": str(tmp_path),
+    monkeypatch.setattr(
+        detection,
+        "detect",
+        lambda *a: {"person": torch.tensor([[1.0, 2.0, 30.0, 40.0]])},
+    )
+    spec = {
         "model": "IDEA-Research/grounding-dino-tiny",
         "threshold": 0.3,
         "text_threshold": 0.25,
-        "scene_size": [224, 224],
+    }
+    root = tmp_path / "detections"
+    detection.build_detection_cache(
+        ["image-1"], [path], root, spec, model=torch.nn.Identity()
+    )
+    data = SimpleNamespace(gallery_ids=["image-1"], image_path=lambda _: path)
+    cfg = {
+        "backend": "grounding_dino_cache",
+        "cache_dir": str(root),
+        **spec,
     }
     candidates, cache_id = detect_gallery(data, ["image-1"], cfg, torch.device("cpu"))
     assert candidates[0][0]["box"] == [1.0, 2.0, 30.0, 40.0]
-    assert cache_id.endswith("#cache_id=verified-id")
+    assert cache_id == f"detections:{detection.DetectionCache(root).cache_id}"
     with pytest.raises(ValueError, match="provenance"):
         detect_gallery(
             data, ["image-1"], {**cfg, "threshold": 0.4}, torch.device("cpu")
         )
-    FakeCache.encoder_metadata["detector"] = None
-    with pytest.raises(ValueError, match="lacks detector provenance"):
-        detect_gallery(data, ["image-1"], cfg, torch.device("cpu"))
-    _, uncertain = detect_gallery(
-        data,
-        ["image-1"],
-        {**cfg, "allow_legacy_cache": True},
-        torch.device("cpu"),
-    )
-    assert uncertain.endswith("#legacy-unverified")
+    with pytest.raises(ValueError, match="grounding_dino_cache"):
+        detect_gallery(
+            data,
+            ["image-1"],
+            {**cfg, "backend": "proposed_dino_tiny_cache"},
+            torch.device("cpu"),
+        )

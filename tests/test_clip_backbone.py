@@ -174,7 +174,7 @@ def test_dino_cache_is_rejected_even_if_its_patch_width_matches_clip():
             "detector": config["detector"],
         },
     )
-    with pytest.raises(ValueError, match="cache person encoder differs"):
+    with pytest.raises(ValueError, match="image encoder/preprocessing differs"):
         check_cache_config(old, config, person_backend="clip")
 
 
@@ -225,7 +225,8 @@ def test_cache_only_validation_allows_missing_native_yaml_but_checks_encoders(
         cfg["person_encoder"].pop("fafa_config")
     cache = SimpleNamespace(
         _scene_cache=None,
-        format_version=6,
+        format_version=7,
+        detections=SimpleNamespace(check_config=lambda _: None),
         native=SimpleNamespace(metadata={"version": "recorded-native-cache"}),
         encoder_metadata={
             "person_encoder": {"backend": "fafa"},
@@ -233,6 +234,7 @@ def test_cache_only_validation_allows_missing_native_yaml_but_checks_encoders(
             "detector": cfg["detector"],
         },
     )
+    cache._scene_cache = SimpleNamespace(encoder_metadata=cache.encoder_metadata)
     check_cache_config(cache, cfg)
     cache.encoder_metadata["image_encoder"] = {"model": "wrong"}
     with pytest.raises(ValueError, match="image encoder/preprocessing differs"):

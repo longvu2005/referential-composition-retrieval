@@ -22,8 +22,12 @@ def main(argv=None):
     cache = commands.add_parser("build-cache", parents=[shared])
     cache.add_argument(
         "--cache-stage",
-        choices=("all", "scene", "fafa", "fafa-image", "fafa-query"),
+        choices=("all", "detections", "scene", "fafa", "fafa-image", "fafa-query"),
         default="all",
+    )
+    cache.add_argument(
+        "--import-scene-cache",
+        help="Import completed legacy scene boxes (detections stage only)",
     )
     commands.add_parser("train", parents=[shared])
     commands.add_parser("prepare-supervision", parents=[shared])
@@ -63,6 +67,12 @@ def main(argv=None):
 
         return calibrate(cfg)
     method = cfg.get("method")
+    if (
+        command == "build-cache"
+        and args.import_scene_cache
+        and args.cache_stage != "detections"
+    ):
+        parser.error("--import-scene-cache requires --cache-stage detections")
     if method not in ("proposed", "clip", "fafa"):
         parser.error("method must be proposed, clip or fafa")
     if (
@@ -117,7 +127,9 @@ def main(argv=None):
     if command == "build-cache":
         from rcr.proposed.cache.build import prepare_cache
 
-        return prepare_cache(cfg, stage=args.cache_stage)
+        return prepare_cache(
+            cfg, stage=args.cache_stage, import_scene=args.import_scene_cache
+        )
     if command == "train":
         from rcr.proposed.train import train
 

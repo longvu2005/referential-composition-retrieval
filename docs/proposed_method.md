@@ -39,11 +39,12 @@ Mean pooling is a simple person representation, not native FDA scoring.
 CLIP scene and FAFA person inputs have separate widths and cache metadata. The
 scene projection is independent of the shared person projection. CLIP and its
 native projections stay frozen/eval; the additional context projection is trained. No FAFA library/model is
-loaded during training or retrieval. The scene directory stores CLIP patches/global vectors and
-predicted crop geometry, without GT identity labels.
-Training/retrieval use FAFA crops. The
-FAFA directory stores crop features and its index. `GalleryCache`
-combines them and verifies the FAFA index references the same scene cache ID.
+loaded during training or retrieval. The scene directory stores CLIP patches/global
+vectors only. A shared detection directory owns ordered pixel boxes and original
+image sizes, without GT identity labels. The FAFA directories store crop features
+bound to that detection cache ID, independently of CLIP. `GalleryCache` joins these
+sources, verifies image order and detection identity, and maps pixel boxes into
+the scene encoder's letterbox coordinates at read time.
 
 `GalleryCache.load()` returns `(scene, persons, boxes, mask)` only. Training uses
 `TrainSupervision` to align GT train heads to those detections separately and
@@ -269,18 +270,24 @@ and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 ## Configuration and checkpoints
 
 There is one architecture, `clip-b32-fafa-partial-match-v2`. Frozen extraction has
-three independent directories: `data.scene_cache`, `data.fafa_image_cache` and
-`data.fafa_query_cache`. The current format-6 image index contains packed pooled person means,
+four independent directories: `data.detection_cache`, `data.scene_cache`,
+`data.fafa_image_cache` and `data.fafa_query_cache`. The format-7 image index contains packed pooled person means,
 native target-token metadata and encoder/crop provenance, with no query text.
 One image-only Q-Former forward supplies both hidden means and projected tokens as
 defined above. The query index separately
 maps sample/Subject slots to content-addressed conditions. Each key binds the
-FAFA source/checkpoint/preprocessing, scene crop source, extraction precision,
+FAFA source/checkpoint/preprocessing, detection crop source, extraction precision,
 reference image, public condition and query text policy. Query text edits only
 require rerunning `--cache-stage fafa-query`; identical condition features are reused.
 
-Build new scene, FAFA image and FAFA query caches in the separate CLIP paths.
-Their crop-source identity and preprocessing are part of the provenance contract.
+FAFA indices contain no scene encoder metadata or scene dimensions. Changing
+scene extraction does not invalidate them. Training checkpoints independently
+bind the FAFA image cache ID, detection cache ID, scene cache ID and encoder
+metadata; retrieval refuses a different scene even when its dimensions match.
+Train-only head alignment binds detection identity, independently of appearance.
+Completed unified CLIP scene features are readable and their boxes can be imported.
+Build format-7 FAFA caches once in the new independent paths. Their crop-source
+identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
 Train the new modules from scratch in `runs/proposed-clip-b32`; this is not a
 weight-compatible checkpoint conversion. The evaluator and offline replay still

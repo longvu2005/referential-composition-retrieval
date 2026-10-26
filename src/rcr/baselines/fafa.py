@@ -556,7 +556,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         "adapter_version": ADAPTER_VERSION,
         "checkpoint_sha256": checkpoint_sha,
         "selector_checkpoint_sha256": selector_sha,
-        "detector_source": "proposed_dino_tiny_cache",
+        "detector_source": "grounding_dino_cache",
         "detector_cache_id": str(detection_dir),
         "source_commit": cfg["source"]["commit"],
         "checkpoint_status": cfg["checkpoint"]["status"],

@@ -8,6 +8,9 @@ import torch
 from torch import Tensor
 
 from rcr.common.data import inference_samples
+from rcr.common.detection import DetectionCache
+from rcr.common.geometry import boxes_to_scene
+from rcr.proposed.cache.scene import SceneCache
 
 
 class GalleryCache:
@@ -18,6 +21,7 @@ class GalleryCache:
         root: str | Path,
         *,
         scene_root: str | Path | None = None,
+        detection_root: str | Path | None = None,
         query_root: str | Path | None = None,
         lru_mib: int = 0,
         native_lru_mib: int = 0,
@@ -43,11 +47,48 @@ class GalleryCache:
         index = torch.load(
             self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
         )
+        if index.get("layout") == "clip-scene-v1":
+            raise ValueError(
+                "GalleryCache requires FAFA person features; "
+                "use SceneCache for standalone CLIP features"
+            )
 
         self._scene_cache = None
+        self.detections = None
+        separated = index.get("layout") == "fafa" and index.get("format_version") == 7
+        if separated:
+            if {
+                "image_encoder",
+                "scene_dim",
+                "global_dim",
+                "patch_hw",
+                "global_features",
+                "source_cache_id",
+            } & index.keys():
+                raise ValueError(
+                    "format-7 FAFA features must be independent of scene metadata"
+                )
+            if detection_root is None:
+                raise ValueError("FAFA person cache requires data.detection_cache")
+            self.detections = DetectionCache(detection_root)
+            self.detections.validate_gallery(index["image_ids"])
+            if index["detection_cache_id"] != self.detections.cache_id:
+                raise ValueError("FAFA cache differs from its source detection cache")
+            if not torch.equal(index["mask"].bool(), self.detections.mask):
+                raise ValueError("FAFA/detection person masks differ")
+            if index["detector"] != self.detections.detector:
+                raise ValueError("FAFA/detection detector provenance differs")
+            if scene_root is not None:
+                self._scene_cache = SceneCache(scene_root, mmap_shards=mmap_shards)
+                self._scene_cache.validate_gallery(index["image_ids"])
+        elif detection_root is not None:
+            raise ValueError(
+                "legacy FAFA cache is bound to a scene cache; "
+                "rebuild FAFA caches after separating detections"
+            )
         if index.get("layout") == "persons":
             raise ValueError("old FAFA person cache; rebuild data.fafa_image_cache")
-        if index.get("layout") == "fafa":
+        if index.get("layout") == "fafa" and not separated:
             if scene_root is None:
                 raise ValueError("FAFA person cache requires data.scene_cache")
             self._scene_cache = GalleryCache(scene_root, mmap_shards=mmap_shards)
@@ -71,7 +112,20 @@ class GalleryCache:
             key: index.get(key)
             for key in ("image_encoder", "person_encoder", "detector")
         }
-        self.scene_dim = index.get("scene_dim", index["persons"].shape[-1])
+        if separated:
+            self.encoder_metadata["detector"] = self.detections.detector
+            self.encoder_metadata["image_encoder"] = (
+                self._scene_cache.encoder_metadata["image_encoder"]
+                if self._scene_cache
+                else None
+            )
+        self.scene_cache_id = self._scene_cache.cache_id if self._scene_cache else None
+        self.detection_cache_id = self.detections.cache_id if self.detections else None
+        self.scene_dim = (
+            self._scene_cache.scene_dim
+            if separated and self._scene_cache
+            else index.get("scene_dim", index["persons"].shape[-1])
+        )
         self.global_dim = index.get(
             "global_dim",
             self._scene_cache.global_dim if self._scene_cache else self.scene_dim,
@@ -80,7 +134,13 @@ class GalleryCache:
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
         self.person_offsets = index.get("person_offsets")
-        self.patch_hw = tuple(index["patch_hw"])
+        self.patch_hw = (
+            self._scene_cache.patch_hw
+            if separated and self._scene_cache
+            else tuple(index.get("patch_hw", ()))
+        )
+        if separated and self._scene_cache is None:
+            self.scene_dim = self.global_dim = self.patch_hw = None
         self._global_features = index.get("global_features")
         if (self.encoder_metadata["person_encoder"] or {}).get(
             "backend"
@@ -101,13 +161,13 @@ class GalleryCache:
             raise ValueError("cache index persons/mask/gallery shape mismatch")
         if self.person_offsets is None:
             if (
-                self.format_version == 6
+                self.format_version in (6, 7)
                 or self.persons.ndim != 3
                 or self.persons.shape[:2] != self.mask.shape
             ):
                 raise ValueError("cache index persons/mask/gallery shape mismatch")
         elif (
-            self.format_version != 6
+            self.format_version not in (6, 7)
             or index.get("layout") != "fafa"
             or self.persons.ndim != 2
             or not isinstance(self.person_offsets, Tensor)
@@ -122,13 +182,16 @@ class GalleryCache:
             # Reconstruct one canonical signature for every supported FAFA index.
             person = self.encoder_metadata["person_encoder"]
             self.feature_signature = {
-                "source_cache_id": index["source_cache_id"],
+                ("detection_cache_id" if separated else "source_cache_id"): index[
+                    "detection_cache_id" if separated else "source_cache_id"
+                ],
                 "spec": person["spec"],
                 "checkpoint_sha256": person["checkpoint_sha256"],
-                "image_encoder": index["image_encoder"],
                 "detector": index["detector"],
                 "encoder_precision": person["encoder_precision"],
             }
+            if not separated:
+                self.feature_signature["image_encoder"] = index["image_encoder"]
             if index.get("signature", self.feature_signature) != self.feature_signature:
                 raise ValueError("FAFA image signature differs from encoder metadata")
         from rcr.proposed.cache.native import NativeFAFACache
@@ -200,6 +263,8 @@ class GalleryCache:
 
     def load_geometry(self, index: int) -> dict:
         """Read immutable crop boxes without loading full feature payloads."""
+        if self.detections is not None:
+            return self.detections.load_geometry(index)
         source = self._scene_cache or self
         item = source._read_feature(index, geometry_only=True)
         if source.format_version >= 2:
@@ -211,7 +276,17 @@ class GalleryCache:
         return item
 
     def _load_item(self, index: int) -> dict:
-        if self._scene_cache is not None:
+        if self.detections is not None:
+            if self._scene_cache is None:
+                raise ValueError("loading scene features requires data.scene_cache")
+            item = self._scene_cache._load_item(index)
+            geometry = self.detections.load_geometry(index)
+            h, w = self.encoder_metadata["image_encoder"]["scene_size"]
+            item["boxes_scene"] = boxes_to_scene(
+                geometry["boxes_pixel"], geometry["image_size"], (w, h)
+            )
+            item["persons"] = self.person_row(index).clone()
+        elif self._scene_cache is not None:
             # The published person index is authoritative. FAFA shards are only
             # extraction checkpoints and may be removed during finalization.
             # Clone the row so a small LRU item does not retain/count the whole
@@ -287,6 +362,8 @@ class GalleryCache:
         Mining the train gallery must not scan val/test/leftover scene shards.
         Reuse any full scene already present in this reader's LRU.
         """
+        if self.detections is not None and self._scene_cache is None:
+            raise ValueError("loading global features requires data.scene_cache")
         if self._global_features is not None:
             return self._global_features[indices]
         source = self._scene_cache

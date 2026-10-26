@@ -12,18 +12,19 @@ The [official source](https://github.com/Delong-liu-bupt/Composed_Person_Retriev
 is unchanged and pinned to `0cc16936f031f7ad166be4cce1be33d0b44b728e`.
 See [native model/extraction](https://github.com/Delong-liu-bupt/Composed_Person_Retrieval/blob/0cc16936f031f7ad166be4cce1be33d0b44b728e/FAFA_SynCPR/src/lavis/models/blip2_models/blip2_fafa_cpr.py).
 `fafa.py` integrates native FAFA; `fafa_adapter.py` implements query Subject
-prediction and text routing; `fafa_detector.py` reads Proposed DINO Tiny boxes,
+prediction and text routing; `fafa_detector.py` reads shared Grounding DINO Tiny boxes,
 and `fafa_matching.py` ports mean Partial SetMatch. These adapters are not official FAFA.
 
 ## 2. Inputs, preprocessing and features
 
 FAFA reads the same Grounding DINO Tiny person boxes as Proposed from
-`cache/proposed-clip-b32` (model `IDEA-Research/grounding-dino-tiny`, box threshold
+`cache/grounding-dino-tiny` (model `IDEA-Research/grounding-dino-tiny`, box threshold
 0.30, text threshold 0.25). Detector inference is not repeated. The shared
 cache must have a complete `index.pt`, matching gallery IDs/order and detector
-metadata, plus intact geometry shards. For older cache manifests that lack
-metadata, `allow_legacy_cache` is disabled by default; explicit opt-in is
-permitted only when the original detector settings were verified independently.
+metadata. Its packed index stores pixel boxes and original image sizes, and its
+content ID covers the ordered boxes and detector configuration. Legacy scene
+boxes must first be explicitly imported with matching detector provenance; the
+baseline never depends on CLIP scene features or letterbox resolution.
 All eligible boxes retain Proposed's
 order and floating-point pixel coordinates: no extra NMS, floor/ceil,
 confidence filtering or person cap is applied. Proposed's cache does not
@@ -113,7 +114,7 @@ Use the isolated FAFA environment in [baselines](../baselines.md):
 
 ```bash
 .venv-proposed/bin/python tools/run.py build-cache \
-  --config configs/proposed.yaml --cache-stage scene
+  --config configs/proposed.yaml --cache-stage detections
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits val
 # Once the test protocol is eligible:
@@ -134,7 +135,7 @@ membership/fallback/truncation statistics.
 Outputs: `runs/fafa/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.
 
 The CPR text/matching policy remains adapter v3. Changing to the Proposed
-DINO cache invalidates old detector-specific FAFA gallery feature caches.
+detection cache invalidates old detector-specific FAFA gallery feature caches.
 Query-text policy and membership changes invalidate query features/scores too.
 Old `protocol.json` locks are stale: rerun complete validation before test.
 The RCR split-specific gallery and official ID/Full evaluator stay unchanged;

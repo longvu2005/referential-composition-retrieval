@@ -11,6 +11,7 @@ Edit `configs/proposed.yaml`:
 data:
   final_dir: dataset/data/final
   image_root: /path/to/images
+  detection_cache: /path/to/person-detections
   scene_cache: /path/to/clip-b32-scene
   fafa_image_cache: /path/to/fafa-images
   fafa_query_cache: /path/to/fafa-queries
@@ -25,15 +26,18 @@ file. Command-line overrides must name an existing key.
 
 ```bash
 python tools/run.py prepare --config configs/proposed.yaml
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage detections
 python tools/run.py build-cache --config configs/proposed.yaml --cache-stage scene
 python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
 python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
 ```
 
-`build-cache` without `--cache-stage` runs all missing stages. CLIP owns scene/global
-features and crop geometry. The FAFA image cache owns query-independent person
+`build-cache` without `--cache-stage` runs all missing stages. Detection owns pixel
+boxes, original image sizes and crop order. CLIP owns scene/global features only.
+Each of these two stages can run independently. The FAFA image cache owns query-independent person
 means and target tokens. The FAFA query cache owns text-conditioned query
-features. Editing query text therefore invalidates only the last stage.
+features. Editing query text therefore invalidates only the last stage; changing
+the CLIP scene encoder does not invalidate detection or either FAFA cache.
 
 The FAFA worker runs through `person_encoder.python`, so native FAFA never enters
 the proposed environment. Training and retrieval read cache files and do not load
@@ -135,19 +139,21 @@ from the FAFA environment with explicit notebook coordinates:
 
 ```bash
 .venv-fafa/bin/python download_fafa.py \
-  --output cache/clip-b32-fafa-images --user OWNER --kernel NOTEBOOK --version VERSION
+  --output cache/fafa-person-images --user OWNER --kernel NOTEBOOK --version VERSION
 ```
 
 Authentication uses the normal Kaggle client configuration. The downloader
 records its source in the resume state and refuses to continue that state with
 different notebook arguments.
 
-CLIP uses new `data.scene_cache`, `data.fafa_image_cache` and
-`data.fafa_query_cache` paths. Rebuild all three stages and train a fresh model;
-old DINO/BERT checkpoint and cache identities must not be substituted. Keep
+The four cache paths include `data.detection_cache`. Completed unified CLIP scene
+features are readable; their boxes can be imported into the shared detection
+cache. Build new format-7 FAFA caches once, then they are independent of scene
+backbones. Old DINO/BERT model checkpoints require fresh CLIP training. Keep
 raw images available for the frozen FAFA crop extraction. Once new caches are
 complete, mounted read-only copies are supported by training/retrieval.
 See [CLIP migration](clip_b32_migration.md) for the exact commands and text policy.
+See [detection separation](detection_cache.md) for import and independent builds.
 
 ## Reading outputs
 

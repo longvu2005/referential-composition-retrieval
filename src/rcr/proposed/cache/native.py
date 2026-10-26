@@ -1,6 +1,6 @@
 """Read frozen FAFA multimodal queries and projected target tokens.
 
-Crop order is inherited from the scene geometry cache. Query features are
+Crop order is inherited from the shared detection cache. Query features are
 indexed by public instruction/Subject slots, never by selected members or GT.
 """
 

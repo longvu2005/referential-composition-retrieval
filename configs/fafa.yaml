@@ -29,17 +29,13 @@ checkpoint:
 
 localization:
   detector:
-    backend: proposed_dino_tiny_cache
+    backend: grounding_dino_cache
     model: IDEA-Research/grounding-dino-tiny
     threshold: 0.3
     text_threshold: 0.25
-    # Used only to invert boxes_scene in a legacy DINO cache.
-    scene_size: [224, 224]
-    # All cached boxes passed Proposed's detection threshold. No second NMS.
+    # All boxes passed the shared detection threshold. No second NMS.
     score_threshold: 0.3
-    cache_dir: cache/proposed-clip-b32
-    # Opt in ONLY for a legacy cache known to use these exact settings.
-    allow_legacy_cache: false
+    cache_dir: cache/grounding-dino-tiny
   query_selector:
     model: ViT-B/32
     checkpoint: checkpoints/clip/ViT-B-32.pt

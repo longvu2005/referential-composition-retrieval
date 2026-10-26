@@ -183,16 +183,13 @@ def fafa_context(data, cfg, device):
     configuration; test only checks it, without selecting from test metrics.
     """
     from rcr.baselines.fafa_adapter import ADAPTER_VERSION
-    from rcr.proposed.cache.store import GalleryCache
+    from rcr.baselines.fafa_detector import load_detection_cache
 
-    detector_cache = GalleryCache(cfg["localization"]["detector"]["cache_dir"])
-    detector_cache.validate_gallery(data.gallery_ids)
-    if not detector_cache.cache_id:
-        raise ValueError("Shared DINO cache lacks a cache_id")
+    detector_cache = load_detection_cache(data, cfg["localization"]["detector"])
 
     return digest_json(
         {
-            "version": "fafa-rcr-val-v1",
+            "version": "fafa-rcr-val-v2",
             "adapter_version": ADAPTER_VERSION,
             "val_sha256": split_fingerprint(data, "val"),
             "source": cfg["source"],

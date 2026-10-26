@@ -9,27 +9,26 @@ from PIL import Image
 from tqdm import tqdm
 
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
+from rcr.common.geometry import boxes_to_pixels
 from rcr.common.io import atomic_write_text
 from rcr.common.vision import match_heads_to_persons
 
 
 def align_identities(item, heads, *, image_path=None, scene_size=None):
     """Label existing detections; never create, remove or move a person box."""
-    count = len(item["boxes_scene"])
+    persons = item.get("boxes_pixel")
+    count = len(persons if persons is not None else item["boxes_scene"])
     labels = [None] * count
     if not count or not heads:
         return labels
-    persons = item.get("boxes_pixel")
     if persons is None:
-        # Old caches may store only letterboxed coordinates. New scene caches
-        # store pixel boxes and need no image access for supervision.
+        # Old caches may store only letterboxed coordinates. The shared
+        # detection cache needs no raw image access for supervision.
         if image_path is None or scene_size is None:
             raise ValueError(
                 "legacy box alignment needs raw images and scene_size; "
                 "cached identity_ids are never used"
             )
-        from rcr.proposed.cache.fafa import boxes_to_pixels
-
         with Image.open(image_path) as image:
             h, w = scene_size
             persons = boxes_to_pixels(item["boxes_scene"], image.size, (w, h))
@@ -71,6 +70,18 @@ class TrainSupervision:
                 [i, data.images_by_id[i]["path"], self.heads[i]] for i in allowed
             ],
         }
+        detection_id = getattr(cache, "detection_cache_id", None)
+        if detection_id is None and getattr(cache, "detections", None) is None:
+            from rcr.common.detection import DetectionCache
+
+            if isinstance(cache, DetectionCache):
+                detection_id = cache.cache_id
+        if detection_id is not None:
+            signature = {
+                "version": "train-head-alignment-v2",
+                "detection_cache_id": detection_id,
+                "images": signature["images"],
+            }
         self.key = hashlib.sha256(
             json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -162,8 +173,8 @@ class TrainSupervision:
 
 def prepare_train_supervision(cfg):
     """Prepare reusable train labels without loading encoders or query features."""
-    from rcr.proposed.cache.build import cache_paths, check_cache_config
-    from rcr.proposed.cache.store import GalleryCache
+    from rcr.common.detection import DetectionCache
+    from rcr.proposed.cache.build import cache_paths
     from rcr.proposed.identity import identity_sampling_settings
 
     cache_paths(cfg)
@@ -172,10 +183,8 @@ def prepare_train_supervision(cfg):
     if cache_file is None:
         raise ValueError("prepare-supervision requires cache.supervision_cache")
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
-    cache = GalleryCache(
-        data_cfg["fafa_image_cache"], scene_root=data_cfg.get("scene_cache")
-    )
-    check_cache_config(cache, cfg)
+    cache = DetectionCache(data_cfg["detection_cache"])
+    cache.check_config(cfg["detector"])
     cache.validate_gallery(data.gallery_ids)
     supervision = TrainSupervision(
         data,

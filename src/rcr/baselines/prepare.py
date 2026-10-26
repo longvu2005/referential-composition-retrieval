@@ -11,15 +11,25 @@ from tqdm import tqdm
 from rcr.common.io import sha256_file
 
 
-def require_shared_dino_cache(cfg: dict) -> None:
+def require_shared_detection_cache(cfg: dict) -> None:
     """Fail before FAFA setup when its immutable detector cache is absent."""
     root = Path(cfg["localization"]["detector"]["cache_dir"])
     if not (root / "index.pt").is_file() or (root / ".building").exists():
         raise FileNotFoundError(
             f"FAFA requires the completed shared person-box cache at {root}; run "
             "`.venv-proposed/bin/python tools/run.py build-cache "
-            "--config configs/proposed.yaml --cache-stage scene` first"
+            "--config configs/proposed.yaml --cache-stage detections` first"
         )
+    from rcr.common.detection import DetectionCache
+
+    cache = DetectionCache(root)
+    detector = cfg["localization"]["detector"]
+    if detector["backend"] != "grounding_dino_cache":
+        raise ValueError("use the shared grounding_dino_cache backend")
+    spec = {key: detector[key] for key in ("model", "threshold", "text_threshold")}
+    if "revision" in detector:
+        spec["revision"] = detector["revision"]
+    cache.check_config(spec)
 
 
 def download(url: str, path: Path, *, force: bool, expected_hash: str | None = None):
@@ -103,7 +113,7 @@ def prepare(cfg: dict, *, force: bool = False) -> None:
     if cfg["method"] == "clip":
         prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], force)
     elif cfg["method"] == "fafa":
-        require_shared_dino_cache(cfg)
+        require_shared_detection_cache(cfg)
         prepare_fafa_model(cfg, force=force)
         selector = cfg["localization"]["query_selector"]
         prepare_clip(selector["model"], selector["checkpoint"], force)

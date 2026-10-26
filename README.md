@@ -100,9 +100,10 @@ Set the paths in `configs/proposed.yaml`, especially:
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
+  detection_cache: cache/grounding-dino-tiny
   scene_cache: cache/proposed-clip-b32
-  fafa_image_cache: cache/clip-b32-fafa-images
-  fafa_query_cache: cache/clip-b32-fafa-queries
+  fafa_image_cache: cache/fafa-person-images
+  fafa_query_cache: cache/fafa-person-queries
 person_encoder:
   python: .venv-fafa/bin/python
 ```
@@ -134,7 +135,9 @@ python tools/run.py evaluate    --config configs/proposed.yaml --splits val
 python tools/run.py calibrate   --config configs/calibration.yaml
 ```
 
-Build one cache stage with `--cache-stage scene`, `fafa-image`, or `fafa-query`.
+Build one stage with `--cache-stage detections`, `scene`, `fafa-image`, or
+`fafa-query`. Scene extraction needs neither detection nor FAFA caches. FAFA
+extraction needs the detection cache, without loading CLIP scene weights.
 Use `--set key=value ...` for explicit typed overrides. For example:
 
 ```bash
@@ -151,20 +154,26 @@ or `--set wandb.enabled=false` to disable tracking for a smoke test.
 
 | Config key | Contents | Depends on query text |
 | --- | --- | --- |
-| `data.scene_cache` | scene patches, detections and crop geometry | no |
+| `data.detection_cache` | shared ordered pixel boxes and original image sizes | no |
+| `data.scene_cache` | CLIP scene patches and native global embeddings | no |
 | `data.fafa_image_cache` | pooled person features and target tokens | no |
 | `data.fafa_query_cache` | text-conditioned query crop features | yes |
 
-The three caches are separate so a text edit only rebuilds FAFA query features.
-Crop order comes from the shared scene cache and is shared by both FAFA paths. Visual
-caches never store training labels. Train-only identity labels are aligned to
+The four caches are separate: a text edit rebuilds only FAFA query features, and
+a scene-encoder change leaves detection and FAFA features reusable. Both FAFA
+paths and the standalone FAFA baseline share the detection cache's crop order.
+Pixel boxes are mapped to CLIP letterbox coordinates only when joining features.
+Visual caches never store training labels. Train-only identity labels are aligned to
 cached boxes in `cache.supervision_cache` before the first epoch.
 
 Cache extraction is resumable. A completed cache is reused; an interrupted cache
-keeps a `.building` marker and resumes its missing shards. CLIP training requires
-newly built scene and FAFA caches. DINO/BERT
-checkpoints and legacy DINO scene caches are incompatible with this architecture;
-use the separate default cache and output directories.
+keeps a `.building` marker and resumes its missing shards. Completed unified CLIP
+scene caches remain readable for scene features. Import their boxes (or boxes
+from a matching legacy DINO scene cache) with `--cache-stage detections
+--import-scene-cache OLD_SCENE_DIR`. Build FAFA features once in the new independent
+directories; old scene-bound FAFA indices are not silently rebound. DINO/BERT
+model checkpoints require fresh CLIP training. See
+[detection cache migration](docs/detection_cache.md).
 
 ## Dataset snapshot
 

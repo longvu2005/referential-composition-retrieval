@@ -10,12 +10,12 @@ from tqdm import tqdm
 
 from rcr.baselines.fafa import load_fafa, text_policy
 from rcr.common.data import load_rcr_inputs
+from rcr.common.detection import DetectionCache
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
 from rcr.common.torch_io import require_disk_space, save_torch
 from rcr.proposed.cache.build import (
     cache_paths,
-    check_cache_config,
     existing_cache,
     fafa_spec,
     load_fafa_config,
@@ -28,30 +28,6 @@ from rcr.proposed.cache.native import (
     query_entries,
     subject_conditions,
 )
-from rcr.proposed.cache.store import GalleryCache
-
-
-def boxes_to_pixels(
-    boxes: torch.Tensor,
-    image_size: tuple[int, int],
-    scene_size: tuple[int, int],
-) -> torch.Tensor:
-    """Invert the legacy ImageOps.pad transform without rerunning detection."""
-    width, height = image_size
-    scene_width, scene_height = scene_size
-    scale = min(scene_width / width, scene_height / height)
-    resized_width = min(scene_width, round(width * scale))
-    resized_height = min(scene_height, round(height * scale))
-    left = round((scene_width - resized_width) * 0.5)
-    top = round((scene_height - resized_height) * 0.5)
-    size = boxes.new_tensor([scene_width, scene_height] * 2)
-    offset = boxes.new_tensor([left, top, left, top])
-    factors = boxes.new_tensor([resized_width / width, resized_height / height] * 2)
-    return (
-        ((boxes * size - offset) / factors)
-        .clamp(min=0)
-        .minimum(boxes.new_tensor([width, height] * 2))
-    )
 
 
 def _ready(path, cache_id, key, shape, dtype):
@@ -115,10 +91,9 @@ class _Extractor:
         self.text_policy = text_policy(self.native_cfg)
         self.device = resolve_device(cfg)
         self.signature = {
-            "source_cache_id": source.cache_id,
+            "detection_cache_id": source.cache_id,
             "spec": fafa_spec(self.native_cfg),
             "checkpoint_sha256": sha256_file(self.native_cfg["checkpoint"]["path"]),
-            "image_encoder": cfg["image_encoder"],
             "detector": cfg["detector"],
             "encoder_precision": "float16" if self.device.type == "cuda" else "float32",
         }
@@ -142,10 +117,9 @@ class _Extractor:
         item = self.source.load_geometry(i)
         with Image.open(self.data.image_path(image_id)) as image_file:
             image = image_file.convert("RGB")
-            boxes = item.get("boxes_pixel")
-            if boxes is None:
-                h, w = self.cfg["image_encoder"]["scene_size"]
-                boxes = boxes_to_pixels(item["boxes_scene"], image.size, (w, h))
+            if image.size != item["image_size"]:
+                raise ValueError("raw image dimensions differ from detection cache")
+            boxes = item["boxes_pixel"]
             if (
                 boxes.shape != (count, 4)
                 or not torch.isfinite(boxes).all()
@@ -254,20 +228,16 @@ def _build_images(cfg, root, extractor):
     _publish(
         root,
         {
-            "format_version": 6,
+            "format_version": 7,
             "layout": "fafa",
             "cache_id": cache_id,
-            "source_cache_id": source.cache_id,
+            "detection_cache_id": source.cache_id,
             "signature": extractor.signature,
             "image_ids": source.image_ids,
             "persons": persons_index,
             "person_offsets": offsets,
             "mask": source.mask,
-            "patch_hw": source.patch_hw,
-            "scene_dim": source.scene_dim,
-            "global_dim": source.global_dim,
             "storage_dtype": storage,
-            "image_encoder": cfg["image_encoder"],
             "detector": cfg["detector"],
             "person_encoder": {
                 "backend": "fafa",
@@ -409,16 +379,12 @@ def _build_queries(root, extractor):
 def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
     if stage not in ("fafa", "fafa-image", "fafa-query"):
         raise ValueError("invalid FAFA cache stage")
-    source_root, image_root, query_root = cache_paths(cfg)
-    source = GalleryCache(source_root)
-    check_cache_config(source, cfg, person_backend="clip")
-    if source.cache_id is None:
-        raise ValueError(
-            "Scene source requires a cache_id to bind FAFA features safely"
-        )
+    detection_root, _, image_root, query_root = cache_paths(cfg)
+    source = DetectionCache(detection_root)
+    source.check_config(cfg["detector"])
     data = load_rcr_inputs(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     source.validate_gallery(data.gallery_ids)
-    image = existing_cache(cfg, image_root, scene_root=source_root)
+    image = existing_cache(cfg, image_root, detection_root=detection_root)
     if image is not None:
         image.validate_gallery(data.gallery_ids)
         if stage == "fafa-image":

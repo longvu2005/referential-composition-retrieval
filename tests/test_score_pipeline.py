@@ -84,6 +84,22 @@ def saved_pipeline(tmp_path, monkeypatch):
     return cfg, data, model.binding_scale.item()
 
 
+@pytest.mark.parametrize("field", ["scene_cache_id", "detection_cache_id"])
+def test_retrieval_rejects_changed_scene_or_crop_source_before_loading_text(
+    saved_pipeline, monkeypatch, field
+):
+    cfg, _, _ = saved_pipeline
+    cache = retrieve.GalleryCache("unused")
+    setattr(cache, field, "different-source")
+    monkeypatch.setattr(
+        retrieve,
+        "load_text_modules",
+        lambda *a, **k: pytest.fail("provenance must fail before text loading"),
+    )
+    with pytest.raises(ValueError, match=field):
+        retrieve.retrieve(cfg)
+
+
 def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
     saved_pipeline,
 ):

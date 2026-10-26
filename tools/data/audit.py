@@ -26,13 +26,21 @@ def main():
         action="store_true",
         help="exit 1 after saving on invalid/conflicting labels or unproven scope",
     )
-    parser.add_argument("--cache", help="Optional existing proposed cache directory")
     parser.add_argument(
-        "--scene-cache", help="CLIP scene/geometry source for a FAFA person cache"
+        "--cache", help="Historical unified cache; prefer --detection-cache"
+    )
+    parser.add_argument(
+        "--detection-cache",
+        help="Shared pixel-box cache; no scene or FAFA features needed",
+    )
+    parser.add_argument(
+        "--scene-cache", help="Scene source for a historical FAFA cache wrapper"
     )
     parser.add_argument("--output", default="runs/data_audit.json")
     parser.add_argument("--scene-size", nargs=2, type=int, metavar=("HEIGHT", "WIDTH"))
     args = parser.parse_args()
+    if args.detection_cache and (args.cache or args.scene_cache):
+        parser.error("use --detection-cache alone, or legacy --cache/--scene-cache")
     data = load_rcr_data(args.final_dir, args.image_root)
     full = audit_full_positives(
         data,
@@ -69,12 +77,15 @@ def main():
     except ValueError as error:
         report["structural_error"] = str(error)
     report["detection"] = None
-    if args.cache:
+    if args.detection_cache or args.cache:
+        from rcr.common.detection import DetectionCache
         from rcr.proposed.cache.store import GalleryCache
 
         report["detection"] = audit_detection(
             data,
-            GalleryCache(args.cache, scene_root=args.scene_cache),
+            DetectionCache(args.detection_cache)
+            if args.detection_cache
+            else GalleryCache(args.cache, scene_root=args.scene_cache),
             scene_size=args.scene_size,
         )
     write_json(args.output, report)

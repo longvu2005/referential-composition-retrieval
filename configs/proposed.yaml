@@ -6,9 +6,10 @@ split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  fafa_image_cache: cache/clip-b32-fafa-images  # pooled persons + projected target tokens
-  fafa_query_cache: cache/clip-b32-fafa-queries
-  scene_cache: cache/proposed-clip-b32  # CLIP patches/global + shared person boxes
+  detection_cache: cache/grounding-dino-tiny  # shared pixel boxes, independent of CLIP
+  fafa_image_cache: cache/fafa-person-images  # pooled persons + projected target tokens
+  fafa_query_cache: cache/fafa-person-queries
+  scene_cache: cache/proposed-clip-b32  # CLIP patches/global only
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3

@@ -156,6 +156,7 @@ def _retrieve(
     cache = GalleryCache(
         data_cfg["fafa_image_cache"],
         scene_root=data_cfg.get("scene_cache"),
+        detection_root=data_cfg["detection_cache"],
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
         native_lru_mib=cfg.get("cache", {}).get("native_lru_mib", 0),
@@ -177,6 +178,9 @@ def _retrieve(
         raise ValueError("native FAFA cache differs from training")
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")
+    for key in ("scene_cache_id", "detection_cache_id"):
+        if checkpoint.get(key) != getattr(cache, key, None):
+            raise ValueError(f"retrieval {key} differs from training")
     if cache.global_dim != checkpoint.get("global_dim"):
         raise ValueError("retrieval CLIP global dimensions differ from training")
     if (cache.scene_dim, cache.person_dim) != (
@@ -253,6 +257,8 @@ def _retrieve(
                 "checkpoint_sha256": checkpoint_sha256,
                 "validation_sha256": validation_sha256,
                 "cache_id": cache.cache_id,
+                "scene_cache_id": getattr(cache, "scene_cache_id", None),
+                "detection_cache_id": getattr(cache, "detection_cache_id", None),
                 "architecture_version": model.architecture_version,
                 "query_subset": len(samples) != full_num_queries,
                 **benchmark,
@@ -295,6 +301,8 @@ def _retrieve(
                 "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
                 "best_val_checkpoint_score": checkpoint.get("best_score"),
                 "cache_id": cache.cache_id,
+                "scene_cache_id": getattr(cache, "scene_cache_id", None),
+                "detection_cache_id": getattr(cache, "detection_cache_id", None),
                 "native_cache": cache.native.metadata,
                 "num_queries": len(samples),
                 "num_gallery": len(output["gallery_ids"]),

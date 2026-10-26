@@ -144,7 +144,7 @@ def audit_detection(data, cache, *, scene_size=None) -> dict:
     cache.validate_gallery(data.gallery_ids)
     from rcr.proposed.supervision import align_identities
 
-    source = cache._scene_cache or cache
+    source = getattr(cache, "_scene_cache", None) or cache
     scene_size = scene_size or (source.encoder_metadata.get("image_encoder") or {}).get(
         "scene_size"
     )
@@ -153,7 +153,7 @@ def audit_detection(data, cache, *, scene_size=None) -> dict:
 
     def identities(image_id):
         if image_id not in detected:
-            item = cache._load_item(by_id[image_id])
+            item = cache.load_geometry(by_id[image_id])
             labels = align_identities(
                 item,
                 data.gt_head_boxes_by_image.get(image_id, []),

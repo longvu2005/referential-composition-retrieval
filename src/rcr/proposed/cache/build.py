@@ -9,9 +9,11 @@ import yaml
 from rcr.baselines.fafa import text_policy
 from rcr.common.config import load_config
 from rcr.common.data import load_rcr_inputs
+from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.io import sha256_file
+from rcr.common.runtime import resolve_device
 from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
-from rcr.proposed.cache.scene import _prepare_scene
+from rcr.proposed.cache.scene import SceneCache, _prepare_scene
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import check_clip_config
 
@@ -58,23 +60,22 @@ def check_cache_config(
     """Check encoder provenance only when building or explicitly reusing a cache."""
     if "person_encoder" not in cfg:
         return  # Small in-memory test configs have no external encoder spec.
+    if person_backend == "clip":
+        if cache.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
+            raise ValueError("cache image encoder/preprocessing differs from config")
+        return
     if cache._scene_cache is not None:
         check_cache_config(cache._scene_cache, cfg, person_backend="clip")
-    if cache.format_version == 1:
-        raise ValueError(
-            "CLIP scene cache needs encoder metadata; rebuild --cache-stage scene"
-        )
-    if cache.format_version not in (2, 4, 5, 6):
-        raise ValueError("unsupported cache format")
+    if cache.format_version != 7 or cache.detections is None:
+        raise ValueError("build a FAFA image cache bound to data.detection_cache")
+    cache.detections.check_config(cfg["detector"])
     actual = cache.encoder_metadata["person_encoder"] or {}
     if actual.get("backend") != person_backend:
         raise ValueError("cache person encoder differs; use a matching cache directory")
-    if cache.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
-        raise ValueError("cache image encoder/preprocessing differs from config")
     if cache.encoder_metadata["detector"] != cfg["detector"]:
         raise ValueError("cache detector differs from config")
     if person_backend == "fafa":
-        if cache.format_version not in (4, 5, 6) or cache.native is None:
+        if cache.native is None:
             raise ValueError("build a FAFA image cache in data.fafa_image_cache")
         native_path = cfg["person_encoder"].get("fafa_config")
         if native_path is None or not Path(native_path).is_file():
@@ -94,11 +95,16 @@ def existing_cache(
     root: Path,
     *,
     scene_root: Path | None = None,
+    detection_root: Path | None = None,
     person_backend: str = "fafa",
 ):
     if not (root / "index.pt").is_file() or (root / ".building").exists():
         return None
-    cache = GalleryCache(root, scene_root=scene_root)
+    cache = (
+        SceneCache(root)
+        if person_backend == "clip"
+        else GalleryCache(root, scene_root=scene_root, detection_root=detection_root)
+    )
     check_cache_config(cache, cfg, person_backend=person_backend)
     return cache
 
@@ -128,54 +134,65 @@ def query_cache_ready(root: Path, image: GalleryCache, samples, policy: dict) ->
     return queries.text_policy == policy and queries.contains_samples(samples)
 
 
-def cache_paths(cfg: dict) -> tuple[Path, Path, Path]:
+def cache_paths(cfg: dict) -> tuple[Path, Path, Path, Path]:
     """Keep every cache separate, including through symlinks and parent paths."""
     data = cfg["data"]
     if "dino_cache" in data:
         raise ValueError(
-            "replace data.dino_cache with data.scene_cache and build CLIP features"
+            "replace data.dino_cache with data.detection_cache and data.scene_cache"
         )
     if "cache" in data or "native_cache" in data:
         raise ValueError(
             "replace data.cache/data.native_cache with data.fafa_image_cache and "
-            "data.fafa_query_cache; a completed unified cache can be reused as "
-            "fafa_image_cache"
+            "data.fafa_query_cache, and add data.detection_cache; "
+            "rebuild FAFA features for the separated crop contract"
         )
-    paths = tuple(
-        Path(data[key])
-        for key in ("scene_cache", "fafa_image_cache", "fafa_query_cache")
-    )
+    keys = ("detection_cache", "scene_cache", "fafa_image_cache", "fafa_query_cache")
+    missing = [key for key in keys if key not in data]
+    if missing:
+        raise ValueError(f"separated caches require data keys: {', '.join(missing)}")
+    paths = tuple(Path(data[key]) for key in keys)
     resolved = [path.resolve() for path in paths]
     for i, first in enumerate(resolved):
         for second in resolved[i + 1 :]:
             if first == second or first in second.parents or second in first.parents:
                 raise ValueError(
-                    "Scene, FAFA image and query caches must be separate directories"
+                    "Detection, scene, FAFA image and query caches "
+                    "must be separate directories"
                 )
     return paths
 
 
-def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
+def prepare_cache(cfg: dict, *, stage: str = "all", import_scene=None) -> None:
     """Build each cache independently; never write to a completed image cache."""
-    if stage not in ("all", "scene", "fafa", "fafa-image", "fafa-query"):
+    if stage not in ("all", "detections", "scene", "fafa", "fafa-image", "fafa-query"):
         raise ValueError("invalid cache stage")
-    check_clip_config(cfg)
-    root, image_root, query_root = cache_paths(cfg)
+    if import_scene is not None and stage != "detections":
+        raise ValueError("--import-scene-cache requires --cache-stage detections")
+    if stage in ("all", "scene"):
+        check_clip_config(cfg)
+    detection_root, root, image_root, query_root = cache_paths(cfg)
     data_cfg = cfg["data"]
     data = load_rcr_inputs(data_cfg["final_dir"], data_cfg["image_root"])
-    source = existing_cache(cfg, root, person_backend="clip")
-    if source is not None:
-        source.validate_gallery(data.gallery_ids)
-        print(f"Using existing CLIP scene cache: {root}", flush=True)
-    elif stage not in ("all", "scene"):
-        raise ValueError(
-            "CLIP scene cache missing/incomplete; run --cache-stage scene first"
+    if stage in ("all", "detections"):
+        build_detection_cache(
+            data.gallery_ids,
+            [data.image_path(i) for i in data.gallery_ids],
+            detection_root,
+            cfg["detector"],
+            device="cpu" if import_scene is not None else resolve_device(cfg),
+            import_scene=import_scene,
         )
-    if source is None:
+    if stage == "detections":
+        return
+    if stage in ("all", "scene"):
         _prepare_scene(cfg, data, root)
     if stage == "scene":
         return
-    image = existing_cache(cfg, image_root, scene_root=root)
+    detections = DetectionCache(detection_root)
+    detections.validate_gallery(data.gallery_ids)
+    detections.check_config(cfg["detector"])
+    image = existing_cache(cfg, image_root, detection_root=detection_root)
     if image is not None:
         image.validate_gallery(data.gallery_ids)
     if stage == "fafa-image" and image is not None:
@@ -192,7 +209,7 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
         return
     run_person_worker(cfg, stage="fafa" if stage == "all" else stage)
     if stage != "fafa-query":
-        image = existing_cache(cfg, image_root, scene_root=root)
+        image = existing_cache(cfg, image_root, detection_root=detection_root)
         if image is None:
             raise RuntimeError("FAFA image build did not publish index.pt")
     if stage != "fafa-image":

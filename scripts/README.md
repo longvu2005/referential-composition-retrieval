@@ -25,7 +25,7 @@ supports deterministic annotation and JSON reports without Torch.
 Proposed requires a separate FAFA environment only to extract FAFA person
 features. Configure `person_encoder.python` in `configs/proposed.yaml`.
 Training/retrieval from completed caches need only the proposed environment.
-The standalone FAFA baseline also requires Proposed's completed scene/person-box cache;
+The standalone FAFA baseline also requires the shared completed detection cache;
 its `prepare` command checks this prerequisite and reports the build command.
 
 ## Dataset

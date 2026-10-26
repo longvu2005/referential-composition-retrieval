@@ -79,6 +79,8 @@ def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples):
         evaluation=cfg.get("evaluation", {"enabled": False}),
         cache={
             "id": cache.cache_id,
+            "scene_id": getattr(cache, "scene_cache_id", None),
+            "detection_id": getattr(cache, "detection_cache_id", None),
             "patch_hw": list(cache.patch_hw),
             "scene_dim": cache.scene_dim,
             "person_dim": cache.person_dim,
@@ -201,6 +203,8 @@ def _make_checkpoint(
         "global_dim": model.global_dim,
         "encoder_metadata": cache.encoder_metadata,
         "cache_id": cache.cache_id,
+        "scene_cache_id": getattr(cache, "scene_cache_id", None),
+        "detection_cache_id": getattr(cache, "detection_cache_id", None),
         "native_cache": cache.native.metadata,
         "architecture_version": model.architecture_version,
         "representation": "shared_person",
@@ -237,6 +241,7 @@ def train(cfg: dict) -> Path:
     cache = GalleryCache(
         data_cfg["fafa_image_cache"],
         scene_root=data_cfg.get("scene_cache"),
+        detection_root=data_cfg["detection_cache"],
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
         native_lru_mib=cache_cfg.get("native_lru_mib", 0),
