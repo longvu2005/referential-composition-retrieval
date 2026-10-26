@@ -1,3 +1,4 @@
+
 """Run one RCR research stage; experiment settings live in YAML."""
 
 import argparse
@@ -17,6 +18,7 @@ def main(argv=None):
     shared.add_argument("--config", required=True)
     shared.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE")
     commands = parser.add_subparsers(dest="command", required=True)
+
     for name in (
         "prepare",
         "build-cache",
@@ -53,18 +55,22 @@ def main(argv=None):
                 action="store_true",
                 help="Proposed val only: export full-gallery scores for offline tuning",
             )
+
     args = parser.parse_args(argv)
     try:
         cfg = override_config(load_config(args.config), parse_overrides(args.set))
     except (ValueError, OSError) as error:
         parser.error(str(error))
+
     command, method = args.command, cfg.get("method")
+    if method not in ("proposed", "clip", "fafa"):
+        parser.error("method must be proposed, clip or fafa")
     if command == "calibrate":
+        if method != "proposed":
+            parser.error("calibrate is only available for proposed")
         from rcr.proposed.calibration import calibrate
 
         return calibrate(cfg)
-    if method not in ("proposed", "clip", "fafa"):
-        parser.error("method must be proposed, clip or fafa")
     if (
         command in ("train", "build-cache", "prepare-supervision")
         and method != "proposed"
@@ -76,6 +82,7 @@ def main(argv=None):
             command == "run" and cfg["split"] == "train"
         ):
             parser.error(f"invalid split for {command}: {cfg['split']}")
+
     save_tuning = getattr(args, "save_tuning", False)
     if save_tuning and (method != "proposed" or cfg["split"] != "val"):
         parser.error("--save-tuning is only available for proposed with --split val")
@@ -126,9 +133,10 @@ def main(argv=None):
         from rcr.baselines.runner import run_retrieval
 
         return run_retrieval(cfg)
-    from rcr.evaluation.runner import evaluate_run
+    if command == "evaluate":
+        from rcr.evaluation.runner import evaluate_run
 
-    return evaluate_run(cfg)
+        return evaluate_run(cfg)
 
 
 if __name__ == "__main__":
