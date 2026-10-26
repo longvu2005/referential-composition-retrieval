@@ -12,4 +12,4 @@ python_bin="${PYTHON:-.venv-fafa/bin/python}"
 if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py prepare --config configs/fafa.yaml
 fi
-"$python_bin" tools/run.py run --config configs/fafa.yaml --splits "$split"
+"$python_bin" tools/run.py run --config configs/fafa.yaml --split "$split"

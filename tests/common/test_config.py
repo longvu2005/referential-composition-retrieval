@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -56,10 +57,11 @@ def test_help_and_config_parsing_do_not_import_model_runtime():
 import sys
 sys.path[:0] = ['src', '.']
 from tools.run import main
-try:
-    main(['--help'])
-except SystemExit as error:
-    assert error.code == 0
+for args in (['--help'], ['run', '--help'], ['build-cache', '--help']):
+    try:
+        main(args)
+    except SystemExit as error:
+        assert error.code == 0
 heavy = {'torch', 'transformers', 'scipy', 'rcr.evaluation.evaluate'}
 assert not heavy & sys.modules.keys()
 """,
@@ -74,8 +76,8 @@ assert not heavy & sys.modules.keys()
 @pytest.mark.parametrize(
     "arguments,message",
     [
-        (["run", "--splits", "test", "--prepare"], "--splits val"),
-        (["retrieve", "--splits", "train"], "--splits val"),
+        (["run", "--split", "test"], "--split val"),
+        (["retrieve", "--split", "train"], "--split val"),
     ],
 )
 def test_tuning_export_rejects_nonvalidation_before_stages(arguments, message, capsys):
@@ -90,3 +92,60 @@ def test_tuning_export_rejects_baseline_method_before_stages(capsys):
         cli.main(["retrieve", "--config", "configs/fafa.yaml", "--save-tuning"])
     assert error.value.code == 2
     assert "only available for proposed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("method", ["proposed", "clip", "fafa"])
+@pytest.mark.parametrize("split_flag,expected", [(None, "test"), ("val", "val")])
+def test_run_honors_yaml_overrides_and_split_precedence(
+    monkeypatch, method, split_flag, expected
+):
+    """Dispatch one split without changing the selected checkpoint or YAML file."""
+    name = "rcr.proposed.runner" if method == "proposed" else "rcr.baselines.runner"
+    runner = ModuleType(name)
+    calls = []
+    runner.run_experiment = lambda cfg, *args, **kwargs: calls.append(
+        (cfg, args, kwargs)
+    )
+    monkeypatch.setitem(sys.modules, name, runner)
+    path = Path(f"configs/{method}.yaml")
+    original = path.read_bytes()
+    arguments = [
+        "run",
+        "--config",
+        str(path),
+        "--set",
+        "split=test",
+        "output.dir=runs/custom",
+    ]
+    if method == "proposed":
+        arguments.append("checkpoint=runs/frozen/best.pt")
+    if split_flag:
+        arguments += ["--split", split_flag]
+    cli.main(arguments)
+    assert len(calls) == 1
+    cfg, _, options = calls[0]
+    assert cfg["split"] == expected
+    assert cfg["output"]["dir"] == "runs/custom"
+    if method == "proposed":
+        assert cfg["checkpoint"] == "runs/frozen/best.pt"
+        assert options == {"save_tuning": False}
+    else:
+        assert options == {"splits": [expected]}
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        (["run", "--set", "split=train"], "invalid split"),
+        (["retrieve", "--set", "split=typo"], "invalid split"),
+        (["train", "--set", "train.epochs=0"], "positive integer"),
+        (["run", "--set", "retrieval.top_m=1"], "candidate_ks"),
+        (["run", "--set", "split=test", "--save-tuning"], "--split val"),
+    ],
+)
+def test_invalid_experiments_fail_before_model_imports(arguments, message, capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main([*arguments, "--config", "configs/proposed.yaml"])
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err

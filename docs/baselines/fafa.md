@@ -98,7 +98,7 @@ Detector threshold/cap, selector model/threshold/margin/member cap, FDA k/use_so
 preprocessing and unmatched score are explicit in `configs/fafa.yaml`. Defaults
 are initial heuristics, not claimed optima. Compare any manual changes using
 complete-val Full-mAP in separate output roots; retain the chosen configuration.
-`run --splits val` locks configuration/artifact hashes in `protocol.json`.
+`run --split val` locks configuration/artifact hashes in `protocol.json`.
 Test-only rejects missing/stale locks. No automatic FAFA sweep or test-based
 hyperparameter selection is performed.
 
@@ -116,9 +116,9 @@ Use the isolated FAFA environment in [baselines](../baselines.md):
 .venv-proposed/bin/python tools/run.py build-cache \
   --config configs/proposed.yaml --cache-stage detections
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits val
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split val
 # Once the test protocol is eligible:
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split test
 ```
 
 The first command builds the shared detector cache once. FAFA preparation obtains

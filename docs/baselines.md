@@ -37,15 +37,17 @@ Call `tools/run.py` directly for custom YAML, stages or overrides.
 ## CLIP
 
 ```bash
-python tools/run.py run --config configs/clip.yaml --prepare
+python tools/run.py prepare --config configs/clip.yaml
 # Reuse prepared weights/cache:
 python tools/run.py run --config configs/clip.yaml
 # Split the experiment into val selection and frozen test:
-python tools/run.py run --config configs/clip.yaml --splits val
-python tools/run.py run --config configs/clip.yaml --splits test
-# Run only image/text baselines:
-python tools/run.py run --config configs/clip.yaml --modes clip_image clip_text
+python tools/run.py run --config configs/clip.yaml --split val
+python tools/run.py run --config configs/clip.yaml --split test
 ```
+
+`run` computes all four CLIP modes for one split, using `split` from YAML unless
+`--split` is supplied. For individual fixed-weight modes, use `retrieve` and
+`evaluate` with YAML `mode` or `--set mode=...`.
 
 One official OpenAI CLIP checkpoint contains both encoders. There is no separate
 fusion model, detector, LLM or RCR training. Both native TorchScript and raw
@@ -63,7 +65,7 @@ standard deviation of either branch over the complete split gallery. Constants
 contribute zero; the self score is saved as a finite zero placeholder and excluded from rankings.
 This applies to both validation weight selection and standalone retrieval.
 Selections created with the earlier self-inclusive convention are rejected:
-rerun `run --splits val` before test. Raw feature/branch caches remain reusable.
+rerun `run --split val` before test. Raw feature/branch caches remain reusable.
 
 Image/text features are normalized. Image features, text features and branch
 score arrays are cached; fusion reuses these arrays. A warm cache does not load
@@ -76,36 +78,34 @@ criterion: Full-mAP. Ties prefer alpha nearest 0.5, then smaller alpha.
 Selection is saved before touching test inputs. Test-only requires matching val
 provenance; changed weights, val labels, grid or text require a new val run.
 Changing test labels cannot affect the selection. Val-optimal does not guarantee
-test-optimal performance. Running val with only one fusion mode replaces the
-selection file with that mode; select both if both will be tested later.
+test-optimal performance. The CLI always selects both fusion modes together.
 
-For a fixed-weight run or retrieval smoke check:
+For a fixed-weight run on the complete validation split:
 
 ```bash
 python tools/run.py retrieve --config configs/clip.yaml \
-  --modes early_fusion --splits val --max-queries 2 \
-  --set fusion.image_weight=0.4 fusion.text_weight=0.6
+  --split val --set mode=early_fusion fusion.image_weight=0.4 fusion.text_weight=0.6
 python tools/run.py evaluate --config configs/clip.yaml \
-  --modes early_fusion --splits val --max-queries 2
+  --split val --set mode=early_fusion
 ```
 
 Low-level `retrieve` uses YAML weights; it does not read `tuning.json`.
-Use the same mode/split/subset when evaluating saved results.
+Use the same mode and split when evaluating saved results.
 
 ## FAFA
 
 ```bash
 .venv-proposed/bin/python tools/run.py build-cache \
   --config configs/proposed.yaml --cache-stage detections
-python tools/run.py run --config configs/fafa.yaml --prepare
+python tools/run.py prepare --config configs/fafa.yaml
 python tools/run.py run --config configs/fafa.yaml
 ```
 
 `prepare` gets the pinned official source, released checkpoint, CLIP selector,
 and FAFA runtime assets. It validates the shared detection cache but does not build it;
 use the Proposed environment for the first command above. Model code remains in
-the authors' checkout. The configured commit, runtime cache and checkpoint checks remain;
-`--force` refreshes prepared assets. Asset preparation can require substantial
+the authors' checkout. The configured commit, runtime cache and checkpoint checks remain.
+Asset preparation can require substantial
 RAM, disk space and network access. Retrieval uses the prepared assets.
 
 FAFA is a single-person model adapted here to RCR scenes: detect people, select
@@ -122,9 +122,9 @@ The long `fafa.py`/`fafa_adapter.py` files have separate responsibilities:
 upstream model/runtime integration versus scene/Subject adaptation. Both are
 needed for a faithful baseline and are retained.
 
-`run --splits val` freezes the supplied FAFA adapter configuration/artifact hashes
+`run --split val` freezes the supplied FAFA adapter configuration/artifact hashes
 in `protocol.json`. This is a manual validation protocol, not an automatic sweep.
-`run --splits test` requires a matching lock and rejects changed settings before
+`run --split test` requires a matching lock and rejects changed settings before
 inference.
 
 ## Saved results

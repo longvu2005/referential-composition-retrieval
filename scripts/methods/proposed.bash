@@ -10,11 +10,13 @@ if [[ "$#" -gt 1 || ( "$split" != val && "$split" != test ) ]]; then
 fi
 python_bin="${PYTHON:-.venv-proposed/bin/python}"
 if [[ "$split" == val ]]; then
-    "$python_bin" tools/run.py run --config configs/proposed.yaml \
-        --prepare --build-cache --train --splits val
+    "$python_bin" tools/run.py prepare --config configs/proposed.yaml
+    "$python_bin" tools/run.py build-cache --config configs/proposed.yaml
+    "$python_bin" tools/run.py train --config configs/proposed.yaml
+    "$python_bin" tools/run.py run --config runs/proposed-clip-b32/config.yaml --split val
     "$python_bin" tools/run.py calibrate --config configs/calibration.yaml
     # Publish the chosen model's validation result under the same root as test.
-    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --splits val
+    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split val
 else
-    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --splits test
+    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split test
 fi

@@ -215,10 +215,10 @@ def fafa_context(data, cfg, device):
 def _load_selection(path: Path, context: str, label: str) -> dict:
     """Load one validation-frozen selection file for a test run."""
     if not path.is_file():
-        raise FileNotFoundError(f"Run --splits val first: missing {path}")
+        raise FileNotFoundError(f"Run --split val first: missing {path}")
     selection = json.loads(path.read_text(encoding="utf-8"))
     if selection.get("split") != "val" or selection.get("context_sha256") != context:
-        raise ValueError(f"Saved {label} is stale; run --splits val again")
+        raise ValueError(f"Saved {label} is stale; run --split val again")
     return selection
 
 
@@ -234,7 +234,7 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
         modes = list(dict.fromkeys(canonical_mode(m) for m in (modes or MODES)))
     elif cfg["method"] == "fafa":
         if modes:
-            raise ValueError("--modes is only for CLIP")
+            raise ValueError("modes are only for CLIP")
         modes = [None]
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
@@ -285,7 +285,7 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
             selection = _load_selection(tuning_path, context, "fusion selection")
             if not all(m in selection["modes"] for m in fusion_modes):
                 raise ValueError(
-                    "Saved selection lacks requested fusion modes; run --splits val"
+                    "Saved selection lacks requested fusion modes; run --split val"
                 )
     summary = Path(cfg["output"]["dir"]) / "summary.csv"
     preserve_file(summary)

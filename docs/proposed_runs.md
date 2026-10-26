@@ -81,8 +81,9 @@ The model is evaluated on the complete validation split at
 Use a separate output directory for every seed or ablation:
 
 ```bash
-python tools/run.py run --config configs/proposed.yaml --train --splits val \
+python tools/run.py train --config configs/proposed.yaml \
   --set train.seed=1 output.dir=runs/proposed-seed1
+python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
 ```
 
 W&B tracking is configured by the `wandb` block in `configs/proposed.yaml`.
@@ -119,7 +120,7 @@ so their weights cannot silently carry over to a different Fine scoring mode.
 ```bash
 python tools/run.py run \
   --config runs/clip-b32-calibration/selected.yaml \
-  --splits test
+  --split test
 ```
 
 The runner verifies the checkpoint hash, validation fingerprint, feature cache
@@ -129,7 +130,7 @@ evaluator.
 To publish the selected validation result before test:
 
 ```bash
-python tools/run.py run --config runs/clip-b32-calibration/selected.yaml --splits val
+python tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split val
 ```
 
 ## Kaggle reuse
@@ -248,13 +249,13 @@ Use the existing trained checkpoint and caches to make one validation export:
 
 ```bash
 python tools/run.py run --config runs/proposed-clip-b32/config.yaml \
-  --splits val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
+  --split val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
 ```
 
 `retrieve --save-tuning` is also available when evaluation will be run separately.
 The flag is Proposed/validation only. It never triggers training and is not
-passed to periodic training validation. If combined with `run --train`, only the
-standalone retrieval after checkpoint selection performs the full export.
+passed to periodic training validation. Train separately, then run this command
+with the saved training config to export scores from the selected checkpoint.
 Use a new output root to keep the original run together.
 
 Ordinary Coarse Top-M forwards are performed first. The exporter then computes
@@ -300,7 +301,7 @@ python -m rcr.proposed.replay runs/proposed-clip-b32-tuning/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 python tools/run.py evaluate --config runs/proposed-clip-b32/config.yaml \
-  --splits val --set output.dir=runs/replayed
+  --split val --set output.dir=runs/replayed
 ```
 
 These numbers illustrate the CLI; the export does not select an optimal beta.

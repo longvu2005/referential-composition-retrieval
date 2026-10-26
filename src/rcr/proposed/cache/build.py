@@ -168,7 +168,7 @@ def prepare_cache(cfg: dict, *, stage: str = "all", import_scene=None) -> None:
     if stage not in ("all", "detections", "scene", "fafa", "fafa-image", "fafa-query"):
         raise ValueError("invalid cache stage")
     if import_scene is not None and stage != "detections":
-        raise ValueError("--import-scene-cache requires --cache-stage detections")
+        raise ValueError("import_scene requires stage='detections'")
     if stage in ("all", "scene"):
         check_clip_config(cfg)
     detection_root, root, image_root, query_root = cache_paths(cfg)

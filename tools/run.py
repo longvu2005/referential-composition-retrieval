@@ -1,4 +1,4 @@
-"""Run RCR experiments from the repository root after pip install -e ."""
+"""Run one RCR research stage; experiment settings live in YAML."""
 
 import argparse
 from pathlib import Path
@@ -17,169 +17,118 @@ def main(argv=None):
     shared.add_argument("--config", required=True)
     shared.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE")
     commands = parser.add_subparsers(dest="command", required=True)
-    prepare = commands.add_parser("prepare", parents=[shared])
-    prepare.add_argument("--force", action="store_true")
-    cache = commands.add_parser("build-cache", parents=[shared])
-    cache.add_argument(
-        "--cache-stage",
-        choices=("all", "detections", "scene", "fafa", "fafa-image", "fafa-query"),
-        default="all",
-    )
-    cache.add_argument(
-        "--import-scene-cache",
-        help="Import completed legacy scene boxes (detections stage only)",
-    )
-    commands.add_parser("train", parents=[shared])
-    commands.add_parser("prepare-supervision", parents=[shared])
-    for name in ("retrieve", "evaluate", "run"):
+    for name in (
+        "prepare",
+        "build-cache",
+        "prepare-supervision",
+        "train",
+        "retrieve",
+        "evaluate",
+        "run",
+        "calibrate",
+    ):
         command = commands.add_parser(name, parents=[shared])
-        command.add_argument(
-            "--splits",
-            nargs="+",
-            choices=("val", "test") if name == "run" else ("train", "val", "test"),
-        )
-        command.add_argument(
-            "--modes",
-            nargs="+",
-            choices=("clip_image", "clip_text", "early_fusion", "late_fusion"),
-        )
-        if name == "run":
-            for flag in ("prepare", "build-cache", "train", "force"):
-                command.add_argument(f"--{flag}", action="store_true")
-        else:
-            command.add_argument("--max-queries", type=int)
+        if name == "build-cache":
+            command.add_argument(
+                "--cache-stage",
+                default="all",
+                choices=(
+                    "all",
+                    "detections",
+                    "scene",
+                    "fafa",
+                    "fafa-image",
+                    "fafa-query",
+                ),
+            )
+        if name in ("retrieve", "evaluate", "run"):
+            command.add_argument(
+                "--split",
+                choices=("val", "test") if name == "run" else ("train", "val", "test"),
+                help="Override YAML split (default: val)",
+            )
         if name in ("retrieve", "run"):
             command.add_argument(
                 "--save-tuning",
                 action="store_true",
-                help="Proposed val only: save full-gallery scores for offline tuning",
+                help="Proposed val only: export full-gallery scores for offline tuning",
             )
-    commands.add_parser("calibrate", parents=[shared])
     args = parser.parse_args(argv)
-
     try:
         cfg = override_config(load_config(args.config), parse_overrides(args.set))
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    command = args.command
+    command, method = args.command, cfg.get("method")
     if command == "calibrate":
         from rcr.proposed.calibration import calibrate
 
         return calibrate(cfg)
-    method = cfg.get("method")
-    if (
-        command == "build-cache"
-        and args.import_scene_cache
-        and args.cache_stage != "detections"
-    ):
-        parser.error("--import-scene-cache requires --cache-stage detections")
     if method not in ("proposed", "clip", "fafa"):
         parser.error("method must be proposed, clip or fafa")
     if (
         command in ("train", "build-cache", "prepare-supervision")
         and method != "proposed"
     ):
-        parser.error(
-            "train/build-cache/prepare-supervision are only available for proposed"
-        )
-    if command == "run":
-        if (args.train or args.build_cache) and method != "proposed":
-            parser.error("--train/--build-cache are only available for proposed")
-        if args.force and not args.prepare:
-            parser.error("--force requires --prepare")
-    if command == "train" or (command == "run" and args.train):
+        parser.error(f"{command} is only available for proposed")
+    if command in ("retrieve", "evaluate", "run"):
+        cfg["split"] = args.split or cfg.get("split", "val")
+        if cfg["split"] not in ("train", "val", "test") or (
+            command == "run" and cfg["split"] == "train"
+        ):
+            parser.error(f"invalid split for {command}: {cfg['split']}")
+    save_tuning = getattr(args, "save_tuning", False)
+    if save_tuning and (method != "proposed" or cfg["split"] != "val"):
+        parser.error("--save-tuning is only available for proposed with --split val")
+    if command == "train":
         try:
             validate_training_schedule(cfg)
         except (KeyError, ValueError) as error:
             parser.error(str(error))
-        if command == "run" and not cfg.get("evaluation", {}).get("enabled", False):
-            parser.error("run --train requires validation to select best.pt")
-    if getattr(args, "modes", None) and method != "clip":
-        parser.error("--modes is only available for CLIP")
-    if getattr(args, "save_tuning", False) and method != "proposed":
-        parser.error("--save-tuning is only available for proposed")
-    if getattr(args, "save_tuning", False):
-        tuning_splits = args.splits or (
-            ["val"] if command == "run" else [cfg.get("split", "val")]
-        )
-        if list(dict.fromkeys(tuning_splits)) != ["val"]:
-            parser.error("--save-tuning requires --splits val")
-    if getattr(args, "max_queries", None) is not None and args.max_queries < 1:
-        parser.error("--max-queries must be positive")
-    if (
-        method == "proposed"
-        and command in ("train", "retrieve", "run")
-        and max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]
-    ):
-        parser.error("candidate_ks cannot exceed top_m")
+    if method == "proposed" and command in ("train", "retrieve", "run"):
+        if max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]:
+            parser.error("candidate_ks cannot exceed top_m")
 
-    if command == "prepare" or getattr(args, "prepare", False):
+    if command == "prepare":
         if method == "proposed":
             from rcr.proposed.cache.build import run_person_worker
 
-            run_person_worker(cfg, prepare=True, force=args.force)
-        else:
-            from rcr.baselines.prepare import prepare
+            return run_person_worker(cfg, prepare=True)
+        from rcr.baselines.prepare import prepare
 
-            prepare(cfg, force=args.force)
-        if command == "prepare":
-            return None
+        return prepare(cfg)
     if command == "build-cache":
         from rcr.proposed.cache.build import prepare_cache
 
-        return prepare_cache(
-            cfg, stage=args.cache_stage, import_scene=args.import_scene_cache
-        )
-    if command == "train":
-        from rcr.proposed.train import train
-
-        return train(cfg)
+        return prepare_cache(cfg, stage=args.cache_stage)
     if command == "prepare-supervision":
         from rcr.proposed.supervision import prepare_train_supervision
 
         return prepare_train_supervision(cfg)
-    splits = list(
-        dict.fromkeys(
-            args.splits or (["val"] if command == "run" else [cfg.get("split", "val")])
-        )
-    )
+    if command == "train":
+        from rcr.proposed.train import train
+
+        return train(cfg)
     if command == "run":
         if method == "proposed":
             from rcr.proposed.runner import run_experiment
 
             return run_experiment(
-                cfg,
-                Path(__file__).resolve(),
-                splits=splits,
-                build=args.build_cache,
-                train=args.train,
-                save_tuning=args.save_tuning,
+                cfg, Path(__file__).resolve(), save_tuning=save_tuning
             )
         from rcr.baselines.runner import run_experiment
 
-        return run_experiment(cfg, modes=args.modes, splits=splits)
-
-    from rcr.evaluation.runner import evaluate_run
-
+        return run_experiment(cfg, splits=[cfg["split"]])
     if command == "retrieve":
         if method == "proposed":
             from rcr.proposed.retrieve import retrieve
-        else:
-            from rcr.baselines.runner import run_retrieval as retrieve
-    modes = (args.modes or [cfg["mode"]]) if method == "clip" else [None]
-    for split in splits:
-        for mode in modes:
-            run_cfg = {**cfg, "split": split}
-            if mode is not None:
-                run_cfg["mode"] = mode
-            if command == "retrieve":
-                options = (
-                    {"save_tuning": args.save_tuning} if method == "proposed" else {}
-                )
-                retrieve(run_cfg, max_queries=args.max_queries, **options)
-            else:
-                evaluate_run(run_cfg, max_queries=args.max_queries)
-    return None
+
+            return retrieve(cfg, save_tuning=save_tuning)
+        from rcr.baselines.runner import run_retrieval
+
+        return run_retrieval(cfg)
+    from rcr.evaluation.runner import evaluate_run
+
+    return evaluate_run(cfg)
 
 
 if __name__ == "__main__":

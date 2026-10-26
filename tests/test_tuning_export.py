@@ -413,31 +413,44 @@ def test_offline_calibration_rejects_partial_or_changed_validation_before_writes
     assert not root.exists()
 
 
-@pytest.mark.parametrize("train", [False, True])
-def test_run_forwards_export_flag_only_to_final_retrieval(tmp_path, monkeypatch, train):
+@pytest.mark.parametrize(
+    "split,save_tuning", [("val", False), ("val", True), ("test", False)]
+)
+def test_run_uses_configured_split_and_checkpoint(
+    tmp_path, monkeypatch, split, save_tuning
+):
     import yaml
 
     from rcr.proposed import runner
 
     cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
     cfg["output"]["dir"] = str(tmp_path / "run")
+    cfg["split"] = split
+    cfg["checkpoint"] = "frozen/best.pt"
+    cfg["selected_checkpoint_sha256"] = "frozen-checkpoint"
+    original = copy.deepcopy(cfg)
     calls = []
 
     def stage(command, **kwargs):
         calls.append(command)
         if command[2] == "evaluate":
-            directory = Path(cfg["output"]["dir"]) / "val"
+            directory = Path(cfg["output"]["dir"]) / split
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "metrics.json").write_text(json.dumps({"overall": {}}))
 
     monkeypatch.setattr(runner.subprocess, "run", stage)
-    runner.run_experiment(cfg, Path("tools/run.py"), train=train, save_tuning=True)
-    assert [cmd[2] for cmd in calls] == (["train"] if train else []) + [
-        "retrieve",
-        "evaluate",
-    ]
+    rows = runner.run_experiment(cfg, Path("tools/run.py"), save_tuning=save_tuning)
+    assert [cmd[2] for cmd in calls] == ["retrieve", "evaluate"]
     for command in calls:
-        assert ("--save-tuning" in command) == (command[2] == "retrieve")
+        assert ("--save-tuning" in command) == (
+            save_tuning and command[2] == "retrieve"
+        )
+        saved = yaml.safe_load(Path(command[4]).read_text())
+        assert saved == original
+    assert cfg == original
+    assert rows == [
+        {"method": "proposed", "split": split, "checkpoint": "frozen/best.pt"}
+    ]
 
 
 def test_misspelled_saved_score_setting_cannot_start_model_calibration():

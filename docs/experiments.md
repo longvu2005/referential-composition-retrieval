@@ -7,10 +7,12 @@ assets and historical run outputs are not included in the repository.
 ## Validation first
 
 ```bash
-.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --prepare --splits val
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --prepare --splits val
+.venv-clip/bin/python tools/run.py prepare --config configs/clip.yaml
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split val
+.venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split val
 # Proposed architecture/training is unchanged; use its prepared checkpoint/cache:
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits val
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --split val
 python tools/report.py --split val
 ```
 
@@ -55,10 +57,12 @@ Legacy metrics need a run/evaluation binding. Re-evaluate saved rankings with
 the same root/config/mode/split, without inference:
 
 ```bash
-.venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --splits val \
-  --modes clip_image clip_text early_fusion late_fusion
-.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --splits val
-.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --splits val
+for mode in clip_image clip_text early_fusion late_fusion; do
+  .venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --split val \
+    --set mode="$mode"
+done
+.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --split val
+.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --split val
 python tools/report.py --split val
 ```
 
@@ -76,9 +80,9 @@ export before test. An explicitly requested current test smoke check uses the
 same frozen policy:
 
 ```bash
-.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --splits test
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits test
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --splits test
+.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split test
+.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split test
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --split test
 python tools/report.py --split test
 ```
 

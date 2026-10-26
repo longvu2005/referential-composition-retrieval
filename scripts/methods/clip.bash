@@ -12,4 +12,4 @@ python_bin="${PYTHON:-.venv-clip/bin/python}"
 if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py prepare --config configs/clip.yaml
 fi
-"$python_bin" tools/run.py run --config configs/clip.yaml --splits "$split"
+"$python_bin" tools/run.py run --config configs/clip.yaml --split "$split"

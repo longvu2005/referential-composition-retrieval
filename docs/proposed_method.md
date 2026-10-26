@@ -337,7 +337,7 @@ selected pair, Top-M, checkpoint SHA256 and validation fingerprint. Retrieval
 rejects modifications to the selected scoring settings; batch sizes may change.
 
 For post-training studies that also change Coarse shortlist membership,
-`retrieve/run --save-tuning --splits val` exports raw Coarse identity/state and
+`retrieve/run --save-tuning --split val` exports raw Coarse identity/state and
 Fine binding/context/coverage scores on the complete split gallery. Each
 non-self pair is Fine-scored once. This explicit full-gallery pass is separate
 from periodic training validation and stores its fixed matching policy and

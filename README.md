@@ -130,10 +130,16 @@ Every stage can also be run directly:
 python tools/run.py prepare     --config configs/proposed.yaml
 python tools/run.py build-cache --config configs/proposed.yaml
 python tools/run.py train       --config configs/proposed.yaml
-python tools/run.py retrieve    --config configs/proposed.yaml --splits val
-python tools/run.py evaluate    --config configs/proposed.yaml --splits val
+python tools/run.py retrieve    --config configs/proposed.yaml --split val
+python tools/run.py evaluate    --config configs/proposed.yaml --split val
 python tools/run.py calibrate   --config configs/calibration.yaml
 ```
+
+`run` retrieves and evaluates one split using prepared assets and an existing
+checkpoint. Preparation, cache extraction and training are explicit commands;
+the full sequence is in `scripts/methods/`. The split comes from YAML (`val` in
+the supplied configs), overridden by `--split`. Repeat the command for test.
+CLIP `run` evaluates all four modes; `retrieve`/`evaluate` use YAML `mode`.
 
 Build one stage with `--cache-stage detections`, `scene`, `fafa-image`, or
 `fafa-query`. Scene extraction needs neither detection nor FAFA caches. FAFA
@@ -141,9 +147,14 @@ extraction needs the detection cache, without loading CLIP scene weights.
 Use `--set key=value ...` for explicit typed overrides. For example:
 
 ```bash
-python tools/run.py run --config configs/proposed.yaml --train --splits val \
+python tools/run.py train --config configs/proposed.yaml \
   --set train.seed=1 output.dir=runs/proposed-seed1
+python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
 ```
+
+The CLI has five options: `--config`, `--set`, `--split`, `--cache-stage` and
+`--save-tuning` (Proposed validation only). It always processes complete query
+splits. CLIP mode and other experiment parameters belong in YAML or `--set`.
 
 Training logs step losses, gradient norm, learning rates, epoch means,
 validation metrics and the best checkpoint summary to W&B. Authenticate once
@@ -169,8 +180,9 @@ cached boxes in `cache.supervision_cache` before the first epoch.
 Cache extraction is resumable. A completed cache is reused; an interrupted cache
 keeps a `.building` marker and resumes its missing shards. Completed unified CLIP
 scene caches remain readable for scene features. Import their boxes (or boxes
-from a matching legacy DINO scene cache) with `--cache-stage detections
---import-scene-cache OLD_SCENE_DIR`. Build FAFA features once in the new independent
+from a matching legacy DINO scene cache) through the Python example in the
+[detection cache guide](docs/detection_cache.md#import-existing-scene-boxes-without-detector-inference).
+Build FAFA features once in the new independent
 directories; old scene-bound FAFA indices are not silently rebound. DINO/BERT
 model checkpoints require fresh CLIP training. See
 [detection cache migration](docs/detection_cache.md).
@@ -229,7 +241,7 @@ once with the existing checkpoint and caches (validation only):
 
 ```bash
 python tools/run.py run --config runs/proposed-clip-b32/config.yaml \
-  --splits val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
+  --split val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
 python -m rcr.proposed.replay runs/proposed-clip-b32-tuning/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064

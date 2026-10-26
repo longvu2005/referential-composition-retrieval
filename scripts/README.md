@@ -6,7 +6,11 @@ same functions under `src/rcr/`; no model logic or metrics are duplicated.
 
 Scripts locate the repository root themselves. Direct `tools/*.py` commands
 must run from that root after an editable package install. Use the tools when
-you need a custom YAML, `--set` overrides, a smoke run or an individual stage.
+you need a custom YAML, `--set` overrides or an individual stage.
+`tools/run.py run` only retrieves and evaluates one split. Prepare assets, build
+caches and train with their own commands; the method recipes sequence them.
+Use `--split val` or `--split test`, or set `split` in YAML. CLIP `run` computes
+all four modes; individual `retrieve`/`evaluate` commands use YAML `mode`.
 
 ## Environments
 

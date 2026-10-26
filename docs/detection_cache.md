@@ -49,9 +49,13 @@ PIL crop padding and the scene transform's clipping preserve crop semantics.
 For an existing complete unified CLIP or DINO scene cache:
 
 ```bash
-.venv-proposed/bin/python tools/run.py build-cache \
-  --config configs/proposed.yaml --cache-stage detections \
-  --import-scene-cache /path/to/old-scene-cache
+.venv-proposed/bin/python - <<'PY'
+from rcr.common.config import load_config
+from rcr.proposed.cache.build import prepare_cache
+
+cfg = load_config("configs/proposed.yaml")
+prepare_cache(cfg, stage="detections", import_scene="/path/to/old-scene-cache")
+PY
 ```
 
 Import checks the source detector model/settings, gallery IDs/order, shard
