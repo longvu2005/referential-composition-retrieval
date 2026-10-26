@@ -22,7 +22,7 @@ def main(argv=None):
     cache = commands.add_parser("build-cache", parents=[shared])
     cache.add_argument(
         "--cache-stage",
-        choices=("all", "dino", "fafa", "fafa-image", "fafa-query"),
+        choices=("all", "scene", "fafa", "fafa-image", "fafa-query"),
         default="all",
     )
     commands.add_parser("train", parents=[shared])

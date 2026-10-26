@@ -49,19 +49,19 @@ class GalleryCache:
             raise ValueError("old FAFA person cache; rebuild data.fafa_image_cache")
         if index.get("layout") == "fafa":
             if scene_root is None:
-                raise ValueError("FAFA person cache requires data.dino_cache")
+                raise ValueError("FAFA person cache requires data.scene_cache")
             self._scene_cache = GalleryCache(scene_root, mmap_shards=mmap_shards)
             source = self._scene_cache
             source.validate_gallery(index["image_ids"])
             if index["source_cache_id"] != source.cache_id:
-                raise ValueError("FAFA cache differs from its source DINO cache")
+                raise ValueError("FAFA cache differs from its source scene cache")
             if not torch.equal(index["mask"].bool(), source.mask):
-                raise ValueError("FAFA/DINO person masks differ")
+                raise ValueError("FAFA/scene person masks differ")
             if (
                 index["scene_dim"] != source.scene_dim
                 or tuple(index["patch_hw"]) != source.patch_hw
             ):
-                raise ValueError("FAFA/DINO scene specifications differ")
+                raise ValueError("FAFA source scene specifications differ")
 
         self.image_ids = index["image_ids"]
         self.by_id = {image_id: i for i, image_id in enumerate(self.image_ids)}
@@ -72,16 +72,29 @@ class GalleryCache:
             for key in ("image_encoder", "person_encoder", "detector")
         }
         self.scene_dim = index.get("scene_dim", index["persons"].shape[-1])
+        self.global_dim = index.get(
+            "global_dim",
+            self._scene_cache.global_dim if self._scene_cache else self.scene_dim,
+        )
         self.person_dim = index["persons"].shape[-1]
         self.persons = index["persons"]
         self.mask = index["mask"].bool()
         self.person_offsets = index.get("person_offsets")
         self.patch_hw = tuple(index["patch_hw"])
         self._global_features = index.get("global_features")
+        if (self.encoder_metadata["person_encoder"] or {}).get(
+            "backend"
+        ) == "clip" and (self._global_features is None):
+            raise ValueError("CLIP scene cache is missing native global embeddings")
+        if (
+            self._scene_cache is not None
+            and self.global_dim != self._scene_cache.global_dim
+        ):
+            raise ValueError("FAFA/scene global dimensions differ")
         self._global_rows: dict[int, Tensor] = {}
         if self._global_features is not None and self._global_features.shape != (
             len(self.image_ids),
-            self.scene_dim,
+            self.global_dim,
         ):
             raise ValueError("cache global features/gallery shape mismatch")
         if self.mask.ndim != 2 or self.mask.shape[0] != len(self.image_ids):
@@ -268,9 +281,9 @@ class GalleryCache:
         return self._global_features
 
     def load_global_features(self, indices: Tensor) -> Tensor:
-        """Read only requested images; retain their fixed FP32 means on CPU.
+        """Read only requested native global embeddings, without reading scene shards.
 
-        A packed FAFA index can rely on a legacy DINO index with no means.
+        Legacy cache readers retain their historical mean-pooling fallback.
         Mining the train gallery must not scan val/test/leftover scene shards.
         Reuse any full scene already present in this reader's LRU.
         """
@@ -281,7 +294,7 @@ class GalleryCache:
             return source.load_global_features(indices)
         rows = indices.tolist()
         if not rows:
-            return torch.empty(0, self.scene_dim)
+            return torch.empty(0, self.global_dim)
         for i in dict.fromkeys(rows):
             if i not in self._global_rows:
                 self._global_rows[i] = self._get_item(i)["scene"].float().mean(0)

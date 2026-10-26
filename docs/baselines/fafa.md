@@ -18,7 +18,7 @@ and `fafa_matching.py` ports mean Partial SetMatch. These adapters are not offic
 ## 2. Inputs, preprocessing and features
 
 FAFA reads the same Grounding DINO Tiny person boxes as Proposed from
-`cache/proposed-dino` (model `IDEA-Research/grounding-dino-tiny`, box threshold
+`cache/proposed-clip-b32` (model `IDEA-Research/grounding-dino-tiny`, box threshold
 0.30, text threshold 0.25). Detector inference is not repeated. The shared
 cache must have a complete `index.pt`, matching gallery IDs/order and detector
 metadata, plus intact geometry shards. For older cache manifests that lack
@@ -113,7 +113,7 @@ Use the isolated FAFA environment in [baselines](../baselines.md):
 
 ```bash
 .venv-proposed/bin/python tools/run.py build-cache \
-  --config configs/proposed.yaml --cache-stage dino
+  --config configs/proposed.yaml --cache-stage scene
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --splits val
 # Once the test protocol is eligible:

@@ -151,7 +151,7 @@ class _Extractor:
                 or not torch.isfinite(boxes).all()
                 or (boxes[:, 2:] <= boxes[:, :2]).any()
             ):
-                raise ValueError("invalid DINO person boxes")
+                raise ValueError("invalid cached person boxes")
             for start in range(0, count, self.batch_size):
                 pixels = torch.stack(
                     [
@@ -183,7 +183,7 @@ def _build_images(cfg, root, extractor):
     pooled_bytes = total * hidden_dim * dtype.itemsize
     target_bytes = total * tokens * dim * dtype.itemsize
     # The compact index coexists with resumable pooled shards until publication.
-    # DINO owns the global scene features; no second copy is written here.
+    # The scene cache owns the global scene features; no second copy is written here.
     estimated = (
         target_bytes
         + 2 * pooled_bytes
@@ -265,6 +265,7 @@ def _build_images(cfg, root, extractor):
             "mask": source.mask,
             "patch_hw": source.patch_hw,
             "scene_dim": source.scene_dim,
+            "global_dim": source.global_dim,
             "storage_dtype": storage,
             "image_encoder": cfg["image_encoder"],
             "detector": cfg["detector"],
@@ -410,9 +411,11 @@ def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
         raise ValueError("invalid FAFA cache stage")
     source_root, image_root, query_root = cache_paths(cfg)
     source = GalleryCache(source_root)
-    check_cache_config(source, cfg, person_backend="dino")
+    check_cache_config(source, cfg, person_backend="clip")
     if source.cache_id is None:
-        raise ValueError("DINO source requires a cache_id to bind FAFA features safely")
+        raise ValueError(
+            "Scene source requires a cache_id to bind FAFA features safely"
+        )
     data = load_rcr_inputs(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     source.validate_gallery(data.gallery_ids)
     image = existing_cache(cfg, image_root, scene_root=source_root)

@@ -7,9 +7,9 @@ data:
   image_root: dataset/data/raw/images
 
 model:
-  name: ViT-L/14
+  name: ViT-B/32
   # One official CLIP checkpoint includes both image and text encoder weights.
-  checkpoint: checkpoints/clip/ViT-L-14.pt
+  checkpoint: checkpoints/clip/ViT-B-32.pt
 
 text_field: final_instruction
 fusion:

@@ -96,7 +96,7 @@ Use the same mode/split/subset when evaluating saved results.
 
 ```bash
 .venv-proposed/bin/python tools/run.py build-cache \
-  --config configs/proposed.yaml --cache-stage dino
+  --config configs/proposed.yaml --cache-stage scene
 python tools/run.py run --config configs/fafa.yaml --prepare
 python tools/run.py run --config configs/fafa.yaml
 ```

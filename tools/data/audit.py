@@ -28,7 +28,7 @@ def main():
     )
     parser.add_argument("--cache", help="Optional existing proposed cache directory")
     parser.add_argument(
-        "--dino-cache", help="DINO source for a separate FAFA person cache"
+        "--scene-cache", help="CLIP scene/geometry source for a FAFA person cache"
     )
     parser.add_argument("--output", default="runs/data_audit.json")
     parser.add_argument("--scene-size", nargs=2, type=int, metavar=("HEIGHT", "WIDTH"))
@@ -74,7 +74,7 @@ def main():
 
         report["detection"] = audit_detection(
             data,
-            GalleryCache(args.cache, scene_root=args.dino_cache),
+            GalleryCache(args.cache, scene_root=args.scene_cache),
             scene_size=args.scene_size,
         )
     write_json(args.output, report)

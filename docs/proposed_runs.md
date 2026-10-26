@@ -1,7 +1,7 @@
 # Proposed method: experiment protocol
 
 Run every command from the repository root. Use Python 3.11 or 3.12 and keep the
-proposed and FAFA environments separate.
+proposed (PyTorch >=2.6) and FAFA (PyTorch 2.5.1) environments separate.
 
 ## 1. Configure paths
 
@@ -11,7 +11,7 @@ Edit `configs/proposed.yaml`:
 data:
   final_dir: dataset/data/final
   image_root: /path/to/images
-  dino_cache: /path/to/dino-cache
+  scene_cache: /path/to/clip-b32-scene
   fafa_image_cache: /path/to/fafa-images
   fafa_query_cache: /path/to/fafa-queries
 person_encoder:
@@ -25,12 +25,12 @@ file. Command-line overrides must name an existing key.
 
 ```bash
 python tools/run.py prepare --config configs/proposed.yaml
-python tools/run.py build-cache --config configs/proposed.yaml --cache-stage dino
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage scene
 python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
 python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
 ```
 
-`build-cache` without `--cache-stage` runs all missing stages. DINO owns scene
+`build-cache` without `--cache-stage` runs all missing stages. CLIP owns scene/global
 features and crop geometry. The FAFA image cache owns query-independent person
 means and target tokens. The FAFA query cache owns text-conditioned query
 features. Editing query text therefore invalidates only the last stage.
@@ -46,9 +46,9 @@ python tools/run.py train --config configs/proposed.yaml
 ```
 
 The training loss remains raw `alpha * B_FAFA + coverage * context`. Periodic
-validation ranks with Context z-score, fixed `context_weight=0.03`; it normalizes
-only after scoring a query's complete Coarse Top-M. Existing checkpoints retain
-their architecture and learned binding scale. To reproduce the previous fine
+validation ranks with Context z-score, fixed `context_weight=0.0325`; it normalizes
+only after scoring a query's complete Coarse Top-M. DINO/BERT checkpoints are
+incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
 ranking, use `--set retrieval.fine_score_mode=legacy_raw` at retrieval time.
 
 Training uses only train annotations. Before epoch 1, GT heads are aligned to the
@@ -94,14 +94,16 @@ tests.
 python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Calibration shares model scores across the configured `(coarse_beta,
+Calibration reads the saved training config at
+`runs/proposed-clip-b32/config.yaml`, including actual paths and training overrides.
+It shares model scores across the configured `(coarse_beta,
 fine_coarse_weight)` grid and evaluates every pair on validation. It writes the
-selected frozen configuration under `runs/calibration/`. Matching thresholds and
+selected frozen configuration under `runs/clip-b32-calibration/`. Matching thresholds and
 the missing penalty are architecture hyperparameters; this command does not tune
 them.
 
 `retrieval.fine_score_mode` and `retrieval.context_weight` come from `model_config`
-and remain fixed throughout this grid (defaults: `context_zscore`, `0.03`).
+and remain fixed throughout this grid (defaults: `context_zscore`, `0.0325`).
 `selected.yaml` includes these values, the selected pair and Top-M in
 `selected_retrieval`, plus checkpoint SHA256 and validation fingerprint. The test
 path rejects changed scoring settings; inference chunk sizes can still change.
@@ -112,7 +114,7 @@ so their weights cannot silently carry over to a different Fine scoring mode.
 
 ```bash
 python tools/run.py run \
-  --config runs/calibration/selected.yaml \
+  --config runs/clip-b32-calibration/selected.yaml \
   --splits test
 ```
 
@@ -123,7 +125,7 @@ evaluator.
 To publish the selected validation result before test:
 
 ```bash
-python tools/run.py run --config runs/calibration/selected.yaml --splits val
+python tools/run.py run --config runs/clip-b32-calibration/selected.yaml --splits val
 ```
 
 ## Kaggle reuse
@@ -133,41 +135,19 @@ from the FAFA environment with explicit notebook coordinates:
 
 ```bash
 .venv-fafa/bin/python download_fafa.py \
-  --output cache/fafa-images --user OWNER --kernel NOTEBOOK --version VERSION
+  --output cache/clip-b32-fafa-images --user OWNER --kernel NOTEBOOK --version VERSION
 ```
 
 Authentication uses the normal Kaggle client configuration. The downloader
 records its source in the resume state and refuses to continue that state with
 different notebook arguments.
 
-For the published legacy DINO cache, point `data.dino_cache` to the mounted
-directory containing `index.pt` and `features/`, keep
-`cache.allow_legacy_dino: true`, and put both FAFA caches in writable storage.
-Raw images remain necessary because FAFA extracts the detector crops.
-
-When all three mounted caches are already complete and their paths configured:
-
-```bash
-cd /kaggle/working/referential-composition-retrieval
-python -m pip install -e . --no-deps
-python tools/run.py prepare-supervision --config configs/proposed.yaml
-python tools/run.py train --config configs/proposed.yaml \
-  --set output.dir=runs/proposed-context-z003 \
-        checkpoint=runs/proposed-context-z003/best.pt
-python tools/run.py calibrate --config configs/calibration.yaml \
-  --set model_config=runs/proposed-context-z003/config.yaml \
-        output_dir=runs/calibration-context-z003
-```
-
-Calibration reads the saved training config, including the explicit checkpoint
-path above. Its selected config lives in `runs/calibration-context-z003/selected.yaml`;
-use that path for subsequent `run --splits val` and `run --splits test` commands.
-Use W&B online/offline settings as appropriate for the Kaggle session.
-
-The legacy cache has no encoder metadata or pixel boxes. The code checks its
-gallery order and patch grid, then reconstructs pixel boxes by inverting the
-original letterbox transform. Keep the original DINOv3 ViT-B/16, 224 x 224 scene,
-256 x 128 person, and Grounding DINO tiny settings.
+CLIP uses new `data.scene_cache`, `data.fafa_image_cache` and
+`data.fafa_query_cache` paths. Rebuild all three stages and train a fresh model;
+old DINO/BERT checkpoint and cache identities must not be substituted. Keep
+raw images available for the frozen FAFA crop extraction. Once new caches are
+complete, mounted read-only copies are supported by training/retrieval.
+See [CLIP migration](clip_b32_migration.md) for the exact commands and text policy.
 
 ## Reading outputs
 
@@ -177,7 +157,7 @@ coarse, fine, fused and FAFA diagnostic rankings. The FAFA diagnostic reranks th
 same coarse Top-M with FDA binding only; it is not the standalone FAFA baseline.
 Checkpoints are inference/reproducibility artifacts, not resumable trainer states:
 they omit optimizer/scaler state and store only the learned text projection,
-Subject-marker embeddings and frozen BERT revision.
+native span policy and frozen CLIP revision.
 
 For a fair ablation, change one owned component, keep data/evaluation fixed, and
 record the commit, full YAML, seed, runtime and validation result.
@@ -221,27 +201,27 @@ only `rankings.pt`, with no checkpoint, GPU, native libraries or feature cache:
 
 ```bash
 # Reproduce the recorded Proposed fused ranking exactly.
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
 # Legacy Fine only: alpha B + C * context.
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
   --output-dir runs/replay-legacy/val --mode legacy_raw --fine-coarse-weight 0
 
 # Raw Gamma: alpha B + gamma * C * context.
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
   --output-dir runs/replay-gamma/val --mode raw_gamma \
-  --context-weight 0.03 --fine-coarse-weight 0
+  --context-weight 0.0325 --fine-coarse-weight 0
 
 # Context z-score, with optional Coarse fusion on the same saved shortlist.
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
   --output-dir runs/replay-context/val --mode context_zscore \
-  --context-weight 0.03 --fine-coarse-weight 0.4
+  --context-weight 0.0325 --fine-coarse-weight 0.4
 
 # Both z-score ablation: z(alpha B) + lambda * z(C * context).
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
   --output-dir runs/replay-both/val --mode both_zscore \
-  --context-weight 0.03 --fine-coarse-weight 0
+  --context-weight 0.0325 --fine-coarse-weight 0
 ```
 
 Omitted arguments reuse recorded values. `--fine-coarse-weight 0` yields Fine
@@ -261,8 +241,8 @@ Do any offline parameter selection on validation; freeze it before test.
 Use the existing trained checkpoint and caches to make one validation export:
 
 ```bash
-python tools/run.py run --config runs/proposed-fafa-unified/config.yaml \
-  --splits val --save-tuning --set output.dir=runs/proposed-tuning
+python tools/run.py run --config runs/proposed-clip-b32/config.yaml \
+  --splits val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
 ```
 
 `retrieve --save-tuning` is also available when evaluation will be run separately.
@@ -310,10 +290,10 @@ the score matrices.
 Now change beta, requested Top-M, context weight and final fusion weight offline:
 
 ```bash
-python -m rcr.proposed.replay runs/proposed-tuning/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed-clip-b32-tuning/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
-python tools/run.py evaluate --config runs/proposed-fafa-unified/config.yaml \
+python tools/run.py evaluate --config runs/proposed-clip-b32/config.yaml \
   --splits val --set output.dir=runs/replayed
 ```
 

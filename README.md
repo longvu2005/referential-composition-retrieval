@@ -25,6 +25,14 @@ The proposed method keeps extraction frozen and learns only the RCR modules:
    context.
 5. Rerank the coarse Top-M shortlist with the fine score.
 
+Scene and text backbones are the frozen pair from `openai/clip-vit-base-patch32`,
+pinned to revision `3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`. The scene cache
+keeps 49 patch tokens (7 x 7, width 768) and a separate native 512-D global vector.
+Text uses the native 77-position tokenizer and projected EOT vector. Subject
+roles are located by token offsets; no new vocabulary entries are added. State
+adapters start as identity maps, so their initial cosine is native CLIP cosine;
+state supervision then adapts those maps. See [migration notes](docs/clip_b32_migration.md).
+
 The training objective is
 
 ```text
@@ -37,10 +45,10 @@ change only from images that contain the required identities. See
 [docs/proposed_method.md](docs/proposed_method.md) for the complete equations.
 
 Training retains the raw fine score `alpha * B_FAFA + coverage * context`.
-Validation/retrieval instead use Context z-score with fixed weight 0.03:
+Validation/retrieval instead use Context z-score with fixed weight 0.0325:
 
 ```text
-S_fine = alpha * B_FAFA + 0.03 * z_topM(coverage * context)
+S_fine = alpha * B_FAFA + 0.0325 * z_topM(coverage * context)
 ```
 
 `alpha` is the checkpoint's learned binding scale. Normalization uses one complete
@@ -62,7 +70,7 @@ dataset/data/final/      finalized benchmark metadata
 src/rcr/common/          data, I/O and runtime helpers
 src/rcr/dataset/         deterministic dataset construction
 src/rcr/baselines/       CLIP and native FAFA baselines
-src/rcr/proposed/cache/  frozen DINO/FAFA extraction and readers
+src/rcr/proposed/cache/  frozen CLIP/FAFA extraction and readers
 src/rcr/proposed/nn/     learned RCR modules
 src/rcr/evaluation/      metrics and reports
 tools/run.py             experiment CLI
@@ -76,9 +84,9 @@ utilities`. Files under `nn/` contain the method; `train.py` owns optimization;
 
 ## Setup
 
-Python 3.11 or 3.12 and PyTorch 2.2 or newer are supported. Proposed/DINO and
-native FAFA require separate environments because their Transformers versions
-conflict.
+Use Python 3.11 or 3.12. Proposed requires PyTorch 2.6 or newer for the
+pinned CLIP `.bin` checkpoint; native FAFA keeps PyTorch 2.5.1. Their Torch and
+Transformers requirements are installed in separate environments.
 
 ```bash
 PYTHON=python3.11 bash scripts/setup.bash proposed
@@ -92,9 +100,9 @@ Set the paths in `configs/proposed.yaml`, especially:
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  dino_cache: cache/proposed-dino
-  fafa_image_cache: cache/fafa-images
-  fafa_query_cache: cache/fafa-queries
+  scene_cache: cache/proposed-clip-b32
+  fafa_image_cache: cache/clip-b32-fafa-images
+  fafa_query_cache: cache/clip-b32-fafa-queries
 person_encoder:
   python: .venv-fafa/bin/python
 ```
@@ -126,7 +134,7 @@ python tools/run.py evaluate    --config configs/proposed.yaml --splits val
 python tools/run.py calibrate   --config configs/calibration.yaml
 ```
 
-Build one cache stage with `--cache-stage dino`, `fafa-image`, or `fafa-query`.
+Build one cache stage with `--cache-stage scene`, `fafa-image`, or `fafa-query`.
 Use `--set key=value ...` for explicit typed overrides. For example:
 
 ```bash
@@ -143,20 +151,20 @@ or `--set wandb.enabled=false` to disable tracking for a smoke test.
 
 | Config key | Contents | Depends on query text |
 | --- | --- | --- |
-| `data.dino_cache` | scene patches, detections and crop geometry | no |
+| `data.scene_cache` | scene patches, detections and crop geometry | no |
 | `data.fafa_image_cache` | pooled person features and target tokens | no |
 | `data.fafa_query_cache` | text-conditioned query crop features | yes |
 
 The three caches are separate so a text edit only rebuilds FAFA query features.
-Crop order comes from the DINO cache and is shared by both FAFA paths. Visual
+Crop order comes from the shared scene cache and is shared by both FAFA paths. Visual
 caches never store training labels. Train-only identity labels are aligned to
 cached boxes in `cache.supervision_cache` before the first epoch.
 
 Cache extraction is resumable. A completed cache is reused; an interrupted cache
-keeps a `.building` marker and resumes its missing shards. The loader supports the
-published legacy DINO cache when `cache.allow_legacy_dino: true` is set, but that
-flag is an explicit provenance assertion because the old index lacks encoder
-metadata.
+keeps a `.building` marker and resumes its missing shards. CLIP training requires
+newly built scene and FAFA caches. DINO/BERT
+checkpoints and legacy DINO scene caches are incompatible with this architecture;
+use the separate default cache and output directories.
 
 ## Dataset snapshot
 
@@ -177,7 +185,7 @@ audits are documented in [dataset/README.md](dataset/README.md).
 
 Training writes `config.yaml`, `runtime.json`, `history.jsonl`, `last.pt`, and the
 validation-selected `best.pt`. Checkpoints contain learned weights and frozen-model
-provenance, but no optimizer state or duplicate frozen BERT weights. Retrieval
+provenance, but no optimizer state or duplicate frozen CLIP weights. Retrieval
 writes one directory per split with:
 
 - `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings, plus raw and
@@ -196,14 +204,14 @@ and `score_config`. It supports CPU replay on the saved shortlist without a
 checkpoint or pretrained caches:
 
 ```bash
-python -m rcr.proposed.replay runs/calibration/selected/val/rankings.pt \
-  --output-dir runs/replay/val --mode context_zscore --context-weight 0.03 \
+python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
+  --output-dir runs/replay/val --mode context_zscore --context-weight 0.0325 \
   --fine-coarse-weight 0.4
 ```
 
 See [docs/proposed_runs.md](docs/proposed_runs.md) for the full schema and offline
-ablations. Existing checkpoints need no migration. The evaluator still accepts
-old rankings; offline replay requires the new score components. Changing
+ablations. The evaluator still accepts old rankings; offline replay requires the
+new score components. Model inference requires a freshly trained CLIP checkpoint.
 With Top-M-only artifacts, changing `coarse_beta` may change shortlist membership
 and requires retrieval again.
 
@@ -211,9 +219,9 @@ For offline tuning that can change the shortlist, export full-gallery raw scores
 once with the existing checkpoint and caches (validation only):
 
 ```bash
-python tools/run.py run --config runs/proposed-fafa-unified/config.yaml \
-  --splits val --save-tuning --set output.dir=runs/proposed-tuning
-python -m rcr.proposed.replay runs/proposed-tuning/val/rankings.pt \
+python tools/run.py run --config runs/proposed-clip-b32/config.yaml \
+  --splits val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
+python -m rcr.proposed.replay runs/proposed-clip-b32-tuning/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 ```

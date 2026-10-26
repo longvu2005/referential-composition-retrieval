@@ -167,6 +167,9 @@ def prepare_visual_batch(
         "query_identity_labels": query_labels,
         "query_identity_mask": query_identity_mask,
         "grounding_targets": grounding_targets,
+        "target_global": cache.load_global_features(target_indices).unflatten(
+            0, (batch_size, candidates_per_query)
+        ),
         "target_scene": t_scene.unflatten(0, (batch_size, candidates_per_query)),
         "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
         "target_boxes": t_boxes.unflatten(0, (batch_size, candidates_per_query)),

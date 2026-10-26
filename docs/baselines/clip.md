@@ -2,11 +2,11 @@
 
 ## 1. Architecture and checkpoint
 
-Use pretrained OpenAI CLIP `ViT-L/14`, containing the image/text transformers
+Use pretrained OpenAI CLIP `ViT-B/32`, containing the image/text transformers
 and contrastively learned projections. The implementation is pinned to
 `a1d071733d7111c9c014f024669f959182114e33` in `pyproject.toml`.
 `prepare` verifies the official download's SHA256 and saves
-`checkpoints/clip/ViT-L-14.pt`; record its actual hash per run. Native state
+`checkpoints/clip/ViT-B-32.pt`; record its actual hash per run. Native state
 dictionaries and official JIT archives are supported.
 Sources: [official CLIP](https://github.com/openai/CLIP/tree/a1d071733d7111c9c014f024669f959182114e33),
 [loader/preprocessing](https://github.com/openai/CLIP/blob/a1d071733d7111c9c014f024669f959182114e33/clip/clip.py).
@@ -14,7 +14,7 @@ Sources: [official CLIP](https://github.com/openai/CLIP/tree/a1d071733d7111c9c01
 ## 2. Input, preprocessing and features
 
 Encode whole RGB scene images with pinned OpenAI preprocessing: bicubic resize,
-center crop to model resolution (224 for ViT-L/14) and CLIP channel normalization.
+center crop to model resolution (224 for ViT-B/32) and CLIP channel normalization.
 Text is `final_instruction` by default; `final_change` is an explicit alternative
 experiment. Tokenization uses a 77-token context, `truncate=True`, retaining EOS.
 Count overflowing queries using non-truncating tokenization and save

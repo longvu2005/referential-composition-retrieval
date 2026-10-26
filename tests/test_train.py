@@ -1,5 +1,6 @@
 """One CPU epoch through the real train and validation loops."""
 
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,20 +20,29 @@ from rcr.proposed.nn.encoders import (
 class Tokenizer:
     padding_side = "right"
     pad_token_id = 0
+    eos_token_id = 6
 
     def __len__(self):
-        return 3
+        return 7
 
-    def add_special_tokens(self, _tokens):
-        pass
-
-    def convert_tokens_to_ids(self, token):
-        return 1 if token == "[S1]" else 2
-
-    def __call__(self, texts, padding=True, return_tensors=None):
-        del padding, return_tensors
+    def __call__(self, texts, padding=True, return_tensors=None, **kwargs):
         texts = [texts] if isinstance(texts, str) else texts
-        rows = [[1 if word == "[S1]" else 2 for word in text.split()] for text in texts]
+        rows, offsets = [], []
+        for text in texts:
+            matches = list(re.finditer(r"\w+|[^\w\s]", text))
+            rows.append(
+                [
+                    5,
+                    *[
+                        {"subject": 1, "1": 2, "2": 3}.get(m.group().lower(), 4)
+                        for m in matches
+                    ],
+                    6,
+                ]
+            )
+            offsets.append([(0, 0), *[m.span() for m in matches], (0, 0)])
+        if kwargs.get("return_offsets_mapping"):
+            return {"input_ids": rows, "offset_mapping": offsets}
         length = max(map(len, rows))
         ids = torch.zeros(len(rows), length, dtype=torch.long)
         mask = torch.zeros_like(ids)
@@ -48,8 +58,13 @@ class Tokenizer:
 class TextBackbone(nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = SimpleNamespace(hidden_size=8)
-        self.embedding = nn.Embedding(3, 8)
+        self.config = SimpleNamespace(
+            hidden_size=8, projection_dim=8, max_position_embeddings=77, eos_token_id=2
+        )
+        self.embedding = nn.Embedding.from_pretrained(
+            torch.randn(7, 8, generator=torch.Generator().manual_seed(41))
+        )
+        self.text_projection = nn.Identity()
 
     def resize_token_embeddings(self, _size):
         pass
@@ -83,7 +98,7 @@ class TinyCache:
         self.mask = torch.ones(6, 1, dtype=torch.bool)
         self.boxes = torch.tensor([0.0, 0.0, 1.0, 1.0]).expand(6, 1, 4)
         self.patch_hw = (2, 2)
-        self.scene_dim = self.person_dim = 8
+        self.scene_dim = self.person_dim = self.global_dim = 8
         self.cache_id = "tiny"
         self.encoder_metadata = {
             "image_encoder": None,
@@ -200,14 +215,15 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(training, "load_rcr_data", lambda *args: data)
     monkeypatch.setattr(training, "GalleryCache", lambda *args, **kwargs: cache)
     monkeypatch.setattr(training, "check_query_text_config", lambda *args: None)
+    monkeypatch.setattr(training, "check_cache_config", lambda *args: None)
     monkeypatch.setitem(
         sys.modules,
         "transformers",
         SimpleNamespace(
-            AutoTokenizer=SimpleNamespace(
+            CLIPTokenizerFast=SimpleNamespace(
                 from_pretrained=lambda *args, **kwargs: Tokenizer()
             ),
-            AutoModel=SimpleNamespace(
+            CLIPTextModelWithProjection=SimpleNamespace(
                 from_pretrained=lambda *args, **kwargs: TextBackbone()
             ),
         ),
@@ -218,9 +234,9 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     cfg["data"] = {
         "final_dir": "unused",
         "image_root": "unused",
-        "dino_cache": "unused",
-        "fafa_image_cache": "unused",
-        "fafa_query_cache": "unused",
+        "scene_cache": "unused-scene",
+        "fafa_image_cache": "unused-fafa-images",
+        "fafa_query_cache": "unused-fafa-queries",
     }
     cfg["cache"]["supervision_cache"] = str(tmp_path / "supervision.json")
     cfg["runtime"]["device"] = "cpu"
@@ -237,11 +253,15 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
     assert checkpoint.name == "best.pt"
     assert saved["best_epoch"] == 1
+    assert saved["config"]["checkpoint"] == str(checkpoint)
     assert saved["state_supervised_pairs"] > 0
     assert saved["config"]["retrieval"]["fine_score_mode"] == "context_zscore"
-    assert saved["config"]["retrieval"]["context_weight"] == 0.03
+    assert (
+        saved["config"]["retrieval"]["context_weight"]
+        == cfg["retrieval"]["context_weight"]
+    )
     assert "optimizer" not in saved and "scaler" not in saved
-    assert set(saved["text_encoder"]) == {"projection", "markers"}
+    assert set(saved["text_encoder"]) == {"projection", "text_policy"}
 
     tokenizer = Tokenizer()
     restored = TextEncoder(TextBackbone(), dim=6)
@@ -268,11 +288,11 @@ def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
     assert training._wandb_run(cfg, tmp_path, None, 1, 1) is None
 
 
-def test_text_cache_reuses_right_padded_rows_and_marker_state_is_compact():
+def test_text_cache_reuses_right_padded_rows_without_saving_frozen_weights():
     backbone = CountingTextBackbone(vocabulary=10_000)
     encoder = TextEncoder(backbone, dim=8, cache_mib=1)
     encoder(torch.tensor([[1, 2]]), torch.tensor([[1, 1]]))
-    output, mask = encoder(
+    output, mask, pooled = encoder(
         torch.tensor([[1, 2, 0], [3, 4, 5]]),
         torch.tensor([[1, 1, 0], [1, 1, 1]]),
     )
@@ -281,7 +301,7 @@ def test_text_cache_reuses_right_padded_rows_and_marker_state_is_compact():
     assert output.shape == (2, 3, 8)
     assert mask.tolist() == [[True, True, False], [True, True, True]]
 
+    assert pooled.shape == (2, 8)
     state = text_encoder_state(encoder, Tokenizer())
-    storage = state["markers"]["[S1]"].untyped_storage()
-    marker = state["markers"]["[S1]"]
-    assert storage.nbytes() == marker.numel() * marker.element_size()
+    assert set(state) == {"projection", "text_policy"}
+    assert state["text_policy"] == {"context_length": 77, "subjects": "native_spans"}

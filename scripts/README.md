@@ -25,7 +25,7 @@ supports deterministic annotation and JSON reports without Torch.
 Proposed requires a separate FAFA environment only to extract FAFA person
 features. Configure `person_encoder.python` in `configs/proposed.yaml`.
 Training/retrieval from completed caches need only the proposed environment.
-The standalone FAFA baseline also requires Proposed's completed DINO cache;
+The standalone FAFA baseline also requires Proposed's completed scene/person-box cache;
 its `prepare` command checks this prerequisite and reports the build command.
 
 ## Dataset
@@ -52,7 +52,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, calibrate and publish selected val results | Use `runs/calibration/selected.yaml` |
+| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, calibrate and publish selected val results | Use `runs/clip-b32-calibration/selected.yaml` |
 
 ```bash
 bash scripts/methods/clip.bash val
@@ -79,9 +79,9 @@ Use any base/method environment to export already evaluated JSON:
 
 ```bash
 .venv-dataset/bin/python tools/report.py --split val \
-  --run proposed=runs/calibration/selected/val
+  --run proposed=runs/clip-b32-calibration/selected/val
 .venv-dataset/bin/python tools/report.py --split test \
-  --run proposed=runs/calibration/selected/test
+  --run proposed=runs/clip-b32-calibration/selected/test
 ```
 
 To evaluate saved `rankings.pt` first, use a method environment or install

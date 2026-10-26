@@ -73,9 +73,9 @@ def build_cache(
         for key, value in (encoder_metadata or {}).items():
             if cache.encoder_metadata[key] != value:
                 raise ValueError(
-                    f"existing DINO cache {key} differs; use a new directory"
+                    f"existing CLIP scene cache {key} differs; use a new directory"
                 )
-        print(f"Using existing DINO cache: {root}", flush=True)
+        print(f"Using existing CLIP scene cache: {root}", flush=True)
         return
     feature_dir = root / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)
@@ -87,12 +87,13 @@ def build_cache(
         "encoders": encoder_metadata or {},
         "storage_dtype": storage_dtype,
         "person_features": "geometry-only-v1",
+        "global_feature": "clip-projected-cls-v1",
     }
     if manifest_path.is_file():
         manifest = torch.load(manifest_path, map_location="cpu", weights_only=True)
         if manifest["signature"] != signature:
             raise ValueError(
-                "unfinished DINO cache settings differ; use a new directory"
+                "unfinished CLIP scene cache settings differ; use a new directory"
             )
         cache_id = manifest["cache_id"]
     else:
@@ -108,6 +109,7 @@ def build_cache(
     all_persons = []
     all_global = []
     patch_hw = None
+    saved_scene_dim = None
 
     for index, (image_id, path) in enumerate(
         tqdm(zip(image_ids, image_paths, strict=True), total=len(image_ids))
@@ -116,12 +118,13 @@ def build_cache(
         if feature_path.is_file():
             saved = torch.load(feature_path, map_location="cpu", weights_only=True)
             if saved.get("cache_id") == cache_id and saved.get("image_id") == image_id:
+                saved_scene_dim = saved["scene"].shape[-1]
                 current_hw = saved["patch_hw"]
                 if patch_hw is not None and patch_hw != current_hw:
-                    raise ValueError("resumed DINO patch grid differs")
+                    raise ValueError("resumed CLIP scene patch grid differs")
                 patch_hw = current_hw
                 all_persons.append(saved["persons"])
-                all_global.append(saved["scene"].float().mean(0))
+                all_global.append(saved["global"].float())
                 continue
         image = Image.open(path).convert("RGB")
         boxes = detect(
@@ -139,13 +142,13 @@ def build_cache(
         scene_pixels = scene_processor(images=image, return_tensors="pt")[
             "pixel_values"
         ]
-        scene, _, current_hw = image_encoder(scene_pixels.to(device))
+        scene, global_embedding, current_hw = image_encoder(scene_pixels.to(device))
         if patch_hw is None:
             patch_hw = current_hw
         elif patch_hw != current_hw:
             raise ValueError("scene processor must produce one fixed patch grid")
 
-        # The active model replaces DINO person rows with frozen FAFA features.
+        # Person appearance comes exclusively from the frozen FAFA cache.
         # This source cache only needs person count/geometry plus scene patches.
         person_features = scene.new_empty(len(persons), 0)
 
@@ -153,14 +156,17 @@ def build_cache(
         boxes_scene = boxes_to_scene(persons, image.size, scene_size)
         cached_persons = compact_cpu(person_features, feature_dtype)
         cached_scene = compact_cpu(scene[0], feature_dtype)
-        # Match training/legacy pooling exactly, including storage rounding.
-        all_global.append(cached_scene.float().mean(dim=0))
+        saved_scene_dim = cached_scene.shape[-1]
+        # Native projected CLS must never be replaced by a patch mean.
+        cached_global = compact_cpu(global_embedding[0], torch.float32)
+        all_global.append(cached_global)
 
         torch.save(
             {
                 "cache_id": cache_id,
                 "image_id": image_id,
                 "scene": cached_scene,
+                "global": cached_global,
                 "persons": cached_persons,
                 "boxes_scene": compact_cpu(boxes_scene, torch.float32),
                 "boxes_pixel": compact_cpu(persons, torch.float32),
@@ -190,9 +196,10 @@ def build_cache(
             "cache_id": cache_id,
             "image_ids": image_ids,
             "image_paths": [str(Path(path).resolve()) for path in image_paths],
-            "scene_dim": all_global[0].shape[-1],
+            "scene_dim": saved_scene_dim,
+            "global_dim": all_global[0].shape[-1],
             "person_encoder": {
-                "backend": "dino",
+                "backend": "clip",
                 "features": "geometry_only",
             },
             **(encoder_metadata or {}),
@@ -236,14 +243,14 @@ class _LetterboxProcessor:
         )
 
 
-def _prepare_dino(cfg: dict, data, root: Path) -> None:
+def _prepare_scene(cfg: dict, data, root: Path) -> None:
     device = resolve_device(cfg)
 
     from transformers import (
         AutoImageProcessor,
-        AutoModel,
         AutoModelForZeroShotObjectDetection,
         AutoProcessor,
+        CLIPVisionModelWithProjection,
     )
 
     detector_cfg = cfg["detector"]
@@ -253,9 +260,15 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
     ).to(device)
 
     image_cfg = cfg["image_encoder"]
-    processor = AutoImageProcessor.from_pretrained(image_cfg["model"])
-    backbone = AutoModel.from_pretrained(image_cfg["model"]).to(device)
-    image_encoder = ImageEncoder(backbone, backbone.config.hidden_size).to(device)
+    processor = AutoImageProcessor.from_pretrained(
+        image_cfg["model"], revision=image_cfg["revision"], use_fast=False
+    )
+    backbone = CLIPVisionModelWithProjection.from_pretrained(
+        image_cfg["model"], revision=image_cfg["revision"]
+    ).to(device)
+    if image_cfg["scene_size"] != [224, 224] or backbone.config.patch_size != 32:
+        raise ValueError("CLIP ViT-B/32 requires a 224x224 scene and 32-pixel patches")
+    image_encoder = ImageEncoder(backbone).to(device)
 
     build_cache(
         image_ids=data.gallery_ids,
@@ -272,7 +285,7 @@ def _prepare_dino(cfg: dict, data, root: Path) -> None:
         encoder_metadata={"image_encoder": image_cfg, "detector": detector_cfg},
     )
 
-    # Release DINO/detector GPU storage before starting the isolated FAFA worker.
+    # Release CLIP scene/detector GPU storage before starting the isolated FAFA worker.
     del detector, image_encoder, backbone
     gc.collect()
     if device.type == "cuda":

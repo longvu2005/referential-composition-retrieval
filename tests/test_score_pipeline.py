@@ -74,6 +74,7 @@ def saved_pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(retrieve, "load_rcr_data", lambda *args: data)
     monkeypatch.setattr(retrieve, "GalleryCache", lambda *args, **kwargs: cache)
     monkeypatch.setattr(retrieve, "check_query_text_config", lambda *args: None)
+    monkeypatch.setattr(retrieve, "check_cache_config", lambda *args: None)
     monkeypatch.setattr(
         retrieve,
         "load_text_modules",
@@ -117,7 +118,7 @@ def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
     assert metadata["score_config"] == saved["score_config"]
     assert metadata["score_schema_version"] == 1
     assert metadata["fine_score_mode"] == "context_zscore"
-    assert metadata["context_weight"] == 0.03
+    assert metadata["context_weight"] == cfg["retrieval"]["context_weight"]
     assert metadata["checkpoint_epoch"] == 2
     assert metadata["validation_sha256"] == split_fingerprint(data, "val")
     assert {
@@ -140,6 +141,22 @@ def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
     )
     with pytest.raises(ValueError, match="retrieval contract is incomplete"):
         retrieve.retrieve(incomplete_test)
+
+
+def test_dino_bert_checkpoint_is_rejected_before_loading_backbone(
+    saved_pipeline, monkeypatch
+):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["architecture_version"] = "fafa-native-partial-match-v1"
+    torch.save(checkpoint, cfg["checkpoint"])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("incompatible checkpoints must fail before model loading")
+
+    monkeypatch.setattr(retrieve, "load_text_modules", forbidden)
+    with pytest.raises(ValueError, match="checkpoint architecture is incompatible"):
+        retrieve.retrieve(cfg)
 
 
 def test_report_rejects_test_without_complete_validation_selection(
@@ -205,7 +222,7 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     assert len(rows) == 4
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     assert selected["retrieval"]["fine_score_mode"] == "context_zscore"
-    assert selected["retrieval"]["context_weight"] == 0.03
+    assert selected["retrieval"]["context_weight"] == cfg["retrieval"]["context_weight"]
     assert selected["selected_validation_sha256"] == split_fingerprint(data, "val")
     assert len(selected["selected_checkpoint_sha256"]) == 64
     best = max(rows, key=lambda row: row["full_map"])

@@ -9,7 +9,24 @@ from torch import Tensor, nn
 
 from rcr.common.data import sample_selection_texts
 
-SUBJECT_MARKERS = {1: "[S1]", 2: "[S2]"}
+SUBJECT_MARKERS = {1: "Subject 1", 2: "Subject 2"}
+CLIP_MODEL = "openai/clip-vit-base-patch32"
+CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
+CLIP_CONTEXT_LENGTH = 77
+
+
+def check_clip_config(cfg: dict) -> None:
+    image = cfg["image_encoder"]
+    if (
+        image["model"] != CLIP_MODEL
+        or cfg["model"]["text_model"] != CLIP_MODEL
+        or image.get("revision") != CLIP_REVISION
+    ):
+        raise ValueError(
+            "image and text must use the same pinned CLIP ViT-B/32 checkpoint"
+        )
+    if image.get("scene_size") != [224, 224]:
+        raise ValueError("CLIP ViT-B/32 scene_size must be [224, 224]")
 
 
 def _autocast_dtype(device_type: str):
@@ -41,48 +58,47 @@ def load_text_modules(
     *,
     tokenizer_source=None,
     revision: str | None = None,
-    add_subject_markers: bool = False,
     cache_mib: int = 0,
 ):
-    """Build the tokenizer and frozen text encoder used by train and retrieve."""
-    from transformers import AutoModel, AutoTokenizer
+    """Load the text half of the same pinned CLIP checkpoint as the scene cache."""
+    from transformers import CLIPTextModelWithProjection, CLIPTokenizerFast
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source or model_name)
-    if add_subject_markers:
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": list(SUBJECT_MARKERS.values())}
-        )
-    backbone = AutoModel.from_pretrained(model_name, revision=revision)
-    backbone.resize_token_embeddings(len(tokenizer))
+    if model_name != CLIP_MODEL:
+        raise ValueError(f"Proposed requires {CLIP_MODEL}")
+    revision = revision or CLIP_REVISION
+    if revision != CLIP_REVISION:
+        raise ValueError("text revision differs from the pinned CLIP image/text pair")
+    tokenizer = CLIPTokenizerFast.from_pretrained(
+        tokenizer_source or model_name,
+        **({} if tokenizer_source is not None else {"revision": revision}),
+    )
+    if tokenizer.padding_side != "right":
+        raise ValueError("CLIP requires right-padded native text")
+    backbone = CLIPTextModelWithProjection.from_pretrained(
+        model_name, revision=revision
+    )
+    if backbone.config.max_position_embeddings != CLIP_CONTEXT_LENGTH:
+        raise ValueError("CLIP text checkpoint must support exactly 77 positions")
     return tokenizer, TextEncoder(backbone, dim, cache_mib=cache_mib).to(device)
 
 
 def text_encoder_state(text_encoder: nn.Module, tokenizer) -> dict:
-    """Save trainable text state without copying the frozen BERT backbone."""
-    embedding = text_encoder.backbone.get_input_embeddings().weight
+    """Store only the learned projection and native-tokenizer policy."""
+    del tokenizer
     return {
         "projection": text_encoder.proj.state_dict(),
-        "markers": {
-            token: embedding[tokenizer.convert_tokens_to_ids(token)]
-            .detach()
-            .to(device="cpu", copy=True)
-            for token in SUBJECT_MARKERS.values()
+        "text_policy": {
+            "context_length": CLIP_CONTEXT_LENGTH,
+            "subjects": "native_spans",
         },
     }
 
 
 def load_text_encoder_state(text_encoder: nn.Module, tokenizer, state: dict) -> None:
-    """Load compact checkpoints and the original full-state format."""
-    if "projection" not in state:
-        text_encoder.load_state_dict(state)
-        return
-
+    expected = text_encoder_state(text_encoder, tokenizer)["text_policy"]
+    if state.get("text_policy") != expected:
+        raise ValueError("text checkpoint is not compatible with native CLIP spans")
     text_encoder.proj.load_state_dict(state["projection"])
-    embedding = text_encoder.backbone.get_input_embeddings().weight
-    with torch.no_grad():
-        for token in SUBJECT_MARKERS.values():
-            index = tokenizer.convert_tokens_to_ids(token)
-            embedding[index].copy_(state["markers"][token])
 
 
 class QueryTextCache:
@@ -91,6 +107,15 @@ class QueryTextCache:
     def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
         self.rows: dict[tuple, dict] = {}
+        self.stats = dict.fromkeys(
+            (
+                "selection_texts",
+                "selection_truncated",
+                "change_texts",
+                "change_truncated",
+            ),
+            0,
+        )
 
     @staticmethod
     def _key(sample: dict) -> tuple:
@@ -106,51 +131,73 @@ class QueryTextCache:
             for sample in samples
             if self._key(sample) not in self.rows
         }
-        entries = list(missing.items())
-        for start in range(0, len(entries), 64):
-            chunk = entries[start : start + 64]
-            selections, changes = [], []
-            for _, sample in chunk:
-                selections.extend(sample_selection_texts(sample))
-                change = sample["final_change"]
-                for subject in sample["subjects"]:
-                    sid = int(subject["subject_id"])
-                    change = re.sub(
-                        rf"\bSubject\s+{sid}\b", SUBJECT_MARKERS[sid], change
-                    )
-                changes.append(change)
-
-            def tokenize(texts):
-                encoded = self.tokenizer(texts, padding=True, return_tensors="pt")
-                return [
-                    ids[mask.bool()].clone()
-                    for ids, mask in zip(
-                        encoded["input_ids"], encoded["attention_mask"], strict=True
+        for key, sample in missing.items():
+            row_stats = dict.fromkeys(self.stats, 0)
+            texts = [*sample_selection_texts(sample), sample["final_change"]]
+            encoded = self.tokenizer(
+                texts,
+                padding=False,
+                truncation=False,
+                return_offsets_mapping=True,
+                return_attention_mask=False,
+                verbose=False,
+            )
+            ids_rows, offset_rows = [], []
+            for j, (ids, offsets) in enumerate(
+                zip(encoded["input_ids"], encoded["offset_mapping"], strict=True)
+            ):
+                kind = "change" if j == len(texts) - 1 else "selection"
+                row_stats[f"{kind}_texts"] += 1
+                if len(ids) > CLIP_CONTEXT_LENGTH:
+                    row_stats[f"{kind}_truncated"] += 1
+                    ids = [*ids[: CLIP_CONTEXT_LENGTH - 1], self.tokenizer.eos_token_id]
+                    offsets = [*offsets[: CLIP_CONTEXT_LENGTH - 1], (0, 0)]
+                ids_rows.append(torch.tensor(ids, dtype=torch.long))
+                offset_rows.append(offsets)
+            subject_ids = [int(x["subject_id"]) for x in sample["subjects"]]
+            positions = []
+            for sid in subject_ids:
+                spans = [
+                    m.span()
+                    for m in re.finditer(
+                        rf"\bSubject\s+{sid}\b", texts[-1], re.IGNORECASE
                     )
                 ]
+                # A clipped "Subject" prefix alone must not count as a full role.
+                spans = [
+                    (a, b)
+                    for a, b in spans
+                    if any(left <= a < right for left, right in offset_rows[-1])
+                    and any(left < b <= right for left, right in offset_rows[-1])
+                ]
+                found = [
+                    i
+                    for i, (left, right) in enumerate(offset_rows[-1])
+                    if right > left and any(left < b and right > a for a, b in spans)
+                ]
+                if not found:
+                    raise ValueError(
+                        f"{sample['sample_id']}: Subject {sid} is absent or truncated "
+                        "from CLIP's 77-token change; shorten the public change text"
+                    )
+                positions.append(torch.tensor(found, dtype=torch.long))
+            self.rows[key] = {
+                "selections": ids_rows[:-1],
+                "change": ids_rows[-1],
+                "positions": positions,
+                "subject_ids": subject_ids,
+                "text_stats": row_stats,
+            }
+            for name, count in row_stats.items():
+                self.stats[name] += count
 
-            selected, changed = tokenize(selections), tokenize(changes)
-            offset = 0
-            for (key, sample), ids in zip(chunk, changed, strict=True):
-                subject_ids = [int(x["subject_id"]) for x in sample["subjects"]]
-                positions = []
-                for sid in subject_ids:
-                    marker = SUBJECT_MARKERS[sid]
-                    marker_id = self.tokenizer.convert_tokens_to_ids(marker)
-                    found = (ids == marker_id).nonzero(as_tuple=True)[0]
-                    if not len(found):
-                        raise ValueError(
-                            f"{marker} must be one tokenizer token and occur"
-                        )
-                    positions.append(found)
-                count = len(subject_ids)
-                self.rows[key] = {
-                    "selections": selected[offset : offset + count],
-                    "change": ids,
-                    "positions": positions,
-                    "subject_ids": subject_ids,
-                }
-                offset += count
+    def statistics(self, samples: list[dict]) -> dict:
+        """Report this query set, independently of earlier visits to the cache."""
+        self.prepare(samples)
+        return {
+            name: sum(self.rows[self._key(s)]["text_stats"][name] for s in samples)
+            for name in self.stats
+        }
 
     def batch(self, samples: list[dict]) -> dict[str, Tensor]:
         self.prepare(samples)
@@ -198,17 +245,20 @@ class QueryTextCache:
 def encode_tokenized_text(
     tokens: dict[str, Tensor], text_encoder: nn.Module, device: torch.device | str
 ) -> dict[str, Tensor]:
-    """Run frozen BERT and the trainable projection after CPU preparation."""
+    """Return context tokens and the separate native CLIP global text embedding."""
     tokens = {key: value.to(device, non_blocking=True) for key, value in tokens.items()}
     b, subjects = tokens["subject_ids"].shape
-    selections, selection_mask = text_encoder(
+    selections, selection_mask, _ = text_encoder(
         tokens["selection_ids"], tokens["selection_mask"]
     )
-    change, change_mask = text_encoder(tokens["change_ids"], tokens["change_mask"])
+    change, change_mask, change_global = text_encoder(
+        tokens["change_ids"], tokens["change_mask"]
+    )
     return {
         "selections": selections.reshape(b, subjects, *selections.shape[1:]),
         "selection_mask": selection_mask.reshape(b, subjects, -1),
         "change": change,
+        "change_global": change_global,
         "change_mask": change_mask,
         **{
             key: tokens[key]
@@ -230,31 +280,27 @@ def encode_query_text(
 
 
 class ImageEncoder(nn.Module):
-    """Extract DINOv3-style patch and CLS features with one shared backbone."""
+    """Keep native CLIP patch tokens and its separately projected global vector."""
 
-    def __init__(self, backbone: nn.Module, dim: int) -> None:
+    def __init__(self, backbone: nn.Module) -> None:
         super().__init__()
-        self.backbone = backbone
+        self.backbone = backbone.requires_grad_(False).eval()
         self.patch_size = backbone.config.patch_size
-        self.num_register_tokens = getattr(backbone.config, "num_register_tokens", 0)
-
-        hidden_dim = backbone.config.hidden_size
-        self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
 
     def forward(self, images: Tensor) -> tuple[Tensor, Tensor, tuple[int, int]]:
-        """Return patch features [B,P,D], CLS [B,D], and patch grid."""
-
-        tokens = self.proj(self.backbone(pixel_values=images).last_hidden_state)
-        patches = tokens[:, 1 + self.num_register_tokens :]
+        output = self.backbone(pixel_values=images)
         patch_hw = (
             images.shape[-2] // self.patch_size,
             images.shape[-1] // self.patch_size,
         )
-        return patches, tokens[:, 0], patch_hw
+        patches = output.last_hidden_state[:, 1:]
+        if patches.shape[1] != patch_hw[0] * patch_hw[1]:
+            raise ValueError("CLIP patch grid differs from the preprocessed image")
+        return patches, output.image_embeds, patch_hw
 
 
 class TextEncoder(nn.Module):
-    """Frozen, deterministic BERT features followed by a trainable projection."""
+    """Frozen CLIP token projection followed by the learned context projection."""
 
     def __init__(self, backbone: nn.Module, dim: int, *, cache_mib: int = 0) -> None:
         super().__init__()
@@ -264,9 +310,9 @@ class TextEncoder(nn.Module):
         self.backbone.requires_grad_(False)
         self.backbone.eval()
 
-        hidden_dim = backbone.config.hidden_size
-        self.proj = nn.Identity() if hidden_dim == dim else nn.Linear(hidden_dim, dim)
-        # Only frozen, unprojected features are cached. Projection gradients and
+        self.global_dim = backbone.config.projection_dim
+        self.proj = nn.Linear(self.global_dim, dim)
+        # Only frozen native CLIP features are cached. Context-projection gradients and
         # optimizer updates must be recomputed on every visit to a text row.
         self._hidden: OrderedDict[tuple, Tensor] = OrderedDict()
         self._hidden_limit = cache_mib * 1024**2
@@ -284,22 +330,34 @@ class TextEncoder(nn.Module):
 
     def forward(
         self, input_ids: Tensor, attention_mask: Tensor
-    ) -> tuple[Tensor, Tensor]:
-        """Return text tokens [B,L,D] and a boolean valid-token mask."""
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return context tokens, valid mask and native EOT embedding."""
 
+        if input_ids.shape[1] > CLIP_CONTEXT_LENGTH:
+            raise ValueError("CLIP text exceeds its 77-token position limit")
         if self._hidden_limit:
             tokens = self._cached_backbone(input_ids, attention_mask)
         else:
             with torch.no_grad():
-                tokens = self.backbone(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                ).last_hidden_state
-        return self.proj(tokens), attention_mask.bool()
+                tokens = self._backbone_tokens(input_ids, attention_mask)
+        # Match CLIP's native pooling, including the legacy HF config whose
+        # eos_token_id=2 represents the highest token ID rather than literal 2.
+        if self.backbone.config.eos_token_id == 2:
+            eot = input_ids.int().argmax(-1)
+        else:
+            eot = (input_ids == self.backbone.config.eos_token_id).int().argmax(-1)
+        pooled = tokens[torch.arange(len(tokens), device=tokens.device), eot]
+        return self.proj(tokens), attention_mask.bool(), pooled.float()
+
+    def _backbone_tokens(self, input_ids, attention_mask):
+        hidden = self.backbone(
+            input_ids=input_ids, attention_mask=attention_mask
+        ).last_hidden_state
+        return self.backbone.text_projection(hidden)
 
     @torch.no_grad()
     def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        # Right padding does not change BERT's absolute positions. Canonicalize
+        # Right padding does not change CLIP's causal token states. Canonicalize
         # that common case while retaining complete rows for left/irregular masks.
         precision = _autocast_dtype(input_ids.device.type)
         backbone_dtype = next(self.backbone.parameters()).dtype
@@ -331,10 +389,9 @@ class TextEncoder(nn.Module):
             indices = torch.tensor(list(missing.values()), device=input_ids.device)
             # Keep the caller's precision; AMP and FP32 visits have separate
             # keys so validation cannot reuse approximate training features.
-            hidden = self.backbone(
-                input_ids=input_ids[indices],
-                attention_mask=attention_mask[indices],
-            ).last_hidden_state.cpu()
+            hidden = self._backbone_tokens(
+                input_ids[indices], attention_mask[indices]
+            ).cpu()
             for key, row in zip(missing, hidden, strict=True):
                 value = row[: len(key[-2])].clone()
                 values[key] = value

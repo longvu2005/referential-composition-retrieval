@@ -1,8 +1,8 @@
 # CPU-only selection from one complete validation --save-tuning export.
-# Uses benchmark annotations, without loading the checkpoint, BERT or image caches.
-model_config: runs/proposed-fafa-unified/config.yaml
-rankings: runs/proposed-tuning/val/rankings.pt
-output_dir: runs/calibration-saved
+# Uses benchmark annotations, without loading the checkpoint, CLIP or image caches.
+model_config: runs/proposed-clip-b32/config.yaml
+rankings: runs/proposed-clip-b32-tuning/val/rankings.pt
+output_dir: runs/clip-b32-calibration-saved
 coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
 fine_coarse_weight: [0.0, 0.0025, 0.005, 0.0064, 0.01, 0.025, 0.05, 0.1, 0.4]
 context_weight: [0.02, 0.0288, 0.03, 0.05]

@@ -20,11 +20,12 @@ dependencies = [
 
 [project.optional-dependencies]
 proposed = [
-    "torch>=2.2,<3",
+    "torch>=2.6,<3",  # Transformers loads the pinned CLIP pytorch_model.bin.
     "scipy>=1.11,<2",  # Fine partial one-to-one identity assignment.
     "transformers>=4.56,<5",
     "torchvision>=0.17,<1",
     "wandb>=0.18,<1",
+    "ftfy>=6.1,<7",  # Official CLIP text normalization.
 ]
 clip = [
     "torch>=2.2,<3",
@@ -74,6 +75,7 @@ evaluation = [
 dev = [
     "torch>=2.2,<3",  # Old/new AMP APIs are both covered by CPU contracts.
     "pytest>=8.0",
+    "transformers>=4.56,<5",  # Tiny native CLIP parity contracts (no downloads).
     "scipy>=1.11,<2",  # CPU FAFA adapter contract tests (no native weights).
     "ruff>=0.6",
 ]

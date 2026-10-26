@@ -2,8 +2,24 @@
 
 ## Frozen features
 
-The person detector supplies full-person boxes. DINO supplies the
-letterboxed scene patch grid. A separate frozen FAFA image-only trunk supplies
+The Grounding DINO Tiny detector supplies full-person boxes. The frozen vision
+half of `openai/clip-vit-base-patch32` supplies the letterboxed 224 x 224 scene:
+49 patch tokens of width 768 and the separately projected 512-D global CLS.
+Both image and text use revision `3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`.
+The native CLIP text encoder supplies projected token states and a separate
+512-D EOT embedding. Text has 77 positions including BOS/EOS; Subject spans are
+mapped by character offsets, without adding or freezing random marker embeddings.
+All original Subject mentions receive their role injection after the frozen
+text backbone. Truncation counts are recorded; losing a complete required Subject
+mention raises an explicit error. This does not change FAFA's separate 128-token policy.
+
+Patch and text states enter independent learned context projections to width 384.
+Patch tokens are not asserted to be directly aligned to individual text tokens.
+Global state bypasses these context projections and uses native pooled embeddings.
+State adapters are 512-D affine maps initialized to identity/zero bias; training
+retains the same identity-restricted state loss and may adapt the initial CLIP metric.
+
+A separate frozen FAFA image-only trunk supplies
 person crops for BOTH query and target images:
 
 ```text
@@ -20,14 +36,14 @@ The complete image-only trunk, including Q-Former, is frozen/eval during cache
 construction. No instruction enters this cache. `h` is cached, not learned heads.
 Mean pooling is a simple person representation, not native FDA scoring.
 
-DINO scene and FAFA person inputs have separate widths and cache metadata. The
-scene projection is independent of the shared person projection. BERT remains
-frozen/eval; only its output projection is trained. No FAFA library/model is
-loaded during training or retrieval. The DINO directory stores scenes,
-predicted detections and DINO crop features, without GT identity labels.
+CLIP scene and FAFA person inputs have separate widths and cache metadata. The
+scene projection is independent of the shared person projection. CLIP and its
+native projections stay frozen/eval; the additional context projection is trained. No FAFA library/model is
+loaded during training or retrieval. The scene directory stores CLIP patches/global vectors and
+predicted crop geometry, without GT identity labels.
 Training/retrieval use FAFA crops. The
 FAFA directory stores crop features and its index. `GalleryCache`
-combines them and verifies the FAFA index references the same DINO cache ID.
+combines them and verifies the FAFA index references the same scene cache ID.
 
 `GalleryCache.load()` returns `(scene, persons, boxes, mask)` only. Training uses
 `TrainSupervision` to align GT train heads to those detections separately and
@@ -89,7 +105,8 @@ Coarse retrieval combines optimistic soft identity with a global state branch:
 
 ```text
 S_id(q,t) = mean_s sum_i normalized(a_si) max_j dot(z_id_qi,z_id_tj)
-S_global_state(q,t) = dot(projected change text, projected mean DINO scene)
+S_global_state(q,t) = cosine(A_text E_CLIP_text(change), A_image E_CLIP_image(t))
+A_text, A_image start as 512-D identity maps; E_CLIP is frozen.
 S_coarse = z_gallery(S_id) + coarse_beta * z_gallery(S_global_state)
 ```
 
@@ -217,14 +234,14 @@ Within Top-M:
 ```text
 gated_context = C * S_context
 z(x) = (float32(x) - mean(x)) / max(std(x, unbiased=False), 1e-6)
-S_fine = alpha * B_FAFA + 0.03 * z_topM(gated_context)
+S_fine = alpha * B_FAFA + 0.0325 * z_topM(gated_context)
 S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 ```
 
 `L_ret` continues to use `S_fine_raw` from `score_target()`. Training batches do
 not define inference normalization groups. Periodic validation, standalone
 retrieval and calibration all use `retrieval.fine_score_mode: context_zscore`
-with `context_weight: 0.03` by default. Context normalization happens **after**
+with `context_weight: 0.0325` by default. Context normalization happens **after**
 coverage gating and after all Top-M candidates have been scored, in original
 Coarse order. Each query has independent statistics. A constant vector, zero
 coverage or M=1 contributes zero normalized context. NaN/Inf fine components
@@ -251,23 +268,23 @@ and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 
 ## Configuration and checkpoints
 
-There is one architecture, `fafa-native-partial-match-v1`. Frozen extraction has
-three independent directories: `data.dino_cache`, `data.fafa_image_cache` and
+There is one architecture, `clip-b32-fafa-partial-match-v2`. Frozen extraction has
+three independent directories: `data.scene_cache`, `data.fafa_image_cache` and
 `data.fafa_query_cache`. The current format-6 image index contains packed pooled person means,
 native target-token metadata and encoder/crop provenance, with no query text.
 One image-only Q-Former forward supplies both hidden means and projected tokens as
 defined above. The query index separately
 maps sample/Subject slots to content-addressed conditions. Each key binds the
-FAFA source/checkpoint/preprocessing, DINO crop source, extraction precision,
+FAFA source/checkpoint/preprocessing, scene crop source, extraction precision,
 reference image, public condition and query text policy. Query text edits only
 require rerunning `--cache-stage fafa-query`; identical condition features are reused.
 
-Completed format-4 unified caches remain valid image sources without writes.
-Replace `data.cache` with `data.fafa_image_cache` and add `data.fafa_query_cache`.
-Checkpoints bind image feature identity, encoder provenance and query text policy,
-not the query manifest UUID. Incompatible architecture checkpoints require
-retraining in a new run directory; this cache separation does not change the model
-equations.
+Build new scene, FAFA image and FAFA query caches in the separate CLIP paths.
+Their crop-source identity and preprocessing are part of the provenance contract.
+DINO/BERT architecture checkpoints are rejected before loading text weights.
+Train the new modules from scratch in `runs/proposed-clip-b32`; this is not a
+weight-compatible checkpoint conversion. The evaluator and offline replay still
+read historical ranking artifacts using their recorded score schemas.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and fusion coefficients.

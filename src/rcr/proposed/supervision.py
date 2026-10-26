@@ -21,7 +21,7 @@ def align_identities(item, heads, *, image_path=None, scene_size=None):
         return labels
     persons = item.get("boxes_pixel")
     if persons is None:
-        # Old caches may store only letterboxed coordinates. New DINO caches
+        # Old caches may store only letterboxed coordinates. New scene caches
         # store pixel boxes and need no image access for supervision.
         if image_path is None or scene_size is None:
             raise ValueError(
@@ -162,17 +162,20 @@ class TrainSupervision:
 
 def prepare_train_supervision(cfg):
     """Prepare reusable train labels without loading encoders or query features."""
+    from rcr.proposed.cache.build import cache_paths, check_cache_config
     from rcr.proposed.cache.store import GalleryCache
     from rcr.proposed.identity import identity_sampling_settings
 
+    cache_paths(cfg)
     data_cfg = cfg["data"]
     cache_file = cfg.get("cache", {}).get("supervision_cache")
     if cache_file is None:
         raise ValueError("prepare-supervision requires cache.supervision_cache")
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
     cache = GalleryCache(
-        data_cfg["fafa_image_cache"], scene_root=data_cfg.get("dino_cache")
+        data_cfg["fafa_image_cache"], scene_root=data_cfg.get("scene_cache")
     )
+    check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     supervision = TrainSupervision(
         data,

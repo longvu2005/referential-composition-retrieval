@@ -431,6 +431,7 @@ def rank_weight_grid(
     }
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
+    text_stats = text_cache.statistics(list(samples))
     with evaluating(model, text_encoder):
         gallery_batches = _encode_gallery_identity(
             cache, model, device, identity_batch_size, image_indices
@@ -478,7 +479,7 @@ def rank_weight_grid(
                 fafa_query=cache.native_queries([sample], q_persons.shape[1]).to(
                     device
                 ),
-                **text,
+                **{key: value for key, value in text.items() if key != "change_global"},
             )
             identity = (
                 _coarse_scores_chunked(
@@ -493,9 +494,7 @@ def rank_weight_grid(
             )
             state = None
             if need_state:
-                query_state = model.encode_text_state(
-                    text["change"], text["change_mask"]
-                )[0]
+                query_state = model.encode_text_state(text["change_global"])[0]
                 state = (
                     torch.cat(
                         [
@@ -660,6 +659,7 @@ def rank_weight_grid(
         return [
             {
                 "sample_ids": [sample["sample_id"] for sample in samples],
+                "clip_text_stats": text_stats,
                 "gallery_ids": gallery_ids,
                 "score_schema_version": SCORE_SCHEMA_VERSION,
                 "binding_scale": binding_scale,
@@ -776,9 +776,7 @@ def mine_hard_negatives(
 
                 state = None
                 if need_state:
-                    query_state = model.encode_text_state(
-                        text["change"], text["change_mask"]
-                    )
+                    query_state = model.encode_text_state(text["change_global"])
                     state = query_identity.new_empty(len(rows), len(gallery_ids))
                     for j in range(0, len(gallery_ids), settings["coarse_batch_size"]):
                         stop = j + settings["coarse_batch_size"]

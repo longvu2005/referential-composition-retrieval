@@ -10,9 +10,10 @@ from rcr.baselines.fafa import text_policy
 from rcr.common.config import load_config
 from rcr.common.data import load_rcr_inputs
 from rcr.common.io import sha256_file
-from rcr.proposed.cache.dino import _prepare_dino
 from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
+from rcr.proposed.cache.scene import _prepare_scene
 from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.nn.encoders import check_clip_config
 
 
 def load_fafa_config(cfg: dict) -> dict:
@@ -58,18 +59,11 @@ def check_cache_config(
     if "person_encoder" not in cfg:
         return  # Small in-memory test configs have no external encoder spec.
     if cache._scene_cache is not None:
-        check_cache_config(cache._scene_cache, cfg, person_backend="dino")
+        check_cache_config(cache._scene_cache, cfg, person_backend="clip")
     if cache.format_version == 1:
-        if person_backend != "dino" or not cfg.get("cache", {}).get(
-            "allow_legacy_dino", False
-        ):
-            raise ValueError("legacy DINO cache requires cache.allow_legacy_dino=true")
-        # Legacy files cannot prove their model/detector provenance. This is
-        # an explicit user assertion, never inferred from equal feature widths.
-        height, width = cfg["image_encoder"]["scene_size"]
-        if cache.patch_hw != (height // 16, width // 16):
-            raise ValueError("legacy DINO patch grid differs from scene_size")
-        return
+        raise ValueError(
+            "CLIP scene cache needs encoder metadata; rebuild --cache-stage scene"
+        )
     if cache.format_version not in (2, 4, 5, 6):
         raise ValueError("unsupported cache format")
     actual = cache.encoder_metadata["person_encoder"] or {}
@@ -82,6 +76,9 @@ def check_cache_config(
     if person_backend == "fafa":
         if cache.format_version not in (4, 5, 6) or cache.native is None:
             raise ValueError("build a FAFA image cache in data.fafa_image_cache")
+        native_path = cfg["person_encoder"].get("fafa_config")
+        if native_path is None or not Path(native_path).is_file():
+            return  # Cache-only train/retrieve uses the recorded native provenance.
         native_cfg = load_fafa_config(cfg)
         if actual.get("spec") != fafa_spec(native_cfg):
             raise ValueError("cache FAFA checkpoint/source/preprocessing spec differs")
@@ -134,6 +131,10 @@ def query_cache_ready(root: Path, image: GalleryCache, samples, policy: dict) ->
 def cache_paths(cfg: dict) -> tuple[Path, Path, Path]:
     """Keep every cache separate, including through symlinks and parent paths."""
     data = cfg["data"]
+    if "dino_cache" in data:
+        raise ValueError(
+            "replace data.dino_cache with data.scene_cache and build CLIP features"
+        )
     if "cache" in data or "native_cache" in data:
         raise ValueError(
             "replace data.cache/data.native_cache with data.fafa_image_cache and "
@@ -142,34 +143,37 @@ def cache_paths(cfg: dict) -> tuple[Path, Path, Path]:
         )
     paths = tuple(
         Path(data[key])
-        for key in ("dino_cache", "fafa_image_cache", "fafa_query_cache")
+        for key in ("scene_cache", "fafa_image_cache", "fafa_query_cache")
     )
     resolved = [path.resolve() for path in paths]
     for i, first in enumerate(resolved):
         for second in resolved[i + 1 :]:
             if first == second or first in second.parents or second in first.parents:
                 raise ValueError(
-                    "DINO, FAFA image and query caches must be separate directories"
+                    "Scene, FAFA image and query caches must be separate directories"
                 )
     return paths
 
 
 def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     """Build each cache independently; never write to a completed image cache."""
-    if stage not in ("all", "dino", "fafa", "fafa-image", "fafa-query"):
+    if stage not in ("all", "scene", "fafa", "fafa-image", "fafa-query"):
         raise ValueError("invalid cache stage")
+    check_clip_config(cfg)
     root, image_root, query_root = cache_paths(cfg)
     data_cfg = cfg["data"]
     data = load_rcr_inputs(data_cfg["final_dir"], data_cfg["image_root"])
-    source = existing_cache(cfg, root, person_backend="dino")
+    source = existing_cache(cfg, root, person_backend="clip")
     if source is not None:
         source.validate_gallery(data.gallery_ids)
-        print(f"Using existing DINO cache: {root}", flush=True)
-    elif stage not in ("all", "dino"):
-        raise ValueError("DINO cache missing/incomplete; run --cache-stage dino first")
+        print(f"Using existing CLIP scene cache: {root}", flush=True)
+    elif stage not in ("all", "scene"):
+        raise ValueError(
+            "CLIP scene cache missing/incomplete; run --cache-stage scene first"
+        )
     if source is None:
-        _prepare_dino(cfg, data, root)
-    if stage == "dino":
+        _prepare_scene(cfg, data, root)
+    if stage == "scene":
         return
     image = existing_cache(cfg, image_root, scene_root=root)
     if image is not None:

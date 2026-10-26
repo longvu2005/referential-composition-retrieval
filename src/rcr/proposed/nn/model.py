@@ -24,7 +24,7 @@ from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import fafa_binding_scores
 
-ARCHITECTURE_VERSION = "fafa-native-partial-match-v1"
+ARCHITECTURE_VERSION = "clip-b32-fafa-partial-match-v2"
 DEFAULT_COARSE_BETA = 0.4
 
 
@@ -70,6 +70,7 @@ class RCRModel(nn.Module):
         *,
         input_dim: int,
         person_input_dim: int,
+        global_dim: int | None = None,
         max_subjects: int = len(SUBJECT_MARKERS),
     ) -> "RCRModel":
         """Create the model from the single YAML model section."""
@@ -78,6 +79,7 @@ class RCRModel(nn.Module):
             dim=dim,
             input_dim=input_dim,
             person_input_dim=person_input_dim,
+            global_dim=global_dim,
             max_subjects=max_subjects,
             **{
                 key: value
@@ -95,6 +97,7 @@ class RCRModel(nn.Module):
         mlp_ratio: int = 2,
         geo_dim: int = 32,
         state_dim: int | None = None,
+        global_dim: int | None = None,
         coarse_beta: float = DEFAULT_COARSE_BETA,
         input_dim: int | None = None,
         person_input_dim: int | None = None,
@@ -105,7 +108,8 @@ class RCRModel(nn.Module):
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
         person_input_dim = input_dim if person_input_dim is None else person_input_dim
-        state_dim = identity_dim if state_dim is None else state_dim
+        self.global_dim = dim if global_dim is None else global_dim
+        state_dim = self.global_dim if state_dim is None else state_dim
         if state_dim < 1 or not math.isfinite(coarse_beta) or coarse_beta < 0:
             raise ValueError("invalid state dimension or coarse beta")
         self.coarse_beta = float(coarse_beta)
@@ -113,12 +117,15 @@ class RCRModel(nn.Module):
         if type(fda_k) is not int or fda_k < 1:
             raise ValueError("fda_k must be a positive integer")
         self.fda_k = fda_k
-        # DINO scene/state features have their own projection.
+        # Scene tokens have their own context projection; globals stay in CLIP space.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
         )
-        self.state_text_proj = nn.Linear(dim, state_dim)
-        self.state_image_proj = nn.Linear(dim, state_dim)
+        self.state_text_proj = nn.Linear(self.global_dim, state_dim)
+        self.state_image_proj = nn.Linear(self.global_dim, state_dim)
+        for projection in (self.state_text_proj, self.state_image_proj):
+            nn.init.eye_(projection.weight)
+            nn.init.zeros_(projection.bias)
         self.person_proj = nn.Sequential(
             nn.Linear(person_input_dim, dim), nn.LayerNorm(dim)
         )
@@ -148,21 +155,11 @@ class RCRModel(nn.Module):
         # Shared person tokens for grounding/composition/context, not FDA scoring.
         return self.person_proj(persons)
 
-    def encode_text_state(
-        self, change: Tensor, change_mask: Tensor | None = None
-    ) -> Tensor:
-        if change_mask is None:
-            pooled = change.float().mean(dim=-2)
-        else:
-            mask = change_mask.bool()
-            tokens = change.float().masked_fill(~mask[..., None], 0)
-            pooled = tokens.sum(dim=-2) / mask.sum(-1, keepdim=True).clamp_min(1)
-        return F.normalize(self.state_text_proj(pooled).float(), dim=-1)
+    def encode_text_state(self, global_features: Tensor) -> Tensor:
+        return F.normalize(self.state_text_proj(global_features).float(), dim=-1)
 
     def encode_image_state(self, global_features: Tensor) -> Tensor:
-        return F.normalize(
-            self.state_image_proj(self.visual_proj(global_features)).float(), dim=-1
-        )
+        return F.normalize(self.state_image_proj(global_features).float(), dim=-1)
 
     def forward(
         self,

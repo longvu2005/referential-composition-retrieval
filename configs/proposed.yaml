@@ -1,44 +1,41 @@
 # One source of truth for cache, training, retrieval and evaluation.
-# Current model: frozen FAFA multimodal + FDA; learned relational context.
+# Current model: frozen CLIP ViT-B/32 scene/text + FAFA FDA; learned relational context.
 # Coarse fusion uses gallery z-scores; fine scoring reranks the Top-M shortlist.
 method: proposed
 split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  fafa_image_cache: cache/fafa-images  # pooled persons + projected target tokens
-  fafa_query_cache: cache/fafa-queries
-  dino_cache: cache/proposed-dino  # shared scenes/detections; may be read-only Kaggle input
+  fafa_image_cache: cache/clip-b32-fafa-images  # pooled persons + projected target tokens
+  fafa_query_cache: cache/clip-b32-fafa-queries
+  scene_cache: cache/proposed-clip-b32  # CLIP patches/global + shared person boxes
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
   text_threshold: 0.25
 image_encoder:
-  model: facebook/dinov3-vitb16-pretrain-lvd1689m
+  model: openai/clip-vit-base-patch32
+  revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
   # [height, width], letterboxed; changing sizes requires rebuilding the cache.
   scene_size: [224, 224]
-  person_size: [256, 128]
 person_encoder:
   python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
   batch_size: 4
 cache:
-  # Legacy Kaggle DINO files lack encoder metadata. Confirm image_encoder/detector
-  # settings match the original build; this flag does not verify that provenance.
-  allow_legacy_dino: true
   storage_dtype: float16
   lru_mib: 1024       # scenes only; FAFA shards cannot evict scenes
   native_lru_mib: 256  # independent FAFA target/query budget
-  supervision_cache: cache/train-supervision.json  # train-only crop IDs prepared before train
+  supervision_cache: cache/clip-b32-train-supervision.json  # train-only crop IDs prepared before train
   mmap_shards: false  # Eager scene/target reads, as in ec5a2a2; large indices stay mmap.
-  text_lru_mib: 256   # frozen BERT outputs only; projection remains trainable
+  text_lru_mib: 256   # frozen native CLIP outputs only; projection remains trainable
 model:
-  text_model: google-bert/bert-base-uncased
+  text_model: openai/clip-vit-base-patch32  # same revision as image_encoder
   dim: 384                   # person/semantic, scene and text width
   dropout: 0.1               # attention weights/residuals and FFNs
   identity_dim: 128
   fda_k: 6                  # native top-k target tokens; no learned semantic cosine
-  state_dim: 128
+  state_dim: 512              # native joint space; adapters start as identity
   # Training default; inference overrides live in retrieval.
   coarse_beta: 0.4
   num_heads: 6
@@ -71,7 +68,7 @@ train:
     pool_size: 100
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05           # text projection only; BERT is fully frozen
+  text_lr: 1.0e-05           # text projection only; CLIP is fully frozen
   weight_decay: 0.01
 loss:
   grounding_weight: 1.0
@@ -104,7 +101,7 @@ wandb:
   log_every_steps: 20
 runtime:
   device: cuda
-checkpoint: runs/proposed-fafa-unified/best.pt
+checkpoint: runs/proposed-clip-b32/best.pt
 output:
   # Root only; the runner appends each split.
-  dir: runs/proposed-fafa-unified
+  dir: runs/proposed-clip-b32

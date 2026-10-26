@@ -16,9 +16,9 @@ def require_shared_dino_cache(cfg: dict) -> None:
     root = Path(cfg["localization"]["detector"]["cache_dir"])
     if not (root / "index.pt").is_file() or (root / ".building").exists():
         raise FileNotFoundError(
-            f"FAFA requires the completed shared DINO cache at {root}; run "
+            f"FAFA requires the completed shared person-box cache at {root}; run "
             "`.venv-proposed/bin/python tools/run.py build-cache "
-            "--config configs/proposed.yaml --cache-stage dino` first"
+            "--config configs/proposed.yaml --cache-stage scene` first"
         )
 
 

@@ -151,7 +151,7 @@ def test_shared_detector_inverts_legacy_non_square_scene_size(tmp_path):
     from PIL import Image
 
     from rcr.baselines.fafa_detector import candidates_from_cache
-    from rcr.proposed.cache.dino import boxes_to_scene
+    from rcr.proposed.cache.scene import boxes_to_scene
 
     path = tmp_path / "input.png"
     Image.new("RGB", (400, 200)).save(path)
@@ -181,7 +181,7 @@ def test_proposed_dino_settings_match_fafa_baseline():
     fafa = yaml.safe_load((root / "configs/fafa.yaml").read_text())
     detector = fafa["localization"]["detector"]
     assert detector["backend"] == "proposed_dino_tiny_cache"
-    assert detector["cache_dir"] == proposed["data"]["dino_cache"]
+    assert detector["cache_dir"] == proposed["data"]["scene_cache"]
     assert detector["model"] == proposed["detector"]["model"]
     assert detector["threshold"] == proposed["detector"]["threshold"]
     assert detector["text_threshold"] == proposed["detector"]["text_threshold"]

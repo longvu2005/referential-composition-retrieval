@@ -216,20 +216,20 @@ def test_preserve_artifacts_moves_one_run_into_one_history_entry(tmp_path):
     assert (histories[0] / "tokenizer" / "config.json").read_text() == "{}"
 
 
-def test_dino_cache_keeps_person_geometry_without_crop_embeddings(
+def test_scene_cache_keeps_native_global_and_person_geometry_without_crop_embeddings(
     tmp_path, monkeypatch
 ):
     import torch
     from PIL import Image
     from torch import nn
 
-    from rcr.proposed.cache import dino
+    from rcr.proposed.cache import scene as scene_cache
     from rcr.proposed.cache.store import GalleryCache
 
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (100, 50), color="white").save(image_path)
     monkeypatch.setattr(
-        dino,
+        scene_cache,
         "detect",
         lambda *_args, **_kwargs: {"person": torch.tensor([[10.0, 5.0, 50.0, 45.0]])},
     )
@@ -237,7 +237,7 @@ def test_dino_cache_keeps_person_geometry_without_crop_embeddings(
     class SceneEncoder(nn.Module):
         def forward(self, pixels):
             scene = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
-            return scene, scene.mean(dim=1), (1, 2)
+            return scene, scene.mean(dim=1)[:, :2] + 9, (1, 2)
 
     def scene_processor(*, images, return_tensors):
         assert images.size == (100, 50)
@@ -245,7 +245,7 @@ def test_dino_cache_keeps_person_geometry_without_crop_embeddings(
         return {"pixel_values": torch.zeros(1, 3, 16, 32)}
 
     cache_root = tmp_path / "cache"
-    dino.build_cache(
+    scene_cache.build_cache(
         image_ids=["image-1"],
         image_paths=[image_path],
         root=cache_root,
@@ -263,10 +263,126 @@ def test_dino_cache_keeps_person_geometry_without_crop_embeddings(
     cache = GalleryCache(cache_root)
     scene, persons, boxes, mask = cache.load(torch.tensor([0]))
     assert scene.shape == (1, 2, 4)
+    assert cache.global_dim == 2
+    torch.testing.assert_close(
+        cache.load_global_features(torch.tensor([0])), torch.tensor([[11.0, 12.0]])
+    )
     assert persons.shape == (1, 1, 0)
     assert boxes.shape == (1, 1, 4)
     assert mask.tolist() == [[True]]
     assert cache.encoder_metadata["person_encoder"] == {
-        "backend": "dino",
+        "backend": "clip",
         "features": "geometry_only",
     }
+
+
+def test_interrupted_scene_cache_resumes_native_globals(tmp_path, monkeypatch):
+    import torch
+    from PIL import Image
+    from torch import nn
+
+    from rcr.proposed.cache import scene
+    from rcr.proposed.cache.store import GalleryCache
+
+    path = tmp_path / "image.jpg"
+    Image.new("RGB", (32, 16), color="white").save(path)
+    monkeypatch.setattr(scene, "detect", lambda *a, **kw: {"person": torch.empty(0, 4)})
+
+    class Encoder(nn.Module):
+        def __init__(self, fail=False):
+            super().__init__()
+            self.calls = 0
+            self.fail = fail
+
+        def forward(self, pixels):
+            self.calls += 1
+            if self.fail and self.calls == 2:
+                raise RuntimeError("interrupted")
+            return torch.zeros(1, 2, 4), torch.tensor([[7.0, 8.0]]), (1, 2)
+
+    kwargs = dict(
+        image_ids=["a", "b"],
+        image_paths=[path, path],
+        root=tmp_path / "cache",
+        detector=nn.Identity(),
+        detector_processor=None,
+        scene_processor=lambda **kw: {"pixel_values": torch.zeros(1, 3, 16, 32)},
+        device="cpu",
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        scene.build_cache(image_encoder=Encoder(fail=True), **kwargs)
+    resumed = Encoder()
+    scene.build_cache(image_encoder=resumed, **kwargs)
+    assert resumed.calls == 1
+    cache = GalleryCache(kwargs["root"])
+    assert cache.scene_dim == 4 and cache.global_dim == 2
+    torch.testing.assert_close(
+        cache.load_global_features(torch.tensor([0, 1])),
+        torch.tensor([[7.0, 8.0], [7.0, 8.0]]),
+    )
+
+
+@pytest.mark.parametrize("global_dim", [2, 4])
+def test_packed_fafa_cache_uses_native_clip_globals_without_scene_reads(
+    tmp_path, global_dim
+):
+    import torch
+
+    from rcr.proposed.cache.native import NATIVE_VERSION
+    from rcr.proposed.cache.store import GalleryCache
+
+    source_root, fafa_root = tmp_path / "scene", tmp_path / "fafa"
+    source_root.mkdir()
+    fafa_root.mkdir()
+    shared = {
+        "image_ids": ["image-1"],
+        "mask": torch.tensor([[True]]),
+        "patch_hw": (1, 2),
+        "scene_dim": 4,
+        "image_encoder": {"model": "fake-clip"},
+        "detector": {"model": "fake-detector"},
+    }
+    torch.save(
+        {
+            **shared,
+            "format_version": 2,
+            "cache_id": "scene-id",
+            "global_dim": 2,
+            "global_features": torch.tensor([[11.0, 12.0]]),
+            "persons": torch.empty(1, 1, 0),
+            "person_encoder": {"backend": "clip"},
+        },
+        source_root / "index.pt",
+    )
+    torch.save(
+        {
+            **shared,
+            "format_version": 6,
+            "layout": "fafa",
+            "cache_id": "fafa-id",
+            "source_cache_id": "scene-id",
+            "global_dim": global_dim,
+            "persons": torch.tensor([[1.0, 2.0, 3.0]]),
+            "person_offsets": torch.tensor([0, 1]),
+            "person_encoder": {
+                "backend": "fafa",
+                "spec": {},
+                "checkpoint_sha256": "fake-weights",
+                "encoder_precision": "float32",
+            },
+            "native": {"version": NATIVE_VERSION, "dim": 3, "tokens": 2},
+        },
+        fafa_root / "index.pt",
+    )
+    if global_dim != 2:
+        with pytest.raises(ValueError, match="global dimensions differ"):
+            GalleryCache(fafa_root, scene_root=source_root)
+        return
+    # No feature shards exist: native globals must come directly from the index.
+    cache = GalleryCache(fafa_root, scene_root=source_root)
+    assert (cache.scene_dim, cache.global_dim, cache.person_dim) == (4, 2, 3)
+    expected = torch.tensor([[11.0, 12.0], [11.0, 12.0]])
+    torch.testing.assert_close(
+        cache.load_global_features(torch.tensor([0, 0])), expected
+    )
+    torch.testing.assert_close(cache.global_features, expected[:1])

@@ -123,8 +123,8 @@ def compute_loss(
 
     state = scores.new_zeros(())
     if state_weight:
-        text_state = model.encode_text_state(batch["change"], batch["change_mask"])
-        image_state = model.encode_image_state(batch["target_scene"].mean(-2))
+        text_state = model.encode_text_state(batch["change_global"])
+        image_state = model.encode_image_state(batch["target_global"])
         state_scores = torch.einsum("bd,bcd->bc", text_state, image_state)
         state = retrieval_loss(
             state_scores / state_temperature,

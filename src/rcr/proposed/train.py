@@ -1,4 +1,4 @@
-"""Train the proposed model from frozen DINO and FAFA caches."""
+"""Train the proposed model from frozen CLIP and FAFA caches."""
 
 import json
 from pathlib import Path
@@ -16,12 +16,17 @@ from rcr.common.torch_io import link_checkpoint, save_torch
 from rcr.dataset.audit import negative_exclusions
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.proposed.batch import build_batch
-from rcr.proposed.cache.build import check_query_text_config
+from rcr.proposed.cache.build import (
+    cache_paths,
+    check_cache_config,
+    check_query_text_config,
+)
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss
 from rcr.proposed.nn.encoders import (
     QueryTextCache,
+    check_clip_config,
     load_text_modules,
     text_encoder_state,
 )
@@ -193,6 +198,7 @@ def _make_checkpoint(
         "dim": dim,
         "input_dim": scene_dim,
         "person_input_dim": person_dim,
+        "global_dim": model.global_dim,
         "encoder_metadata": cache.encoder_metadata,
         "cache_id": cache.cache_id,
         "native_cache": cache.native.metadata,
@@ -209,8 +215,10 @@ def _make_checkpoint(
 def train(cfg: dict) -> Path:
     """Train on ``train`` and select ``best.pt`` only from validation mAP."""
     validate_training_schedule(cfg)
+    check_clip_config(cfg)
     cfg = {
         **cfg,
+        "checkpoint": str(Path(cfg["output"]["dir"]) / "best.pt"),
         "retrieval": retrieval_settings(
             cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
         ),
@@ -218,6 +226,7 @@ def train(cfg: dict) -> Path:
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
+    cache_paths(cfg)
     data_cfg = cfg["data"]
     cache_cfg = cfg.get("cache", {})
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
@@ -227,12 +236,13 @@ def train(cfg: dict) -> Path:
 
     cache = GalleryCache(
         data_cfg["fafa_image_cache"],
-        scene_root=data_cfg.get("dino_cache"),
+        scene_root=data_cfg.get("scene_cache"),
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cache_cfg.get("lru_mib", 0),
         native_lru_mib=cache_cfg.get("native_lru_mib", 0),
         mmap_shards=cache_cfg.get("mmap_shards", False),
     )
+    check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples([*train_samples, *val_samples])
     check_query_text_config(cache, cfg)
@@ -272,14 +282,19 @@ def train(cfg: dict) -> Path:
         model_cfg["text_model"],
         dim,
         device,
-        add_subject_markers=True,
+        revision=cfg["image_encoder"]["revision"],
         cache_mib=cache_cfg.get("text_lru_mib", 0),
     )
+    if text_encoder.global_dim != cache.global_dim:
+        raise ValueError("CLIP image/text global dimensions differ")
     text_cache = QueryTextCache(tokenizer)
     text_cache.prepare([*train_samples, *val_samples])
+    cfg = {**cfg, "clip_text_stats": dict(text_cache.stats)}
+    print(f"CLIP text policy (77 tokens): {text_cache.stats}", flush=True)
     model = RCRModel.from_config(
         model_cfg,
         input_dim=scene_dim,
+        global_dim=cache.global_dim,
         person_input_dim=person_dim,
     ).to(device)
 

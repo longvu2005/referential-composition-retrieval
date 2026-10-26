@@ -37,7 +37,7 @@ localization:
     scene_size: [224, 224]
     # All cached boxes passed Proposed's detection threshold. No second NMS.
     score_threshold: 0.3
-    cache_dir: cache/proposed-dino
+    cache_dir: cache/proposed-clip-b32
     # Opt in ONLY for a legacy cache known to use these exact settings.
     allow_legacy_cache: false
   query_selector:

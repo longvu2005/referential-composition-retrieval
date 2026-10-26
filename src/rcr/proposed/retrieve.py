@@ -18,10 +18,18 @@ from rcr.common.io import (
 )
 from rcr.common.runtime import resolve_device
 from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
-from rcr.proposed.cache.build import check_query_text_config
+from rcr.proposed.cache.build import (
+    cache_paths,
+    check_cache_config,
+    check_query_text_config,
+)
 from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache
-from rcr.proposed.nn.encoders import load_text_encoder_state, load_text_modules
+from rcr.proposed.nn.encoders import (
+    check_clip_config,
+    load_text_encoder_state,
+    load_text_modules,
+)
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     rank_weight_grid,
@@ -107,9 +115,11 @@ def _retrieve(
         )
     if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
-            "checkpoint architecture is incompatible; train FAFA-native V1 "
-            "in a new output directory after building the FAFA image/query caches"
+            "checkpoint architecture is incompatible; rebuild CLIP scene/FAFA caches "
+            "and train CLIP ViT-B/32 in a new output directory"
         )
+    check_clip_config(train_cfg)
+    check_clip_config(cfg)
     if checkpoint.get("representation", "shared_person") != "shared_person":
         raise ValueError("checkpoint representation differs from its architecture")
     if model_cfg.get("representation", "shared_person") != "shared_person":
@@ -131,6 +141,7 @@ def _retrieve(
         )
 
     # Reject missing/incompatible caches before loading the text backbone.
+    cache_paths(cfg)
     data_cfg = cfg["data"]
     data = load_rcr_data(data_cfg["final_dir"], data_cfg["image_root"])
     validation_sha256 = split_fingerprint(data, "val")
@@ -144,12 +155,13 @@ def _retrieve(
         samples = samples[:max_queries]
     cache = GalleryCache(
         data_cfg["fafa_image_cache"],
-        scene_root=data_cfg.get("dino_cache"),
+        scene_root=data_cfg.get("scene_cache"),
         query_root=data_cfg.get("fafa_query_cache"),
         lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
         native_lru_mib=cfg.get("cache", {}).get("native_lru_mib", 0),
         mmap_shards=cfg.get("cache", {}).get("mmap_shards", False),
     )
+    check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(samples)
     check_query_text_config(cache, cfg)
@@ -165,6 +177,8 @@ def _retrieve(
         raise ValueError("native FAFA cache differs from training")
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")
+    if cache.global_dim != checkpoint.get("global_dim"):
+        raise ValueError("retrieval CLIP global dimensions differ from training")
     if (cache.scene_dim, cache.person_dim) != (
         checkpoint.get("input_dim", dim),
         checkpoint["person_input_dim"],
@@ -188,6 +202,7 @@ def _retrieve(
     model = RCRModel.from_config(
         model_cfg,
         input_dim=checkpoint.get("input_dim", dim),
+        global_dim=checkpoint["global_dim"],
         person_input_dim=checkpoint["person_input_dim"],
         max_subjects=max_subjects,
     ).to(device)
@@ -260,6 +275,7 @@ def _retrieve(
                     if save_tuning
                     else None
                 ),
+                "clip_text_stats": output.get("clip_text_stats"),
                 "fine_score_mode": settings["fine_score_mode"],
                 "context_weight": settings["context_weight"],
                 "checkpoint": str(checkpoint_path),

@@ -37,7 +37,7 @@ writing any table; previous tables are preserved in `.history/`.
 
 ```bash
 # Use the experiment name recorded in calibration/selection.json:
-python tools/report.py --split val --run proposed=runs/calibration/CHOSEN_EXPERIMENT/val
+python tools/report.py --split val --run proposed=runs/clip-b32-calibration/CHOSEN_EXPERIMENT/val
 # Explicitly request a smaller table or alternative formats:
 python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
 python tools/report.py --split val --formats csv tex --decimals 3
@@ -47,7 +47,7 @@ python tools/report.py --split val --formats csv tex --decimals 3
 default run root. Missing selected methods are errors. Do not replace a selected
 calibrated model with an unselected run.
 Calibration keeps val outputs in each experiment folder; its frozen test output
-is `runs/calibration/selected/test`, which can be passed with `--run proposed=...`.
+is `runs/clip-b32-calibration/selected/test`, which can be passed with `--run proposed=...`.
 
 ## Historical saved results
 
