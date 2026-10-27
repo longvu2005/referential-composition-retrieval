@@ -29,7 +29,6 @@ from rcr.common.data import (
 from rcr.common.io import (
     image_signature,
     output_directory,
-    preserve_file,
     save_results,
     scores_to_rankings,
     sha256_file,
@@ -53,7 +52,8 @@ def run_retrieval(
     cfg = copy.deepcopy(cfg)
     if data is None:
         data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-    samples = split_inputs(data, cfg["split"])
+    public_data = inference_data(data)
+    samples = split_inputs(public_data, cfg["split"])
     full_num_queries = len(samples)
     if max_queries is not None:
         samples = samples[:max_queries]
@@ -70,15 +70,11 @@ def run_retrieval(
     if cfg["method"] == "clip":
         from rcr.baselines.clip import retrieve_clip
 
-        scores, details = retrieve_clip(
-            inference_data(data), samples, gallery_ids, cfg, device
-        )
+        scores, details = retrieve_clip(public_data, samples, gallery_ids, cfg, device)
     elif cfg["method"] == "fafa":
         from rcr.baselines.fafa import retrieve_fafa
 
-        scores, details = retrieve_fafa(
-            inference_data(data), samples, gallery_ids, cfg, device
-        )
+        scores, details = retrieve_fafa(public_data, samples, gallery_ids, cfg, device)
     else:
         raise ValueError(f"unknown baseline {cfg['method']!r}")
     if selection_metadata is not None:
@@ -288,7 +284,6 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                     "Saved selection lacks requested fusion modes; run --split val"
                 )
     summary = Path(cfg["output"]["dir"]) / "summary.csv"
-    preserve_file(summary)
     summary.unlink(missing_ok=True)
     rows = []
     for split in splits:
@@ -312,7 +307,6 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                         data, samples, gallery_ids, inputs, cfg, mode
                     )
                 # Published before touching test inputs.
-                preserve_file(tuning_path)
                 write_json(tuning_path, selection)
         for mode in modes:
             run_cfg = copy.deepcopy(split_cfg)
@@ -351,7 +345,6 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                 )
             metrics = evaluate_run(run_cfg, data=data, samples=samples, output=output)
             if cfg["method"] == "fafa" and split == "val":
-                preserve_file(adapter_path)
                 write_json(
                     adapter_path,
                     {

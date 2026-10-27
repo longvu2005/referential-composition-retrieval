@@ -3,6 +3,7 @@
 import torch
 from torch import Tensor, nn
 
+from rcr.common.data import inference_samples
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 
@@ -163,7 +164,9 @@ def prepare_visual_batch(
         "query_persons": q_people,
         "query_boxes": q_boxes,
         "query_person_mask": q_mask,
-        "fafa_query": cache.native_queries(samples, q_people.shape[1]),
+        "fafa_query": cache.native_queries(
+            inference_samples(samples), q_people.shape[1]
+        ),
         "query_identity_labels": query_labels,
         "query_identity_mask": query_identity_mask,
         "grounding_targets": grounding_targets,

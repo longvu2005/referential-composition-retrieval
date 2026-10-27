@@ -5,33 +5,56 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from PIL import Image
+import torch
+from torch import Tensor
 from tqdm import tqdm
 
 from rcr.common.data import load_rcr_data, split_image_ids, split_samples
-from rcr.common.geometry import boxes_to_pixels
+from rcr.common.detection import DetectionCache
 from rcr.common.io import atomic_write_text
-from rcr.common.vision import match_heads_to_persons
 
 
-def align_identities(item, heads, *, image_path=None, scene_size=None):
+def match_heads_to_persons(heads: Tensor, persons: Tensor) -> Tensor:
+    """Greedily match heads to containing persons, one-to-one, by geometry."""
+    num_heads = heads.shape[0]
+    num_persons = persons.shape[0]
+    match = torch.full((num_persons,), -1, device=persons.device, dtype=torch.long)
+    if num_heads == 0 or num_persons == 0:
+        return match
+
+    hx = (heads[:, 0] + heads[:, 2]) / 2
+    hy = (heads[:, 1] + heads[:, 3]) / 2
+    x1, y1, x2, y2 = persons.unbind(-1)
+    w = (x2 - x1).clamp_min(1e-6)
+    h = (y2 - y1).clamp_min(1e-6)
+    cx = (x1 + x2) / 2
+    inside = (
+        (hx[:, None] >= x1)
+        & (hx[:, None] <= x2)
+        & (hy[:, None] >= y1)
+        & (hy[:, None] <= y2)
+    )
+    dx = (hx[:, None] - cx) / w
+    dy = (hy[:, None] - y1) / h
+    cost = (dx.square() + dy.square()).masked_fill(~inside, torch.inf)
+    used_heads = torch.zeros(num_heads, device=heads.device, dtype=torch.bool)
+    for flat in cost.flatten().argsort().tolist():
+        head = flat // num_persons
+        person = flat % num_persons
+        if not torch.isfinite(cost[head, person]):
+            break
+        if match[person] < 0 and not used_heads[head]:
+            match[person] = head
+            used_heads[head] = True
+    return match
+
+
+def align_identities(item, heads):
     """Label existing detections; never create, remove or move a person box."""
-    persons = item.get("boxes_pixel")
-    count = len(persons if persons is not None else item["boxes_scene"])
-    labels = [None] * count
-    if not count or not heads:
+    persons = item["boxes_pixel"]
+    labels = [None] * len(persons)
+    if not len(persons) or not heads:
         return labels
-    if persons is None:
-        # Old caches may store only letterboxed coordinates. The shared
-        # detection cache needs no raw image access for supervision.
-        if image_path is None or scene_size is None:
-            raise ValueError(
-                "legacy box alignment needs raw images and scene_size; "
-                "cached identity_ids are never used"
-            )
-        with Image.open(image_path) as image:
-            h, w = scene_size
-            persons = boxes_to_pixels(item["boxes_scene"], image.size, (w, h))
     boxes = persons.new_tensor(
         [[r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"]] for r in heads]
     )
@@ -44,44 +67,30 @@ def align_identities(item, heads, *, image_path=None, scene_size=None):
 class TrainSupervision:
     """Train-only alignment, optionally reused across runs with identical inputs."""
 
-    def __init__(self, data, cache, *, scene_size=None, cache_file=None):
+    def __init__(self, data, cache, *, cache_file=None):
         self.cache = cache
         allowed = split_image_ids(data, "train")
         self.heads = {i: data.gt_head_boxes_by_image.get(i, []) for i in allowed}
-        self.image_paths = {i: Path(data.image_path(i)) for i in allowed}
-        self.scene_size = scene_size
         self._ids = {}
         self._saved_count = 0
         self._prepared = False
         self.cache_file = Path(cache_file) if cache_file is not None else None
         if self.cache_file is None:
             return
-        if not cache.cache_id:
-            raise ValueError("persistent supervision requires a feature cache ID")
-        # Feature cache IDs bind immutable crops. Never import legacy shard labels.
+        detection_id = (
+            cache.cache_id
+            if isinstance(cache, DetectionCache)
+            else cache.detection_cache_id
+        )
+        if not detection_id:
+            raise ValueError("persistent supervision requires a detection cache ID")
         signature = {
-            "version": "train-head-alignment-v1",
-            "cache_id": cache.cache_id,
-            "source_cache_id": getattr(
-                getattr(cache, "_scene_cache", None), "cache_id", None
-            ),
-            "scene_size": scene_size,
+            "version": "train-head-alignment-v2",
+            "detection_cache_id": detection_id,
             "images": [
                 [i, data.images_by_id[i]["path"], self.heads[i]] for i in allowed
             ],
         }
-        detection_id = getattr(cache, "detection_cache_id", None)
-        if detection_id is None and getattr(cache, "detections", None) is None:
-            from rcr.common.detection import DetectionCache
-
-            if isinstance(cache, DetectionCache):
-                detection_id = cache.cache_id
-        if detection_id is not None:
-            signature = {
-                "version": "train-head-alignment-v2",
-                "detection_cache_id": detection_id,
-                "images": signature["images"],
-            }
         self.key = hashlib.sha256(
             json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -118,8 +127,6 @@ class TrainSupervision:
             self._ids[image_id] = align_identities(
                 item,
                 self.heads[image_id],
-                image_path=self.image_paths[image_id],
-                scene_size=self.scene_size,
             )
         return self._ids[image_id]
 
@@ -173,7 +180,6 @@ class TrainSupervision:
 
 def prepare_train_supervision(cfg):
     """Prepare reusable train labels without loading encoders or query features."""
-    from rcr.common.detection import DetectionCache
     from rcr.proposed.cache.build import cache_paths
     from rcr.proposed.identity import identity_sampling_settings
 
@@ -189,7 +195,6 @@ def prepare_train_supervision(cfg):
     supervision = TrainSupervision(
         data,
         cache,
-        scene_size=cfg.get("image_encoder", {}).get("scene_size"),
         cache_file=cache_file,
     )
     settings = identity_sampling_settings(cfg["train"].get("identity_sampling", {}))

@@ -114,8 +114,6 @@ def _load_data(final_dir, image_root, *, inputs_only):
     samples = load_jsonl(final_dir / "samples.jsonl")
     images = load_jsonl(final_dir / "images.jsonl")
     gallery = load_jsonl(final_dir / "gallery.jsonl")
-    if inputs_only:
-        samples = inference_samples(samples)
     manifest = json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
 
     samples_by_id = index_unique(samples, "sample_id", "samples.jsonl")

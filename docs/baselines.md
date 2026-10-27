@@ -146,5 +146,5 @@ older rankings without this metadata still use gallery/sample consistency checks
 New runs add dataset/sample/gallery digests, case counts, Git/runtime metadata.
 Evaluations bind metrics to `run.json`. `tools/report.py --split val` exports
 the two paper tables without inference. Re-evaluate legacy rankings to attach
-the binding first. Replacements preserve prior run files/selections/reports in
-`.history/` and retain the active output layout.
+the binding first. Replacements overwrite active run files, selections and reports.
+Use a distinct `output.dir` to retain another experiment.

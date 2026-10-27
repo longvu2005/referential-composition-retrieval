@@ -124,7 +124,8 @@ split fingerprint and saved-ranking re-evaluation to attach the JSON binding;
 missing historical Git/runtime details are not invented. Results lacking an
 original split fingerprint cannot be certified by the reporter.
 
-Previous scores/rankings/metadata/metrics are preserved together under the result
-directory's `.history/` before replacement. Baseline selection files/summaries,
-evaluations and reports are also preserved. Active output paths remain unchanged. Prefer a
-new `output.dir` for each scientific experiment.
+Use a distinct `output.dir` for each scientific experiment. Training refuses a
+root containing `config.yaml`, `best.pt` or `last.pt` before loading data/models.
+Retrieval, evaluation, calibration and reports replace their active outputs;
+there is no automatic archive. Publishing new rankings invalidates old metrics
+and metadata first; evaluate again after a successful retrieval.

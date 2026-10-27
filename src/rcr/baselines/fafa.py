@@ -33,7 +33,6 @@ from rcr.common.io import (
     cache_directory,
     image_signature,
     output_directory,
-    preserve_run,
     sha256_file,
     write_json,
 )
@@ -538,7 +537,6 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     )
     output = output_directory(cfg)
     output.mkdir(parents=True, exist_ok=True)
-    preserve_run(output)
     temporary = output / "scores.npy.tmp"
     scores = np.lib.format.open_memmap(
         temporary, mode="w+", dtype=np.float32, shape=(len(samples), len(gallery_ids))

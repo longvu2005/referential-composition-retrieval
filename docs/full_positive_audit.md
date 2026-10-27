@@ -107,9 +107,7 @@ never from cached identity labels:
   --output runs/data_and_detection_audit.json
 ```
 
-Detection diagnostics need no scene or FAFA features. Historical unified scene
-caches remain supported through `--cache`, with `--scene-cache` for a historical
-FAFA wrapper. Legacy DINO sources lacking pixel boxes and scene-size metadata need
-`--scene-size HEIGHT WIDTH` with the original letterbox size and accessible raw
-images. Coverage measures GT-to-detection alignment, not localization AP. GT for
+Detection diagnostics use `--detection-cache` and need no scene/FAFA features,
+raw image access or scene dimensions. Coverage measures GT-to-detection alignment,
+not localization AP. GT for
 val/test is permitted in this diagnostic, separately from training/scoring.

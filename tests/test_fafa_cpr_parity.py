@@ -145,15 +145,21 @@ def test_shared_detector_reads_proposed_boxes_without_renormalization(tmp_path):
     ]
 
 
-def test_legacy_non_square_coordinate_transform_roundtrip():
+def test_pixel_boxes_follow_non_square_letterbox_coordinates():
     import torch
 
-    from rcr.common.geometry import boxes_to_pixels, boxes_to_scene
+    from rcr.common.geometry import boxes_to_scene
 
     original = torch.tensor([[40.0, 20.0, 200.0, 100.0]])
 
-    scene = boxes_to_scene(original, (400, 200), (256, 128))
-    torch.testing.assert_close(boxes_to_pixels(scene, (400, 200), (256, 128)), original)
+    torch.testing.assert_close(
+        boxes_to_scene(original, (400, 200), (256, 128)),
+        torch.tensor([[0.1, 0.1, 0.5, 0.5]]),
+    )
+    torch.testing.assert_close(
+        boxes_to_scene(original, (400, 200), (224, 224)),
+        torch.tensor([[0.1, 0.3, 0.5, 0.5]]),
+    )
 
 
 def test_proposed_dino_settings_match_fafa_baseline():
@@ -187,8 +193,8 @@ def test_shared_dino_cache_rejects_wrong_detector_metadata(tmp_path, monkeypatch
     Image.new("RGB", (100, 80)).save(path)
     monkeypatch.setattr(
         detection,
-        "detect",
-        lambda *a: {"person": torch.tensor([[1.0, 2.0, 30.0, 40.0]])},
+        "detect_persons",
+        lambda *a: torch.tensor([[1.0, 2.0, 30.0, 40.0]]),
     )
     spec = {
         "model": "IDEA-Research/grounding-dino-tiny",

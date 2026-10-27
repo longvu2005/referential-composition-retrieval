@@ -152,6 +152,10 @@ python tools/run.py train --config configs/proposed.yaml \
 python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
 ```
 
+Use a new `output.dir` for each training run. Training refuses a directory that
+already contains `config.yaml`, `best.pt` or `last.pt`. Retrieval, evaluation,
+calibration and reports overwrite their active outputs without archiving them.
+
 The CLI has five options: `--config`, `--set`, `--split`, `--cache-stage` and
 `--save-tuning` (Proposed validation only). It always processes complete query
 splits. CLIP mode and other experiment parameters belong in YAML or `--set`.

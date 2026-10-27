@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 import yaml
 from torch import nn
@@ -179,9 +180,37 @@ def _sample(sample_id, query, target):
     }
 
 
+@pytest.mark.parametrize("existing", ["config.yaml", "best.pt", "last.pt"])
+def test_training_rejects_existing_run_before_loading_data(
+    tmp_path, monkeypatch, existing
+):
+    path = tmp_path / existing
+    path.write_bytes(b"previous run")
+    monkeypatch.setattr(
+        training,
+        "load_rcr_data",
+        lambda *a: pytest.fail("must reject before data loading"),
+    )
+    cfg = {"train": {"epochs": 1, "batch_size": 1}, "output": {"dir": str(tmp_path)}}
+    with pytest.raises(FileExistsError, match="new output.dir"):
+        training.train(cfg)
+    assert path.read_bytes() == b"previous run"
+
+
 def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     samples = [_sample("train", "q", "a"), _sample("val", "vq", "va")]
     cache = TinyCache()
+    native_queries = cache.native_queries
+
+    def public_queries(rows, max_people):
+        for row in rows:
+            assert {"case_type", "positive_image_ids", "target_image_id"}.isdisjoint(
+                row
+            )
+            assert all(set(subject) == {"subject_id"} for subject in row["subjects"])
+        return native_queries(rows, max_people)
+
+    monkeypatch.setattr(cache, "native_queries", public_queries)
     wandb_run = WandbRun()
     wandb_init = {}
 

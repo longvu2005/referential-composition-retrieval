@@ -19,8 +19,6 @@ from rcr.common.data import (
 from rcr.common.io import (
     atomic_write_text,
     output_directory,
-    preserve_artifacts,
-    preserve_file,
     save_results,
     sha256_file,
     write_json,
@@ -82,7 +80,6 @@ def calibrate(settings: dict) -> list[dict]:
     cfg.pop("selected_validation_sha256", None)
     cfg.pop("selected_retrieval", None)
     root.mkdir(parents=True, exist_ok=True)
-    preserve_file(root / "calibration.yaml")
     atomic_write_text(
         root / "calibration.yaml", yaml.safe_dump(settings, sort_keys=False)
     )
@@ -158,7 +155,6 @@ def _write_selection(cfg: dict, root: Path, rows: list[dict]) -> tuple[dict, dic
             "top_m",
         )
     }
-    preserve_artifacts(root, ("selection.json", "selected.yaml"))
     atomic_write_text(root / "selected.yaml", yaml.safe_dump(selected, sort_keys=False))
     write_json(
         root / "selection.json",
@@ -255,7 +251,6 @@ def _calibrate_saved(settings: dict) -> list[dict]:
             "use a separate calibration output root to retain the source export"
         )
     root.mkdir(parents=True, exist_ok=True)
-    preserve_file(root / "calibration.yaml")
     atomic_write_text(
         root / "calibration.yaml", yaml.safe_dump(settings, sort_keys=False)
     )

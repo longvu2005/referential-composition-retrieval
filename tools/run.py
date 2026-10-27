@@ -1,4 +1,3 @@
-
 """Run one RCR research stage; experiment settings live in YAML."""
 
 import argparse

@@ -15,7 +15,7 @@ from rcr.common.data import (
     split_inputs,
     split_samples,
 )
-from rcr.common.io import load_jsonl, preserve_artifacts, write_jsonl
+from rcr.common.io import load_jsonl, write_jsonl
 from rcr.dataset.text import parse_selection_texts
 
 
@@ -198,22 +198,6 @@ def test_inference_projection_is_allowlisted_and_detached(tmp_path):
     assert all(set(s) == {"subject_id"} for s in public["subjects"])
     public["subjects"][0]["subject_id"] = 9
     assert sample["subjects"][0]["subject_id"] == 1
-
-
-def test_preserve_artifacts_moves_one_run_into_one_history_entry(tmp_path):
-    (tmp_path / "best.pt").write_bytes(b"checkpoint")
-    tokenizer = tmp_path / "tokenizer"
-    tokenizer.mkdir()
-    (tokenizer / "config.json").write_text("{}", encoding="utf-8")
-
-    preserve_artifacts(tmp_path, ("best.pt", "tokenizer", "missing.json"))
-
-    assert not (tmp_path / "best.pt").exists()
-    assert not tokenizer.exists()
-    histories = list((tmp_path / ".history").iterdir())
-    assert len(histories) == 1
-    assert (histories[0] / "best.pt").read_bytes() == b"checkpoint"
-    assert (histories[0] / "tokenizer" / "config.json").read_text() == "{}"
 
 
 def test_scene_cache_keeps_native_global_without_person_geometry(tmp_path):

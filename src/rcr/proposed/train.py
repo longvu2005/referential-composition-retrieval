@@ -9,8 +9,13 @@ import yaml
 from tqdm import tqdm
 
 from rcr.common.config import validate_training_schedule
-from rcr.common.data import load_rcr_data, split_image_ids, split_samples
-from rcr.common.io import atomic_write_text, preserve_artifacts, write_json
+from rcr.common.data import (
+    inference_samples,
+    load_rcr_data,
+    split_image_ids,
+    split_samples,
+)
+from rcr.common.io import atomic_write_text, write_json
 from rcr.common.runtime import resolve_device
 from rcr.common.torch_io import link_checkpoint, save_torch
 from rcr.dataset.audit import negative_exclusions
@@ -219,6 +224,11 @@ def _make_checkpoint(
 def train(cfg: dict) -> Path:
     """Train on ``train`` and select ``best.pt`` only from validation mAP."""
     validate_training_schedule(cfg)
+    output = Path(cfg["output"]["dir"])
+    if any((output / name).exists() for name in ("config.yaml", "best.pt", "last.pt")):
+        raise FileExistsError(
+            f"training run already exists at {output}; use a new output.dir"
+        )
     check_clip_config(cfg)
     cfg = {
         **cfg,
@@ -249,13 +259,12 @@ def train(cfg: dict) -> Path:
     )
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
-    cache.validate_samples([*train_samples, *val_samples])
+    cache.validate_samples(inference_samples([*train_samples, *val_samples]))
     check_query_text_config(cache, cfg)
 
     supervision = TrainSupervision(
         data,
         cache,
-        scene_size=cfg.get("image_encoder", {}).get("scene_size"),
         cache_file=cache_cfg.get("supervision_cache"),
     )
     identity_settings = identity_sampling_settings(
@@ -319,22 +328,7 @@ def train(cfg: dict) -> Path:
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
-    output = Path(cfg["output"]["dir"])
     output.mkdir(parents=True, exist_ok=True)
-    preserve_artifacts(
-        output,
-        (
-            "best.pt",
-            "last.pt",
-            "config.yaml",
-            "history.jsonl",
-            "runtime.json",
-            "training_data.json",
-            "hard_negatives.json",
-            "tokenizer",
-            "evaluation",
-        ),
-    )
     atomic_write_text(output / "config.yaml", yaml.safe_dump(cfg, sort_keys=False))
     atomic_write_text(output / "history.jsonl", "")
     tokenizer.save_pretrained(output / "tokenizer")

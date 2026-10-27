@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from statistics import fmean
 
-from rcr.common.io import atomic_write_text, preserve_file
+from rcr.common.io import atomic_write_text
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.provenance import BENCHMARK_FIELDS, PROTOCOL, digest_json
 
@@ -441,7 +441,6 @@ def generate_report(
     paths = []
     for filename, content in rendered.items():
         path = output / filename
-        preserve_file(path)
         atomic_write_text(path, content)
         paths.append(path)
     return paths

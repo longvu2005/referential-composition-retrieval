@@ -35,7 +35,7 @@ Overall has 8 metrics. By-case has 4 metrics for each case, with grouped LaTeX
 headers. CSV retains raw fractions in [0,1]; Markdown/LaTeX use percentages,
 2 decimals by default. An absent case is blank/—/--. Diagnostics and automatic
 best-method selection are excluded. All selected runs must validate before
-writing any table; previous tables are preserved in `.history/`.
+writing any table; reruns overwrite the active tables.
 
 ```bash
 # Use the experiment name recorded in calibration/selection.json:

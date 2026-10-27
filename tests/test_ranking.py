@@ -259,8 +259,36 @@ def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m
                 loaded["gallery_ids"]
             ) - {sample["query_image_id"]}
     assert {"positive_image_ids", "case_type", "identity_ids"}.isdisjoint(loaded)
+    (tmp_path / "metrics.json").write_text('{"old": true}')
     save_results(tmp_path, replayed, {})
-    assert len(list((tmp_path / ".history").glob("*/rankings.pt"))) == 1
+    assert not (tmp_path / "metrics.json").exists()
+    assert not (tmp_path / ".history").exists()
+    assert torch.equal(
+        torch.load(tmp_path / "rankings.pt", weights_only=True)["rankings"],
+        replayed["rankings"],
+    )
+
+
+def test_interrupted_result_replacement_keeps_rankings_but_invalidates_metadata(
+    tmp_path, monkeypatch
+):
+    original = {"rankings": torch.tensor([[1, 0]])}
+    save_results(tmp_path, original, {"old": True})
+    (tmp_path / "metrics.json").write_text('{"old": true}')
+
+    def fail(*args):
+        raise OSError("interrupted tensor write")
+
+    monkeypatch.setattr(torch, "save", fail)
+    with pytest.raises(OSError, match="interrupted"):
+        save_results(tmp_path, {"rankings": torch.tensor([[0, 1]])}, {})
+    assert not (tmp_path / "metrics.json").exists()
+    assert not (tmp_path / "run.json").exists()
+    assert not (tmp_path / "rankings.pt.tmp").exists()
+    assert torch.equal(
+        torch.load(tmp_path / "rankings.pt", weights_only=True)["rankings"],
+        original["rankings"],
+    )
 
 
 @pytest.mark.parametrize(

@@ -135,7 +135,7 @@ def audit_data(data) -> dict:
     return {"splits": report, "identity_overlap": overlap}
 
 
-def audit_detection(data, cache, *, scene_size=None) -> dict:
+def audit_detection(data, cache) -> dict:
     """Read query/positive cache entries once; report ALL required ID coverage.
 
     Coverage measures diagnostic GT alignment, not detector localization accuracy.
@@ -144,10 +144,6 @@ def audit_detection(data, cache, *, scene_size=None) -> dict:
     cache.validate_gallery(data.gallery_ids)
     from rcr.proposed.supervision import align_identities
 
-    source = getattr(cache, "_scene_cache", None) or cache
-    scene_size = scene_size or (source.encoder_metadata.get("image_encoder") or {}).get(
-        "scene_size"
-    )
     by_id = {image_id: i for i, image_id in enumerate(cache.image_ids)}
     detected = {}
 
@@ -157,8 +153,6 @@ def audit_detection(data, cache, *, scene_size=None) -> dict:
             labels = align_identities(
                 item,
                 data.gt_head_boxes_by_image.get(image_id, []),
-                image_path=data.image_path(image_id),
-                scene_size=scene_size,
             )
             detected[image_id] = {
                 str(identity) for identity in labels if identity is not None

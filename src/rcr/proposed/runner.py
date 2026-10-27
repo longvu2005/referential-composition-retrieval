@@ -11,7 +11,6 @@ import yaml
 from rcr.common.io import (
     atomic_write_text,
     output_directory,
-    preserve_file,
     write_summary,
 )
 
@@ -21,7 +20,6 @@ def run_experiment(cfg, entrypoint, *, save_tuning=False):
     root = Path(cfg["output"]["dir"])
     root.mkdir(parents=True, exist_ok=True)
     path = root / "run_config.yaml"
-    preserve_file(path)
     atomic_write_text(path, yaml.safe_dump(cfg, sort_keys=False))
 
     def stage(command, *options):

@@ -12,11 +12,29 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from rcr.common.geometry import boxes_to_pixels
 from rcr.common.torch_io import save_torch
-from rcr.common.vision import detect
 
 DETECTION_LAYOUT = "person-detections-v1"
+
+
+@torch.inference_mode()
+def detect_persons(model, processor, image, device, threshold, text_threshold):
+    """Return Grounding DINO's person boxes in their original order."""
+    inputs = processor(images=image, text=[["person"]], return_tensors="pt").to(device)
+    result = processor.post_process_grounded_object_detection(
+        model(**inputs),
+        input_ids=inputs.input_ids,
+        threshold=threshold,
+        text_threshold=text_threshold,
+        target_sizes=[(image.height, image.width)],
+    )[0]
+    boxes = result["boxes"]
+    keep = torch.tensor(
+        [label == "person" for label in result["text_labels"]],
+        device=boxes.device,
+        dtype=torch.bool,
+    )
+    return boxes[keep]
 
 
 def _validate_boxes(boxes):
@@ -65,9 +83,7 @@ class DetectionCache:
             self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
         )
         if index.get("layout") != DETECTION_LAYOUT or index.get("prompt") != "person":
-            raise ValueError(
-                "use a separate detection cache; import legacy scene boxes"
-            )
+            raise ValueError("unsupported detection cache layout; rebuild detections")
         self.image_ids = index["image_ids"]
         self.by_id = {name: i for i, name in enumerate(self.image_ids)}
         self.detector = index["detector"]
@@ -118,20 +134,6 @@ class DetectionCache:
         }
 
 
-def _legacy_source(root, image_ids, detector):
-    root = Path(root)
-    if (root / ".building").exists():
-        raise ValueError("cannot import an unfinished legacy scene cache")
-    index = torch.load(
-        root / "index.pt", map_location="cpu", weights_only=True, mmap=True
-    )
-    if index.get("layout") is not None or index.get("detector") != detector:
-        raise ValueError("legacy scene cache lacks matching detector provenance")
-    if index["image_ids"] != image_ids or not index.get("cache_id"):
-        raise ValueError("legacy scene gallery/cache identity differs")
-    return index
-
-
 def build_detection_cache(
     image_ids,
     image_paths,
@@ -141,33 +143,21 @@ def build_detection_cache(
     model=None,
     processor=None,
     device="cpu",
-    import_scene=None,
 ):
     """Resume per-image shards, then publish only validated boxes and image sizes."""
     root = Path(root)
-    if import_scene is not None:
-        other, target = Path(import_scene).resolve(), root.resolve()
-        if other == target or other in target.parents or target in other.parents:
-            raise ValueError(
-                "legacy scene and detection cache must be separate directories"
-            )
     if (root / "index.pt").is_file() and not (root / ".building").exists():
         cache = DetectionCache(root)
         cache.validate_gallery(image_ids)
         cache.check_config(detector_config)
         print(f"Using existing detection cache: {root}", flush=True)
         return
-    legacy = (
-        _legacy_source(import_scene, image_ids, detector_config)
-        if import_scene
-        else None
-    )
     signature = {
         "image_ids": image_ids,
         "image_paths": [str(Path(p).resolve()) for p in image_paths],
         "detector": detector_config,
         "prompt": "person",
-        "import_cache_id": legacy["cache_id"] if legacy else None,
+        "import_cache_id": None,  # Keep unfinished native builds resumable.
     }
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / ".build.pt"
@@ -183,7 +173,7 @@ def build_detection_cache(
     (root / ".building").write_text(manifest["build_id"], encoding="utf-8")
     shards = root / "features"
     shards.mkdir(exist_ok=True)
-    if legacy is None and model is None:
+    if model is None:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         kwargs = (
@@ -221,40 +211,19 @@ def build_detection_cache(
         else:
             with Image.open(path) as source:
                 size = source.size
-                if legacy is None:
-                    boxes = (
-                        detect(
-                            model,
-                            processor,
-                            source.convert("RGB"),
-                            ["person"],
-                            device,
-                            detector_config["threshold"],
-                            detector_config["text_threshold"],
-                        )["person"]
-                        .detach()
-                        .to("cpu", torch.float32)
-                        .clone()
+                boxes = (
+                    detect_persons(
+                        model,
+                        processor,
+                        source.convert("RGB"),
+                        device,
+                        detector_config["threshold"],
+                        detector_config["text_threshold"],
                     )
-                else:
-                    item = torch.load(
-                        Path(import_scene) / "features" / f"{i}.pt",
-                        map_location="cpu",
-                        weights_only=True,
-                        mmap=True,
-                    )
-                    if (
-                        item.get("cache_id") != legacy["cache_id"]
-                        or item.get("image_id", image_id) != image_id
-                    ):
-                        raise ValueError("legacy scene shard identity differs")
-                    boxes = item.get("boxes_pixel")
-                    if boxes is None:
-                        h, w = legacy["image_encoder"]["scene_size"]
-                        boxes = boxes_to_pixels(item["boxes_scene"], size, (w, h))
-                    boxes = boxes.float().clone()
-                    if len(boxes) != int(legacy["mask"][i].sum()):
-                        raise ValueError("legacy scene box count differs")
+                    .detach()
+                    .to("cpu", torch.float32)
+                    .clone()
+                )
             _validate_boxes(boxes)
             save_torch(
                 {

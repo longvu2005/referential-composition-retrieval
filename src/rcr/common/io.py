@@ -6,13 +6,10 @@ import csv
 import hashlib
 import io
 import json
-import shutil
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
-from uuid import uuid4
 
 import numpy as np
 
@@ -100,7 +97,6 @@ def write_json(path: str | Path, value) -> None:
 
 def write_summary(root: str | Path, rows: list[dict]) -> None:
     path = Path(root) / "summary.csv"
-    preserve_file(path)
     buffer = io.StringIO(newline="")
     fields = list(dict.fromkeys(key for row in rows for key in row))
     writer = csv.DictWriter(buffer, fieldnames=fields)
@@ -116,38 +112,6 @@ def sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _history_directory(directory: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-    history = directory / ".history" / f"{stamp}-{uuid4().hex[:8]}"
-    history.mkdir(parents=True)
-    return history
-
-
-def preserve_file(path: str | Path) -> None:
-    """Keep the previous file before publishing a replacement."""
-    path = Path(path)
-    if path.is_file():
-        shutil.copy2(path, _history_directory(path.parent) / path.name)
-
-
-def preserve_artifacts(directory: str | Path, names: Iterable[str]) -> None:
-    """Move one related artifact set into a single history directory."""
-    directory = Path(directory)
-    previous = [directory / name for name in names if (directory / name).exists()]
-    if previous:
-        history = _history_directory(directory)
-        for path in previous:
-            path.replace(history / path.name)
-
-
-def preserve_run(directory: str | Path) -> None:
-    """Move a previous run together, before writing any new scores/rankings."""
-    directory = Path(directory)
-    preserve_artifacts(
-        directory, ("scores.npy", "rankings.pt", "run.json", "metrics.json")
-    )
 
 
 def cache_directory(root: str | Path, signature: dict) -> Path:
@@ -205,23 +169,13 @@ def scores_to_rankings(
 
 
 def save_results(directory: str | Path, output: dict, metadata: Mapping) -> None:
-    import torch
+    """Replace one result; old metrics must never describe new rankings."""
+    from rcr.common.torch_io import save_torch
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    # Baselines archive before writing scores; Proposed publishes rankings here.
-    if any((directory / name).is_file() for name in ("rankings.pt", "run.json")):
-        preserve_run(directory)
-    else:
-        preserve_file(directory / "metrics.json")
-    temporary = directory / "rankings.pt.tmp"
-    metadata_temporary = directory / "run.json.tmp"
-    torch.save(output, temporary)
-    metadata_temporary.write_text(
-        json.dumps(dict(metadata), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    # Reusing a run directory must not leave metrics for the previous rankings.
     (directory / "metrics.json").unlink(missing_ok=True)
-    temporary.replace(directory / "rankings.pt")
-    metadata_temporary.replace(directory / "run.json")
+    # Invalidate metadata first so an interrupted replacement cannot look complete.
+    (directory / "run.json").unlink(missing_ok=True)
+    save_torch(output, directory / "rankings.pt")
+    write_json(directory / "run.json", dict(metadata))

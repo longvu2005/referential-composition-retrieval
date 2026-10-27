@@ -45,7 +45,7 @@ def inputs(tmp_path):
 def detect_inputs(cfg, data, monkeypatch):
     boxes = torch.tensor([[7.25, 3.5, 58.75, 47.5], [15.0, 9.0, 80.0, 45.0]])
     values = iter([boxes, torch.empty(0, 4)])
-    monkeypatch.setattr(detection, "detect", lambda *a: {"person": next(values)})
+    monkeypatch.setattr(detection, "detect_persons", lambda *a: next(values))
     build_detection_cache(
         data.gallery_ids,
         [data.image_path(i) for i in data.gallery_ids],
@@ -54,6 +54,32 @@ def detect_inputs(cfg, data, monkeypatch):
         model=nn.Identity(),
     )
     return DetectionCache(cfg["data"]["detection_cache"])
+
+
+def test_person_detection_preserves_filter_order_and_unclipped_boxes():
+    boxes = torch.tensor(
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [-2.0, 0.0, 102.0, 40.0]]
+    )
+
+    class Inputs(dict):
+        input_ids = torch.tensor([[1]])
+
+        def to(self, device):
+            return self
+
+    class Processor:
+        def __call__(self, *, images, text, return_tensors):
+            assert text == [["person"]] and return_tensors == "pt"
+            return Inputs()
+
+        def post_process_grounded_object_detection(self, outputs, **kwargs):
+            assert kwargs["target_sizes"] == [(50, 100)]
+            return [{"text_labels": ["person", "chair", "person"], "boxes": boxes}]
+
+    result = detection.detect_persons(
+        lambda **kw: None, Processor(), Image.new("RGB", (100, 50)), "cpu", 0.3, 0.25
+    )
+    torch.testing.assert_close(result, boxes[[0, 2]])
 
 
 def test_detection_resume_reuses_completed_shards_and_rejects_changed_spec(
@@ -67,9 +93,9 @@ def test_detection_resume_reuses_completed_shards_and_rejects_changed_spec(
         calls.append(True)
         if len(calls) == 2:
             raise RuntimeError("interrupted")
-        return {"person": torch.tensor([[-1.25, 2.0, 102.0, 40.0]])}
+        return torch.tensor([[-1.25, 2.0, 102.0, 40.0]])
 
-    monkeypatch.setattr(detection, "detect", detect)
+    monkeypatch.setattr(detection, "detect_persons", detect)
     kwargs = dict(
         image_ids=data.gallery_ids,
         image_paths=[data.image_path(i) for i in data.gallery_ids],
@@ -94,62 +120,6 @@ def test_detection_resume_reuses_completed_shards_and_rejects_changed_spec(
     # Reusing a published cache performs no new model inference.
     build_detection_cache(**kwargs)
     assert len(calls) == 3
-
-
-@pytest.mark.parametrize("pixels", [True, False])
-def test_import_legacy_boxes_without_loading_any_model(inputs, monkeypatch, pixels):
-    cfg, data = inputs
-    legacy = Path(cfg["data"]["scene_cache"])
-    (legacy / "features").mkdir(parents=True)
-    boxes = torch.tensor([[7.25, 3.5, 58.75, 47.5]])
-    mask = torch.tensor([[True], [False]])
-    torch.save(
-        {
-            "format_version": 2,
-            "cache_id": "legacy",
-            "image_ids": data.gallery_ids,
-            "mask": mask,
-            "detector": cfg["detector"],
-            "image_encoder": {"scene_size": [128, 256]},
-        },
-        legacy / "index.pt",
-    )
-    for i, name in enumerate(data.gallery_ids):
-        value = boxes if i == 0 else boxes[:0]
-        item = {
-            "cache_id": "legacy",
-            "image_id": name,
-            "identity_ids": ["private"],
-            "boxes_scene": boxes_to_scene(value, (100, 50), (256, 128)),
-        }
-        if pixels:
-            item["boxes_pixel"] = value
-        torch.save(item, legacy / "features" / f"{i}.pt")
-    monkeypatch.setattr(
-        detection,
-        "detect",
-        lambda *a: pytest.fail("no detector inference during import"),
-    )
-    monkeypatch.setattr(build, "load_rcr_inputs", lambda *a: data)
-    monkeypatch.setattr(
-        build,
-        "resolve_device",
-        lambda *a: pytest.fail("import only needs CPU/image headers"),
-    )
-    build.prepare_cache(cfg, stage="detections", import_scene=legacy)
-    cache = DetectionCache(cfg["data"]["detection_cache"])
-    torch.testing.assert_close(cache.load_geometry(0)["boxes_pixel"], boxes)
-    assert cache.mask.tolist() == [[True], [False]]
-    index = torch.load(cache.root / "index.pt", weights_only=True)
-    assert not {"image_encoder", "scene", "identity_ids"} & index.keys()
-    with pytest.raises(ValueError, match="matching detector provenance"):
-        build_detection_cache(
-            data.gallery_ids,
-            [data.image_path(i) for i in data.gallery_ids],
-            legacy.with_name("bad-import"),
-            {**cfg["detector"], "threshold": 0.4},
-            import_scene=legacy,
-        )
 
 
 class FakeFAFA(nn.Module):
@@ -256,7 +226,7 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
 
     bad = tmp_path / "changed-detections"
     values = iter([source.load_geometry(0)["boxes_pixel"].flip(0), torch.empty(0, 4)])
-    monkeypatch.setattr(detection, "detect", lambda *a: {"person": next(values)})
+    monkeypatch.setattr(detection, "detect_persons", lambda *a: next(values))
     build_detection_cache(
         data.gallery_ids,
         [data.image_path(i) for i in data.gallery_ids],
@@ -306,8 +276,8 @@ def test_detection_audit_and_supervision_need_no_scene_or_fafa(
         Image.new("RGB", (100, 50)).save(path)
     monkeypatch.setattr(
         detection,
-        "detect",
-        lambda *a: {"person": torch.tensor([[0.0, 0.0, 20.0, 20.0]])},
+        "detect_persons",
+        lambda *a: torch.tensor([[0.0, 0.0, 20.0, 20.0]]),
     )
     build_detection_cache(
         data.gallery_ids,
@@ -326,8 +296,7 @@ def test_detection_audit_and_supervision_need_no_scene_or_fafa(
     labels = TrainSupervision(data, cache, cache_file=cfg["cache"]["supervision_cache"])
     changed = TrainSupervision(
         data,
-        cache,
-        scene_size=[1024, 1024],
+        SimpleNamespace(cache_id="new-appearance", detection_cache_id=cache.cache_id),
         cache_file=cfg["cache"]["supervision_cache"],
     )
     assert labels.key == changed.key

@@ -44,35 +44,18 @@ remains an eligibility sentinel. Its existing zero-person fallback is retained.
 Boxes that cross the image boundary retain their original coordinates; FAFA's
 PIL crop padding and the scene transform's clipping preserve crop semantics.
 
-## Import existing scene boxes without detector inference
+## Supported detection inputs
 
-For an existing complete unified CLIP or DINO scene cache:
-
-```bash
-.venv-proposed/bin/python - <<'PY'
-from rcr.common.config import load_config
-from rcr.proposed.cache.build import prepare_cache
-
-cfg = load_config("configs/proposed.yaml")
-prepare_cache(cfg, stage="detections", import_scene="/path/to/old-scene-cache")
-PY
-```
-
-Import checks the source detector model/settings, gallery IDs/order, shard
-identity and person counts. It copies pixel boxes without sorting or rounding.
-If a legacy shard has only letterboxed boxes, its recorded scene size and raw
-image header invert that transform. Images are needed to record original sizes.
-No legacy identity labels are imported. Missing detector provenance is rejected.
-The source directory is never modified. An unfinished legacy cache must be
-completed before import. New and legacy cache directories cannot overlap.
-An unfinished unified scene build cannot resume under the new scene-only
-builder; finish it with the previous code or select a fresh scene directory.
+Detection extraction, supervision and diagnostics use the independent pixel-box
+cache only. Existing `person-detections-v1` indexes and native unfinished builds
+remain reusable. Scene-to-detection migration is no longer part of the runtime
+API; convert historical unified caches with their original code revision or
+build a fresh detection cache before using this pipeline.
 
 A completed unified CLIP scene cache remains usable as `data.scene_cache`; its
-geometry is ignored by the scene reader. Legacy DINO scene features still cannot
-replace CLIP features. Old FAFA formats 4–6 bind a scene UUID and must be rebuilt
-once in the new FAFA directories. They are not silently rebound to another crop
-source. Historical diagnostics retain their explicit legacy reader.
+geometry is ignored by the scene reader. Legacy DINO scene features cannot
+replace CLIP features. Old FAFA formats 4–6 must be rebuilt once for the separated
+crop contract.
 
 ## Shared consumers and provenance
 
@@ -109,5 +92,5 @@ Detection diagnostics require no scene or FAFA cache:
 ```
 
 `prepare-supervision --config configs/proposed.yaml` also needs only the shared
-detection cache and train annotations. Legacy `--cache` / `--scene-cache` audit
-arguments are retained for historical unified caches.
+detection cache and train annotations. Detection auditing accepts only
+`--detection-cache`; it never needs raw images or scene dimensions for alignment.

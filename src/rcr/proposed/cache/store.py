@@ -7,7 +7,6 @@ from threading import Lock
 import torch
 from torch import Tensor
 
-from rcr.common.data import inference_samples
 from rcr.common.detection import DetectionCache
 from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache.scene import SceneCache
@@ -203,14 +202,15 @@ class GalleryCache:
         )
 
     def native_queries(self, samples, max_people: int) -> Tensor:
+        """Read public query inputs supplied by ranking or training batch assembly."""
         if self.native is None:
             raise ValueError("FAFA image/query caches are required; run build-cache")
-        return self.native.load_queries(inference_samples(samples), max_people)
+        return self.native.load_queries(samples, max_people)
 
     def validate_samples(self, samples) -> None:
         if self.native is None:
             raise ValueError("FAFA image/query caches are required; run build-cache")
-        self.native.validate_samples(inference_samples(samples))
+        self.native.validate_samples(samples)
 
     def native_targets(self, indices: Tensor, max_people: int) -> Tensor:
         if self.native is None:
