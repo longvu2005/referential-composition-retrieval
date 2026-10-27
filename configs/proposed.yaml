@@ -1,76 +1,95 @@
-# One source of truth for cache, training, retrieval and evaluation.
-# Current model: frozen CLIP ViT-B/32 scene/text + FAFA FDA; learned relational context.
-# Coarse fusion uses gallery z-scores; fine scoring reranks the Top-M shortlist.
+# Proposed: Frozen CLIP B/32 + FAFA + learned relational context.
 method: proposed
 split: val
+
+# Dataset and feature caches.
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  detection_cache: cache/grounding-dino-tiny  # shared pixel boxes, independent of CLIP
-  fafa_image_cache: cache/fafa-person-images  # pooled persons + projected target tokens
+  detection_cache: cache/grounding-dino-tiny
+  fafa_image_cache: cache/fafa-person-images
   fafa_query_cache: cache/fafa-person-queries
-  scene_cache: cache/proposed-clip-b32  # CLIP patches/global only
+  scene_cache: cache/proposed-clip-b32
+
+# Person detection.
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
   text_threshold: 0.25
+
+# Frozen CLIP image encoder.
 image_encoder:
   model: openai/clip-vit-base-patch32
   revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
-  # [height, width], letterboxed; changing sizes requires rebuilding the cache.
-  scene_size: [224, 224]
+  scene_size: [224, 224]        # Letterboxed input; rebuild cache if changed.
+
+# Frozen FAFA person encoder.
 person_encoder:
   python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
   batch_size: 4
+
+# Cache storage and memory limits.
 cache:
   storage_dtype: float16
-  lru_mib: 1024       # scenes only; FAFA shards cannot evict scenes
-  native_lru_mib: 256  # independent FAFA target/query budget
-  supervision_cache: cache/clip-b32-train-supervision.json  # train-only crop IDs prepared before train
-  mmap_shards: false  # Eager scene/target reads, as in ec5a2a2; large indices stay mmap.
-  text_lru_mib: 256   # frozen native CLIP outputs only; projection remains trainable
+  lru_mib: 1024                 # Scene cache.
+  native_lru_mib: 256          # FAFA cache.
+  supervision_cache: cache/clip-b32-train-supervision.json
+  mmap_shards: false
+  text_lru_mib: 256            # Frozen CLIP text features.
+
+# Trainable model architecture.
 model:
-  text_model: openai/clip-vit-base-patch32  # same revision as image_encoder
-  dim: 384                   # person/semantic, scene and text width
-  dropout: 0.1               # attention weights/residuals and FFNs
+  text_model: openai/clip-vit-base-patch32
+  dim: 384                     # Shared feature dimension.
+  dropout: 0.1
   identity_dim: 128
-  fda_k: 6                  # native top-k target tokens; no learned semantic cosine
-  state_dim: 512              # native joint space; adapters start as identity
-  # Training default; inference overrides live in retrieval.
-  coarse_beta: 0.4
+  fda_k: 6                     # Top-K FAFA token similarities.
+  state_dim: 512
+  coarse_beta: 0.4             # Default state fusion weight.
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
+
+  # Subject selection and partial identity matching.
   fine_matching:
-    # Common to every query: no case label or GT member count at inference.
     selection_threshold: 0.5
-    identity_threshold: 0.2   # starting value; calibrate on val, never test
-    missing_penalty: 1.1     # > 1 for FDA in [-1,1]; starting value, tune on val
-    duplicate_iou: 0.9       # suppress near-identical boxes; 1 disables
+    identity_threshold: 0.2
+    missing_penalty: 1.1       # Penalty for unmatched persons.
+    duplicate_iou: 0.9        # Suppress duplicate detections.
+
+# Training schedule and sampling.
 train:
   epochs: 20
-  batch_size: 14
-  candidates: 32
-  case_balanced: true        # P(case) proportional to sqrt(N_case)
+  batch_size: 14               # Queries per batch.
+  candidates: 32              # Gallery candidates per query.
+  case_balanced: true         # P(case) proportional to sqrt(N_case).
   seed: 0
   amp: true
   mining_batch_size: 8
+
+  # Additional crops for identity supervision.
   identity_sampling:
     max_crops: 128
     crops_per_identity: 2
     random_identities: 8
+
+  # Positive and negative sampling.
   sampling:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.3
-    warmup_epochs: 1
+    warmup_epochs: 3
     refresh_every_epochs: 2
     pool_size: 100
+
+# AdamW optimization; pretrained encoders remain frozen.
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05           # text projection only; CLIP is fully frozen
+  text_lr: 1.0e-05
   weight_decay: 0.01
+
+# Grounding + identity + retrieval + state losses.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
@@ -78,31 +97,38 @@ loss:
   identity_temperature: 0.1
   state_weight: 1.0
   state_temperature: 0.1
+
+# Coarse retrieval and Top-M fine reranking.
 retrieval:
-  # Shared by periodic validation and standalone retrieval.
-  fine_score_mode: context_zscore  # legacy_raw reproduces the old fine score
-  context_weight: 0.0325            # fixed; normalize coverage * context over all Top-M
-  coarse_beta: 0.4              # joint validation calibration selects final pair
-  # Final Top-M score = z(fine) + fine_coarse_weight * z(coarse).
-  # Calibrate both weights with configs/calibration.yaml after training.
-  fine_coarse_weight: 0.025
+  # Fine = alpha * FAFA + gamma * z(coverage * context).
+  # Final = z(fine) + lambda * z(coarse).
+  fine_score_mode: context_zscore
+  context_weight: 0.0325       # gamma
+  coarse_beta: 0.4             # Coarse state weight.
+  fine_coarse_weight: 0.025    # lambda
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
   coarse_batch_size: 512
+
+# Validation and coarse shortlist metrics.
 candidate_ks: [100, 500]
 evaluation:
   enabled: true
   every_epochs: 2
+
+# Experiment logging.
 wandb:
   enabled: true
   project: referential-composition-retrieval
   name: proposed
-  mode: online           # Use offline to defer syncing, or disabled to suppress logging.
+  mode: online
   log_every_steps: 20
+
+# Runtime and checkpoints.
 runtime:
   device: cuda
+
 checkpoint: runs/proposed-clip-b32/best.pt
 output:
-  # Root only; the runner appends each split.
   dir: runs/proposed-clip-b32
