@@ -269,6 +269,34 @@ weights are selected independently on validation. An untrained/disabled state
 branch cannot enter training validation with a positive coarse beta. Checkpoint
 selection and the ID/Full evaluation protocol remain unchanged.
 
+The default 20-epoch run has a short context warmup:
+
+| Epochs | Active objective |
+| --- | --- |
+| 1-3 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
+| 4-20 | All five terms, with the configured `loss.context_weight` |
+
+Selection and assignment are detached, so unreliable initial grounding/identity
+cannot be corrected through context gradients. Warmup first supervises those
+components without running composition or fine matching/reasoning. Afterwards,
+the base tasks remain active to constrain their shared projections while context
+learns. The optimizer, its state and learning rates are retained across phases;
+there is no parameter freezing or teacher forcing added at the boundary.
+
+`train.context_warmup_epochs` must be an integer in `[0, train.epochs)`; omitted or
+zero means joint training from epoch 1. A positive warmup requires a non-context
+objective. When `loss.context_weight=0`, no context phase is scheduled. This is
+independent of `train.sampling.warmup_epochs`, which delays hard-negative mining.
+The three-epoch default is a starting schedule, not a measured optimum. Compare
+against zero warmup with the same total optimizer steps and select on validation.
+
+Full validation and checkpoint selection skip warmup epochs, then follow the
+existing epoch interval and always evaluate the final epoch. The selection metric
+is unchanged. `last.pt` is still saved every epoch; during warmup it is an
+intermediate snapshot. History records `phase` and the effective `context_weight`;
+W&B records the effective weight and warmup flag per step and epoch. The saved
+configuration retains the final objective weights rather than the temporary zero.
+
 Within Top-M:
 
 ```text

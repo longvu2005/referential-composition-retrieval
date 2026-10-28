@@ -55,6 +55,11 @@ def validate_training_schedule(cfg: dict) -> None:
     candidates = cfg["train"].get("candidates", 2)
     if type(candidates) is not int or candidates < 2:
         raise ValueError("train.candidates must be an integer >= 2")
+    warmup = cfg["train"].get("context_warmup_epochs", 0)
+    if type(warmup) is not int or not 0 <= warmup < cfg["train"]["epochs"]:
+        raise ValueError(
+            "train.context_warmup_epochs must be an integer >= 0 and < train.epochs"
+        )
     evaluation = cfg.get("evaluation", {})
     if evaluation.get("enabled", False):
         value = evaluation["every_epochs"]

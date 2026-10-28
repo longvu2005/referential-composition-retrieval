@@ -39,6 +39,13 @@ The training objective separates the components used by retrieval:
 L = L_ground + 0.1 L_id + L_coarse + L_context + L_state
 ```
 
+Training uses one 20-epoch run. `train.context_warmup_epochs: 3` disables only
+`L_context` for epochs 1-3; all five objectives run from epoch 4. Composition and
+fine context scoring are skipped during warmup. The same optimizer and base
+objectives continue across the boundary. Set `train.context_warmup_epochs=0`
+for joint training from epoch 1. `train.sampling.warmup_epochs` independently
+controls when hard-negative mining starts.
+
 | Objective | Supervision |
 | --- | --- |
 | Grounding | Foreground/background-balanced BCE per Subject, averaged per query |
@@ -238,8 +245,10 @@ writes one directory per split with:
 - `run.json`: configuration, checkpoint, cache and benchmark provenance;
 - `metrics.json`: overall and by-case metrics.
 
-`best.pt` maximizes the mean of overall validation Full-mAP and macro-case
-validation Full-mAP. With the chosen checkpoint, the official pipeline is:
+Full validation and `best.pt` selection begin after context warmup, using the
+configured evaluation interval and always the final epoch. `best.pt` maximizes
+the mean of overall validation Full-mAP and macro-case validation Full-mAP.
+With the chosen checkpoint, the official pipeline is:
 
 ```bash
 python tools/run.py run --config configs/proposed.yaml --split val

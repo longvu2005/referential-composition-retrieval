@@ -1,7 +1,9 @@
-"""One CPU epoch through the real train and validation loops."""
+"""CPU contracts for training, context warmup and validation selection."""
 
+import json
 import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,12 +68,6 @@ class TextBackbone(nn.Module):
             torch.randn(7, 8, generator=torch.Generator().manual_seed(41))
         )
         self.text_projection = nn.Identity()
-
-    def resize_token_embeddings(self, _size):
-        pass
-
-    def get_input_embeddings(self):
-        return self.embedding
 
     def forward(self, input_ids, attention_mask):
         del attention_mask
@@ -197,7 +193,8 @@ def test_training_rejects_existing_run_before_loading_data(
     assert path.read_bytes() == b"previous run"
 
 
-def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
+@pytest.fixture
+def tiny_training_run(tmp_path, monkeypatch):
     samples = [_sample("train", "q", "a"), _sample("val", "vq", "va")]
     cache = TinyCache()
     native_queries = cache.native_queries
@@ -273,18 +270,100 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     cfg["cache"]["supervision_cache"] = str(tmp_path / "supervision.json")
     cfg["runtime"]["device"] = "cpu"
     cfg["model"].update(dim=6, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
-    cfg["train"].update(epochs=1, batch_size=1, candidates=2, amp=False)
+    cfg["train"].update(
+        epochs=1, context_warmup_epochs=0, batch_size=1, candidates=2, amp=False
+    )
     cfg["evaluation"]["every_epochs"] = 1
     cfg["retrieval"].update(
         top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2
     )
     cfg["candidate_ks"] = [1, 2]
     cfg["output"]["dir"] = str(tmp_path / "run")
+    return cfg, cache, wandb_run, wandb_init
+
+
+@pytest.mark.parametrize(
+    "warmup,epochs,every_epochs,context_weight,expected_weights,expected_evaluations",
+    [
+        (0, 1, 1, 1.0, [1.0], [1]),
+        (1, 3, 1, 0.7, [0.0, 0.7, 0.7], [2, 3]),
+        (2, 3, 10, 1.0, [0.0, 0.0, 1.0], [3]),
+        (3, 4, 2, 1.0, [0.0, 0.0, 0.0, 1.0], [4]),
+        (1, 2, 1, 0.0, [0.0, 0.0], [1, 2]),
+        (None, 1, 1, 1.0, [1.0], [1]),
+    ],
+)
+def test_training_warmup_and_validation_selected_checkpoint(
+    tiny_training_run,
+    monkeypatch,
+    warmup,
+    epochs,
+    every_epochs,
+    context_weight,
+    expected_weights,
+    expected_evaluations,
+):
+    cfg, cache, wandb_run, wandb_init = tiny_training_run
+    cfg["train"]["epochs"] = epochs
+    if warmup is None:
+        del cfg["train"]["context_warmup_epochs"]
+    else:
+        cfg["train"]["context_warmup_epochs"] = warmup
+    cfg["loss"]["context_weight"] = context_weight
+    cfg["evaluation"]["every_epochs"] = every_epochs
+    cfg["wandb"]["log_every_steps"] = 1
+    original = deepcopy(cfg)
+    weights, evaluated = [], []
+    compute_loss, evaluate = training.compute_loss, training._evaluate
+
+    def observe_loss(*args, **settings):
+        weights.append(settings.copy())
+        return compute_loss(*args, **settings)
+
+    def observe_evaluation(*args, **kwargs):
+        evaluated.append(args[-2])
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(training, "compute_loss", observe_loss)
+    monkeypatch.setattr(training, "_evaluate", observe_evaluation)
 
     checkpoint = training.train(cfg)
+    assert cfg == original
+    assert [settings["context_weight"] for settings in weights] == expected_weights
+    assert all(
+        {k: v for k, v in settings.items() if k != "context_weight"}
+        == {k: v for k, v in cfg["loss"].items() if k != "context_weight"}
+        for settings in weights
+    )
+    assert evaluated == expected_evaluations
+    history = [
+        json.loads(line)
+        for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
+    ]
+    assert [row["context_weight"] for row in history] == expected_weights
+    assert [row["phase"] for row in history] == [
+        "warmup" if context_weight and weight == 0 else "joint"
+        for weight in expected_weights
+    ]
+    assert all(
+        row["train_context"] == row["train_context_active_fraction"] == 0
+        for row in history
+        if row["phase"] == "warmup"
+    )
+    assert [row["epoch"] for row in history if "val_full_map" in row] == evaluated
+    best_epoch = max(
+        (row for row in history if "val_checkpoint_score" in row),
+        key=lambda row: row["val_checkpoint_score"],
+    )["epoch"]
     saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
     assert checkpoint.name == "best.pt"
-    assert saved["best_epoch"] == 1
+    assert saved["best_epoch"] == saved["epoch"] == best_epoch
+    assert saved["config"]["loss"]["context_weight"] == context_weight
+    last = torch.load(
+        checkpoint.parent / "last.pt", map_location="cpu", weights_only=True
+    )
+    assert last["epoch"] == epochs
+    assert last["best_epoch"] == best_epoch
     assert saved["config"]["checkpoint"] == str(checkpoint)
     assert saved["scene_cache_id"] == cache.scene_cache_id
     assert saved["detection_cache_id"] == cache.detection_cache_id
@@ -310,10 +389,62 @@ def test_one_epoch_writes_validation_selected_checkpoint(tmp_path, monkeypatch):
     assert len(wandb_run.metrics) == 5
     assert wandb_run.logs[0]["global_step"] == 1
     assert "train/loss" in wandb_run.logs[0]
-    assert wandb_run.logs[-1]["epoch"] == 1
+    assert wandb_run.logs[-1]["epoch"] == epochs
     assert "val/checkpoint_score" in wandb_run.logs[-1]
-    assert wandb_run.summary["best_epoch"] == 1
+    step_logs = [row for row in wandb_run.logs if "global_step" in row]
+    assert [row["train/context_weight"] for row in step_logs] == expected_weights
+    assert [
+        row["epoch/context_weight"] for row in wandb_run.logs if "epoch" in row
+    ] == expected_weights
+    assert wandb_run.summary["best_epoch"] == best_epoch
     assert wandb_run.finished
+
+
+def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
+    tiny_training_run, monkeypatch
+):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"].update(epochs=4, context_warmup_epochs=2)
+    cfg["train"]["sampling"].update(
+        identity_fraction=0, hard_fraction=1, warmup_epochs=1, refresh_every_epochs=2
+    )
+    cfg["evaluation"]["enabled"] = False
+    cfg["wandb"]["enabled"] = False
+    optimizers, mined_after_steps = [], []
+    adamw, compute_loss = torch.optim.AdamW, training.compute_loss
+    completed_steps = 0
+
+    def create_optimizer(*args, **kwargs):
+        optimizer = adamw(*args, **kwargs)
+        optimizers.append(optimizer)
+        return optimizer
+
+    def observe_loss(model, *args, **kwargs):
+        nonlocal completed_steps
+        if completed_steps:
+            state = optimizers[0].state[model.person_proj[0].weight]
+            assert state["step"].item() == completed_steps
+        completed_steps += 1
+        return compute_loss(model, *args, **kwargs)
+
+    def mine(*args, **kwargs):
+        assert kwargs["gallery_ids"] == ["q", "a", "n"]
+        mined_after_steps.append(completed_steps)
+        return {"train": ["n"]}
+
+    monkeypatch.setattr(torch.optim, "AdamW", create_optimizer)
+    monkeypatch.setattr(training, "compute_loss", observe_loss)
+    monkeypatch.setattr(training, "mine_hard_negatives", mine)
+    checkpoint = training.train(cfg)
+    assert checkpoint.name == "last.pt"
+    assert not (checkpoint.parent / "best.pt").exists()
+    assert len(optimizers) == 1
+    assert completed_steps == 4
+    assert mined_after_steps == [1, 3]  # Epochs 2 and 4, despite context warmup=2.
+    assert [group["lr"] for group in optimizers[0].param_groups] == [
+        cfg["optimizer"]["lr"],
+        cfg["optimizer"]["text_lr"],
+    ]
 
 
 def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
@@ -505,6 +636,128 @@ def test_disabled_state_cannot_be_used_by_training_validation(tmp_path, monkeypa
     ):
         training.train(cfg)
     assert not Path(cfg["output"]["dir"]).exists()
+
+
+def test_context_only_training_requires_zero_warmup(tmp_path, monkeypatch):
+    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
+    cfg["output"]["dir"] = str(tmp_path / "run")
+    cfg["loss"] = _only_loss("context")
+    cfg["retrieval"]["coarse_beta"] = 0
+    monkeypatch.setattr(
+        training, "cache_paths", lambda *a: pytest.fail("fail before assets")
+    )
+    with pytest.raises(ValueError, match="warmup requires a non-context loss"):
+        training.train(cfg)
+    assert not Path(cfg["output"]["dir"]).exists()
+
+
+def test_warmup_skips_fine_and_preserves_its_parameters_until_joint_training(
+    objective_batch, monkeypatch
+):
+    model, batch = objective_batch
+    settings = training.loss_settings({})
+    settings["context_weight"] = 0
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.2)
+    fine = [
+        parameter
+        for module in (model.composition, model.target_builder, model.reasoner)
+        for parameter in module.parameters()
+    ] + [model.null_person]
+    before = [p.detach().clone() for p in fine]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("warmup must skip composition and fine context scoring")
+
+    with monkeypatch.context() as stage:
+        stage.setattr(model.composition, "forward", forbidden)
+        stage.setattr(model, "score_context", forbidden)
+        value, parts = training.compute_loss(model, batch, (2, 2), **settings)
+        value.backward()
+        assert parts["context"] == parts["context_active_fraction"] == 0
+        assert all(p.grad is None for p in fine)
+        assert _has_gradient(model.grounding)
+        assert _has_gradient(model.identity_head)
+        assert _has_gradient(model.state_text_proj)
+        optimizer.step()
+        for parameter, original in zip(fine, before, strict=True):
+            torch.testing.assert_close(parameter, original, rtol=0, atol=0)
+
+    optimizer.zero_grad(set_to_none=True)
+    settings["context_weight"] = 1
+    value, parts = training.compute_loss(model, batch, (2, 2), **settings)
+    value.backward()
+    assert parts["context_active_fraction"] == 1
+    assert _has_gradient(model.reasoner)
+    assert _has_gradient(model.composition)
+    assert _has_gradient(model.identity_head)
+    optimizer.step()
+    assert any(
+        not torch.equal(p, original) for p, original in zip(fine, before, strict=True)
+    )
+    assert model.binding_scale.item() == 1
+
+
+@pytest.mark.parametrize("query_has_persons", [True, False])
+@pytest.mark.parametrize("subjects", [1, 2])
+def test_warmup_coarse_query_path_matches_full_encoding(
+    objective_batch, monkeypatch, query_has_persons, subjects
+):
+    model, batch = objective_batch
+    for key in (
+        "selections",
+        "selection_mask",
+        "subject_pos",
+        "subject_token_mask",
+        "grounding_targets",
+    ):
+        value = batch[key]
+        batch[key] = value.repeat(1, subjects, *([1] * (value.ndim - 2)))
+    batch["subject_ids"] = torch.arange(1, subjects + 1)[None]
+    batch["subject_mask"] = torch.ones(1, subjects, dtype=torch.bool)
+    if subjects == 2:
+        batch["subject_mask"][0, 1] = False
+    batch["query_person_mask"].fill_(query_has_persons)
+    if not query_has_persons:
+        batch["query_persons"].fill_(float("nan"))
+        batch["query_boxes"].fill_(float("nan"))
+    settings = training.loss_settings({"context_weight": 0})
+    actual, parts = training.compute_loss(model, batch, (2, 2), **settings)
+    actual.backward()
+    gradients = {
+        name: None if p.grad is None else p.grad.clone()
+        for name, p in model.named_parameters()
+    }
+    model.zero_grad(set_to_none=True)
+
+    def full_encoding(scene, persons, boxes, selections, patch_hw, **kwargs):
+        query = model.encode_query(
+            scene,
+            persons,
+            boxes,
+            selections,
+            batch["change"],
+            batch["subject_pos"],
+            patch_hw,
+            query_person_mask=batch["query_person_mask"],
+            subject_mask=batch.get("subject_mask"),
+            change_mask=batch.get("change_mask"),
+            subject_token_mask=batch.get("subject_token_mask"),
+            subject_ids=batch.get("subject_ids"),
+            **kwargs,
+        )
+        return query.logits, query.identity
+
+    monkeypatch.setattr(model, "encode_grounded_identity", full_encoding)
+    expected, expected_parts = training.compute_loss(model, batch, (2, 2), **settings)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for key in parts:
+        torch.testing.assert_close(parts[key], expected_parts[key], rtol=0, atol=0)
+    expected.backward()
+    for name, parameter in model.named_parameters():
+        if gradients[name] is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, gradients[name], rtol=0, atol=0)
 
 
 def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):

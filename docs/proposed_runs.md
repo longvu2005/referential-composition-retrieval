@@ -54,6 +54,14 @@ context and global-state objectives. The context loss ranks raw `coverage * cont
 against same-ID negatives, without FDA or a trainable binding scale. Pairwise
 losses weight eligible queries equally; see the exact objectives in
 [proposed_method.md](proposed_method.md#objective-and-ranking).
+The default run uses 3 warmup epochs for grounding/identity/coarse/state, followed
+by 17 epochs with context enabled. `train.epochs` is the total, including warmup;
+`train.context_warmup_epochs` controls only context loss and must be smaller than
+that total. Composition and fine context scoring are skipped during warmup. The
+same optimizer continues, and the base objectives stay active afterwards.
+Set `train.context_warmup_epochs=0` for a joint-training ablation or a one-epoch
+smoke test. When context loss is disabled, all epochs use the remaining objectives.
+
 Periodic validation uses Context z-score with initial `context_weight=0.0325`,
 normalizing only after scoring a query's complete Coarse Top-M. DINO/BERT checkpoints are
 incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
@@ -71,7 +79,8 @@ Each batch contains:
 
 - up to `positives_per_query` Full Positives;
 - `identity_fraction` same-identity, wrong-state negatives;
-- `hard_fraction` coarse hard negatives after the configured warm-up;
+- `hard_fraction` coarse hard negatives after `train.sampling.warmup_epochs`,
+  independently of context warmup;
 - uniform negatives for the remaining slots.
 
 The identity loss can additionally read up to
@@ -79,8 +88,9 @@ The identity loss can additionally read up to
 not enter the candidate set, FAFA scoring or state loss; they only keep the
 supervised contrastive objective supplied with cross-image positives.
 
-The model is evaluated on the complete validation split at
-`evaluation.every_epochs` and on the final epoch. `best.pt` maximizes
+After context warmup, the model is evaluated on the complete validation split at
+`evaluation.every_epochs` and on the final epoch. Warmup checkpoints are saved as
+`last.pt` but do not compete for `best.pt`. The checkpoint selection formula stays
 
 ```text
 0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP.
@@ -97,7 +107,9 @@ python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
 W&B tracking is configured by the `wandb` block in `configs/proposed.yaml`.
 Each run records only research configuration and cache provenance, not local
 dataset paths. It logs losses, gradient norm and learning rates every
-`log_every_steps`, then epoch means and validation metrics. Set `mode: offline`
+`log_every_steps`, the effective context weight and warmup flag, then epoch means
+and validation metrics. `history.jsonl` also records the phase and effective
+context weight. Set `mode: offline`
 to sync later with `wandb sync`, or set `enabled: false` for untracked smoke
 tests.
 

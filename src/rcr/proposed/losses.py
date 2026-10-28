@@ -124,27 +124,40 @@ def compute_loss(
     state_temperature: float,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
-    query = model.encode_query(
-        batch["query_scene"],
-        batch["query_persons"],
-        batch["query_boxes"],
-        batch["selections"],
-        batch["change"],
-        batch["subject_pos"],
-        patch_hw,
-        selection_mask=batch.get("selection_mask"),
-        change_mask=batch.get("change_mask"),
-        query_person_mask=batch.get("query_person_mask"),
-        subject_mask=batch.get("subject_mask"),
-        subject_token_mask=batch.get("subject_token_mask"),
-        subject_ids=batch.get("subject_ids"),
-    )
+    if context_weight:
+        query = model.encode_query(
+            batch["query_scene"],
+            batch["query_persons"],
+            batch["query_boxes"],
+            batch["selections"],
+            batch["change"],
+            batch["subject_pos"],
+            patch_hw,
+            selection_mask=batch.get("selection_mask"),
+            change_mask=batch.get("change_mask"),
+            query_person_mask=batch.get("query_person_mask"),
+            subject_mask=batch.get("subject_mask"),
+            subject_token_mask=batch.get("subject_token_mask"),
+            subject_ids=batch.get("subject_ids"),
+        )
+        logits, query_identity = query.logits, query.identity
+    else:
+        # Reuse the coarse query path; warmup needs no composition or fine matching.
+        mask = batch["query_person_mask"][..., None]
+        logits, query_identity = model.encode_grounded_identity(
+            batch["query_scene"],
+            batch["query_persons"].masked_fill(~mask, 0),
+            batch["query_boxes"].masked_fill(~mask, 0),
+            batch["selections"],
+            patch_hw,
+            selection_mask=batch.get("selection_mask"),
+        )
     positive = batch["positive_mask"]
     identity_positive = batch["identity_positive_mask"]
     if (positive & ~identity_positive).any():
         raise ValueError("every Full Positive must also be an identity positive")
     batch_size, candidates = positive.shape
-    zero = query.identity.new_zeros(())
+    zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     context_active = zero.detach()
     target_identity = None
@@ -154,12 +167,12 @@ def compute_loss(
         )
 
     if grounding_weight:
-        mask = batch["query_person_mask"][:, None].expand_as(query.logits)
+        mask = batch["query_person_mask"][:, None].expand_as(logits)
         if "subject_mask" in batch:
             mask = mask & batch["subject_mask"][:, :, None]
         mask = mask & (batch["query_identity_labels"][:, None] >= 0)
         mask = mask & batch["grounding_targets"].any(-1, keepdim=True)
-        ground = grounding_loss(query.logits, batch["grounding_targets"], mask)
+        ground = grounding_loss(logits, batch["grounding_targets"], mask)
 
     if identity_weight:
         query_keep, target_keep = (
@@ -170,7 +183,7 @@ def compute_loss(
             batch["query_identity_labels"][query_keep],
             batch["target_identity_labels"][target_keep],
         ]
-        features = [query.identity[query_keep], target_identity[target_keep]]
+        features = [query_identity[query_keep], target_identity[target_keep]]
         if batch.get("extra_identity_labels", labels[0][:0]).numel():
             labels.append(batch["extra_identity_labels"])
             features.append(model.encode_identity(batch["extra_identity_persons"]))
@@ -181,12 +194,12 @@ def compute_loss(
     if coarse_weight:
         # Reuse the exact inference identity scorer without an unnecessary BxB
         # cross-query gallery. No state/relation label enters this identity task.
-        with torch.autocast(query.identity.device.type, enabled=False):
+        with torch.autocast(query_identity.device.type, enabled=False):
             coarse_scores = torch.stack(
                 [
                     identity_scores(
-                        query.identity[i],
-                        query.logits[i].float(),
+                        query_identity[i],
+                        logits[i].float(),
                         target_identity[i],
                         batch["target_mask"][i],
                         query_mask=batch["query_person_mask"][i],
@@ -204,7 +217,7 @@ def compute_loss(
             valid = valid & batch["subject_mask"].any(-1)[:, None]
         coarse = (
             retrieval_loss(coarse_scores / coarse_temperature, identity_positive, valid)
-            + query.identity.sum() * 0
+            + query_identity.sum() * 0
         )
 
     if context_weight:

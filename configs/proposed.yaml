@@ -61,6 +61,7 @@ model:
 # Training schedule and sampling.
 train:
   epochs: 20
+  context_warmup_epochs: 3    # Context starts at epoch 4; 0 = joint from epoch 1.
   batch_size: 14               # Queries per batch.
   candidates: 32              # Gallery candidates per query.
   case_balanced: true         # P(case) proportional to sqrt(N_case).
@@ -79,7 +80,7 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.3
-    warmup_epochs: 3
+    warmup_epochs: 3          # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
 

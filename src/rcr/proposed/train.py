@@ -243,6 +243,16 @@ def train(cfg: dict) -> Path:
     }
     if not cfg["loss"]["state_weight"] and cfg["retrieval"]["coarse_beta"] != 0:
         raise ValueError("loss.state_weight=0 requires retrieval.coarse_beta=0")
+    warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
+    if warmup_epochs and not any(
+        value
+        for key, value in cfg["loss"].items()
+        if key.endswith("weight") and key != "context_weight"
+    ):
+        raise ValueError(
+            "context warmup requires a non-context loss; "
+            "set train.context_warmup_epochs=0 for context-only training"
+        )
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
@@ -390,6 +400,12 @@ def train(cfg: dict) -> Path:
     hard_pools = None
 
     for epoch in range(1, epochs + 1):
+        in_warmup = epoch <= warmup_epochs and cfg["loss"]["context_weight"] > 0
+        phase = "warmup" if in_warmup else "joint"
+        epoch_loss = {
+            **cfg["loss"],
+            "context_weight": 0.0 if in_warmup else cfg["loss"]["context_weight"],
+        }
         generator = torch.Generator().manual_seed(cfg["train"]["seed"] + epoch - 1)
         identity_generator = torch.Generator().manual_seed(
             cfg["train"]["seed"] + epoch + 1_000_002
@@ -438,7 +454,7 @@ def train(cfg: dict) -> Path:
             ),
             0.0,
         )
-        progress = tqdm(batches, desc=f"epoch {epoch}/{epochs}")
+        progress = tqdm(batches, desc=f"epoch {epoch}/{epochs} ({phase})")
         for rows in progress:
             candidates = sample_candidates(
                 rows,
@@ -478,7 +494,7 @@ def train(cfg: dict) -> Path:
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
-                loss, parts = compute_loss(model, batch, cache.patch_hw, **cfg["loss"])
+                loss, parts = compute_loss(model, batch, cache.patch_hw, **epoch_loss)
             if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"non-finite loss at epoch {epoch}: "
@@ -510,11 +526,15 @@ def train(cfg: dict) -> Path:
                         "train/gradient_norm": gradient_norm,
                         "train/model_lr": optimizer.param_groups[0]["lr"],
                         "train/text_lr": optimizer.param_groups[1]["lr"],
+                        "train/context_weight": epoch_loss["context_weight"],
+                        "train/warmup": in_warmup,
                     }
                 )
 
         epoch_log = {
             "epoch": epoch,
+            "phase": phase,
+            "context_weight": epoch_loss["context_weight"],
             **{
                 f"train_{name}": value / len(train_samples)
                 for name, value in totals.items()
@@ -522,8 +542,10 @@ def train(cfg: dict) -> Path:
         }
         optimizer.zero_grad(set_to_none=True)
         is_best = False
-        should_evaluate = evaluation.get("enabled", False) and (
-            epoch % evaluation["every_epochs"] == 0 or epoch == epochs
+        should_evaluate = (
+            not in_warmup
+            and evaluation.get("enabled", False)
+            and (epoch % evaluation["every_epochs"] == 0 or epoch == epochs)
         )
         if should_evaluate:
             metrics = _evaluate(
@@ -578,6 +600,8 @@ def train(cfg: dict) -> Path:
         if run is not None:
             tracked_epoch = {
                 "epoch": epoch,
+                "epoch/context_weight": epoch_loss["context_weight"],
+                "epoch/warmup": in_warmup,
                 **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
             }
             if should_evaluate:
