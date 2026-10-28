@@ -175,6 +175,32 @@ def test_dino_bert_checkpoint_is_rejected_before_loading_backbone(
         retrieve.retrieve(cfg)
 
 
+def test_renamed_architecture_loads_existing_checkpoint_without_changing_scores(
+    saved_pipeline,
+):
+    cfg, _, _ = saved_pipeline
+    current = retrieve.retrieve(cfg)
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    assert checkpoint["architecture_version"] == "fafa-partial-match-v2"
+    checkpoint["architecture_version"] = "clip-b32-fafa-partial-match-v2"
+    torch.save(checkpoint, cfg["checkpoint"])
+    digest = sha256_file(cfg["checkpoint"])
+
+    previous_name = retrieve.retrieve(cfg)
+    for key in (
+        "rankings",
+        "coarse_rankings",
+        "fine_rankings",
+        "identity_scores",
+        "state_scores",
+        "fafa_binding",
+        "context",
+        "coverage",
+    ):
+        assert torch.equal(current[key], previous_name[key]), key
+    assert sha256_file(cfg["checkpoint"]) == digest
+
+
 def test_report_rejects_test_without_complete_validation_selection(
     saved_pipeline, tmp_path
 ):

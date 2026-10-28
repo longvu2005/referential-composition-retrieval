@@ -6,10 +6,10 @@ split: val
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
-  detection_cache: cache/grounding-dino-tiny
-  fafa_image_cache: cache/fafa-person-images
-  fafa_query_cache: cache/fafa-person-queries
-  scene_cache: cache/proposed-clip-b32
+  detection_cache: cache/detections
+  fafa_image_cache: cache/person-images
+  fafa_query_cache: cache/person-queries
+  scene_cache: cache/scene
 
 # Person detection.
 detector:
@@ -34,7 +34,7 @@ cache:
   storage_dtype: float16
   lru_mib: 1024                 # Scene cache.
   native_lru_mib: 256          # FAFA cache.
-  supervision_cache: cache/clip-b32-train-supervision.json
+  supervision_cache: cache/train-supervision.json
   mmap_shards: false
   text_lru_mib: 256            # Frozen CLIP text features.
 
@@ -132,6 +132,6 @@ wandb:
 runtime:
   device: cuda
 
-checkpoint: runs/proposed-clip-b32/best.pt
+checkpoint: runs/proposed/best.pt
 output:
-  dir: runs/proposed-clip-b32
+  dir: runs/proposed

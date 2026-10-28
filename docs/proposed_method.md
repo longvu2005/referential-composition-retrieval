@@ -336,7 +336,7 @@ and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 
 ## Configuration and checkpoints
 
-There is one architecture, `clip-b32-fafa-partial-match-v2`. Frozen extraction has
+There is one architecture, `fafa-partial-match-v2`. Frozen extraction has
 four independent directories: `data.detection_cache`, `data.scene_cache`,
 `data.fafa_image_cache` and `data.fafa_query_cache`. The format-7 image index contains packed pooled person means,
 native target-token metadata and encoder/crop provenance, with no query text.
@@ -352,13 +352,16 @@ scene extraction does not invalidate them. Training checkpoints independently
 bind the FAFA image cache ID, detection cache ID, scene cache ID and encoder
 metadata; retrieval refuses a different scene even when its dimensions match.
 Train-only head alignment binds detection identity, independently of appearance.
-Completed unified CLIP scene features are readable and their boxes can be imported.
+Completed unified CLIP scene features are readable. Historical boxes require
+conversion with the original code revision or a fresh detection build; see
+[supported detection inputs](detection_cache.md#supported-detection-inputs).
 Build format-7 FAFA caches once in the new independent paths. Their crop-source
 identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
-Train the new modules from scratch in `runs/proposed-clip-b32`; this is not a
-weight-compatible checkpoint conversion. The evaluation protocol remains unchanged; offline replay requires the complete
-version-1 raw-score artifact.
+Fresh experiments train from scratch in `runs/proposed`. Existing checkpoints
+from this CLIP/FAFA architecture also load through their previous architecture-name
+alias without changing model weights. See [feature contracts](feature_contracts.md).
+Offline replay requires the complete version-1 raw-score artifact.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and fusion coefficients.

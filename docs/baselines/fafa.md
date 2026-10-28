@@ -18,7 +18,7 @@ and `fafa_matching.py` ports mean Partial SetMatch. These adapters are not offic
 ## 2. Inputs, preprocessing and features
 
 FAFA reads the same Grounding DINO Tiny person boxes as Proposed from
-`cache/grounding-dino-tiny` (model `IDEA-Research/grounding-dino-tiny`, box threshold
+`cache/detections` (model `IDEA-Research/grounding-dino-tiny`, box threshold
 0.30, text threshold 0.25). Detector inference is not repeated. The shared
 cache must have a complete `index.pt`, matching gallery IDs/order and detector
 metadata. Its packed index stores pixel boxes and original image sizes, and its

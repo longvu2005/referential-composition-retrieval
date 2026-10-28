@@ -102,7 +102,7 @@ never from cached identity labels:
 
 ```bash
 .venv-proposed/bin/python tools/data/audit.py \
-  --detection-cache cache/grounding-dino-tiny \
+  --detection-cache cache/detections \
   --image-root dataset/data/raw/images \
   --output runs/data_and_detection_audit.json
 ```

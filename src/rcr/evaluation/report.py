@@ -13,6 +13,7 @@ from statistics import fmean
 from rcr.common.io import atomic_write_text
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.provenance import BENCHMARK_FIELDS, PROTOCOL, digest_json
+from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 
 METHODS = ("clip_image", "clip_text", "early_fusion", "late_fusion", "fafa", "proposed")
 OVERALL_METRICS = (
@@ -143,18 +144,11 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
         selected_checkpoint = config.get("selected_checkpoint_sha256")
         selected_validation = config.get("selected_validation_sha256")
         selected_retrieval = config.get("selected_retrieval")
-        selected_retrieval_keys = {
-            "fine_score_mode",
-            "context_weight",
-            "coarse_beta",
-            "fine_coarse_weight",
-            "top_m",
-        }
         if (
             selected_checkpoint != run.get("checkpoint_sha256")
             or selected_validation != run.get("validation_sha256")
             or not isinstance(selected_retrieval, dict)
-            or set(selected_retrieval) != selected_retrieval_keys
+            or set(selected_retrieval) != set(SELECTED_RETRIEVAL_KEYS)
         ):
             raise ReportError(
                 f"{label}: proposed test requires validation-selected configuration"

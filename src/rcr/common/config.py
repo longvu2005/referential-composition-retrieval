@@ -16,6 +16,13 @@ def load_config(path: str | Path) -> dict:
     return cfg
 
 
+def save_config(path: str | Path, cfg: dict) -> None:
+    """Write an effective YAML configuration atomically, preserving key order."""
+    from rcr.common.io import atomic_write_text
+
+    atomic_write_text(path, yaml.safe_dump(cfg, sort_keys=False))
+
+
 def override_config(cfg: dict, overrides: dict) -> dict:
     """Override known dotted keys without mutating the base experiment."""
     cfg = deepcopy(cfg)

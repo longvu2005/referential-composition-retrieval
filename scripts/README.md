@@ -58,7 +58,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `runs/clip-b32-calibration/selected.yaml` |
+| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `runs/proposed-calibration/selected.yaml` |
 
 ```bash
 bash scripts/methods/clip.bash val
@@ -85,9 +85,9 @@ Use any base/method environment to export already evaluated JSON:
 
 ```bash
 .venv-dataset/bin/python tools/report.py --split val \
-  --run proposed=runs/clip-b32-calibration/selected/val
+  --run proposed=runs/proposed-calibration/selected/val
 .venv-dataset/bin/python tools/report.py --split test \
-  --run proposed=runs/clip-b32-calibration/selected/test
+  --run proposed=runs/proposed-calibration/selected/test
 ```
 
 To evaluate saved `rankings.pt` first, use a method environment or install

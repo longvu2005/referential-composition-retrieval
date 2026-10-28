@@ -13,8 +13,8 @@ if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py prepare --config configs/proposed.yaml
     "$python_bin" tools/run.py build-cache --config configs/proposed.yaml
     "$python_bin" tools/run.py train --config configs/proposed.yaml
-    "$python_bin" tools/run.py run --config runs/proposed-clip-b32/config.yaml --split val
+    "$python_bin" tools/run.py run --config runs/proposed/config.yaml --split val
     "$python_bin" tools/run.py calibrate --config configs/calibration.yaml
 else
-    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split test
+    "$python_bin" tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
 fi

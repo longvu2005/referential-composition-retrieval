@@ -24,13 +24,17 @@ from rcr.proposed.cache.build import (
     check_query_text_config,
 )
 from rcr.proposed.cache.native import checkpoint_native_metadata
-from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
+from rcr.proposed.contracts import (
+    COMPATIBLE_ARCHITECTURE_VERSIONS,
+    SELECTED_RETRIEVAL_KEYS,
+)
 from rcr.proposed.nn.encoders import (
     check_clip_config,
     load_text_encoder_state,
     load_text_modules,
 )
-from rcr.proposed.nn.model import ARCHITECTURE_VERSION, DEFAULT_COARSE_BETA, RCRModel
+from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     retrieval_settings,
     retrieve_rankings,
@@ -48,13 +52,6 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         "selected_checkpoint_sha256",
         "selected_validation_sha256",
         "selected_retrieval",
-    )
-    selected_retrieval_keys = (
-        "fine_score_mode",
-        "context_weight",
-        "coarse_beta",
-        "fine_coarse_weight",
-        "top_m",
     )
     if cfg["split"] == "test":
         missing = [key for key in selection_keys if key not in cfg]
@@ -78,18 +75,18 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         )
     selected = cfg.get("selected_retrieval")
     if selected is not None and (
-        not isinstance(selected, dict) or set(selected) != set(selected_retrieval_keys)
+        not isinstance(selected, dict) or set(selected) != set(SELECTED_RETRIEVAL_KEYS)
     ):
         raise ValueError(
             "selected retrieval contract is incomplete; rerun val calibration"
         )
     if selected is not None and any(
-        settings[key] != selected[key] for key in selected_retrieval_keys
+        settings[key] != selected[key] for key in SELECTED_RETRIEVAL_KEYS
     ):
         raise ValueError(
             "retrieval settings changed since val selection; rerun the sweep"
         )
-    if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
+    if checkpoint.get("architecture_version") not in COMPATIBLE_ARCHITECTURE_VERSIONS:
         raise ValueError(
             "checkpoint architecture is incompatible; rebuild CLIP scene/FAFA caches "
             "and train CLIP ViT-B/32 in a new output directory"
@@ -125,15 +122,7 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     full_num_queries = len(samples)
     if max_queries is not None:
         samples = samples[:max_queries]
-    cache = GalleryCache(
-        data_cfg["fafa_image_cache"],
-        scene_root=data_cfg.get("scene_cache"),
-        detection_root=data_cfg["detection_cache"],
-        query_root=data_cfg.get("fafa_query_cache"),
-        lru_mib=cfg.get("cache", {}).get("lru_mib", 0),
-        native_lru_mib=cfg.get("cache", {}).get("native_lru_mib", 0),
-        mmap_shards=cfg.get("cache", {}).get("mmap_shards", False),
-    )
+    cache = GalleryCache(**gallery_cache_options(cfg))
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(samples)

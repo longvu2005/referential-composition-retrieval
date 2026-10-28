@@ -11,12 +11,14 @@ Edit `configs/proposed.yaml`:
 data:
   final_dir: dataset/data/final
   image_root: /path/to/images
-  detection_cache: /path/to/person-detections
-  scene_cache: /path/to/clip-b32-scene
-  fafa_image_cache: /path/to/fafa-images
-  fafa_query_cache: /path/to/fafa-queries
+  detection_cache: /path/to/cache/detections
+  scene_cache: /path/to/cache/scene
+  fafa_image_cache: /path/to/cache/person-images
+  fafa_query_cache: /path/to/cache/person-queries
 person_encoder:
   python: .venv-fafa/bin/python
+cache:
+  supervision_cache: /path/to/cache/train-supervision.json
 ```
 
 All model, optimizer, sampling, retrieval and runtime choices live in this one
@@ -67,9 +69,10 @@ normalizing only after scoring a query's complete Coarse Top-M. DINO/BERT checkp
 incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
 ranking, use `--set retrieval.fine_score_mode=legacy_raw` at retrieval time.
 
-The new loss requires a new run directory; old run configs with `retrieval_weight`
-are rejected for training. Existing checkpoint inference is unchanged. To disable
-global-state training, also set `retrieval.coarse_beta=0`.
+Training requires a fresh run directory; obsolete loss configs with
+`retrieval_weight` are rejected. Existing compatible checkpoints retain their
+inference behavior, including when loaded through the previous architecture-name
+alias. To disable global-state training, also set `retrieval.coarse_beta=0`.
 
 Training uses only train annotations. Before epoch 1, GT heads are aligned to the
 fixed detector crops required by train queries and their Full Positives. The
@@ -120,7 +123,7 @@ python tools/run.py run --config configs/proposed.yaml --split val
 python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Use the saved `runs/proposed-clip-b32/config.yaml` in the first command if training
+Use the saved `runs/proposed/config.yaml` in the first command if training
 used path or parameter overrides. Set `rankings` in `configs/calibration.yaml`
 to that run's `val/rankings.pt`. The artifact embeds its actual run configuration,
 checkpoint fingerprint and fixed matching settings; no separate model config or
@@ -155,7 +158,7 @@ search points, not measured optima. Refine the grid on validation only.
 
 ```bash
 python tools/run.py run \
-  --config runs/clip-b32-calibration/selected.yaml \
+  --config runs/proposed-calibration/selected.yaml \
   --split test
 ```
 
@@ -174,20 +177,23 @@ from the FAFA environment with explicit notebook coordinates:
 
 ```bash
 .venv-fafa/bin/python download_fafa.py \
-  --output cache/fafa-person-images --user OWNER --kernel NOTEBOOK --version VERSION
+  --output cache/person-images --user OWNER --kernel NOTEBOOK --version VERSION
 ```
 
 Authentication uses the normal Kaggle client configuration. The downloader
 records its source in the resume state and refuses to continue that state with
 different notebook arguments.
+`--output` names the local destination. The downloader reads the historical
+`cache/fafa-images` path inside the selected Kaggle export; that remote archive
+prefix does not need to match the local `cache/person-images` directory.
 
 The four cache paths include `data.detection_cache`. Completed unified CLIP scene
-features are readable; their boxes can be imported into the shared detection
-cache. Build new format-7 FAFA caches once, then they are independent of scene
+features are readable; historical boxes require conversion with the original
+code revision or a fresh detection build. Build format-7 FAFA caches once, then they are independent of scene
 backbones. Old DINO/BERT model checkpoints require fresh CLIP training. Keep
 raw images available for the frozen FAFA crop extraction. Once new caches are
 complete, mounted read-only copies are supported by training/retrieval.
-See [CLIP migration](clip_b32_migration.md) for the exact commands and text policy.
+See [feature contracts](feature_contracts.md) for text policy and checkpoint compatibility.
 See [detection separation](detection_cache.md) for import and independent builds.
 
 ## Reading outputs
@@ -251,11 +257,11 @@ only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cach
 
 ```bash
 # Reproduce the recorded ranking exactly.
-python -m rcr.proposed.replay runs/proposed-clip-b32/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
 # Rebuild coarse order, choose another Top-M, normalize and fuse offline.
-python -m rcr.proposed.replay runs/proposed-clip-b32/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 

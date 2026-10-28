@@ -6,14 +6,25 @@ loads the detector; FAFA extraction never loads scene features.
 
 | Config key | Default | Owns |
 | --- | --- | --- |
-| `data.detection_cache` | `cache/grounding-dino-tiny` | Ordered pixel boxes and original image sizes |
-| `data.scene_cache` | `cache/proposed-clip-b32` | CLIP patches and native global vectors |
-| `data.fafa_image_cache` | `cache/fafa-person-images` | Packed person means and projected target tokens |
-| `data.fafa_query_cache` | `cache/fafa-person-queries` | Content-addressed multimodal query features |
+| `data.detection_cache` | `cache/detections` | Ordered pixel boxes and original image sizes |
+| `data.scene_cache` | `cache/scene` | CLIP patches and native global vectors |
+| `data.fafa_image_cache` | `cache/person-images` | Packed person means and projected target tokens |
+| `data.fafa_query_cache` | `cache/person-queries` | Content-addressed multimodal query features |
+| `cache.supervision_cache` | `cache/train-supervision.json` | Train-only head alignment; separate from visual evidence |
 
-All four roots must be distinct, including after resolving symlinks and parent
+All four feature-cache roots must be distinct, including after resolving symlinks and parent
 paths. Set `data.image_root` to the actual image directory before extraction.
 Commands below run from the repository root after installing the environments.
+
+Cache paths name their role rather than a particular encoder or experiment.
+To reuse completed caches after a directory rename, move each entire directory
+with its index and shards intact and update the YAML paths used by that run.
+Keep checkpoint bytes and stored cache IDs unchanged. Rebuilding is not needed
+solely because a directory or the supervision JSON has a new name.
+
+The FAFA baseline's validation lock includes its detector path. After changing
+that path in `configs/fafa.yaml`, rerun FAFA validation before test to refresh
+`runs/fafa/protocol.json`; the detector cache itself remains reusable.
 
 ## Build stages independently
 
@@ -77,7 +88,7 @@ metadata. A scene change can reuse extraction caches but requires the matching
 trained model or a new training run. Train-supervision keys depend on detections
 and train GT, independently of scene/FAFA appearance features.
 
-The FAFA baseline uses `grounding_dino_cache` and `cache/grounding-dino-tiny` in
+The FAFA baseline uses `grounding_dino_cache` and `cache/detections` in
 `configs/fafa.yaml`. Build detections before its `prepare` command. After changing
 its detection-cache contract, rerun baseline validation to create a fresh test
 protocol lock. No labels, matching equations, selector thresholds or evaluator
@@ -87,7 +98,7 @@ Detection diagnostics require no scene or FAFA cache:
 
 ```bash
 .venv-proposed/bin/python tools/data/audit.py \
-  --detection-cache cache/grounding-dino-tiny \
+  --detection-cache cache/detections \
   --image-root /path/to/images --output runs/detection_audit.json
 ```
 

@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from rcr.proposed.contracts import ARCHITECTURE_VERSION
 from rcr.proposed.matching import (
     PersonMatching,
     exclusive_membership,
@@ -25,7 +26,6 @@ from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import fafa_binding_scores
 
-ARCHITECTURE_VERSION = "clip-b32-fafa-partial-match-v2"
 DEFAULT_COARSE_BETA = 0.4
 
 
@@ -48,13 +48,10 @@ class QueryEncoding:
             raise ValueError("candidate count must be positive")
 
         def repeat(value):
-            return (
-                None
-                if value is None
-                else value[:, None]
-                .expand(-1, count, *value.shape[1:])
-                .reshape(value.shape[0] * count, *value.shape[1:])
-            )
+            if value is None:
+                return None
+            expanded = value[:, None].expand(-1, count, *value.shape[1:])
+            return expanded.reshape(value.shape[0] * count, *value.shape[1:])
 
         return QueryEncoding(
             **{field.name: repeat(getattr(self, field.name)) for field in fields(self)}

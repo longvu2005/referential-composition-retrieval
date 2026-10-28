@@ -35,7 +35,7 @@ localization:
     text_threshold: 0.25
     # All boxes passed the shared detection threshold. No second NMS.
     score_threshold: 0.3
-    cache_dir: cache/grounding-dino-tiny
+    cache_dir: cache/detections
   query_selector:
     model: ViT-B/32
     checkpoint: checkpoints/clip/ViT-B-32.pt

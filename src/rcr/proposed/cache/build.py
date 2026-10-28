@@ -4,10 +4,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import yaml
-
 from rcr.baselines.fafa import text_policy
-from rcr.common.config import load_config
+from rcr.common.config import load_config, save_config
 from rcr.common.data import load_rcr_inputs
 from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.io import sha256_file
@@ -43,12 +41,12 @@ def run_person_worker(
     worker = Path(__file__).resolve().parents[4] / "tools/cache_fafa.py"
     with tempfile.TemporaryDirectory(prefix="rcr-person-") as directory:
         path = Path(directory) / "config.yaml"
-        path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        save_config(path, cfg)
         command = [cfg["person_encoder"]["python"], str(worker), "--config", str(path)]
-        if not prepare:
-            command.extend(["--stage", stage])
         if prepare:
             command.append("--prepare")
+        else:
+            command.extend(["--stage", stage])
         if force:
             command.append("--force")
         subprocess.run(command, check=True)

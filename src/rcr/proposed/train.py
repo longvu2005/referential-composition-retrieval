@@ -5,10 +5,9 @@ from pathlib import Path
 from statistics import fmean
 
 import torch
-import yaml
 from tqdm import tqdm
 
-from rcr.common.config import validate_training_schedule
+from rcr.common.config import save_config, validate_training_schedule
 from rcr.common.data import (
     inference_samples,
     load_rcr_data,
@@ -26,7 +25,7 @@ from rcr.proposed.cache.build import (
     check_cache_config,
     check_query_text_config,
 )
-from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.nn.encoders import (
@@ -264,15 +263,7 @@ def train(cfg: dict) -> Path:
     val_samples = split_samples(data, "val")
     train_gallery = split_image_ids(data, "train")
 
-    cache = GalleryCache(
-        data_cfg["fafa_image_cache"],
-        scene_root=data_cfg.get("scene_cache"),
-        detection_root=data_cfg["detection_cache"],
-        query_root=data_cfg.get("fafa_query_cache"),
-        lru_mib=cache_cfg.get("lru_mib", 0),
-        native_lru_mib=cache_cfg.get("native_lru_mib", 0),
-        mmap_shards=cache_cfg.get("mmap_shards", False),
-    )
+    cache = GalleryCache(**gallery_cache_options(cfg))
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(inference_samples(val_samples))
@@ -350,7 +341,7 @@ def train(cfg: dict) -> Path:
         scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
     output.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(output / "config.yaml", yaml.safe_dump(cfg, sort_keys=False))
+    save_config(output / "config.yaml", cfg)
     atomic_write_text(output / "history.jsonl", "")
     tokenizer.save_pretrained(output / "tokenizer")
     write_json(

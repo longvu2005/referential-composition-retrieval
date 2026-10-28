@@ -12,6 +12,20 @@ from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache.scene import SceneCache
 
 
+def gallery_cache_options(cfg: dict) -> dict:
+    """Use the same joined cache paths and memory limits in train and retrieval."""
+    data, cache = cfg["data"], cfg.get("cache", {})
+    return {
+        "root": data["fafa_image_cache"],
+        "scene_root": data.get("scene_cache"),
+        "detection_root": data["detection_cache"],
+        "query_root": data.get("fafa_query_cache"),
+        "lru_mib": cache.get("lru_mib", 0),
+        "native_lru_mib": cache.get("native_lru_mib", 0),
+        "mmap_shards": cache.get("mmap_shards", False),
+    }
+
+
 class GalleryCache:
     """CPU person index plus a bounded LRU for immutable on-disk image features."""
 

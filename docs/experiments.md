@@ -9,11 +9,11 @@ assets and historical run outputs are not included in the repository.
 ```bash
 .venv-clip/bin/python tools/run.py prepare --config configs/clip.yaml
 .venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split val
+bash scripts/methods/proposed.bash val
+# Proposed's cache stage also prepares the detections required by FAFA.
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split val
-# Proposed architecture/training is unchanged; use its prepared checkpoint/cache:
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --split val
-python tools/report.py --split val
+python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
 ```
 
 CLIP selects fusion weights on Full-mAP. FAFA evaluates/locks the supplied adapter
@@ -21,6 +21,9 @@ configuration; tune manually on val if needed. Use separate output roots for
 trials: `--set output.dir=runs/<experiment-name>`. Check hashes, fingerprints,
 query/gallery/case counts, truncation/fallback statistics and Git state before
 interpreting results. Never select methods/configs using test metrics.
+
+For an already trained proposed run, use its saved `config.yaml` with `run`,
+then `calibrate`; the full Bash validation recipe includes a fresh training run.
 
 Reporting defaults to all four CLIP variants, FAFA and Proposed. It reads only
 saved `metrics.json`/`run.json` and exports:
@@ -39,7 +42,7 @@ writing any table; reruns overwrite the active tables.
 
 ```bash
 # Use the selected validation artifact written by calibration:
-python tools/report.py --split val --run proposed=runs/clip-b32-calibration/selected/val
+python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
 # Explicitly request a smaller table or alternative formats:
 python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
 python tools/report.py --split val --formats csv tex --decimals 3
@@ -49,7 +52,7 @@ python tools/report.py --split val --formats csv tex --decimals 3
 default run root. Missing selected methods are errors. Do not replace a selected
 calibrated model with an unselected run.
 Calibration keeps val outputs in each experiment folder; its frozen test output
-is `runs/clip-b32-calibration/selected/test`, which can be passed with `--run proposed=...`.
+is `runs/proposed-calibration/selected/test`, which can be passed with `--run proposed=...`.
 
 ## Historical saved results
 
@@ -82,8 +85,8 @@ same frozen policy:
 ```bash
 .venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split test
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split test
-.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --split test
-python tools/report.py --split test
+.venv-proposed/bin/python tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
+python tools/report.py --split test --run proposed=runs/proposed-calibration/selected/test
 ```
 
 Report sample/case counts alongside such tables. CPU tests use tiny local fixtures;

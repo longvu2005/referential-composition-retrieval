@@ -6,10 +6,9 @@ from itertools import product
 from pathlib import Path
 
 import torch
-import yaml
 from tqdm import tqdm
 
-from rcr.common.config import override_config
+from rcr.common.config import override_config, save_config
 from rcr.common.data import (
     load_rcr_data,
     split_fingerprint,
@@ -17,7 +16,6 @@ from rcr.common.data import (
     split_samples,
 )
 from rcr.common.io import (
-    atomic_write_text,
     save_results,
     sha256_file,
     write_json,
@@ -26,6 +24,7 @@ from rcr.common.io import (
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.evaluation.provenance import digest_json, runtime_metadata
 from rcr.evaluation.runner import evaluate_run
+from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.ranking import FINE_SCORE_MODES
 from rcr.proposed.replay import _replay_rankings, _validate_artifact
 
@@ -36,32 +35,16 @@ def _write_selection(cfg: dict, root: Path, rows: list[dict]) -> dict:
     selected = override_config(
         cfg,
         {
-            **{
-                f"retrieval.{key}": best[key]
-                for key in (
-                    "coarse_beta",
-                    "fine_coarse_weight",
-                    "fine_score_mode",
-                    "context_weight",
-                    "top_m",
-                )
-            },
+            **{f"retrieval.{key}": best[key] for key in SELECTED_RETRIEVAL_KEYS},
             "output.dir": str(root / "selected"),
         },
     )
     for key in ("checkpoint_sha256", "validation_sha256"):
         selected[f"selected_{key}"] = best[key]
     selected["selected_retrieval"] = {
-        key: selected["retrieval"][key]
-        for key in (
-            "fine_score_mode",
-            "context_weight",
-            "coarse_beta",
-            "fine_coarse_weight",
-            "top_m",
-        )
+        key: selected["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
     }
-    atomic_write_text(root / "selected.yaml", yaml.safe_dump(selected, sort_keys=False))
+    save_config(root / "selected.yaml", selected)
     write_json(
         root / "selection.json",
         {
