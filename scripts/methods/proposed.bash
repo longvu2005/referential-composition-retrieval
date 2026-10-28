@@ -15,8 +15,6 @@ if [[ "$split" == val ]]; then
     "$python_bin" tools/run.py train --config configs/proposed.yaml
     "$python_bin" tools/run.py run --config runs/proposed-clip-b32/config.yaml --split val
     "$python_bin" tools/run.py calibrate --config configs/calibration.yaml
-    # Publish the chosen model's validation result under the same root as test.
-    "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split val
 else
     "$python_bin" tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split test
 fi

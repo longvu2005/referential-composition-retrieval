@@ -100,7 +100,7 @@ def test_retrieval_rejects_changed_scene_or_crop_source_before_loading_text(
         retrieve.retrieve(cfg)
 
 
-def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
+def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     saved_pipeline,
 ):
     cfg, data, scale = saved_pipeline
@@ -110,8 +110,8 @@ def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
     assert saved["binding_scale"] == scale != 1.0
     assert torch.equal(replay_rankings(saved)["rankings"], output["rankings"])
     current_metrics = evaluate_run(cfg, data=data)
-    # The unchanged evaluator continues to accept the pre-score-schema payload.
-    old = {
+    # Evaluation needs only rankings and IDs; raw score storage does not affect it.
+    ranking_only = {
         k: saved[k]
         for k in (
             "sample_ids",
@@ -127,7 +127,7 @@ def test_standalone_retrieve_save_evaluate_and_old_artifact_compatibility(
         )
     }
     assert evaluate_retrieval_output(
-        data, [data.samples[1]], old, [1, 2], split="val"
+        data, [data.samples[1]], ranking_only, [1, 2], split="val"
     ) == evaluate_retrieval_output(data, [data.samples[1]], saved, [1, 2], split="val")
     assert current_metrics["overall"]["num_queries"] == 1
     metadata = json.loads((directory / "run.json").read_text())
@@ -224,15 +224,17 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     saved_pipeline, tmp_path
 ):
     cfg, data, _ = saved_pipeline
-    model_config = tmp_path / "proposed.yaml"
-    model_config.write_text(yaml.safe_dump(cfg))
+    retrieve.retrieve(cfg)
+    source_path = Path(cfg["output"]["dir"]) / "val/rankings.pt"
     root = tmp_path / "calibration"
     rows = calibration.calibrate(
         {
-            "model_config": str(model_config),
+            "rankings": str(source_path),
             "output_dir": str(root),
             "coarse_beta": [0.0, 0.4],
             "fine_coarse_weight": [0.0, 0.4],
+            "context_weight": [cfg["retrieval"]["context_weight"]],
+            "top_m": [cfg["retrieval"]["top_m"]],
         }
     )
     assert len(rows) == 4
@@ -242,11 +244,10 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     assert selected["selected_validation_sha256"] == split_fingerprint(data, "val")
     assert len(selected["selected_checkpoint_sha256"]) == 64
     best = max(rows, key=lambda row: row["full_map"])
+    expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
+    assert expected["score_config"]["coarse_beta"] == best["coarse_beta"]
     output = retrieve.retrieve(selected)
     evaluate_run(selected, data=data)
-    expected = torch.load(
-        root / f"grid_{best['index']:03d}" / "val/rankings.pt", weights_only=True
-    )
     assert torch.equal(output["rankings"], expected["rankings"])
 
     for key, value in (

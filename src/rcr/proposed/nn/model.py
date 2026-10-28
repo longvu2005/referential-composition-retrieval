@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from rcr.proposed.matching import (
+    PersonMatching,
     exclusive_membership,
     gather_matched,
     matching_settings,
@@ -37,7 +38,7 @@ class QueryEncoding:
     reference: Tensor
     mask: Tensor
     prior: Tensor
-    fafa: Tensor
+    fafa: Tensor | None
     membership: Tensor
     subjects: Tensor
 
@@ -48,7 +49,9 @@ class QueryEncoding:
 
         def repeat(value):
             return (
-                value[:, None]
+                None
+                if value is None
+                else value[:, None]
                 .expand(-1, count, *value.shape[1:])
                 .reshape(value.shape[0] * count, *value.shape[1:])
             )
@@ -130,7 +133,11 @@ class RCRModel(nn.Module):
             nn.Linear(person_input_dim, dim), nn.LayerNorm(dim)
         )
         self.identity_head = IdentityHead(dim, identity_dim)
-        self.binding_log_scale = nn.Parameter(torch.tensor(math.log(math.expm1(1.0))))
+        # A fixed reference scale: calibration owns the relative context weight.
+        # Keep its state key/value so existing checkpoint inference stays exact.
+        self.binding_log_scale = nn.Parameter(
+            torch.tensor(math.log(math.expm1(1.0))), requires_grad=False
+        )
         binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim, dropout)
         self.grounding = SubjectGrounding(binding, dim)
         self.composition = StructuredComposition(
@@ -226,12 +233,12 @@ class RCRModel(nn.Module):
         subject_token_mask: Tensor | None = None,
         subject_ids: Tensor | None = None,
         *,
-        fafa_query: Tensor,
+        fafa_query: Tensor | None = None,
     ) -> QueryEncoding:
-        if fafa_query.ndim != 4 or fafa_query.shape[:3] != (
-            query_persons.shape[0],
-            selections.shape[1],
-            query_persons.shape[1],
+        if fafa_query is not None and (
+            fafa_query.ndim != 4
+            or fafa_query.shape[:3]
+            != (query_persons.shape[0], selections.shape[1], query_persons.shape[1])
         ):
             raise ValueError("fafa_query must be [B,S,Kq,D_fafa]")
         if query_person_mask is not None:
@@ -283,7 +290,7 @@ class RCRModel(nn.Module):
             reference,
             mask,
             prior,
-            fafa_query.detach(),
+            None if fafa_query is None else fafa_query.detach(),
             membership,
             subjects,
         )
@@ -309,7 +316,7 @@ class RCRModel(nn.Module):
         )
         return logits, self.identity_head(semantic)
 
-    def score_target(
+    def score_context(
         self,
         query: QueryEncoding,
         scene: Tensor,
@@ -317,21 +324,18 @@ class RCRModel(nn.Module):
         boxes: Tensor,
         patch_hw: tuple[int, int],
         person_mask: Tensor | None = None,
-        *,
-        fafa_targets: Tensor,
-        return_details: bool = False,
-    ) -> Tensor | dict[str, Tensor]:
-        """Shared identity matching -> aligned evidence/context -> null-aware score.
+    ) -> tuple[Tensor, PersonMatching]:
+        """Learnable context path shared by training and fine inference.
 
-        Case labels, GT identities and GT cardinalities never enter this path.
-        ``return_details`` is a diagnostic view of this very same forward pass.
+        Selection/assignment stay prediction-based and detached. Training needs
+        no native FAFA query/target tokens to supervise this component.
         """
         if person_mask is not None:
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
-        # Identity fixes the assignment. Retrieval learns the aligned context and
-        # fusion scale; native FAFA features stay frozen in both directions.
+        # Identity fixes the assignment. Only aligned context receives gradients
+        # through this path; crop identity has its own explicit objectives.
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
         matching = partial_identity_matching(
@@ -381,6 +385,30 @@ class RCRModel(nn.Module):
             aligned_boxes=aligned_boxes,
             matched_mask=matched.flatten(1),
         ).float()
+        return context, matching
+
+    def score_target(
+        self,
+        query: QueryEncoding,
+        scene: Tensor,
+        persons: Tensor,
+        boxes: Tensor,
+        patch_hw: tuple[int, int],
+        person_mask: Tensor | None = None,
+        *,
+        fafa_targets: Tensor,
+        return_details: bool = False,
+    ) -> Tensor | dict[str, Tensor]:
+        """Shared identity matching -> aligned evidence/context -> null-aware score.
+
+        Case labels, GT identities and GT cardinalities never enter this path.
+        ``return_details`` is a diagnostic view of this very same forward pass.
+        """
+        if query.fafa is None:
+            raise ValueError("fine retrieval requires native FAFA query features")
+        context, matching = self.score_context(
+            query, scene, persons, boxes, patch_hw, person_mask
+        )
         if fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
             raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
         binding = fafa_binding_scores(

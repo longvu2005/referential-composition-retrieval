@@ -73,25 +73,34 @@ assert not heavy & sys.modules.keys()
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    "arguments,message",
-    [
-        (["run", "--split", "test"], "--split val"),
-        (["retrieve", "--split", "train"], "--split val"),
-    ],
-)
-def test_tuning_export_rejects_nonvalidation_before_stages(arguments, message, capsys):
-    with pytest.raises(SystemExit) as error:
-        cli.main([*arguments, "--config", "configs/proposed.yaml", "--save-tuning"])
-    assert error.value.code == 2
-    assert message in capsys.readouterr().err
+def test_calibration_cli_accepts_its_own_config_without_top_level_method(monkeypatch):
+    name = "rcr.proposed.calibration"
+    module = ModuleType(name)
+    calls = []
+    module.calibrate = lambda cfg: calls.append(cfg)
+    monkeypatch.setitem(sys.modules, name, module)
+    cli.main(["calibrate", "--config", "configs/calibration.yaml"])
+    assert len(calls) == 1
+    assert "method" not in calls[0]
+    assert {
+        "rankings",
+        "output_dir",
+        "coarse_beta",
+        "fine_coarse_weight",
+        "context_weight",
+        "top_m",
+    } == calls[0].keys()
 
 
-def test_tuning_export_rejects_baseline_method_before_stages(capsys):
-    with pytest.raises(SystemExit) as error:
-        cli.main(["retrieve", "--config", "configs/fafa.yaml", "--save-tuning"])
-    assert error.value.code == 2
-    assert "only available for proposed" in capsys.readouterr().err
+def test_run_allows_candidate_cutoffs_larger_than_fine_shortlist(monkeypatch):
+    name = "rcr.proposed.runner"
+    runner = ModuleType(name)
+    calls = []
+    runner.run_experiment = lambda cfg, *args: calls.append(cfg)
+    monkeypatch.setitem(sys.modules, name, runner)
+    cli.main(["run", "--config", "configs/proposed.yaml", "--set", "retrieval.top_m=1"])
+    assert calls[0]["candidate_ks"] == [100, 500]
+    assert calls[0]["retrieval"]["top_m"] == 1
 
 
 @pytest.mark.parametrize("method", ["proposed", "clip", "fafa"])
@@ -128,7 +137,7 @@ def test_run_honors_yaml_overrides_and_split_precedence(
     assert cfg["output"]["dir"] == "runs/custom"
     if method == "proposed":
         assert cfg["checkpoint"] == "runs/frozen/best.pt"
-        assert options == {"save_tuning": False}
+        assert options == {}
     else:
         assert options == {"splits": [expected]}
     assert path.read_bytes() == original
@@ -140,8 +149,7 @@ def test_run_honors_yaml_overrides_and_split_precedence(
         (["run", "--set", "split=train"], "invalid split"),
         (["retrieve", "--set", "split=typo"], "invalid split"),
         (["train", "--set", "train.epochs=0"], "positive integer"),
-        (["run", "--set", "retrieval.top_m=1"], "candidate_ks"),
-        (["run", "--set", "split=test", "--save-tuning"], "--split val"),
+        (["train", "--set", "train.candidates=1"], "candidates"),
     ],
 )
 def test_invalid_experiments_fail_before_model_imports(arguments, message, capsys):

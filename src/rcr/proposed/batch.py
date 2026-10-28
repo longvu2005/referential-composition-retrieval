@@ -3,7 +3,6 @@
 import torch
 from torch import Tensor, nn
 
-from rcr.common.data import inference_samples
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 
@@ -81,12 +80,23 @@ def prepare_visual_batch(
     cache: GalleryCache,
     *,
     supervision,
-    state_image_ids: list[set[str]] | None = None,
+    identity_image_ids: list[set[str]],
     identity_crops=(),
 ) -> dict[str, Tensor]:
     """Load CPU visual features and labels. No model is executed here."""
+    if not samples or len(samples) != len(candidate_image_ids):
+        raise ValueError("training requires matching non-empty query/candidate rows")
     batch_size = len(samples)
     candidates_per_query = len(candidate_image_ids[0])
+    if candidates_per_query < 2 or any(
+        len(row) != candidates_per_query
+        or len(set(row)) != len(row)
+        or sample["query_image_id"] in row
+        for sample, row in zip(samples, candidate_image_ids, strict=True)
+    ):
+        raise ValueError(
+            "training candidates must be unique, exclude self and have width >= 2"
+        )
     query_indices = torch.tensor(
         [cache.by_id[row["query_image_id"]] for row in samples]
     )
@@ -157,16 +167,12 @@ def prepare_visual_batch(
             )[0],
         }
 
-    k_target = t_people.shape[1]
     batch = {
         **extra_batch,
         "query_scene": q_scene,
         "query_persons": q_people,
         "query_boxes": q_boxes,
         "query_person_mask": q_mask,
-        "fafa_query": cache.native_queries(
-            inference_samples(samples), q_people.shape[1]
-        ),
         "query_identity_labels": query_labels,
         "query_identity_mask": query_identity_mask,
         "grounding_targets": grounding_targets,
@@ -177,9 +183,6 @@ def prepare_visual_batch(
         "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
         "target_boxes": t_boxes.unflatten(0, (batch_size, candidates_per_query)),
         "target_mask": t_mask.unflatten(0, (batch_size, candidates_per_query)),
-        "fafa_targets": cache.native_targets(target_indices, k_target).unflatten(
-            0, (batch_size, candidates_per_query)
-        ),
         "target_identity_labels": target_labels.unflatten(
             0, (batch_size, candidates_per_query)
         ),
@@ -188,18 +191,17 @@ def prepare_visual_batch(
         ),
         "positive_mask": positive_mask,
     }
-    if state_image_ids is not None:
-        batch["state_mask"] = torch.tensor(
-            [
-                [image_id in eligible for image_id in image_ids]
-                for image_ids, eligible in zip(
-                    candidate_image_ids, state_image_ids, strict=True
-                )
-            ],
-            dtype=torch.bool,
-        )
-        if (positive_mask & ~batch["state_mask"]).any():
-            raise ValueError("every Full Positive must contain all required IDs")
+    batch["identity_positive_mask"] = torch.tensor(
+        [
+            [image_id in eligible for image_id in image_ids]
+            for image_ids, eligible in zip(
+                candidate_image_ids, identity_image_ids, strict=True
+            )
+        ],
+        dtype=torch.bool,
+    )
+    if (positive_mask & ~batch["identity_positive_mask"]).any():
+        raise ValueError("every Full Positive must contain all required IDs")
     return batch
 
 
@@ -212,7 +214,7 @@ def build_batch(
     device: torch.device | str,
     *,
     supervision,
-    state_image_ids: list[set[str]] | None = None,
+    identity_image_ids: list[set[str]],
     identity_crops=(),
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor]:
@@ -222,7 +224,7 @@ def build_batch(
         candidate_image_ids,
         cache,
         supervision=supervision,
-        state_image_ids=state_image_ids,
+        identity_image_ids=identity_image_ids,
         identity_crops=identity_crops,
     )
     visual = {key: value.to(device) for key, value in visual.items()}

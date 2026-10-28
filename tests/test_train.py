@@ -339,3 +339,191 @@ def test_text_cache_reuses_right_padded_rows_without_saving_frozen_weights():
     state = text_encoder_state(encoder, Tokenizer())
     assert set(state) == {"projection", "text_policy"}
     assert state["text_policy"] == {"context_length": 77, "subjects": "native_spans"}
+
+
+@pytest.fixture
+def objective_batch(monkeypatch):
+    from rcr.proposed.batch import build_batch
+
+    torch.manual_seed(23)
+    cache = TinyCache()
+
+    def no_fda(*args, **kwargs):
+        pytest.fail("training must not load native FAFA query/target tokens or run FDA")
+
+    monkeypatch.setattr(cache, "native_queries", no_fda)
+    monkeypatch.setattr(cache, "native_targets", no_fda)
+    monkeypatch.setattr("rcr.proposed.nn.model.fafa_binding_scores", no_fda)
+    supervision = SimpleNamespace(
+        load_ids=lambda ids, width: [["p1"] * width for _ in ids]
+    )
+    model = training.RCRModel(
+        dim=8,
+        identity_dim=6,
+        state_dim=4,
+        num_heads=2,
+        fine_matching={"selection_threshold": 0.0001, "identity_threshold": -1.0},
+    ).eval()
+    batch = build_batch(
+        [_sample("train", "q", "a")],
+        [["a", "n", "va"]],
+        cache,
+        Tokenizer(),
+        TextEncoder(TextBackbone(), dim=8),
+        "cpu",
+        supervision=supervision,
+        identity_image_ids=[{"a", "n"}],
+    )
+    assert "fafa_query" not in batch and "fafa_targets" not in batch
+    batch = {key: value.detach() for key, value in batch.items()}
+    batch["extra_identity_persons"] = torch.randn(2, 8)
+    batch["extra_identity_labels"] = torch.tensor([1, 1])
+    for name in ("target_scene", "target_persons", "target_global"):
+        batch[name] = batch[name].detach().clone().requires_grad_()
+    return model, batch
+
+
+def _only_loss(name):
+    settings = training.loss_settings({})
+    for key in settings:
+        if key.endswith("weight"):
+            settings[key] = float(key == f"{name}_weight")
+    return settings
+
+
+def _has_gradient(module):
+    return any(
+        p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters()
+    )
+
+
+@pytest.mark.parametrize(
+    "component", ["grounding", "identity", "coarse", "context", "state"]
+)
+def test_each_objective_trains_its_intended_modules(objective_batch, component):
+    model, batch = objective_batch
+    total, parts = training.compute_loss(model, batch, (2, 2), **_only_loss(component))
+    assert torch.isfinite(total)
+    total.backward()
+    assert _has_gradient(model.identity_head) == (component in ("identity", "coarse"))
+    if component not in ("identity", "coarse"):
+        assert all(p.grad is None for p in model.identity_head.parameters())
+    assert _has_gradient(model.reasoner) == (component == "context")
+    assert _has_gradient(model.composition) == (component == "context")
+    assert _has_gradient(model.state_text_proj) == (component == "state")
+    assert _has_gradient(model.state_image_proj) == (component == "state")
+    assert model.binding_log_scale.grad is None
+    assert not model.binding_log_scale.requires_grad
+    assert all(
+        p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()
+    )
+    if component == "context":
+        assert parts["context_active_fraction"].item() == 1
+        assert batch["target_persons"].grad[0, 2].count_nonzero() == 0
+        assert batch["target_persons"].grad[0, :2].abs().sum() > 0
+    if component == "state":
+        assert batch["target_global"].grad[0, 2].count_nonzero() == 0
+        assert batch["target_global"].grad[0, :2].abs().sum() > 0
+
+
+def test_context_cannot_reduce_loss_by_changing_frozen_fafa_scale(objective_batch):
+    model, batch = objective_batch
+    settings = _only_loss("context")
+    first, _ = training.compute_loss(model, batch, (2, 2), **settings)
+    first.backward()
+    gradient = model.reasoner.score[-1].weight.grad.clone()
+    model.zero_grad(set_to_none=True)
+    model.binding_log_scale.data.fill_(20)
+    second, _ = training.compute_loss(model, batch, (2, 2), **settings)
+    second.backward()
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    torch.testing.assert_close(
+        gradient, model.reasoner.score[-1].weight.grad, rtol=0, atol=0
+    )
+    assert model.binding_log_scale.grad is None
+
+
+def test_no_matched_context_pair_skips_context_without_wrong_identity_fallback(
+    objective_batch,
+):
+    model, batch = objective_batch
+    batch["target_mask"][0, 1] = False
+    total, parts = training.compute_loss(model, batch, (2, 2), **_only_loss("context"))
+    assert parts["context_active_fraction"].item() == parts["context"].item() == 0
+    total.backward()
+    assert not _has_gradient(model.reasoner)
+    # Global state still has an annotated same-identity pair, regardless of detections.
+    model.zero_grad(set_to_none=True)
+    state, _ = training.compute_loss(model, batch, (2, 2), **_only_loss("state"))
+    state.backward()
+    assert _has_gradient(model.state_text_proj)
+
+
+def test_context_requires_same_identity_negatives(objective_batch):
+    model, batch = objective_batch
+    batch["identity_positive_mask"][0, 1] = False
+    total, parts = training.compute_loss(model, batch, (2, 2), **_only_loss("context"))
+    assert total.item() == 0
+    assert parts["context_active_fraction"].item() == 0
+    total.backward()
+    assert not _has_gradient(model.reasoner)
+
+
+def test_coarse_and_context_use_the_correct_positive_sets(objective_batch, monkeypatch):
+    model, batch = objective_batch
+    coarse_scores = torch.tensor([0.0, -0.1, 0.1], requires_grad=True)
+    monkeypatch.setattr(
+        "rcr.proposed.losses.identity_scores", lambda *a, **k: coarse_scores
+    )
+    total, _ = training.compute_loss(model, batch, (2, 2), **_only_loss("coarse"))
+    total.backward()
+    # A same-ID wrong-state image is an identity positive for coarse retrieval.
+    assert coarse_scores.grad[1] < 0
+    assert coarse_scores.grad[2] > 0
+    context_scores = torch.tensor([0.0, -0.1, 0.1], requires_grad=True)
+    monkeypatch.setattr(
+        model,
+        "score_context",
+        lambda *a, **k: (context_scores, SimpleNamespace(coverage=torch.ones(3))),
+    )
+    total, _ = training.compute_loss(model, batch, (2, 2), **_only_loss("context"))
+    total.backward()
+    # The same image is a conditional negative; wrong IDs have unknown context.
+    assert context_scores.grad[1] > 0
+    assert context_scores.grad[2] == 0
+
+
+def test_disabled_state_cannot_be_used_by_training_validation(tmp_path, monkeypatch):
+    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
+    cfg["output"]["dir"] = str(tmp_path / "run")
+    cfg["loss"]["state_weight"] = 0
+    monkeypatch.setattr(
+        training, "cache_paths", lambda *a: pytest.fail("fail before assets")
+    )
+    with pytest.raises(
+        ValueError, match="state_weight=0 requires retrieval.coarse_beta=0"
+    ):
+        training.train(cfg)
+    assert not Path(cfg["output"]["dir"]).exists()
+
+
+def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
+    model, batch = objective_batch
+    settings = training.loss_settings({})
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad], lr=1e-3
+    )
+    losses = []
+    for _ in range(6):
+        optimizer.zero_grad(set_to_none=True)
+        value, parts = training.compute_loss(model, batch, (2, 2), **settings)
+        assert torch.isfinite(value)
+        assert parts["context_active_fraction"].item() == 1
+        losses.append(value.item())
+        value.backward()
+        assert all(
+            p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()
+        )
+        optimizer.step()
+    assert losses[-1] < losses[0]
+    assert model.binding_scale.item() == 1.0

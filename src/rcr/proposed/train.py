@@ -28,7 +28,7 @@ from rcr.proposed.cache.build import (
 )
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
-from rcr.proposed.losses import compute_loss
+from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.nn.encoders import (
     QueryTextCache,
     check_clip_config,
@@ -150,6 +150,8 @@ def _evaluate(
     cfg,
     epoch,
     output,
+    *,
+    state_trained,
 ):
     rankings = retrieve_rankings(
         samples,
@@ -161,6 +163,7 @@ def _evaluate(
         gallery_ids=split_image_ids(data, "val"),
         text_cache=text_cache,
         description=f"val epoch {epoch}",
+        state_trained=state_trained,
         **cfg["retrieval"],
     )
     result = evaluate_retrieval_output(
@@ -232,11 +235,14 @@ def train(cfg: dict) -> Path:
     check_clip_config(cfg)
     cfg = {
         **cfg,
+        "loss": loss_settings(cfg["loss"]),
         "checkpoint": str(Path(cfg["output"]["dir"]) / "best.pt"),
         "retrieval": retrieval_settings(
             cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
         ),
     }
+    if not cfg["loss"]["state_weight"] and cfg["retrieval"]["coarse_beta"] != 0:
+        raise ValueError("loss.state_weight=0 requires retrieval.coarse_beta=0")
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
@@ -259,7 +265,7 @@ def train(cfg: dict) -> Path:
     )
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
-    cache.validate_samples(inference_samples([*train_samples, *val_samples]))
+    cache.validate_samples(inference_samples(val_samples))
     check_query_text_config(cache, cfg)
 
     supervision = TrainSupervision(
@@ -285,7 +291,9 @@ def train(cfg: dict) -> Path:
     candidate_index = CandidateIndex(
         train_samples, train_gallery, identity_pools, excluded
     )
-    state_images = {sample_id: set(pool) for sample_id, pool in identity_pools.items()}
+    identity_images = {
+        sample_id: set(pool) for sample_id, pool in identity_pools.items()
+    }
     sampling = sampling_settings(cfg["train"].get("sampling", {}))
 
     scene, people, *_ = cache.load(torch.tensor([0]))
@@ -314,7 +322,10 @@ def train(cfg: dict) -> Path:
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": model.parameters(), "lr": cfg["optimizer"]["lr"]},
+            {
+                "params": [p for p in model.parameters() if p.requires_grad],
+                "lr": cfg["optimizer"]["lr"],
+            },
             {
                 "params": text_encoder.proj.parameters(),
                 "lr": cfg["optimizer"]["text_lr"],
@@ -416,7 +427,16 @@ def train(cfg: dict) -> Path:
         model.train()
         text_encoder.train()
         totals = dict.fromkeys(
-            ("loss", "grounding", "identity", "retrieval", "state"), 0.0
+            (
+                "loss",
+                "grounding",
+                "identity",
+                "coarse",
+                "context",
+                "state",
+                "context_active_fraction",
+            ),
+            0.0,
         )
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs}")
         for rows in progress:
@@ -443,13 +463,18 @@ def train(cfg: dict) -> Path:
                 text_encoder,
                 device,
                 supervision=supervision,
-                state_image_ids=[state_images[row["sample_id"]] for row in rows],
+                identity_image_ids=[identity_images[row["sample_id"]] for row in rows],
                 identity_crops=identity_crops,
                 text_cache=text_cache,
             )
-            positives = (batch["positive_mask"] & batch["state_mask"]).sum(1)
-            negatives = (~batch["positive_mask"] & batch["state_mask"]).sum(1)
-            state_pairs_seen += int((positives * negatives).sum())
+            positives = (batch["positive_mask"] & batch["identity_positive_mask"]).sum(
+                1
+            )
+            negatives = (~batch["positive_mask"] & batch["identity_positive_mask"]).sum(
+                1
+            )
+            if cfg["loss"]["state_weight"]:
+                state_pairs_seen += int((positives * negatives).sum())
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
@@ -513,6 +538,7 @@ def train(cfg: dict) -> Path:
                 cfg,
                 epoch,
                 output,
+                state_trained=bool(cfg["loss"]["state_weight"] and state_pairs_seen),
             )
             epoch_log.update({f"val_{key}": value for key, value in metrics.items()})
             if best["score"] is None or metrics["checkpoint_score"] > best["score"]:

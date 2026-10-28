@@ -33,30 +33,52 @@ roles are located by token offsets; no new vocabulary entries are added. State
 adapters start as identity maps, so their initial cosine is native CLIP cosine;
 state supervision then adapts those maps. See [migration notes](docs/clip_b32_migration.md).
 
-The training objective is
+The training objective separates the components used by retrieval:
 
 ```text
-L = L_ground + lambda_id L_id + L_retrieval + lambda_state L_state
+L = L_ground + 0.1 L_id + L_coarse + L_context + L_state
 ```
 
-`L_ground` is masked BCE, `L_id` is supervised contrastive loss,
-`L_retrieval` is pairwise ranking loss, and `L_state` learns the global requested
-change only from images that contain the required identities. See
-[docs/proposed_method.md](docs/proposed_method.md) for the complete equations.
+| Objective | Supervision |
+| --- | --- |
+| Grounding | Foreground/background-balanced BCE per Subject, averaged per query |
+| Crop identity | Supervised contrastive learning on deduplicated train crops |
+| Coarse identity | Same-required-ID images outrank wrong-ID images, using the actual coarse identity scorer |
+| Context | Full Positives outrank same-ID wrong-state/relation images with nonzero predicted matching coverage |
+| Global state | Full Positives outrank same-ID wrong-state images in global CLIP state space |
 
-Training retains the raw fine score `alpha * B_FAFA + coverage * context`.
-Validation/retrieval instead use Context z-score with fixed weight 0.0325:
+Pairwise losses average pairs within each query and then eligible queries, so
+queries with more positives do not dominate. Wrong-ID images have unknown context
+labels and are excluded from context/state supervision. A context query without
+both a supported positive and a supported same-ID negative contributes zero;
+`context_active_fraction` logs how often this objective is usable. No GT label
+changes predicted membership or matching.
+
+Training supervises `coverage * context` directly and does not include frozen
+FDA binding in its loss. It reads pooled FAFA image features, without loading
+native FAFA query/target tokens or computing FDA. New runs keep `binding_scale=1`
+fixed; its existing checkpoint key is retained and recorded values still load.
+This prevents the train loss from being reduced by inflating a frozen branch's
+coefficient. Calibrating the context weight remains a validation-only step.
+
+Validation/retrieval retains the same formula and full Top-M normalization:
 
 ```text
-S_fine = alpha * B_FAFA + 0.0325 * z_topM(coverage * context)
+S_fine = alpha * B_FAFA + context_weight * z_topM(coverage * context)
 ```
 
-`alpha` is the checkpoint's learned binding scale. Normalization uses one complete
-Coarse Top-M per query, FP32 population standard deviation and epsilon `1e-6`.
-Constants contribute zero; inference batch sizes do not define normalization
-groups. Set `retrieval.fine_score_mode=legacy_raw` to restore raw fine scoring.
+`alpha` is the checkpoint's recorded binding scale, and the initial inference
+`context_weight` remains 0.0325. Normalization uses one complete Coarse Top-M per
+query, FP32 population standard deviation and epsilon `1e-6`. Training candidate
+batches do not define inference normalization groups. Constants contribute zero.
+Set `retrieval.fine_score_mode=legacy_raw` to use `alpha * B_FAFA + coverage * context`.
 Final fusion remains `z(S_fine) + fine_coarse_weight * z(S_coarse)` on common finite
 Coarse support; weight zero returns the fine score directly.
+
+Loss weights and cosine temperatures live under `loss`; inference weights live
+under `retrieval`. The new objective needs a fresh training run, using a new
+`output.dir`. Existing checkpoints keep their inference behavior. If disabling
+`loss.state_weight`, also set `retrieval.coarse_beta=0`.
 
 Inference receives only images, text and public Subject slots. Case labels,
 identity labels, head boxes and positive sets are used only for training or
@@ -111,8 +133,8 @@ person_encoder:
 ## Run the proposed method
 
 The complete validation workflow prepares FAFA assets, reuses or builds caches,
-trains, calibrates the two fusion weights on validation, and writes validation
-results:
+trains, retrieves validation scores once, calibrates four scoring parameters
+offline, and writes the selected validation results:
 
 ```bash
 bash scripts/methods/proposed.bash val
@@ -156,9 +178,8 @@ Use a new `output.dir` for each training run. Training refuses a directory that
 already contains `config.yaml`, `best.pt` or `last.pt`. Retrieval, evaluation,
 calibration and reports overwrite their active outputs without archiving them.
 
-The CLI has five options: `--config`, `--set`, `--split`, `--cache-stage` and
-`--save-tuning` (Proposed validation only). It always processes complete query
-splits. CLIP mode and other experiment parameters belong in YAML or `--set`.
+The CLI has four options: `--config`, `--set`, `--split` and `--cache-stage`.
+It always processes complete query splits. CLIP mode and other experiment parameters belong in YAML or `--set`.
 
 Training logs step losses, gradient norm, learning rates, epoch means,
 validation metrics and the best checkpoint summary to W&B. Authenticate once
@@ -213,66 +234,61 @@ validation-selected `best.pt`. Checkpoints contain learned weights and frozen-mo
 provenance, but no optimizer state or duplicate frozen CLIP weights. Retrieval
 writes one directory per split with:
 
-- `rankings.pt`: fused, coarse, fine and FAFA diagnostic rankings, plus raw and
-  normalized score components aligned with `coarse_topm`;
+- `rankings.pt`: rankings, raw scores, scoring settings and embedded provenance;
 - `run.json`: configuration, checkpoint, cache and benchmark provenance;
 - `metrics.json`: overall and by-case metrics.
 
 `best.pt` maximizes the mean of overall validation Full-mAP and macro-case
-validation Full-mAP. `configs/calibration.yaml` then selects `coarse_beta` and
-`fine_coarse_weight` on validation. Test labels never select a checkpoint or
-weight.
-
-Score schema 1 adds `coarse_topm_scores`, `gated_context`, `fine_raw_scores`,
-`fine_scores`, `fused_topm_scores`, `context_mean`, `context_std`, `binding_scale`
-and `score_config`. It supports CPU replay on the saved shortlist without a
-checkpoint or pretrained caches:
+validation Full-mAP. With the chosen checkpoint, the official pipeline is:
 
 ```bash
-python -m rcr.proposed.replay runs/clip-b32-calibration/selected/val/rankings.pt \
-  --output-dir runs/replay/val --mode context_zscore --context-weight 0.0325 \
-  --fine-coarse-weight 0.4
+python tools/run.py run --config configs/proposed.yaml --split val
+python tools/run.py calibrate --config configs/calibration.yaml
+python tools/run.py run --config runs/clip-b32-calibration/selected.yaml --split test
 ```
 
-See [docs/proposed_runs.md](docs/proposed_runs.md) for the full schema and offline
-ablations. The evaluator still accepts old rankings; offline replay requires the
-new score components. Model inference requires a freshly trained CLIP checkpoint.
-With Top-M-only artifacts, changing `coarse_beta` may change shortlist membership
-and requires retrieval again.
+Validation retrieval saves `identity_scores`, `state_scores`, `fafa_binding`,
+`context` and `coverage` as CPU float32 `[Q,G]` matrices in `gallery_ids` order.
+It scores the original Top-M first, then each remaining non-self pair once.
+This requires approximately `Q*(G-1)` fine pairs and `20*Q*G` bytes for raw
+scores, plus diagnostic rankings. Periodic training validation and test retrieval
+continue to fine-score only Top-M.
 
-For offline tuning that can change the shortlist, export full-gallery raw scores
-once with the existing checkpoint and caches (validation only):
+`rankings.pt` is the sole input artifact for offline calibration: it embeds
+query/gallery IDs, query indices, recorded binding scale, fixed matching settings,
+score configuration, the original run config and provenance. Both
+`score_schema_version` and `schema_version` stay **1**. Raw scores are stored once;
+shortlist scores/statistics and coarse/fine/FAFA rankings remain as diagnostics.
+
+`configs/calibration.yaml` contains `rankings`, `output_dir` and grids for
+`coarse_beta`, `fine_coarse_weight`, `context_weight` and `top_m`. No top-level
+`method` or separate model config is required. Calibration reads this artifact
+and validation annotations, without opening checkpoint weights, backbone assets,
+images or feature caches. It rebuilds coarse order and Top-M, then uses the same
+CPU float32 normalization/fusion helpers as direct retrieval. Coarse sorting,
+shortlist statistics and fusion normalization are cached across grid tuples.
+`candidate_ks` stays fixed from the evaluation config and is measured on the
+complete coarse order, independently of Top-M.
+
+Selection maximizes validation Full-mAP and writes `summary.csv`, `selection.json`,
+`selected.yaml` and the best `selected/val/{rankings.pt,run.json,metrics.json}`.
+Only the best full ranking is serialized. The checkpoint fingerprint, complete
+validation fingerprint, query IDs and gallery order are checked; test retrieval
+also verifies the checkpoint bytes and frozen scoring settings. Test labels
+never select a checkpoint or hyperparameters.
+
+For a single offline ablation, replay the same validation artifact directly:
 
 ```bash
-python tools/run.py run --config runs/proposed-clip-b32/config.yaml \
-  --split val --save-tuning --set output.dir=runs/proposed-clip-b32-tuning
-python -m rcr.proposed.replay runs/proposed-clip-b32-tuning/val/rankings.pt \
-  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
+python -m rcr.proposed.replay runs/proposed-clip-b32/val/rankings.pt \
+  --output-dir runs/replay/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 ```
 
-`--save-tuning` scores every non-self query/gallery pair once and stores raw
-identity/state and FAFA/context/coverage scores inside `rankings.pt`. This extra
-work is opt-in and is not added to periodic training validation. Later replay
-needs only that file and CPU PyTorch; it rebuilds the complete Coarse ranking,
-new shortlist, its normalization and the new Coarse tail. No model, image
-features or backbone downloads are needed. Old Top-M-only artifacts retain their
-existing replay support but cannot recover candidates they never scored.
-See [docs/proposed_runs.md](docs/proposed_runs.md#full-gallery-tuning-export)
-for fields, cost, provenance and fixed matching settings.
-
-To search weights on the export and freeze a test-ready configuration without
-running model inference, use:
-
-```bash
-python tools/run.py calibrate --config configs/calibration_saved.yaml
-```
-
-This CPU-only path evaluates the complete validation split, writes
-`summary.csv`, `selection.json` and `selected.yaml`, and retains only the best
-full ranking under `selected/val/`. It checks the export's checkpoint fingerprint
-and exact validation text/labels/ordered gallery; no checkpoint file or visual
-feature cache is opened during this selection.
+Replay requires the complete version-1 raw-score artifact; rerun validation
+retrieval once if the required raw scores are missing. See
+[docs/proposed_runs.md](docs/proposed_runs.md#score-artifacts-and-cpu-replay)
+for the exact fields and fixed scoring conventions.
 
 ## Development
 

@@ -48,12 +48,6 @@ def main(argv=None):
                 choices=("val", "test") if name == "run" else ("train", "val", "test"),
                 help="Override YAML split (default: val)",
             )
-        if name in ("retrieve", "run"):
-            command.add_argument(
-                "--save-tuning",
-                action="store_true",
-                help="Proposed val only: export full-gallery scores for offline tuning",
-            )
 
     args = parser.parse_args(argv)
     try:
@@ -62,14 +56,12 @@ def main(argv=None):
         parser.error(str(error))
 
     command, method = args.command, cfg.get("method")
-    if method not in ("proposed", "clip", "fafa"):
-        parser.error("method must be proposed, clip or fafa")
     if command == "calibrate":
-        if method != "proposed":
-            parser.error("calibrate is only available for proposed")
         from rcr.proposed.calibration import calibrate
 
         return calibrate(cfg)
+    if method not in ("proposed", "clip", "fafa"):
+        parser.error("method must be proposed, clip or fafa")
     if (
         command in ("train", "build-cache", "prepare-supervision")
         and method != "proposed"
@@ -82,18 +74,11 @@ def main(argv=None):
         ):
             parser.error(f"invalid split for {command}: {cfg['split']}")
 
-    save_tuning = getattr(args, "save_tuning", False)
-    if save_tuning and (method != "proposed" or cfg["split"] != "val"):
-        parser.error("--save-tuning is only available for proposed with --split val")
     if command == "train":
         try:
             validate_training_schedule(cfg)
         except (KeyError, ValueError) as error:
             parser.error(str(error))
-    if method == "proposed" and command in ("train", "retrieve", "run"):
-        if max(cfg["candidate_ks"]) > cfg["retrieval"]["top_m"]:
-            parser.error("candidate_ks cannot exceed top_m")
-
     if command == "prepare":
         if method == "proposed":
             from rcr.proposed.cache.build import run_person_worker
@@ -118,9 +103,7 @@ def main(argv=None):
         if method == "proposed":
             from rcr.proposed.runner import run_experiment
 
-            return run_experiment(
-                cfg, Path(__file__).resolve(), save_tuning=save_tuning
-            )
+            return run_experiment(cfg, Path(__file__).resolve())
         from rcr.baselines.runner import run_experiment
 
         return run_experiment(cfg, splits=[cfg["split"]])
@@ -128,7 +111,7 @@ def main(argv=None):
         if method == "proposed":
             from rcr.proposed.retrieve import retrieve
 
-            return retrieve(cfg, save_tuning=save_tuning)
+            return retrieve(cfg)
         from rcr.baselines.runner import run_retrieval
 
         return run_retrieval(cfg)

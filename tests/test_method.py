@@ -1,5 +1,6 @@
 """Small contracts for the equations that define the proposed method."""
 
+import pytest
 import torch
 
 from rcr.proposed.losses import identity_loss, retrieval_loss
@@ -96,3 +97,101 @@ def test_fine_coarse_fusion_uses_common_shortlist_statistics():
     assert fused.shape == fine.shape
     assert torch.isfinite(fused).all()
     torch.testing.assert_close(fuse_fine_coarse_scores(fine, coarse, weight=0), fine)
+
+
+def test_grounding_balances_subject_foreground_and_background():
+    from rcr.proposed.losses import grounding_loss
+
+    logits = torch.zeros(1, 1, 4, requires_grad=True)
+    targets = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])
+    loss = grounding_loss(logits, targets, torch.ones_like(targets, dtype=torch.bool))
+    loss.backward()
+    torch.testing.assert_close(logits.grad[0, 0, 0].abs(), logits.grad[0, 0, 1:].sum())
+    # More background observations do not change the relative class weight.
+    first = grounding_loss(
+        torch.tensor([[[-1.0, -2.0]]]),
+        torch.tensor([[[1.0, 0.0]]]),
+        torch.ones(1, 1, 2, dtype=torch.bool),
+    )
+    second = grounding_loss(
+        torch.tensor([[[-1.0, *([-2.0] * 8)]]]),
+        torch.tensor([[[1.0, *([0.0] * 8)]]]),
+        torch.ones(1, 1, 9, dtype=torch.bool),
+    )
+    torch.testing.assert_close(first, second)
+
+
+def test_grounding_ignores_unknown_crops_subjects_and_queries():
+    from rcr.proposed.losses import grounding_loss
+
+    logits = torch.tensor(
+        [
+            [[0.0, float("nan")], [float("nan"), float("nan")]],
+            [[float("nan"), float("nan")], [float("nan"), float("nan")]],
+        ],
+        requires_grad=True,
+    )
+    targets = torch.ones_like(logits)
+    mask = torch.zeros_like(logits, dtype=torch.bool)
+    mask[0, 0, 0] = True
+    value = grounding_loss(logits, targets, mask)
+    torch.testing.assert_close(value, torch.tensor(2.0).log())
+    value.backward()
+    assert logits.grad[~mask].count_nonzero() == 0
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_ranking_averages_queries_instead_of_number_of_pairs():
+    import torch.nn.functional as F
+
+    scores = torch.tensor(
+        [[2.0, 0.0, 0.0, float("nan")], [-1.0, -1.0, 1.0, 1.0]], requires_grad=True
+    )
+    positives = torch.tensor([[True, False, False, False], [True, True, False, False]])
+    valid = torch.ones_like(positives)
+    valid[0, -1] = False
+    loss = retrieval_loss(scores, positives, valid)
+    expected = (F.softplus(torch.tensor(-2.0)) + F.softplus(torch.tensor(2.0))) / 2
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    assert torch.isfinite(scores.grad).all()
+    assert scores.grad[0, -1] == 0
+    assert (scores.grad[positives] < 0).all()
+    assert (scores.grad[~positives & valid] > 0).all()
+
+
+def test_ranking_empty_supervision_is_finite_differentiable_zero():
+    scores = torch.tensor([[float("nan"), float("inf")]], requires_grad=True)
+    positives = torch.tensor([[True, False]])
+    loss = retrieval_loss(scores, positives, torch.zeros_like(positives))
+    assert loss.item() == 0
+    loss.backward()
+    assert torch.equal(scores.grad, torch.zeros_like(scores))
+    all_positive = torch.tensor([[2.0, 3.0]], requires_grad=True)
+    retrieval_loss(all_positive, torch.ones(1, 2, dtype=torch.bool)).backward()
+    assert all_positive.grad.count_nonzero() == 0
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"retrieval_weight": 1},
+        {"coarse_temperature": 0},
+        {"identity_temperature": float("nan")},
+        {"context_weight": -1},
+        {"state_weight": True},
+        {"grounding_weight": float("inf")},
+        {
+            "grounding_weight": 0,
+            "identity_weight": 0,
+            "coarse_weight": 0,
+            "context_weight": 0,
+            "state_weight": 0,
+        },
+    ],
+)
+def test_invalid_or_stale_loss_settings_fail_explicitly(config):
+    from rcr.proposed.losses import loss_settings
+
+    with pytest.raises(ValueError, match="loss|weight"):
+        loss_settings(config)

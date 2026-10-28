@@ -78,6 +78,7 @@ dev = [
     "transformers>=4.56,<5",  # Tiny native CLIP parity contracts (no downloads).
     "scipy>=1.11,<2",  # CPU FAFA adapter contract tests (no native weights).
     "ruff>=0.6",
+    "gdown>=5.2,<7",  # Preparation contracts exercise the real streamed downloader.
 ]
 
 

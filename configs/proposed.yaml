@@ -89,12 +89,14 @@ optimizer:
   text_lr: 1.0e-05
   weight_decay: 0.01
 
-# Grounding + identity + retrieval + state losses.
+# Grounding + crop identity + coarse identity + conditional context + global state.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
-  retrieval_weight: 1.0
+  coarse_weight: 1.0
+  context_weight: 1.0           # Loss weight; inference gamma is under retrieval.
   identity_temperature: 0.1
+  coarse_temperature: 0.1
   state_weight: 1.0
   state_temperature: 0.1
 

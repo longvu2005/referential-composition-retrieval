@@ -57,10 +57,11 @@ def evaluate_retrieval_output(
         return decoded
 
     rankings = decode(output["rankings"], "rankings")
+    # CandidateRecall@K uses the complete coarse order, independently of the
+    # fine shortlist size. Shortlist-only callers retain their existing input.
+    coarse_field = "coarse_rankings" if "coarse_rankings" in output else "coarse_topm"
     coarse = (
-        decode(output["coarse_topm"], "coarse_topm")
-        if "coarse_topm" in output
-        else None
+        decode(output[coarse_field], coarse_field) if coarse_field in output else None
     )
     identities_by_image = {
         image_id: {

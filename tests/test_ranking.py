@@ -45,7 +45,7 @@ def _rank(tiny_ranker, **overrides):
         model,
         torch.device("cpu"),
         gallery_ids=cache.image_ids,
-        **{**settings, **overrides},
+        **{**settings, "full_gallery_scores": True, **overrides},
     )
 
 
@@ -211,6 +211,7 @@ def test_artifact_alignment_matches_real_forward_and_coarse_scores(
         torch.device("cpu"),
         gallery_ids=gallery,
         **{**settings, "top_m": 3},
+        full_gallery_scores=True,
     )
     top = output["coarse_topm"][0].long()
     torch.testing.assert_close(
@@ -225,10 +226,13 @@ def test_artifact_alignment_matches_real_forward_and_coarse_scores(
         expected = torch.stack(
             [target_values[gallery[j]][source] for j in top.tolist()]
         )
-        torch.testing.assert_close(output[field][0], expected, rtol=0, atol=0)
+        actual = (
+            output[field][0] if field == "fine_raw_scores" else output[field][0, top]
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert output["fine_scores"].shape == (1, 3)
     assert output["context_std"].shape == (1,)
-    assert len(target_values) == 3
+    assert len(target_values) == len(gallery) - 1
 
 
 @pytest.mark.parametrize("top_m", [1, 4, 20])
@@ -239,9 +243,6 @@ def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m
     replayed = replay_rankings(loaded)
     m = min(top_m, len(output["gallery_ids"]) - 1)
     for field in (
-        "fafa_binding",
-        "context",
-        "coverage",
         "coarse_topm_scores",
         "gated_context",
         "fine_raw_scores",
@@ -251,6 +252,17 @@ def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m
         assert loaded[field].shape == (2, m)
         assert loaded[field].dtype == torch.float32
         torch.testing.assert_close(replayed[field], loaded[field], rtol=0, atol=0)
+    for field in (
+        "identity_scores",
+        "state_scores",
+        "fafa_binding",
+        "context",
+        "coverage",
+    ):
+        assert loaded[field].shape == (2, len(output["gallery_ids"]))
+        assert loaded[field].dtype == torch.float32
+        assert loaded[field] is replayed[field]
+    assert loaded["score_schema_version"] == loaded["schema_version"] == 1
     for field in ("rankings", "fine_rankings"):
         assert torch.equal(loaded[field], replayed[field])
         for sample, row in zip(tiny_ranker[3], loaded[field], strict=True):
@@ -312,11 +324,17 @@ def test_replay_ablations_keep_tail_and_use_real_coarse_scores(tiny_ranker, mode
         assert torch.equal(direct["rankings"], replayed["rankings"])
     # Finite-mask behavior is shared even for partially/all unsupported Coarse.
     unsupported = copy.deepcopy(output)
-    unsupported["coarse_topm_scores"][0, 1:] = -torch.inf
-    unsupported["coarse_topm_scores"][1] = -torch.inf
-    masked = replay_rankings(unsupported, fine_score_mode=mode, fine_coarse_weight=0.7)
-    assert torch.isneginf(masked["fused_topm_scores"][0, 1:]).all()
-    assert torch.equal(masked["rankings"][1], unsupported["coarse_rankings"][1])
+    unsupported["identity_scores"][
+        0, unsupported["coarse_topm"][0, 1:].long()
+    ] = -torch.inf
+    unsupported["identity_scores"][1] = -torch.inf
+    masked = replay_rankings(
+        unsupported, top_m=20, fine_score_mode=mode, fine_coarse_weight=0.7
+    )
+    invalid = ~torch.isfinite(masked["coarse_topm_scores"])
+    assert invalid.any()
+    assert torch.isneginf(masked["fused_topm_scores"][invalid]).all()
+    assert torch.equal(masked["rankings"][1], masked["coarse_rankings"][1])
 
 
 def test_replay_rejects_old_missing_truncated_or_misaligned_data(tiny_ranker):
@@ -324,8 +342,8 @@ def test_replay_rejects_old_missing_truncated_or_misaligned_data(tiny_ranker):
         replay_rankings({"rankings": torch.tensor([[1, 2]])})
     output = _rank(tiny_ranker)
     broken = copy.deepcopy(output)
-    del broken["coarse_topm_scores"]
-    with pytest.raises(ValueError, match="coarse_topm_scores"):
+    del broken["identity_scores"]
+    with pytest.raises(ValueError, match="identity_scores"):
         replay_rankings(broken)
     broken = copy.deepcopy(output)
     broken["coarse_topm"] = broken["coarse_topm"].flip(1)
@@ -379,36 +397,25 @@ def test_replay_cli_needs_only_saved_rankings(tiny_ranker, tmp_path):
     assert torch.equal(saved["fine_rankings"], saved["rankings"])
 
 
-def test_weight_grid_reuses_each_query_target_score(tiny_ranker, monkeypatch):
-    cache, model, text, samples, settings = tiny_ranker
-    calls = []
+def test_training_and_test_only_score_their_shortlist(tiny_ranker, monkeypatch):
+    cache, model, _, samples, _ = tiny_ranker
+    pairs = []
     original = model.score_target
 
     def counted(query, scene, *args, **kwargs):
-        calls.extend(scene[:, 0, 0].tolist())
+        pairs.extend(scene[:, 0, 0].tolist())
         return original(query, scene, *args, **kwargs)
 
     monkeypatch.setattr(model, "score_target", counted)
-    outputs = ranking.rank_weight_grid(
-        samples[:1],
-        cache,
-        Tokenizer(),
-        text,
-        model,
-        torch.device("cpu"),
-        gallery_ids=cache.image_ids,
-        settings={**settings, "top_m": 3},
-        weights=[(0.0, 0.0), (0.0, 0.4), (0.4, 0.0), (0.4, 0.7)],
-    )
-    union = set(outputs[0]["coarse_topm"][0].tolist()) | set(
-        outputs[2]["coarse_topm"][0].tolist()
-    )
-    assert len(calls) == len(set(calls)) == len(union)
-    for field in ("coarse_rankings", "fine_rankings", "fafa_binding", "fine_scores"):
-        assert outputs[0][field].data_ptr() == outputs[1][field].data_ptr()
-        assert outputs[2][field].data_ptr() == outputs[3][field].data_ptr()
-    for output in outputs:
-        assert torch.equal(replay_rankings(output)["rankings"], output["rankings"])
+    output = _rank(tiny_ranker, top_m=1, full_gallery_scores=False)
+    assert len(pairs) == len(samples)
+    assert output["fafa_binding"].shape == (len(samples), 1)
+    assert output["score_config"]["score_alignment"] == "coarse_topm"
+    assert output["schema_version"] == 1
+    assert "identity_scores" not in output
+    with pytest.raises(ValueError, match="missing fields|full-gallery"):
+        replay_rankings(output)
+    assert len(cache.image_ids) - 1 == output["rankings"].shape[1]
 
 
 def test_new_settings_are_accepted_by_hard_negative_mining(tiny_ranker):

@@ -155,7 +155,9 @@ def test_local_checkpoint_conflict_and_broken_link_fail_before_network(fafa):
 
 def test_disk_preflight_stops_before_cloning_or_downloading(fafa, monkeypatch):
     cfg, calls = fafa
-    monkeypatch.setattr(prepare.shutil, "disk_usage", lambda _: SimpleNamespace(free=1))
+    monkeypatch.setattr(
+        "rcr.common.torch_io.shutil.disk_usage", lambda _: SimpleNamespace(free=1)
+    )
     monkeypatch.setattr(
         gdown, "download", lambda **_: pytest.fail("unexpected download")
     )
@@ -199,7 +201,9 @@ def test_http_truncation_and_space_failure_never_replace_complete_file(
         prepare.download("https://example.org/weights", path, force=True)
     assert path.read_bytes() == b"previous"
     assert not list(tmp_path.glob("*.part"))
-    monkeypatch.setattr(prepare.shutil, "disk_usage", lambda _: SimpleNamespace(free=1))
+    monkeypatch.setattr(
+        "rcr.common.torch_io.shutil.disk_usage", lambda _: SimpleNamespace(free=1)
+    )
     with pytest.raises(OSError, match="Not enough disk space"):
         prepare.download("https://example.org/weights", path, force=True)
     assert path.read_bytes() == b"previous"

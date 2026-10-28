@@ -15,7 +15,7 @@ from rcr.common.io import (
 )
 
 
-def run_experiment(cfg, entrypoint, *, save_tuning=False):
+def run_experiment(cfg, entrypoint):
     cfg = copy.deepcopy(cfg)
     root = Path(cfg["output"]["dir"])
     root.mkdir(parents=True, exist_ok=True)
@@ -29,7 +29,7 @@ def run_experiment(cfg, entrypoint, *, save_tuning=False):
             check=True,
         )
 
-    stage("retrieve", *(["--save-tuning"] if save_tuning else []))
+    stage("retrieve")
     stage("evaluate")
     directory = output_directory(cfg)
     metrics = json.loads((directory / "metrics.json").read_text(encoding="utf-8"))

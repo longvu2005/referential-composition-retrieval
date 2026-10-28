@@ -38,8 +38,8 @@ best-method selection are excluded. All selected runs must validate before
 writing any table; reruns overwrite the active tables.
 
 ```bash
-# Use the experiment name recorded in calibration/selection.json:
-python tools/report.py --split val --run proposed=runs/clip-b32-calibration/CHOSEN_EXPERIMENT/val
+# Use the selected validation artifact written by calibration:
+python tools/report.py --split val --run proposed=runs/clip-b32-calibration/selected/val
 # Explicitly request a smaller table or alternative formats:
 python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
 python tools/report.py --split val --formats csv tex --decimals 3

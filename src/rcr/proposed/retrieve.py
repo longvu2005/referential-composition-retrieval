@@ -32,40 +32,16 @@ from rcr.proposed.nn.encoders import (
 )
 from rcr.proposed.nn.model import ARCHITECTURE_VERSION, DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
-    rank_weight_grid,
     retrieval_settings,
+    retrieve_rankings,
     uses_state,
 )
 
 
-def retrieve(
-    cfg: dict, *, max_queries: int | None = None, save_tuning: bool = False
-) -> dict:
-    return _retrieve(cfg, max_queries=max_queries, save_tuning=save_tuning)[0]
-
-
-def retrieve_weight_grid(cfg: dict, weights: list[tuple[float, float]]) -> list[dict]:
-    """Score a validation weight grid with one checkpoint/backbone load."""
-    if cfg["split"] != "val":
-        raise ValueError("weight calibration requires the validation split")
-    if not weights:
-        raise ValueError("calibration requires at least one weight pair")
-    return _retrieve(cfg, weights=weights)
-
-
-def _retrieve(
-    cfg: dict,
-    *,
-    max_queries: int | None = None,
-    weights: list[tuple[float, float]] | None = None,
-    save_tuning: bool = False,
-) -> list[dict]:
-    """Load the current model, rank, and save complete split results."""
+def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
+    """Save complete raw scores for val; fine-score only Top-M for other splits."""
     started = perf_counter()
     device = resolve_device(cfg)
-    if save_tuning and cfg["split"] != "val":
-        raise ValueError("tuning export requires the validation split")
-
     checkpoint_path = Path(cfg["checkpoint"])
     checkpoint_sha256 = sha256_file(checkpoint_path)
     selection_keys = (
@@ -129,12 +105,8 @@ def _retrieve(
         train_cfg.get("loss", {}).get("state_weight", 1.0) == 0
         or checkpoint.get("state_supervised_pairs", 1) == 0
     )
-    if state_untrained and (
-        any(beta != 0 for beta, _ in weights)
-        if weights is not None
-        else uses_state(
-            cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
-        )
+    if state_untrained and uses_state(
+        settings, model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     ):
         raise ValueError(
             "checkpoint state branch is untrained; use retrieval.coarse_beta=0"
@@ -212,13 +184,7 @@ def _retrieve(
     ).to(device)
     model.load_state_dict(checkpoint["model"])
 
-    is_grid = weights is not None
-    weights = (
-        weights
-        if is_grid
-        else [(settings["coarse_beta"], settings["fine_coarse_weight"])]
-    )
-    outputs = rank_weight_grid(
+    output = retrieve_rankings(
         samples,
         cache,
         tokenizer,
@@ -226,89 +192,49 @@ def _retrieve(
         model,
         device,
         gallery_ids=split_image_ids(data, cfg["split"]),
-        settings=settings,
-        weights=weights,
+        **settings,
         description=cfg["split"],
-        save_tuning=save_tuning,
+        full_gallery_scores=cfg["split"] == "val",
         state_trained=not state_untrained,
     )
-    elapsed = perf_counter() - started
-    for index, (output, (beta, fine_weight)) in enumerate(
-        zip(outputs, weights, strict=True)
-    ):
-        run_cfg = {
-            **cfg,
-            "retrieval": {
-                **settings,
-                "coarse_beta": beta,
-                "fine_coarse_weight": fine_weight,
-            },
-        }
-        if is_grid:
-            run_cfg["output"] = {
-                "dir": str(Path(cfg["output"]["dir"]) / f"grid_{index:03d}")
-            }
-        directory = output_directory(run_cfg)
-        benchmark = benchmark_metadata(data, cfg["split"], output)
-        if save_tuning:
-            # Keep the score file attributable when copied without run.json.
-            # Only fingerprints/summary metadata are added after model scoring.
-            output["tuning_scores"]["provenance"] = {
-                "checkpoint_sha256": checkpoint_sha256,
-                "validation_sha256": validation_sha256,
-                "cache_id": cache.cache_id,
-                "scene_cache_id": getattr(cache, "scene_cache_id", None),
-                "detection_cache_id": getattr(cache, "detection_cache_id", None),
-                "architecture_version": model.architecture_version,
-                "query_subset": len(samples) != full_num_queries,
-                **benchmark,
-            }
-        save_results(
-            directory,
-            output,
-            {
-                "method": "proposed",
-                "config": run_cfg,
-                "retrieval": run_cfg["retrieval"],
-                "score_schema_version": output["score_schema_version"],
-                "score_config": output["score_config"],
-                "tuning_export": (
-                    {
-                        "schema_version": output["tuning_scores"]["schema_version"],
-                        "scope": "full_gallery",
-                        "state_trained": not state_untrained,
-                    }
-                    if save_tuning
-                    else None
-                ),
-                "clip_text_stats": output.get("clip_text_stats"),
-                "fine_score_mode": settings["fine_score_mode"],
-                "context_weight": settings["context_weight"],
-                "checkpoint": str(checkpoint_path),
-                "checkpoint_sha256": checkpoint_sha256,
-                "validation_sha256": validation_sha256,
-                **benchmark,
-                **runtime_metadata(device),
-                "architecture_version": model.architecture_version,
-                "representation": "shared_person",
-                "binding_scale": model.binding_scale.item(),
-                "fine_matching": model.fine_matching,
-                "encoder_metadata": checkpoint.get("encoder_metadata"),
-                "checkpoint_epoch": checkpoint.get("epoch"),
-                "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
-                "best_epoch": checkpoint.get("best_epoch"),
-                "best_val_full_map": checkpoint.get("best_full_map"),
-                "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
-                "best_val_checkpoint_score": checkpoint.get("best_score"),
-                "cache_id": cache.cache_id,
-                "scene_cache_id": getattr(cache, "scene_cache_id", None),
-                "detection_cache_id": getattr(cache, "detection_cache_id", None),
-                "native_cache": cache.native.metadata,
-                "num_queries": len(samples),
-                "num_gallery": len(output["gallery_ids"]),
-                "query_subset": len(samples) != full_num_queries,
-                "elapsed_seconds": elapsed,
-            },
-        )
-        print(f"Saved {directory}/rankings.pt", flush=True)
-    return outputs
+    metadata = {
+        "method": "proposed",
+        "config": {**cfg, "retrieval": settings},
+        "retrieval": settings,
+        "score_schema_version": output["score_schema_version"],
+        "schema_version": output["schema_version"],
+        "score_config": output["score_config"],
+        "clip_text_stats": output.get("clip_text_stats"),
+        "fine_score_mode": settings["fine_score_mode"],
+        "context_weight": settings["context_weight"],
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_sha256": checkpoint_sha256,
+        "validation_sha256": validation_sha256,
+        **benchmark_metadata(data, cfg["split"], output),
+        **runtime_metadata(device),
+        "architecture_version": model.architecture_version,
+        "representation": "shared_person",
+        "binding_scale": model.binding_scale.item(),
+        "fine_matching": model.fine_matching,
+        "encoder_metadata": checkpoint.get("encoder_metadata"),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
+        "best_epoch": checkpoint.get("best_epoch"),
+        "best_val_full_map": checkpoint.get("best_full_map"),
+        "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
+        "best_val_checkpoint_score": checkpoint.get("best_score"),
+        "cache_id": cache.cache_id,
+        "scene_cache_id": getattr(cache, "scene_cache_id", None),
+        "detection_cache_id": getattr(cache, "detection_cache_id", None),
+        "native_cache": cache.native.metadata,
+        "num_queries": len(samples),
+        "num_gallery": len(output["gallery_ids"]),
+        "query_subset": len(samples) != full_num_queries,
+        "elapsed_seconds": perf_counter() - started,
+    }
+    # rankings.pt remains sufficient when copied without sibling logs/configs.
+    output["provenance"] = metadata
+    directory = output_directory(cfg)
+    save_results(directory, output, metadata)
+    print(f"Saved {directory}/rankings.pt", flush=True)
+    return output

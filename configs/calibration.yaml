@@ -1,6 +1,9 @@
-# Only two inference weights are selected, using the complete validation split.
-# fine_score_mode=context_zscore and context_weight=0.0325 stay fixed in model_config.
-model_config: runs/proposed-clip-b32/config.yaml
+# CPU-only validation selection from the official retrieval artifact.
+# The source embeds its config, checkpoint fingerprint and ordered gallery.
+rankings: runs/proposed-clip-b32/val/rankings.pt
 output_dir: runs/clip-b32-calibration
 coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
-fine_coarse_weight: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0]
+fine_coarse_weight: [0.0, 0.0025, 0.005, 0.0064, 0.01, 0.025, 0.05, 0.1, 0.4]
+# Include context-off and a broader range for newly trained, fixed-alpha models.
+context_weight: [0.0, 0.01, 0.0325, 0.1, 0.3, 1.0]
+top_m: [100, 250, 500]

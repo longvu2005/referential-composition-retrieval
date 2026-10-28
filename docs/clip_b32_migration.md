@@ -61,12 +61,14 @@ Or run the stages explicitly:
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml
+.venv-proposed/bin/python tools/run.py run --config configs/proposed.yaml --split val
 .venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
 Outputs use `runs/proposed-clip-b32` and `runs/clip-b32-calibration`. Calibration
-reads the saved training config, so its paths and training overrides are retained. Run test only
-with the newly selected configuration:
+reads the validation rankings artifact and annotations; the artifact embeds
+its actual retrieval config and checkpoint fingerprint. Run test only with the
+newly selected configuration:
 
 ```bash
 bash scripts/methods/proposed.bash test
