@@ -264,8 +264,8 @@ def tiny_training_run(tmp_path, monkeypatch):
         "image_root": "unused",
         "scene_cache": "unused-scene",
         "detection_cache": "unused-detections",
-        "fafa_image_cache": "unused-fafa-images",
-        "fafa_query_cache": "unused-fafa-queries",
+        "fafa_image_cache": "unused-person-images",
+        "fafa_query_cache": "unused-person-queries",
     }
     cfg["cache"]["supervision_cache"] = str(tmp_path / "supervision.json")
     cfg["runtime"]["device"] = "cpu"

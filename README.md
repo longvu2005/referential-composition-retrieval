@@ -114,7 +114,7 @@ For an individual stage, run from the repository root:
 .venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml
-.venv-proposed/bin/python tools/run.py run --config runs/proposed-lr-sampling/config.yaml --split val
+.venv-proposed/bin/python tools/run.py run --config runs/proposed/config.yaml --split val
 .venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
 .venv-proposed/bin/python tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
 ```
@@ -162,10 +162,16 @@ Cache paths follow their role: `cache/detections`, `cache/scene`,
 
 | Default path | Contents |
 | --- | --- |
-| `runs/proposed-lr-sampling/` | Effective config, runtime, history, tokenizer, `last.pt`, `best.pt` |
-| `runs/proposed-lr-sampling/val/` | `rankings.pt`, `run.json`, `metrics.json` |
+| `runs/proposed/` | Effective config, runtime, history, tokenizer, `last.pt`, `best.pt` |
+| `runs/proposed/val/` | `rankings.pt`, `run.json`, `metrics.json` |
 | `runs/proposed-calibration/` | Grid summary, `selection.json`, `selected.yaml` |
 | `runs/proposed-calibration/selected/{val,test}/` | Selected split results |
+
+The default method, W&B run name and training folder use `proposed`.
+`proposed-calibration` names the separate scoring-selection stage. Reports read
+its `selected/<split>` results by default; use `--run proposed=...` for another
+experiment. Ablation configs retain their own experiment names. Existing runs
+keep their saved paths; use their saved configs without renaming their folders.
 
 Validation saves complete raw score matrices for offline calibration/replay.
 It fine-scores every non-self query/gallery pair; periodic training validation

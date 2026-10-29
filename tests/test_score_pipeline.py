@@ -294,3 +294,40 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     del selected["selected_retrieval"]
     with pytest.raises(ValueError, match="predates the scoring contract"):
         retrieve.retrieve(selected)
+
+
+def test_report_cli_finds_the_default_calibrated_proposed_results(
+    saved_pipeline, tmp_path
+):
+    from tools.report import main as report_main
+
+    cfg, _, _ = saved_pipeline
+    retrieve.retrieve(cfg)
+    root = tmp_path / "runs"
+    calibration.calibrate(
+        {
+            "rankings": str(Path(cfg["output"]["dir"]) / "val/rankings.pt"),
+            "output_dir": str(root / "proposed-calibration"),
+            "coarse_beta": [0.4],
+            "fine_coarse_weight": [0.0],
+            "context_weight": [cfg["retrieval"]["context_weight"]],
+            "top_m": [cfg["retrieval"]["top_m"]],
+        }
+    )
+    paths = report_main(
+        [
+            "--split",
+            "val",
+            "--methods",
+            "proposed",
+            "--runs-root",
+            str(root),
+            "--output-dir",
+            str(tmp_path / "reports"),
+            "--formats",
+            "md",
+        ]
+    )
+    assert not (root / "proposed/val").exists()
+    assert len(paths) == 2
+    assert all("proposed" in path.read_text() for path in paths)

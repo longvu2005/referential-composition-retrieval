@@ -169,7 +169,7 @@ python tools/run.py run --config configs/proposed.yaml --split val
 python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Use the saved `runs/proposed-lr-sampling/config.yaml` in the first command if
+Use the saved `runs/proposed/config.yaml` in the first command if
 training used path or parameter overrides. Set `rankings` in `configs/calibration.yaml`
 to that run's `val/rankings.pt`. The artifact embeds its actual run configuration,
 checkpoint fingerprint and fixed matching settings; no separate model config or
@@ -305,11 +305,11 @@ only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cach
 
 ```bash
 # Reproduce the recorded ranking exactly.
-python -m rcr.proposed.replay runs/proposed-lr-sampling/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
 # Rebuild coarse order, choose another Top-M, normalize and fuse offline.
-python -m rcr.proposed.replay runs/proposed-lr-sampling/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 

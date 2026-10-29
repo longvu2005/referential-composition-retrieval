@@ -85,7 +85,7 @@ rejected before loading text weights. Matching feature dimensions alone do
 not make them compatible. Model checkpoints still bind scene, detection and
 FAFA source identities and encoder metadata.
 
-Current YAML outputs are `runs/proposed-lr-sampling` and
+Current YAML outputs are `runs/proposed` and
 `runs/proposed-calibration`. Existing run configs retain their explicit paths;
 use those configs to read old runs.
 Keep selected configurations and checkpoint bytes intact: test selection binds

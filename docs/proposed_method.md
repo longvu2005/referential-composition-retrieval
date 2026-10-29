@@ -359,7 +359,7 @@ conversion with the original code revision or a fresh detection build; see
 Build format-7 FAFA caches once in the new independent paths. Their crop-source
 identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
-The current YAML writes new runs to `runs/proposed-lr-sampling`. Existing checkpoints
+The current YAML writes new runs to `runs/proposed`. Existing checkpoints
 from this CLIP/FAFA architecture also load through their previous architecture-name
 alias without changing model weights. See [feature contracts](feature_contracts.md).
 Offline replay requires the complete version-1 raw-score artifact.

@@ -86,11 +86,12 @@ must be available as described in the method guides.
 Use any base/method environment to export already evaluated JSON:
 
 ```bash
-.venv-dataset/bin/python tools/report.py --split val \
-  --run proposed=runs/proposed-calibration/selected/val
-.venv-dataset/bin/python tools/report.py --split test \
-  --run proposed=runs/proposed-calibration/selected/test
+.venv-dataset/bin/python tools/report.py --split val
+.venv-dataset/bin/python tools/report.py --split test
 ```
+
+Proposed defaults to `runs/proposed-calibration/selected/<split>`, the output of
+the standard calibration recipe. Use `--run proposed=...` for a custom experiment.
 
 To evaluate saved `rankings.pt` first, use a method environment or install
 `requirements/evaluation.txt`; this needs Torch but no encoder libraries.

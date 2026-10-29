@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from rcr.common.config import load_config, save_config
+from rcr.evaluation.report import default_runs
 
 
 @pytest.mark.parametrize("split", ["val", "test"])
@@ -19,10 +20,15 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(
     root = Path(__file__).resolve().parents[1]
     proposed = load_config(root / "configs/proposed.yaml")
     calibration = load_config(root / "configs/calibration.yaml")
+    assert proposed["method"] == proposed["wandb"]["name"] == "proposed"
+    assert Path(proposed["output"]["dir"]) == Path("runs/proposed")
     assert Path(proposed["checkpoint"]) == Path(proposed["output"]["dir"]) / "best.pt"
     assert (
         Path(calibration["rankings"])
         == Path(proposed["output"]["dir"]) / "val/rankings.pt"
+    )
+    assert default_runs("runs", split)["proposed"] == (
+        Path(calibration["output_dir"]) / "selected" / split
     )
     script = (root / "scripts/methods/proposed.bash").read_text()
     if relocate:

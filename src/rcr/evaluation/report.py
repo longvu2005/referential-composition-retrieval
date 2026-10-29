@@ -34,13 +34,16 @@ class ReportError(ValueError):
 
 
 def default_runs(root: str | Path, split: str) -> dict[str, Path]:
+    """Default method outputs; Proposed uses its calibrated selection."""
     root = Path(root)
-    return {
+    directories = {
         name: root / "clip" / name / split
         if name in METHODS[:4]
         else root / name / split
         for name in METHODS
     }
+    directories["proposed"] = root / "proposed-calibration" / "selected" / split
+    return directories
 
 
 def _read(path):

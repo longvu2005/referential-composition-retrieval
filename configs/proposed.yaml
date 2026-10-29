@@ -126,7 +126,7 @@ evaluation:
 wandb:
   enabled: true
   project: referential-composition-retrieval
-  name: proposed-lr-sampling
+  name: proposed
   mode: online
   log_every_steps: 20
 
@@ -135,6 +135,6 @@ runtime:
   device: cuda
 
 # Checkpoint and experiment outputs.
-checkpoint: runs/proposed-lr-sampling/best.pt
+checkpoint: runs/proposed/best.pt
 output:
-  dir: runs/proposed-lr-sampling
+  dir: runs/proposed
