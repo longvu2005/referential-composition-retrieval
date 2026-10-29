@@ -472,6 +472,9 @@ def test_ranking_ignores_case_identities_positives_and_cardinality(
     [
         {"fine_score_mode": "both_zscore"},
         {"context_weight": float("nan")},
+        {"context_weight": True},
+        {"coarse_beta": "0.4"},
+        {"fine_coarse_weight": None},
         {"top_m": 0},
     ],
 )

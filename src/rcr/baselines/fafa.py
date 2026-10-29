@@ -1,7 +1,8 @@
 """Pinned official FAFA model, artifact preparation and native FDA scoring.
 
-FAFA network code is imported unchanged from the authors' checkout. The scene
-adapter and SetMatch are in fafa_adapter.py; metrics are exclusively in evaluation/.
+FAFA network code is imported unchanged from the authors' checkout. Scene/Subject
+adaptation lives in fafa_adapter.py, set matching in fafa_matching.py and metrics
+in evaluation/.
 """
 
 from __future__ import annotations
@@ -216,9 +217,8 @@ def load_fafa(cfg: dict, device):
     state = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))
     if not set(state) & set(model.state_dict()):
         raise ValueError("FAFA checkpoint has no matching model parameters")
-    incompatible = model.load_state_dict(
-        state, strict=False
-    )  # Official inference policy.
+    # The released checkpoint uses the upstream non-strict loading policy.
+    incompatible = model.load_state_dict(state, strict=False)
     model.fda_k = int(cfg["checkpoint"]["fda_k"])
     model.fda_alpha = float(cfg["checkpoint"]["fda_alpha"])
     model.use_soft = bool(cfg["checkpoint"]["use_soft"])
@@ -260,15 +260,30 @@ class CropDataset(Dataset):
             return self.preprocess(crop), caption
 
 
+def _cached_features(path, count, ndim, dtype):
+    """Reuse complete NPY arrays only when rank, count and storage precision agree."""
+    try:
+        value = np.load(path, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError, EOFError):
+        return None
+    if (
+        value.ndim == ndim
+        and len(value) == count
+        and all(size > 0 for size in value.shape[1:])
+        and value.dtype == np.dtype(dtype)
+    ):
+        return value
+    return None
+
+
 @torch.inference_mode()
 def encode_crops(model, processors, preprocess, items, runtime, device, *, query, path):
-    """Cache complete feature arrays only; interrupted builds keep the .tmp suffix."""
-    if path.is_file():
-        features = np.load(path, mmap_mode="r", allow_pickle=False)
-        ndim = 2 if query else 3
-        if features.ndim == ndim and len(features) == len(items):
-            print(f"FAFA feature cache: {path}", flush=True)
-            return features
+    """Reuse compatible arrays; atomically replace missing or invalid features."""
+    dtype = np.float32 if query else np.dtype(runtime["gallery_feature_dtype"])
+    cached = _cached_features(path, len(items), 2 if query else 3, dtype)
+    if cached is not None:
+        print(f"FAFA feature cache: {path}", flush=True)
+        return cached
     loader = DataLoader(
         CropDataset(items, preprocess),
         batch_size=int(runtime["query_batch_size" if query else "image_batch_size"]),
@@ -301,7 +316,6 @@ def encode_crops(model, processors, preprocess, items, runtime, device, *, query
         if features_batch.ndim != (2 if query else 3):
             raise ValueError("Unexpected official FAFA feature shape")
         if features is None:
-            dtype = np.float32 if query else np.dtype(runtime["gallery_feature_dtype"])
             features = np.lib.format.open_memmap(
                 temporary,
                 mode="w+",
@@ -332,10 +346,9 @@ def fda_scores(query: torch.Tensor, targets: torch.Tensor, k: int, use_soft=True
 def score_components(
     query_features, gallery_features, path, runtime, device, checkpoint
 ):
-    if path.is_file():
-        cached = np.load(path, mmap_mode="r", allow_pickle=False)
-        if cached.shape == (len(query_features), len(gallery_features)):
-            return cached
+    cached = _cached_features(path, len(query_features), 2, np.float32)
+    if cached is not None and cached.shape[1] == len(gallery_features):
+        return cached
     temporary = path.with_suffix(".tmp")
     scores = np.lib.format.open_memmap(
         temporary,
@@ -393,6 +406,7 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         gallery_offsets.append(len(gallery_items))
     signature = {
         "version": VISUAL_CACHE_VERSION,
+        "images": image_signature(data, gallery_ids),
         "checkpoint_sha256": checkpoint_sha,
         "selector_sha256": selector_sha,
         # Text changes only invalidate multimodal query features, not images.
@@ -470,23 +484,11 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
     gallery_path = gallery_dir / "gallery.npy"
     query_path = query_dir / "query.npy"
 
-    # As in CPR Benchmark, skip native FAFA construction on a warm feature cache.
-    # Re-encode both sides if the expected rank/count is not present.
-    def cached(path, expected, ndim):
-        try:
-            features = np.load(path, mmap_mode="r", allow_pickle=False)
-            if (
-                features.ndim == ndim
-                and len(features) == expected
-                and features.dtype in (np.float16, np.float32)
-            ):
-                return features
-        except (OSError, ValueError, EOFError):
-            pass
-        return None
-
-    gallery_features = cached(gallery_path, len(gallery_items), 3)
-    query_features = cached(query_path, len(query_items), 2)
+    # Both the warm-cache check and extractor use the same validity policy.
+    gallery_features = _cached_features(
+        gallery_path, len(gallery_items), 3, runtime["gallery_feature_dtype"]
+    )
+    query_features = _cached_features(query_path, len(query_items), 2, np.float32)
     if gallery_features is not None and query_features is not None:
         load_info = {
             "missing_keys": None,

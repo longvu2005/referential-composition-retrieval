@@ -57,7 +57,7 @@ def check_cache_config(
 ) -> None:
     """Check encoder provenance only when building or explicitly reusing a cache."""
     if "person_encoder" not in cfg:
-        return  # Small in-memory test configs have no external encoder spec.
+        return  # No external encoder spec; use the cache's recorded provenance.
     if person_backend == "clip":
         if cache.encoder_metadata["image_encoder"] != cfg["image_encoder"]:
             raise ValueError("cache image encoder/preprocessing differs from config")

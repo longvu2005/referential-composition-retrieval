@@ -269,25 +269,26 @@ weights are selected independently on validation. An untrained/disabled state
 branch cannot enter training validation with a positive coarse beta. Checkpoint
 selection and the ID/Full evaluation protocol remain unchanged.
 
-The default 20-epoch run has a short context warmup:
+The current `configs/proposed.yaml` uses 35 epochs with context warmup:
 
 | Epochs | Active objective |
 | --- | --- |
-| 1-3 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
-| 4-20 | All five terms, with the configured `loss.context_weight` |
+| 1-6 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
+| 7-35 | All five terms, with the configured `loss.context_weight` |
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
 components without running composition or fine matching/reasoning. Afterwards,
 the base tasks remain active to constrain their shared projections while context
-learns. The optimizer, its state and learning rates are retained across phases;
-there is no parameter freezing or teacher forcing added at the boundary.
+learns. The same optimizer and state continue across phases, while epoch learning
+rates follow `optimizer.schedule` throughout the run. The phase boundary adds
+no parameter freezing or teacher forcing.
 
 `train.context_warmup_epochs` must be an integer in `[0, train.epochs)`; omitted or
 zero means joint training from epoch 1. A positive warmup requires a non-context
 objective. When `loss.context_weight=0`, no context phase is scheduled. This is
 independent of `train.sampling.warmup_epochs`, which delays hard-negative mining.
-The three-epoch default is a starting schedule, not a measured optimum. Compare
+The six-epoch warmup is a starting schedule, not a measured optimum. Compare
 against zero warmup with the same total optimizer steps and select on validation.
 
 Full validation and checkpoint selection skip warmup epochs, then follow the
@@ -302,7 +303,7 @@ Within Top-M:
 ```text
 gated_context = C * S_context
 z(x) = (float32(x) - mean(x)) / max(std(x, unbiased=False), 1e-6)
-S_fine = alpha * B_FAFA + 0.0325 * z_topM(gated_context)
+S_fine = alpha * B_FAFA + context_weight * z_topM(gated_context)
 S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 ```
 
@@ -358,7 +359,7 @@ conversion with the original code revision or a fresh detection build; see
 Build format-7 FAFA caches once in the new independent paths. Their crop-source
 identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
-Fresh experiments train from scratch in `runs/proposed`. Existing checkpoints
+The current YAML writes new runs to `runs/proposed-lr-sampling`. Existing checkpoints
 from this CLIP/FAFA architecture also load through their previous architecture-name
 alias without changing model weights. See [feature contracts](feature_contracts.md).
 Offline replay requires the complete version-1 raw-score artifact.

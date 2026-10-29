@@ -226,7 +226,7 @@ def _make_checkpoint(
 
 
 def train(cfg: dict) -> Path:
-    """Train on ``train`` and select ``best.pt`` only from validation mAP."""
+    """Train on ``train``; select ``best.pt`` by overall/macro validation Full-mAP."""
     validate_training_schedule(cfg)
     output = Path(cfg["output"]["dir"])
     if any((output / name).exists() for name in ("config.yaml", "best.pt", "last.pt")):
@@ -235,6 +235,9 @@ def train(cfg: dict) -> Path:
         )
     epoch_learning_rates(cfg["optimizer"], 1, cfg["train"]["epochs"])
     sampling = sampling_settings(cfg["train"].get("sampling", {}))
+    identity_settings = identity_sampling_settings(
+        cfg["train"].get("identity_sampling", {})
+    )
     check_clip_config(cfg)
     cfg = {
         **cfg,
@@ -277,9 +280,6 @@ def train(cfg: dict) -> Path:
         data,
         cache,
         cache_file=cache_cfg.get("supervision_cache"),
-    )
-    identity_settings = identity_sampling_settings(
-        cfg["train"].get("identity_sampling", {})
     )
     use_extra_identities = (
         identity_settings["max_crops"] > 0

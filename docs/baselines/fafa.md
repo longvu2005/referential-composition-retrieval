@@ -134,6 +134,13 @@ FAFA and CLIP checkpoint hashes, DINO cache ID, official FAFA commit, and
 membership/fallback/truncation statistics.
 Outputs: `runs/fafa/<split>/{scores.npy,rankings.pt,run.json,metrics.json}`.
 
+Gallery cache fingerprints include ordered image IDs, resolved paths, file sizes
+and modification times, as in the CLIP baseline. Updating a raw image therefore
+invalidates its feature family. Adding this input fingerprint creates a new
+FAFA baseline cache directory on the first run after the cleanup; existing files
+are retained. Proposed's independent feature caches are unaffected.
+Unreadable NPY arrays or incompatible rank/count/dtype are rebuilt atomically.
+
 The CPR text/matching policy remains adapter v3. Changing to the Proposed
 detection cache invalidates old detector-specific FAFA gallery feature caches.
 Query-text policy and membership changes invalidate query features/scores too.

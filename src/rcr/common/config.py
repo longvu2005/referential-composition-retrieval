@@ -55,8 +55,11 @@ def parse_overrides(items: list[str]) -> dict:
 
 def validate_training_schedule(cfg: dict) -> None:
     """Reject no-op training and invalid validation intervals before any writes."""
-    for key in ("epochs", "batch_size"):
-        value = cfg["train"][key]
+    for key, value in (
+        ("epochs", cfg["train"]["epochs"]),
+        ("batch_size", cfg["train"]["batch_size"]),
+        ("mining_batch_size", cfg["train"].get("mining_batch_size", 1)),
+    ):
         if type(value) is not int or value < 1:
             raise ValueError(f"train.{key} must be a positive integer")
     candidates = cfg["train"].get("candidates", 2)

@@ -185,8 +185,7 @@ def build_detection_cache(
         model = AutoModelForZeroShotObjectDetection.from_pretrained(
             detector_config["model"], **kwargs
         ).to(device)
-    if model is not None:
-        model.eval()
+    model.eval()
     rows, sizes = [], []
     for i, (image_id, path) in enumerate(
         tqdm(

@@ -150,6 +150,7 @@ def test_run_honors_yaml_overrides_and_split_precedence(
         (["retrieve", "--set", "split=typo"], "invalid split"),
         (["train", "--set", "train.epochs=0"], "positive integer"),
         (["train", "--set", "train.candidates=1"], "candidates"),
+        (["train", "--set", "train.mining_batch_size=0"], "mining_batch_size"),
         (["train", "--set", "train.context_warmup_epochs=-1"], "context_warmup_epochs"),
         (
             ["train", "--set", "train.context_warmup_epochs=1.5"],

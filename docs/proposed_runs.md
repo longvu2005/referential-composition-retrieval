@@ -56,17 +56,18 @@ context and global-state objectives. The context loss ranks raw `coverage * cont
 against same-ID negatives, without FDA or a trainable binding scale. Pairwise
 losses weight eligible queries equally; see the exact objectives in
 [proposed_method.md](proposed_method.md#objective-and-ranking).
-The default run uses 3 warmup epochs for grounding/identity/coarse/state, followed
-by 17 epochs with context enabled. `train.epochs` is the total, including warmup;
+The current YAML uses 6 warmup epochs for grounding/identity/coarse/state, followed
+by 29 epochs with context enabled. `train.epochs` is the total, including warmup;
 `train.context_warmup_epochs` controls only context loss and must be smaller than
 that total. Composition and fine context scoring are skipped during warmup. The
 same optimizer continues, and the base objectives stay active afterwards.
 Set `train.context_warmup_epochs=0` for a joint-training ablation or a one-epoch
 smoke test. When context loss is disabled, all epochs use the remaining objectives.
 
-Periodic validation uses Context z-score with initial `context_weight=0.0325`,
-normalizing only after scoring a query's complete Coarse Top-M. DINO/BERT checkpoints are
-incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
+Periodic validation uses Context z-score with `context_weight=0.01` and
+`fine_coarse_weight=0.05` in the current YAML, normalizing only after scoring a
+query's complete Coarse Top-M. DINO/BERT checkpoints are incompatible; train a
+fresh CLIP checkpoint. To reproduce the previous fine
 ranking, use `--set retrieval.fine_score_mode=legacy_raw` at retrieval time.
 
 Training requires a fresh run directory; obsolete loss configs with
@@ -81,22 +82,24 @@ alignment is cached separately from visual features.
 Each batch contains:
 
 - up to `positives_per_query` Full Positives;
-- `identity_fraction` same-identity, wrong-state negatives;
-- `hard_fraction` coarse hard negatives after `train.sampling.warmup_epochs`,
-  independently of context warmup;
+- `identity_fraction` of negative slots from same-identity, wrong-state images;
+- `hard_fraction` of negative slots from coarse hard pools after
+  `train.sampling.warmup_epochs`, independently of context warmup;
 - uniform negatives for the remaining slots.
 
 `train.sampling.identity_hard_fraction` reserves a share of the existing same-ID
-quota for mined same-ID negatives **before** random same-ID sampling. It defaults
-to zero. A value of `0.5` uses half that quota when enough eligible mined images
-exist; shortages fall back to random same-ID negatives, then uniform negatives.
+quota for mined same-ID negatives **before** random same-ID sampling. The current
+YAML uses `0.5`; an omitted setting resolves to zero. A value of `0.5` uses half
+that quota when enough eligible mined images exist; shortages fall back to random
+same-ID negatives, then uniform negatives.
 The total candidate count and `identity_fraction` are unchanged. Mining starts
 when either hard quota needs a pool, including when `hard_fraction=0`. Pools are
 ranked by coarse score, not learned context score; this is an initial sampling
 ablation, not context-error mining. Unreviewed positives can still be mislabeled
 as negatives; only known positives and disputed pairs are excluded.
 
-`optimizer.schedule` accepts `constant` (default) or `cosine`. Cosine uses the
+`optimizer.schedule` accepts `constant` or `cosine`. The current YAML uses cosine;
+omitting the key retains a constant schedule. Cosine uses the
 configured base rates in epoch 1 and `base * optimizer.min_lr_ratio` in the last
 epoch, updating once at each epoch start. A single-epoch run uses base rates.
 Both groups share the same factor; the optimizer and its state continue across
@@ -116,9 +119,9 @@ For the analyzed 25-epoch, seed-0 run, four complete configs are provided under
 `sampling_only.yaml`, and `combined.yaml`. All four retain the original run's
 context warmup of 4 epochs, mining warmup of 6, candidates/seed/losses and fixed
 original inference weights. They intentionally differ from today's
-`configs/proposed.yaml`, which delays mining until after its 25-epoch budget and
-uses calibrated inference weights. These configs are candidate experiments,
-not validated improvements. Compare each single change with baseline before
+`configs/proposed.yaml`, which uses 35 epochs, 6 context warmup epochs and
+10 mining warmup epochs. Its inference weights are starting settings. These
+configs are candidate experiments, not validated improvements. Compare each single change with baseline before
 interpreting the combined run; the old observed mAP is not a substitute for a
 fresh control run when source/environment differ.
 
@@ -166,8 +169,8 @@ python tools/run.py run --config configs/proposed.yaml --split val
 python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Use the saved `runs/proposed/config.yaml` in the first command if training
-used path or parameter overrides. Set `rankings` in `configs/calibration.yaml`
+Use the saved `runs/proposed-lr-sampling/config.yaml` in the first command if
+training used path or parameter overrides. Set `rankings` in `configs/calibration.yaml`
 to that run's `val/rankings.pt`. The artifact embeds its actual run configuration,
 checkpoint fingerprint and fixed matching settings; no separate model config or
 top-level `method` is needed in the calibration YAML.
@@ -226,9 +229,11 @@ from the FAFA environment with explicit notebook coordinates:
 Authentication uses the normal Kaggle client configuration. The downloader
 records its source in the resume state and refuses to continue that state with
 different notebook arguments.
-`--output` names the local destination. The downloader reads the historical
-`cache/fafa-images` path inside the selected Kaggle export; that remote archive
-prefix does not need to match the local `cache/person-images` directory.
+`--output` names the local destination. `--cache-path` selects exactly one cache
+directory inside the Kaggle export and defaults to `cache/person-images`.
+For historical exports or their existing resume state, add
+`--cache-path cache/fafa-images`. The remote directory and local destination may
+differ; switching the remote directory requires a separate destination/resume state.
 
 The four cache paths include `data.detection_cache`. Completed unified CLIP scene
 features are readable; historical boxes require conversion with the original
@@ -300,11 +305,11 @@ only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cach
 
 ```bash
 # Reproduce the recorded ranking exactly.
-python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed-lr-sampling/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
 # Rebuild coarse order, choose another Top-M, normalize and fuse offline.
-python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
+python -m rcr.proposed.replay runs/proposed-lr-sampling/val/rankings.pt \
   --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
   --context-weight 0.0288 --fine-coarse-weight 0.0064
 

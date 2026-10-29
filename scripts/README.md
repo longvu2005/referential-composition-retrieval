@@ -58,7 +58,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `runs/proposed-calibration/selected.yaml` |
+| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `selected.yaml` from the configured calibration output |
 
 ```bash
 bash scripts/methods/clip.bash val
@@ -75,8 +75,10 @@ PYTHON=/path/to/clip-env/bin/python bash scripts/methods/clip.bash test
 
 Test never trains or selects parameters. Run validation first. Proposed's val
 recipe uses `configs/proposed.yaml` and `configs/calibration.yaml`; it includes
-training even if a prior checkpoint exists. For cache reuse without retraining,
-or another seed/config, call `tools/run.py` directly. Raw images and model assets
+training even if a prior checkpoint exists. Run/selection paths come from these
+YAML files; calibration receives the active run's `val/rankings.pt`. For cache
+reuse without retraining, or another seed/config, call `tools/run.py` directly.
+Raw images and model assets
 must be available as described in the method guides.
 
 ## Reports

@@ -16,10 +16,15 @@ def identity_sampling_settings(config):
     }
     if set(settings) != {"max_crops", "crops_per_identity", "random_identities"}:
         raise ValueError("unknown train.identity_sampling setting")
-    if settings["max_crops"] < 0 or settings["crops_per_identity"] < 1:
-        raise ValueError("invalid identity crop limits")
-    if settings["random_identities"] < 0:
-        raise ValueError("random_identities must be nonnegative")
+    for key, minimum in (
+        ("max_crops", 0),
+        ("crops_per_identity", 1),
+        ("random_identities", 0),
+    ):
+        if type(settings[key]) is not int or settings[key] < minimum:
+            raise ValueError(
+                f"train.identity_sampling.{key} must be an integer >= {minimum}"
+            )
     return settings
 
 

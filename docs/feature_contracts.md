@@ -85,8 +85,9 @@ rejected before loading text weights. Matching feature dimensions alone do
 not make them compatible. Model checkpoints still bind scene, detection and
 FAFA source identities and encoder metadata.
 
-Default outputs are `runs/proposed` and `runs/proposed-calibration`. Existing
-run configs retain their explicit paths; use those configs to read old runs.
+Current YAML outputs are `runs/proposed-lr-sampling` and
+`runs/proposed-calibration`. Existing run configs retain their explicit paths;
+use those configs to read old runs.
 Keep selected configurations and checkpoint bytes intact: test selection binds
 the checkpoint SHA256 and validation fingerprint. For a new experiment, use a
 fresh output directory and calibrate its validation artifact separately.

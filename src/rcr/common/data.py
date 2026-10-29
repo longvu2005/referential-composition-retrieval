@@ -107,7 +107,6 @@ def load_rcr_data(
 
 
 def _load_data(final_dir, image_root, *, inputs_only):
-
     final_dir = Path(final_dir)
     image_root = Path(image_root)
 
@@ -204,7 +203,7 @@ def required_identity_ids(sample: dict) -> list[str]:
     return subject_identity_ids(sample["subjects"])
 
 
-def split_image_ids(data: RCRData, split: str) -> list[str]:
+def split_image_ids(data: RCRInputs, split: str) -> list[str]:
     """All registered images in a split, retaining the canonical gallery order."""
     if split not in SPLIT_NAMES:
         raise ValueError(f"invalid query split {split!r}")

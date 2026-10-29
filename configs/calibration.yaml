@@ -1,6 +1,6 @@
 # CPU-only validation selection from the official retrieval artifact.
 # The source embeds its config, checkpoint fingerprint and ordered gallery.
-rankings: runs/proposed/val/rankings.pt
+rankings: runs/proposed-lr-sampling/val/rankings.pt
 output_dir: runs/proposed-calibration
 coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
 fine_coarse_weight: [0.0, 0.0025, 0.005, 0.0064, 0.01, 0.025, 0.05, 0.1, 0.4]
