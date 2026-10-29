@@ -54,6 +54,29 @@ PYTHON=python3.11 bash scripts/setup.bash proposed
 PYTHON=python3.11 bash scripts/setup.bash fafa
 ```
 
+Without `PYTHON`, setup searches for Python 3.11, then 3.12, then a compatible
+`python3`. An explicit `PYTHON` must be compatible; Python 3.13 is unsupported
+by the pinned NumPy/FAFA stack. Setup checks this before creating an environment.
+It also isolates installation from notebook `PYTHONPATH` and user startup hooks.
+
+On a Kaggle image that only has Python 3.13, install Python 3.11 and seed pip
+with uv before setup:
+
+```bash
+python3 -m pip install --no-cache-dir uv
+uv python install 3.11
+# If a previous setup failed, move that .venv-proposed/.venv-fafa aside first.
+for method in proposed fafa; do
+  uv venv --python 3.11 --seed ".venv-$method"
+  PYTHON=".venv-$method/bin/python" bash scripts/setup.bash "$method"
+done
+```
+
+Setup can be rerun after an interrupted package install. Always rerun it to
+repair an incomplete environment: the existence of `bin/python` alone does not
+mean dependencies are installed. An existing environment with an incompatible
+Python version must be moved aside before setup; caches and runs are separate.
+
 Edit the paths in `configs/proposed.yaml`:
 
 ```yaml
