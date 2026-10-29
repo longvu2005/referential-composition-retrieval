@@ -80,7 +80,7 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
-    warmup_epochs: 6          # Delay hard-negative mining only.
+    warmup_epochs: 50          # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
 
@@ -106,9 +106,9 @@ retrieval:
   # Fine = alpha * FAFA + gamma * z(coverage * context).
   # Final = z(fine) + lambda * z(coarse).
   fine_score_mode: context_zscore
-  context_weight: 0.0325       # gamma
-  coarse_beta: 0.4             # Coarse state weight.
-  fine_coarse_weight: 0.025    # lambda
+  context_weight: 0.01       # gamma
+  coarse_beta: 2.0             # Coarse state weight.
+  fine_coarse_weight: 0.05    # lambda
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
