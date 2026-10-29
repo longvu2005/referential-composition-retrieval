@@ -453,6 +453,59 @@ def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
     assert training._wandb_run(cfg, tmp_path, None, 1, 1) is None
 
 
+def test_cosine_training_logs_rates_used_and_mines_identity_quota(
+    tiny_training_run, monkeypatch
+):
+    cfg, _, wandb_run, _ = tiny_training_run
+    cfg["train"].update(epochs=3, candidates=2)
+    cfg["optimizer"].update(schedule="cosine", min_lr_ratio=0.1)
+    cfg["train"]["sampling"].update(
+        identity_fraction=1,
+        identity_hard_fraction=1,
+        hard_fraction=0,
+        warmup_epochs=1,
+        refresh_every_epochs=2,
+    )
+    cfg["evaluation"]["enabled"] = False
+    cfg["wandb"]["log_every_steps"] = 1
+    seen_rates, mined = [], []
+    adamw = torch.optim.AdamW
+
+    def create_optimizer(*args, **kwargs):
+        optimizer = adamw(*args, **kwargs)
+        step = optimizer.step
+
+        def observe_step(*args, **kwargs):
+            seen_rates.append([group["lr"] for group in optimizer.param_groups])
+            return step(*args, **kwargs)
+
+        optimizer.step = observe_step
+        return optimizer
+
+    def mine(*args, **kwargs):
+        mined.append(len(seen_rates))
+        return {"train": ["n"]}
+
+    monkeypatch.setattr(torch.optim, "AdamW", create_optimizer)
+    monkeypatch.setattr(training, "mine_hard_negatives", mine)
+    checkpoint = training.train(cfg)
+    history = [
+        json.loads(line)
+        for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
+    ]
+    assert mined == [1]  # Same-ID mining works with general hard_fraction=0.
+    expected = [(1e-4, 1e-5), (5.5e-5, 5.5e-6), (1e-5, 1e-6)]
+    for used, row, pair in zip(seen_rates, history, expected, strict=True):
+        assert used == pytest.approx(pair)
+        assert [row["model_lr"], row["text_lr"]] == pytest.approx(pair)
+    assert [r["mining_active"] for r in history] == [False, True, True]
+    assert all("train_sampled_identity_hard" in r for r in history)
+    step_logs = [row for row in wandb_run.logs if "global_step" in row]
+    assert [r["train/model_lr"] for r in step_logs] == pytest.approx(
+        [p[0] for p in expected]
+    )
+
+
 def test_text_cache_reuses_right_padded_rows_without_saving_frozen_weights():
     backbone = CountingTextBackbone(vocabulary=10_000)
     encoder = TextEncoder(backbone, dim=8, cache_mib=1)

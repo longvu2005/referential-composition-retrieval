@@ -35,12 +35,14 @@ from rcr.proposed.nn.encoders import (
     text_encoder_state,
 )
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
+from rcr.proposed.optimization import epoch_learning_rates
 from rcr.proposed.ranking import (
     mine_hard_negatives,
     retrieval_settings,
     retrieve_rankings,
 )
 from rcr.proposed.sampling import (
+    SAMPLING_METRICS,
     CandidateIndex,
     identity_candidate_pools,
     sample_candidates,
@@ -231,6 +233,8 @@ def train(cfg: dict) -> Path:
         raise FileExistsError(
             f"training run already exists at {output}; use a new output.dir"
         )
+    epoch_learning_rates(cfg["optimizer"], 1, cfg["train"]["epochs"])
+    sampling = sampling_settings(cfg["train"].get("sampling", {}))
     check_clip_config(cfg)
     cfg = {
         **cfg,
@@ -295,7 +299,6 @@ def train(cfg: dict) -> Path:
     identity_images = {
         sample_id: set(pool) for sample_id, pool in identity_pools.items()
     }
-    sampling = sampling_settings(cfg["train"].get("sampling", {}))
 
     scene, people, *_ = cache.load(torch.tensor([0]))
     scene_dim, person_dim = scene.shape[-1], people.shape[-1]
@@ -391,6 +394,11 @@ def train(cfg: dict) -> Path:
     hard_pools = None
 
     for epoch in range(1, epochs + 1):
+        model_lr, text_lr = epoch_learning_rates(cfg["optimizer"], epoch, epochs)
+        for group, rate in zip(
+            optimizer.param_groups, (model_lr, text_lr), strict=True
+        ):
+            group["lr"] = rate
         in_warmup = epoch <= warmup_epochs and cfg["loss"]["context_weight"] > 0
         phase = "warmup" if in_warmup else "joint"
         epoch_loss = {
@@ -402,7 +410,14 @@ def train(cfg: dict) -> Path:
             cfg["train"]["seed"] + epoch + 1_000_002
         )
         epoch_index = epoch - 1
-        hard_quota = int((cfg["train"]["candidates"] - 1) * sampling["hard_fraction"])
+        negatives = cfg["train"]["candidates"] - 1
+        hard_quota = max(
+            int(negatives * sampling["hard_fraction"]),
+            int(
+                int(negatives * sampling["identity_fraction"])
+                * sampling["identity_hard_fraction"]
+            ),
+        )
         if (
             hard_quota
             and epoch_index >= sampling["warmup_epochs"]
@@ -442,11 +457,13 @@ def train(cfg: dict) -> Path:
                 "context",
                 "state",
                 "context_active_fraction",
+                *(f"sampled_{key}" for key in SAMPLING_METRICS),
             ),
             0.0,
         )
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs} ({phase})")
         for rows in progress:
+            sampling_stats = {}
             candidates = sample_candidates(
                 rows,
                 cfg["train"]["candidates"],
@@ -456,6 +473,8 @@ def train(cfg: dict) -> Path:
                 identity_fraction=sampling["identity_fraction"],
                 hard_pools=hard_pools,
                 hard_fraction=sampling["hard_fraction"],
+                identity_hard_fraction=sampling["identity_hard_fraction"],
+                stats=sampling_stats,
             )
             identity_crops = (
                 identity_sampler.sample(rows, candidates, identity_generator)
@@ -505,6 +524,7 @@ def train(cfg: dict) -> Path:
             values = {
                 "loss": float(loss.detach()),
                 **{key: float(value) for key, value in parts.items()},
+                **{f"sampled_{key}": value for key, value in sampling_stats.items()},
             }
             for name, value in values.items():
                 totals[name] += value * len(rows)
@@ -526,6 +546,9 @@ def train(cfg: dict) -> Path:
             "epoch": epoch,
             "phase": phase,
             "context_weight": epoch_loss["context_weight"],
+            "model_lr": model_lr,
+            "text_lr": text_lr,
+            "mining_active": hard_pools is not None,
             **{
                 f"train_{name}": value / len(train_samples)
                 for name, value in totals.items()
@@ -593,6 +616,9 @@ def train(cfg: dict) -> Path:
                 "epoch": epoch,
                 "epoch/context_weight": epoch_loss["context_weight"],
                 "epoch/warmup": in_warmup,
+                "epoch/model_lr": model_lr,
+                "epoch/text_lr": text_lr,
+                "epoch/mining_active": hard_pools is not None,
                 **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
             }
             if should_evaluate:

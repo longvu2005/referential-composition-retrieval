@@ -1,8 +1,8 @@
-# Proposed: Frozen CLIP B/32 + FAFA + learned relational context.
+# Proposed method: frozen CLIP and FAFA encoders with learned relational context.
 method: proposed
 split: val
 
-# Dataset and feature caches.
+# Dataset paths and feature caches.
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
@@ -17,13 +17,13 @@ detector:
   threshold: 0.3
   text_threshold: 0.25
 
-# Frozen CLIP image encoder.
+# Frozen scene encoder.
 image_encoder:
   model: openai/clip-vit-base-patch32
   revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
-  scene_size: [224, 224]        # Letterboxed input; rebuild cache if changed.
+  scene_size: [224, 224]
 
-# Frozen FAFA person encoder.
+# Frozen person encoder.
 person_encoder:
   python: .venv-fafa/bin/python
   fafa_config: configs/fafa.yaml
@@ -32,21 +32,21 @@ person_encoder:
 # Cache storage and memory limits.
 cache:
   storage_dtype: float16
-  lru_mib: 1024                 # Scene cache.
-  native_lru_mib: 256          # FAFA cache.
+  lru_mib: 1024
+  native_lru_mib: 256
   supervision_cache: cache/train-supervision.json
   mmap_shards: false
-  text_lru_mib: 256            # Frozen CLIP text features.
+  text_lru_mib: 256
 
 # Trainable model architecture.
 model:
   text_model: openai/clip-vit-base-patch32
-  dim: 384                     # Shared feature dimension.
+  dim: 384
   dropout: 0.1
   identity_dim: 128
-  fda_k: 6                     # Top-K FAFA token similarities.
+  fda_k: 6
   state_dim: 512
-  coarse_beta: 0.4             # Default state fusion weight.
+  coarse_beta: 0.4
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
@@ -55,16 +55,16 @@ model:
   fine_matching:
     selection_threshold: 0.5
     identity_threshold: 0.2
-    missing_penalty: 1.1       # Penalty for unmatched persons.
-    duplicate_iou: 0.9        # Suppress duplicate detections.
+    missing_penalty: 1.1
+    duplicate_iou: 0.9
 
-# Training schedule and sampling.
+# Training schedule and batch settings.
 train:
-  epochs: 25
-  context_warmup_epochs: 4    # Context starts at epoch 4; 0 = joint from epoch 1.
-  batch_size: 18               # Queries per batch.
-  candidates: 32              # Gallery candidates per query.
-  case_balanced: true         # P(case) proportional to sqrt(N_case).
+  epochs: 35
+  context_warmup_epochs: 6
+  batch_size: 24
+  candidates: 32
+  case_balanced: true
   seed: 0
   amp: true
   mining_batch_size: 8
@@ -75,63 +75,66 @@ train:
     crops_per_identity: 2
     random_identities: 8
 
-  # Positive and negative sampling.
+  # Candidate sampling and hard-negative mining.
   sampling:
     positives_per_query: 2
-    identity_fraction: 0.5
-    hard_fraction: 0.1
-    warmup_epochs: 50          # Delay hard-negative mining only.
+    identity_fraction: 0.5       # Same-ID quota among negatives.
+    identity_hard_fraction: 0.5  # Mined share within the same-ID quota.
+    hard_fraction: 0.1          # Additional coarse-hard quota among negatives.
+    warmup_epochs: 10
     refresh_every_epochs: 2
     pool_size: 100
 
-# AdamW optimization; pretrained encoders remain frozen.
+# AdamW learning rates, regularization and decay schedule.
 optimizer:
   lr: 0.0001
   text_lr: 1.0e-05
   weight_decay: 0.01
+  schedule: cosine
+  min_lr_ratio: 0.1
 
-# Grounding + crop identity + coarse identity + conditional context + global state.
+# Training loss weights and temperatures.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
   coarse_weight: 1.0
-  context_weight: 1.0           # Loss weight; inference gamma is under retrieval.
+  context_weight: 1.0
   identity_temperature: 0.1
   coarse_temperature: 0.1
   state_weight: 1.0
   state_temperature: 0.1
 
-# Coarse retrieval and Top-M fine reranking.
+# Retrieval scoring, reranking and inference batch sizes.
+# Coarse scoring is also used for train negative mining.
 retrieval:
-  # Fine = alpha * FAFA + gamma * z(coverage * context).
-  # Final = z(fine) + lambda * z(coarse).
   fine_score_mode: context_zscore
-  context_weight: 0.01       # gamma
-  coarse_beta: 2.0             # Coarse state weight.
-  fine_coarse_weight: 0.05    # lambda
+  context_weight: 0.01
+  coarse_beta: 0.4
+  fine_coarse_weight: 0.05
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
   coarse_batch_size: 512
 
-# Validation and coarse shortlist metrics.
+# Shortlist metrics and validation frequency.
 candidate_ks: [100, 500]
 evaluation:
   enabled: true
   every_epochs: 2
 
-# Experiment logging.
+# Experiment tracking.
 wandb:
   enabled: true
   project: referential-composition-retrieval
-  name: proposed
+  name: proposed-lr-sampling
   mode: online
   log_every_steps: 20
 
-# Runtime and checkpoints.
+# Runtime device.
 runtime:
   device: cuda
 
-checkpoint: runs/proposed/best.pt
+# Checkpoint and experiment outputs.
+checkpoint: runs/proposed-lr-sampling/best.pt
 output:
-  dir: runs/proposed
+  dir: runs/proposed-lr-sampling

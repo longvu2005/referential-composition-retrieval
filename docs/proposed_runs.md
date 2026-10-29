@@ -86,6 +86,49 @@ Each batch contains:
   independently of context warmup;
 - uniform negatives for the remaining slots.
 
+`train.sampling.identity_hard_fraction` reserves a share of the existing same-ID
+quota for mined same-ID negatives **before** random same-ID sampling. It defaults
+to zero. A value of `0.5` uses half that quota when enough eligible mined images
+exist; shortages fall back to random same-ID negatives, then uniform negatives.
+The total candidate count and `identity_fraction` are unchanged. Mining starts
+when either hard quota needs a pool, including when `hard_fraction=0`. Pools are
+ranked by coarse score, not learned context score; this is an initial sampling
+ablation, not context-error mining. Unreviewed positives can still be mislabeled
+as negatives; only known positives and disputed pairs are excluded.
+
+`optimizer.schedule` accepts `constant` (default) or `cosine`. Cosine uses the
+configured base rates in epoch 1 and `base * optimizer.min_lr_ratio` in the last
+epoch, updating once at each epoch start. A single-epoch run uses base rates.
+Both groups share the same factor; the optimizer and its state continue across
+context/mining phases. With 25 epochs and ratio `0.1`, model LR is `1e-4 -> 1e-5`
+and text projection LR is `1e-5 -> 1e-6`. This is decay, not LR warmup.
+
+Step W&B logs and epoch history include realized candidate counts under
+`sampled_positive`, `sampled_identity_hard`, `sampled_identity_random`,
+`sampled_coarse_hard`, `sampled_uniform`, and `sampled_same_identity_negative`.
+The last count overlaps the source quotas: uniform/general-hard draws may also
+contain all required identities. Epoch logs additionally include `model_lr`,
+`text_lr` and `mining_active`. Use these to check actual exposure, not just
+configured fractions.
+
+For the analyzed 25-epoch, seed-0 run, four complete configs are provided under
+`configs/experiments/lr-negatives/`: `baseline.yaml`, `lr_only.yaml`,
+`sampling_only.yaml`, and `combined.yaml`. All four retain the original run's
+context warmup of 4 epochs, mining warmup of 6, candidates/seed/losses and fixed
+original inference weights. They intentionally differ from today's
+`configs/proposed.yaml`, which delays mining until after its 25-epoch budget and
+uses calibrated inference weights. These configs are candidate experiments,
+not validated improvements. Compare each single change with baseline before
+interpreting the combined run; the old observed mAP is not a substitute for a
+fresh control run when source/environment differ.
+
+```bash
+.venv-proposed/bin/python tools/run.py train \
+  --config configs/experiments/lr-negatives/lr_only.yaml
+.venv-proposed/bin/python tools/run.py train \
+  --config configs/experiments/lr-negatives/sampling_only.yaml
+```
+
 The identity loss can additionally read up to
 `train.identity_sampling.max_crops` detector-aligned train crops. These crops do
 not enter the candidate set, FAFA scoring or state loss; they only keep the

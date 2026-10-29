@@ -167,8 +167,14 @@ def test_run_honors_yaml_overrides_and_split_precedence(
             ["train", "--set", 'train.context_warmup_epochs="3"'],
             "context_warmup_epochs",
         ),
-        (["train", "--set", "train.context_warmup_epochs=20"], "context_warmup_epochs"),
-        (["train", "--set", "train.context_warmup_epochs=21"], "context_warmup_epochs"),
+        (
+            ["train", "--set", "train.epochs=20", "train.context_warmup_epochs=20"],
+            "context_warmup_epochs",
+        ),
+        (
+            ["train", "--set", "train.epochs=20", "train.context_warmup_epochs=21"],
+            "context_warmup_epochs",
+        ),
     ],
 )
 def test_invalid_experiments_fail_before_model_imports(arguments, message, capsys):

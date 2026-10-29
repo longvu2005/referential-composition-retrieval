@@ -7,6 +7,15 @@ import torch
 
 from rcr.common.data import required_identity_ids
 
+SAMPLING_METRICS = (
+    "positive",
+    "identity_hard",
+    "identity_random",
+    "coarse_hard",
+    "uniform",
+    "same_identity_negative",
+)
+
 
 def training_batches(samples, batch_size, generator, *, case_balanced=True):
     """Draw one epoch and group rows by Subject count for tensor collation."""
@@ -56,6 +65,7 @@ def sampling_settings(config):
     settings = {
         "positives_per_query": 2,
         "identity_fraction": 0.5,
+        "identity_hard_fraction": 0.0,
         "hard_fraction": 0.0,
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
@@ -65,6 +75,7 @@ def sampling_settings(config):
     known = {
         "positives_per_query",
         "identity_fraction",
+        "identity_hard_fraction",
         "hard_fraction",
         "warmup_epochs",
         "refresh_every_epochs",
@@ -77,6 +88,8 @@ def sampling_settings(config):
     fractions = settings["identity_fraction"], settings["hard_fraction"]
     if any(not 0 <= value <= 1 for value in fractions) or sum(fractions) > 1:
         raise ValueError("negative fractions must be in [0, 1] and sum to <= 1")
+    if not 0 <= settings["identity_hard_fraction"] <= 1:
+        raise ValueError("identity_hard_fraction must be in [0, 1]")
     if settings["warmup_epochs"] < 0:
         raise ValueError("warmup_epochs must be nonnegative")
     if settings["refresh_every_epochs"] < 1 or settings["pool_size"] < 1:
@@ -147,9 +160,17 @@ def sample_candidates(
     identity_fraction=0.5,
     hard_pools=None,
     hard_fraction=0.0,
+    identity_hard_fraction=0.0,
+    stats=None,
 ):
-    """Sample positives, structured negatives, then uniform negatives."""
+    """Reserve same-ID quota, drawing its mined negatives before random ones.
+
+    identity_hard_fraction is a fraction of the existing same-ID quota, not
+    extra candidate slots. Sparse mined/identity pools fall back to same-ID
+    random/uniform draws, respectively. Stats report mean realized counts.
+    """
     rows = []
+    counts = dict.fromkeys(SAMPLING_METRICS, 0)
     for sample in samples:
         positives, base_forbidden, identity_pool = index.rows[sample["sample_id"]]
         positive_count = min(positives_per_query, len(positives), num_candidates - 1)
@@ -164,16 +185,30 @@ def sample_candidates(
                 if image_id not in forbidden
             )
         )
-        for pool, fraction in (
-            (identity_pool, identity_fraction),
-            (hard_pool, hard_fraction),
+        identity_count = min(
+            int(negative_count * identity_fraction), len(identity_pool)
+        )
+        identity_set = set(identity_pool)
+        hard_identity = [image_id for image_id in hard_pool if image_id in identity_set]
+        chosen = _draw(
+            hard_identity,
+            min(int(identity_count * identity_hard_fraction), len(hard_identity)),
+            generator,
+        )
+        row.extend(chosen)
+        forbidden.update(chosen)
+        counts["positive"] += positive_count
+        counts["identity_hard"] += len(chosen)
+        for pool, count, name in (
+            (identity_pool, identity_count - len(chosen), "identity_random"),
+            (hard_pool, int(negative_count * hard_fraction), "coarse_hard"),
         ):
             pool = [image_id for image_id in pool if image_id not in forbidden]
-            chosen = _draw(
-                pool, min(int(negative_count * fraction), len(pool)), generator
-            )
+            chosen = _draw(pool, min(count, len(pool)), generator)
             row.extend(chosen)
             forbidden.update(chosen)
+            counts[name] += len(chosen)
+        counts["uniform"] += num_candidates - len(row)
         row.extend(
             _random_negatives(
                 index.gallery,
@@ -184,4 +219,7 @@ def sample_candidates(
         )
         permutation = torch.randperm(num_candidates, generator=generator).tolist()
         rows.append([row[index] for index in permutation])
+        counts["same_identity_negative"] += sum(i in identity_set for i in row)
+    if stats is not None:
+        stats.update({key: value / max(1, len(rows)) for key, value in counts.items()})
     return rows
