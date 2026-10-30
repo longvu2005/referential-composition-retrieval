@@ -144,6 +144,8 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
         selected_checkpoint = config.get("selected_checkpoint_sha256")
         selected_validation = config.get("selected_validation_sha256")
         selected_retrieval = config.get("selected_retrieval")
+        if isinstance(selected_retrieval, dict):
+            selected_retrieval = {"pooling": "penalized", **selected_retrieval}
         if (
             selected_checkpoint != run.get("checkpoint_sha256")
             or selected_validation != run.get("validation_sha256")
@@ -154,6 +156,7 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
                 f"{label}: proposed test requires validation-selected configuration"
             )
         retrieval = run.get("retrieval", config.get("retrieval", {}))
+        retrieval = {"pooling": "penalized", **retrieval}
         if any(
             retrieval.get(key) != value for key, value in selected_retrieval.items()
         ):

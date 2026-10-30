@@ -13,6 +13,7 @@ from tqdm import tqdm
 from rcr.common.data import inference_samples
 from rcr.common.runtime import evaluating
 from rcr.proposed.scores import (
+    POOLING_MODES,
     combine_scores,
     identity_scores,
     identity_scores_batched,
@@ -204,6 +205,7 @@ def score_configuration(
                 "top_m",
             )
         },
+        "pooling": settings.get("pooling", "penalized"),
         "binding_scale": binding_scale,
         "normalization": "per_query_coarse_topm_population",
         "normalization_dtype": "float32",
@@ -268,6 +270,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "fine_coarse_weight",
         "fine_score_mode",
         "context_weight",
+        "pooling",
     }
     if unknown:
         raise ValueError(f"unknown retrieval settings: {', '.join(sorted(unknown))}")
@@ -277,6 +280,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "fine_coarse_weight": 0.0,
         "fine_score_mode": "context_zscore",
         "context_weight": 0.03,
+        "pooling": "penalized",
         **cfg,
     }
     if settings["coarse_beta"] is None:
@@ -294,6 +298,8 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         raise ValueError("retrieval weights must be finite and nonnegative")
     if settings["fine_score_mode"] not in FINE_SCORE_MODES:
         raise ValueError(f"unknown fine_score_mode: {settings['fine_score_mode']!r}")
+    if settings["pooling"] not in POOLING_MODES:
+        raise ValueError(f"unknown FAFA pooling: {settings['pooling']!r}")
     return settings
 
 
@@ -333,6 +339,7 @@ def retrieve_rankings(
     fine_coarse_weight: float = 0.0,
     fine_score_mode: str = "context_zscore",
     context_weight: float = 0.03,
+    pooling: str = "penalized",
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
     full_gallery_scores: bool = False,
@@ -359,6 +366,7 @@ def retrieve_rankings(
             "fine_coarse_weight": fine_coarse_weight,
             "fine_score_mode": fine_score_mode,
             "context_weight": context_weight,
+            "pooling": pooling,
         },
         model.coarse_beta,
     )
@@ -439,7 +447,12 @@ def retrieve_rankings(
             top = order[:top_m]
             components = {
                 key: torch.zeros(len(gallery_ids), device=device, dtype=torch.float32)
-                for key in ("binding", "context", "coverage")
+                for key in (
+                    "binding",
+                    "context",
+                    "coverage",
+                    *(f"binding_{mode}" for mode in POOLING_MODES),
+                )
             }
 
             def score_targets(indices, *, query=query, components=components):
@@ -458,6 +471,7 @@ def retrieve_rankings(
                             device
                         ),
                         return_details=True,
+                        pooling=pooling,
                     )
                     for key in components:
                         values = details[key].float()
@@ -467,7 +481,8 @@ def retrieve_rankings(
 
             score_targets(top.to(device))
             raw = {
-                key: value[top.to(device)].cpu() for key, value in components.items()
+                key: components[key][top.to(device)].cpu()
+                for key in ("binding", "context", "coverage")
             }
             scored = fine_score_components(
                 **raw,
@@ -501,8 +516,13 @@ def retrieve_rankings(
                 ("fafa_binding", "binding"),
                 ("context", "context"),
                 ("coverage", "coverage"),
+                *((f"binding_{mode}", f"binding_{mode}") for mode in POOLING_MODES),
             ):
-                row[field] = components[key].cpu() if full_gallery_scores else raw[key]
+                row[field] = (
+                    components[key].cpu()
+                    if full_gallery_scores
+                    else components[key][top.to(device)].cpu()
+                )
             rows.append(row)
     return {
         "sample_ids": [sample["sample_id"] for sample in samples],

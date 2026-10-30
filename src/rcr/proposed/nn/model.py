@@ -187,6 +187,7 @@ class RCRModel(nn.Module):
         *,
         fafa_query: Tensor,
         fafa_targets: Tensor,
+        pooling: str = "penalized",
     ) -> tuple[Tensor, Tensor]:
         query = self.encode_query(
             query_scene,
@@ -212,6 +213,7 @@ class RCRModel(nn.Module):
             patch_hw,
             target_mask,
             fafa_targets=fafa_targets,
+            pooling=pooling,
         )
 
     def encode_query(
@@ -395,6 +397,7 @@ class RCRModel(nn.Module):
         *,
         fafa_targets: Tensor,
         return_details: bool = False,
+        pooling: str = "penalized",
     ) -> Tensor | dict[str, Tensor]:
         """Shared identity matching -> aligned evidence/context -> null-aware score.
 
@@ -408,13 +411,16 @@ class RCRModel(nn.Module):
         )
         if fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
             raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
-        binding = fafa_binding_scores(
+        poolings = fafa_binding_scores(
             query.fafa,
             fafa_targets,
             matching=matching,
             k=self.fda_k,
             missing_penalty=self.fine_matching["missing_penalty"],
+            pooling=pooling,
+            return_poolings=True,
         )
+        binding = poolings[pooling]
         gated_context = matching.coverage * context
         score = gated_context + self.binding_scale * binding
         if return_details:
@@ -427,5 +433,6 @@ class RCRModel(nn.Module):
                 "subject_coverage": matching.subject_coverage,
                 "matched_indices": matching.indices,
                 "membership": matching.membership,
+                **{f"binding_{key}": value for key, value in poolings.items()},
             }
         return score

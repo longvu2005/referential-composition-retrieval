@@ -1,6 +1,7 @@
 """Train the proposed model from frozen CLIP and FAFA caches."""
 
 import json
+import math
 from pathlib import Path
 from statistics import fmean
 
@@ -80,6 +81,11 @@ def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples):
         )
     }
     tracked_config.update(
+        optimizer={
+            **cfg["optimizer"],
+            "schedule": "cosine",
+            "min_lr_ratio": cfg["optimizer"].get("min_lr_ratio", 0.1),
+        },
         evaluation=cfg.get("evaluation", {"enabled": False}),
         cache={
             "id": cache.cache_id,
@@ -165,11 +171,12 @@ def _evaluate(
         state_trained=state_trained,
         **cfg["retrieval"],
     )
+    top_m = cfg["retrieval"]["top_m"]
     result = evaluate_retrieval_output(
         data,
         samples,
         rankings,
-        cfg["candidate_ks"],
+        sorted({*cfg["candidate_ks"], top_m}),
         split="val",
     )
     selected = _selection_metrics(result)
@@ -179,7 +186,16 @@ def _evaluate(
         directory / "val_metrics.json",
         {"overall": result["overall"], "by_case": result["by_case"]},
     )
-    return selected
+    return {
+        **selected,
+        "id_map": float(result["overall"]["id_map"]),
+        "candidate_recall": float(result["overall"][f"candidate_recall_{top_m}"]),
+        **{
+            f"full_map_{case.lower()}": float(row["full_map"])
+            for case, row in result["by_case"].items()
+            if row["num_queries"]
+        },
+    }
 
 
 def _make_checkpoint(
@@ -334,6 +350,8 @@ def train(cfg: dict) -> Path:
         ],
         weight_decay=cfg["optimizer"]["weight_decay"],
     )
+    base_lrs = [group["lr"] for group in optimizer.param_groups]
+    min_lr_ratio = cfg["optimizer"].get("min_lr_ratio", 0.1)
     amp = bool(cfg["train"].get("amp", False)) and device.type == "cuda"
     if hasattr(getattr(torch, "amp", None), "GradScaler"):
         scaler = torch.amp.GradScaler("cuda", enabled=amp)
@@ -391,6 +409,13 @@ def train(cfg: dict) -> Path:
     hard_pools = None
 
     for epoch in range(1, epochs + 1):
+        # Use the base rates first and reach each group's floor in the final epoch.
+        progress = (epoch - 1) / max(1, epochs - 1)
+        lr_factor = (
+            min_lr_ratio + (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress)) / 2
+        )
+        for group, base_lr in zip(optimizer.param_groups, base_lrs, strict=True):
+            group["lr"] = base_lr * lr_factor
         in_warmup = epoch <= warmup_epochs and cfg["loss"]["context_weight"] > 0
         phase = "warmup" if in_warmup else "joint"
         epoch_loss = {
@@ -498,7 +523,9 @@ def train(cfg: dict) -> Path:
             )
             if should_log:
                 scaler.unscale_(optimizer)
-                gradient_norm = _gradient_norm(model, text_encoder)
+                model_gradient_norm = _gradient_norm(model)
+                text_gradient_norm = _gradient_norm(text_encoder.proj)
+                gradient_norm = math.hypot(model_gradient_norm, text_gradient_norm)
             scaler.step(optimizer)
             scaler.update()
 
@@ -515,6 +542,8 @@ def train(cfg: dict) -> Path:
                         "global_step": global_step,
                         **{f"train/{name}": value for name, value in values.items()},
                         "train/gradient_norm": gradient_norm,
+                        "train/model_gradient_norm": model_gradient_norm,
+                        "train/text_gradient_norm": text_gradient_norm,
                         "train/model_lr": optimizer.param_groups[0]["lr"],
                         "train/text_lr": optimizer.param_groups[1]["lr"],
                         "train/context_weight": epoch_loss["context_weight"],
@@ -526,6 +555,8 @@ def train(cfg: dict) -> Path:
             "epoch": epoch,
             "phase": phase,
             "context_weight": epoch_loss["context_weight"],
+            "model_lr": optimizer.param_groups[0]["lr"],
+            "text_lr": optimizer.param_groups[1]["lr"],
             **{
                 f"train_{name}": value / len(train_samples)
                 for name, value in totals.items()
@@ -593,6 +624,8 @@ def train(cfg: dict) -> Path:
                 "epoch": epoch,
                 "epoch/context_weight": epoch_loss["context_weight"],
                 "epoch/warmup": in_warmup,
+                "epoch/model_lr": epoch_log["model_lr"],
+                "epoch/text_lr": epoch_log["text_lr"],
                 **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
             }
             if should_evaluate:

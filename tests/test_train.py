@@ -341,6 +341,21 @@ def test_training_warmup_and_validation_selected_checkpoint(
         for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
     ]
     assert [row["context_weight"] for row in history] == expected_weights
+    factors = {
+        1: [1.0],
+        2: [1.0, 0.1],
+        3: [1.0, 0.55, 0.1],
+        4: [1.0, 0.775, 0.325, 0.1],
+    }[epochs]
+    for key, base in [("model_lr", "lr"), ("text_lr", "text_lr")]:
+        rates = [cfg["optimizer"][base] * factor for factor in factors]
+        assert [row[key] for row in history] == pytest.approx(rates)
+        assert [
+            row[f"train/{key}"] for row in wandb_run.logs if "global_step" in row
+        ] == pytest.approx(rates)
+        assert [
+            row[f"epoch/{key}"] for row in wandb_run.logs if "epoch" in row
+        ] == pytest.approx(rates)
     assert [row["phase"] for row in history] == [
         "warmup" if context_weight and weight == 0 else "joint"
         for weight in expected_weights
@@ -351,6 +366,26 @@ def test_training_warmup_and_validation_selected_checkpoint(
         if row["phase"] == "warmup"
     )
     assert [row["epoch"] for row in history if "val_full_map" in row] == evaluated
+    for row in history:
+        if "val_full_map" not in row:
+            assert not any(key.startswith("val_") for key in row)
+            continue
+        validation = json.loads(
+            (
+                checkpoint.parent
+                / "evaluation"
+                / f"epoch_{row['epoch']:03d}"
+                / "val_metrics.json"
+            ).read_text()
+        )
+        assert row["val_id_map"] == validation["overall"]["id_map"]
+        assert (
+            row["val_candidate_recall"] == validation["overall"]["candidate_recall_2"]
+        )
+        assert (
+            row["val_full_map_individual"]
+            == validation["by_case"]["INDIVIDUAL"]["full_map"]
+        )
     best_epoch = max(
         (row for row in history if "val_checkpoint_score" in row),
         key=lambda row: row["val_checkpoint_score"],
@@ -386,18 +421,106 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert wandb_init["project"] == "referential-composition-retrieval"
     assert "data" not in wandb_init["config"]
     assert wandb_init["config"]["cache"]["id"] == "tiny"
+    assert wandb_init["config"]["optimizer"]["schedule"] == "cosine"
+    assert wandb_init["config"]["optimizer"]["min_lr_ratio"] == 0.1
     assert len(wandb_run.metrics) == 5
     assert wandb_run.logs[0]["global_step"] == 1
     assert "train/loss" in wandb_run.logs[0]
     assert wandb_run.logs[-1]["epoch"] == epochs
     assert "val/checkpoint_score" in wandb_run.logs[-1]
     step_logs = [row for row in wandb_run.logs if "global_step" in row]
+    for row in step_logs:
+        assert row["train/model_gradient_norm"] > 0
+        assert row["train/text_gradient_norm"] > 0
+        assert row["train/gradient_norm"] ** 2 == pytest.approx(
+            row["train/model_gradient_norm"] ** 2 + row["train/text_gradient_norm"] ** 2
+        )
+    validation_logs = [row for row in wandb_run.logs if "val/full_map" in row]
+    assert [row["epoch"] for row in validation_logs] == evaluated
+    for row in validation_logs:
+        epoch_row = history[row["epoch"] - 1]
+        for key in ("id_map", "candidate_recall", "full_map_individual"):
+            assert row[f"val/{key}"] == epoch_row[f"val_{key}"]
+        assert "val/full_map_group" not in row
     assert [row["train/context_weight"] for row in step_logs] == expected_weights
     assert [
         row["epoch/context_weight"] for row in wandb_run.logs if "epoch" in row
     ] == expected_weights
     assert wandb_run.summary["best_epoch"] == best_epoch
     assert wandb_run.finished
+
+
+def test_validation_diagnostics_use_actual_top_m_and_skip_empty_cases(
+    tiny_training_run, tmp_path, monkeypatch
+):
+    cfg, _, _, _ = tiny_training_run
+    cfg["retrieval"]["top_m"] = 3
+    result = {
+        "overall": {"full_map": 0.4, "id_map": 0.8, "candidate_recall_3": 0.9},
+        "by_case": {
+            "INDIVIDUAL": {"num_queries": 1, "full_map": 0.2},
+            "GROUP": {"num_queries": 0, "full_map": 0.0},
+            "DUAL": {"num_queries": 1, "full_map": 0.6},
+            "RELATIONAL": {"num_queries": 1, "full_map": 0.7},
+        },
+    }
+
+    def evaluate(data, samples, rankings, candidate_ks, *, split):
+        assert candidate_ks == [1, 2, 3]
+        assert split == "val"
+        return deepcopy(result)
+
+    monkeypatch.setattr(training, "split_image_ids", lambda *args: [])
+    monkeypatch.setattr(training, "retrieve_rankings", lambda *args, **kwargs: {})
+    monkeypatch.setattr(training, "evaluate_retrieval_output", evaluate)
+    metrics = training._evaluate(
+        [],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "cpu",
+        cfg,
+        1,
+        tmp_path,
+        state_trained=True,
+    )
+    assert metrics == pytest.approx(
+        {
+            "full_map": 0.4,
+            "macro_full_map": 0.5,
+            "checkpoint_score": 0.45,
+            "id_map": 0.8,
+            "candidate_recall": 0.9,
+            "full_map_individual": 0.2,
+            "full_map_dual": 0.6,
+            "full_map_relational": 0.7,
+        }
+    )
+    assert cfg["candidate_ks"] == [1, 2]
+
+
+def test_wandb_diagnostics_do_not_change_learned_parameters(tiny_training_run):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"].update(epochs=2, context_warmup_epochs=1)
+    cfg["wandb"]["log_every_steps"] = 1
+    enabled = training.train(cfg)
+    without_wandb = deepcopy(cfg)
+    without_wandb["wandb"]["enabled"] = False
+    without_wandb["output"]["dir"] += "-untracked"
+    disabled = training.train(without_wandb)
+    left = torch.load(enabled, map_location="cpu", weights_only=True)
+    right = torch.load(disabled, map_location="cpu", weights_only=True)
+    for name, tensor in left["model"].items():
+        torch.testing.assert_close(tensor, right["model"][name], rtol=0, atol=0)
+    for name, tensor in left["text_encoder"]["projection"].items():
+        torch.testing.assert_close(
+            tensor, right["text_encoder"]["projection"][name], rtol=0, atol=0
+        )
+    assert left["best_epoch"] == right["best_epoch"]
+    assert left["best_score"] == right["best_score"]
 
 
 def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
@@ -410,7 +533,7 @@ def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
     )
     cfg["evaluation"]["enabled"] = False
     cfg["wandb"]["enabled"] = False
-    optimizers, mined_after_steps = [], []
+    optimizers, mined_after_steps, learning_rates = [], [], []
     adamw, compute_loss = torch.optim.AdamW, training.compute_loss
     completed_steps = 0
 
@@ -421,6 +544,7 @@ def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
 
     def observe_loss(model, *args, **kwargs):
         nonlocal completed_steps
+        learning_rates.append([group["lr"] for group in optimizers[0].param_groups])
         if completed_steps:
             state = optimizers[0].state[model.person_proj[0].weight]
             assert state["step"].item() == completed_steps
@@ -441,10 +565,33 @@ def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
     assert len(optimizers) == 1
     assert completed_steps == 4
     assert mined_after_steps == [1, 3]  # Epochs 2 and 4, despite context warmup=2.
-    assert [group["lr"] for group in optimizers[0].param_groups] == [
-        cfg["optimizer"]["lr"],
-        cfg["optimizer"]["text_lr"],
+    for actual, factor in zip(learning_rates, [1, 0.775, 0.325, 0.1], strict=True):
+        assert actual == pytest.approx(
+            [cfg["optimizer"][key] * factor for key in ("lr", "text_lr")]
+        )
+
+
+@pytest.mark.parametrize("minimum", [0.0, 0.25, None])
+def test_cosine_uses_configured_floor_and_saved_epoch_rates(tiny_training_run, minimum):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"].update(epochs=3, context_warmup_epochs=0)
+    cfg["evaluation"]["enabled"] = False
+    cfg["wandb"]["enabled"] = False
+    if minimum is None:
+        del cfg["optimizer"]["min_lr_ratio"]
+        minimum = 0.1
+    else:
+        cfg["optimizer"]["min_lr_ratio"] = minimum
+    checkpoint = training.train(cfg)
+    history = [
+        json.loads(line)
+        for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
     ]
+    for key, base in [("model_lr", "lr"), ("text_lr", "text_lr")]:
+        start = cfg["optimizer"][base]
+        assert [row[key] for row in history] == pytest.approx(
+            [start, start * (1 + minimum) / 2, start * minimum]
+        )
 
 
 def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-"""Select four scoring parameters offline using complete validation rankings."""
+"""Select pooling and score weights from complete validation rankings."""
 
 import math
 from copy import deepcopy
@@ -27,6 +27,7 @@ from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.ranking import FINE_SCORE_MODES
 from rcr.proposed.replay import _replay_rankings, _validate_artifact
+from rcr.proposed.scores import POOLING_MODES
 
 
 def _write_selection(cfg: dict, root: Path, rows: list[dict]) -> dict:
@@ -84,6 +85,7 @@ def calibrate(settings: dict) -> list[dict]:
         "fine_coarse_weight",
         "context_weight",
         "top_m",
+        "pooling",
     }
     if unknown:
         raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
@@ -107,6 +109,25 @@ def calibrate(settings: dict) -> list[dict]:
         or cfg.get("split") != "val"
     ):
         raise ValueError("rankings.pt must embed its proposed validation config")
+    score_config = {"pooling": "penalized", **source["score_config"]}
+    cfg["retrieval"].setdefault("pooling", "penalized")
+    poolings = settings.get("pooling", [score_config["pooling"]])
+    if (
+        not isinstance(poolings, list)
+        or not poolings
+        or any(mode not in POOLING_MODES for mode in poolings)
+    ):
+        raise ValueError("pooling must be a non-empty list of supported modes")
+    if any(
+        mode != score_config["pooling"] and f"binding_{mode}" not in source
+        for mode in poolings
+    ):
+        raise ValueError(
+            "changing pooling requires saved binding scores for that mode; "
+            "retrieve validation again with the updated scorer"
+        )
+    keys = (*keys[:2], "pooling", *keys[2:])
+    grids = [*grids[:2], poolings, *grids[2:]]
     digest = provenance.get("checkpoint_sha256", "")
     if (
         not isinstance(digest, str)
@@ -122,7 +143,7 @@ def calibrate(settings: dict) -> list[dict]:
         cfg.get("checkpoint") != provenance.get("checkpoint")
         or provenance.get("score_config") != source["score_config"]
         or any(
-            cfg["retrieval"].get(key) != source["score_config"][key]
+            cfg["retrieval"].get(key) != score_config[key]
             for key in (*keys, "fine_score_mode")
         )
         or provenance.get("binding_scale") != source["binding_scale"]

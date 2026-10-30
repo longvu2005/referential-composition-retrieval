@@ -67,6 +67,9 @@ def validate_training_schedule(cfg: dict) -> None:
         raise ValueError(
             "train.context_warmup_epochs must be an integer >= 0 and < train.epochs"
         )
+    minimum = cfg.get("optimizer", {}).get("min_lr_ratio", 0.1)
+    if type(minimum) not in (int, float) or not 0 <= minimum < 1:
+        raise ValueError("optimizer.min_lr_ratio must be in [0, 1)")
     evaluation = cfg.get("evaluation", {})
     if evaluation.get("enabled", False):
         value = evaluation["every_epochs"]

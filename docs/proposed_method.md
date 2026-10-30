@@ -162,7 +162,9 @@ It never reads case labels, GT identities or member counts. Complete original
 change text still enters the Context Reasoner. Independent crop composition
 alone does not enforce group/relation correctness.
 
-Let `pi(i)` be the shared identity assignment or null:
+Let `pi(i)` be the shared identity assignment or null. `retrieval.pooling`
+selects the reduction of native FDA evidence; the method remains `proposed`.
+The default `penalized` reduction is:
 
 ```text
 E_si = a_F_si,pi(i)                        # matched
@@ -172,10 +174,22 @@ B_s = -missing_penalty                     # active Subject with no member
 B_FAFA = mean_active_subjects B_s
 ```
 
-Identity cosine is not added again. FDA lies in [-1,1], so the initial penalty
-is 1.1 and must exceed 1. This is an uncalibrated starting value. Missing members
-stay in the pooling denominator. An empty selection blocks contextual retrieval
-gradients, preserving the grounding/matching decision.
+`matched_mean` normalizes the matched weighted FDA across active Subjects,
+discarding unmatched mass. Subjects with higher matched coverage contribute
+more to this global mean. It returns `-missing_penalty` if no evidence matches.
+
+`subject_mean` first normalizes matched FDA within each active Subject, then
+averages Subjects equally. A completely unmatched Subject contributes
+`-missing_penalty`; unmatched members inside a nonempty Subject do not enter
+that Subject's denominator. Thus a present Subject cannot absorb the weight of
+an absent Subject. Partial evidence can still miss an identity inside a GROUP;
+coverage is a model estimate, not a ground-truth completeness certificate.
+
+All reductions use the same detached identity assignment and grounding weights.
+They do not change context gating, training losses, model parameters or cache
+features. Identity cosine is not added again. FDA lies in [-1,1], and the null
+penalty magnitude remains greater than 1. Empty selection blocks contextual
+retrieval gradients, preserving the grounding/matching decision.
 
 `EvidenceBinding` conditions scene patches on the composed reference, but its
 person inputs are gathered using `pi`. Target evidence and geometry are injected
@@ -380,20 +394,22 @@ recorded policy and checkpoint contract without installing native FAFA.
 `model.fine_matching` defines selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
-Calibration selects the coarse, context and fine/coarse weights plus Top-M. Changing
+Calibration selects pooling, coarse/context/fusion weights and Top-M. Changing
 `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
-Subject/overall coverage, binding, raw/gated context and final score from the same
-forward pass. Small tests verify structure and numerics, not benchmark mAP.
+Subject/overall coverage, all three binding reductions, raw/gated context and
+final score from the same forward pass. Small tests verify structure and
+numerics, not benchmark mAP.
 
 Saved rankings include `fafa_rankings` in addition to coarse/fine/fused rankings.
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
 order outside it; it is not the full-gallery FAFA + SetMatch baseline.
 Official validation stores `identity_scores`, `state_scores`, `fafa_binding`,
 `context` and `coverage` as float32 `[Q,G]` matrices aligned with `gallery_ids`.
-Raw fine evidence is stored once; derived shortlist diagnostics retain coarse
+It also stores `binding_penalized`, `binding_matched_mean` and
+`binding_subject_mean` for offline pooling selection. Derived diagnostics retain coarse
 Top-M order. The evaluator reports `fafa_*` metrics with the same official protocol.
 Training validation and test still fine-score only Top-M.
 
@@ -402,7 +418,7 @@ recorded binding scale, fixed matching policy, scoring configuration and embedde
 run/provenance metadata. Each non-self pair is fine-scored once during official
 validation retrieval. Offline calibration reads this file and validation
 annotations, without opening any checkpoint, backbone or feature cache. It
-jointly searches `coarse_beta`, `fine_coarse_weight`, `context_weight` and `top_m`,
+jointly searches `pooling`, `coarse_beta`, `fine_coarse_weight`, `context_weight` and `top_m`,
 using validation Full-mAP. Context mode stays fixed. Coarse eligibility and
 population normalization use the existing complete-gallery helper; fine and
 fusion normalization use the newly selected Top-M, with self always excluded.

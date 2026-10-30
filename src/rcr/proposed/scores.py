@@ -1,4 +1,4 @@
-"""Coarse scores and fine scores on one shared partial person assignment."""
+"""Identity scores and FAFA pooling over a shared person assignment."""
 
 import math
 
@@ -10,6 +10,49 @@ from rcr.proposed.matching import (
     PersonMatching,
     gather_matched,
 )
+
+POOLING_MODES = ("penalized", "matched_mean", "subject_mean")
+
+
+def pool_fafa_scores(
+    fda: Tensor, matching: PersonMatching, missing_penalty: float = 1.1
+) -> dict[str, Tensor]:
+    """Pool matched FDA evidence with confidence weights and active Subject masks."""
+    member = matching.membership.float()
+    active = matching.subjects.bool()
+    denominator = member.sum(-1)
+    weights = member / denominator[..., None].clamp_min(1e-6)
+
+    # Unmatched members retain their weight in the penalized mean.
+    value = fda.masked_fill(~matching.matched[:, None], -missing_penalty)
+    per_subject = (value * weights).sum(-1)
+    per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
+    per_subject = per_subject.masked_fill(~active, 0)
+    penalized = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
+    penalized = penalized.masked_fill(~active.any(-1), -missing_penalty)
+
+    matched = matching.matched[:, None] & (member > 0) & active[..., None]
+    matched_weights = weights.masked_fill(~matched, 0)
+    evidence = fda.masked_fill(~matched, 0)
+    numerator = (evidence * matched_weights).sum(-1)
+    mass = matched_weights.sum(-1)
+
+    # Global normalization gives more weight to Subjects with more matched mass.
+    total_mass = mass.sum(-1)
+    matched_mean = numerator.sum(-1) / total_mass.clamp_min(1e-6)
+    matched_mean = matched_mean.masked_fill(total_mass == 0, -missing_penalty)
+
+    # Subject normalization keeps every active role, including an empty role.
+    subject_values = numerator / mass.clamp_min(1e-6)
+    subject_values = subject_values.masked_fill(mass == 0, -missing_penalty)
+    subject_values = subject_values.masked_fill(~active, 0)
+    subject_mean = subject_values.sum(-1) / active.sum(-1).clamp_min(1)
+    subject_mean = subject_mean.masked_fill(~active.any(-1), -missing_penalty)
+    return {
+        "penalized": penalized,
+        "matched_mean": matched_mean,
+        "subject_mean": subject_mean,
+    }
 
 
 def identity_scores(
@@ -125,13 +168,12 @@ def fafa_binding_scores(
     matching: PersonMatching,
     k: int = 6,
     missing_penalty: float = 1.1,
-) -> Tensor:
-    """Native FDA on identity-assigned pairs, pooled equally across Subjects.
-
-    query [B,S,Kq,D] and targets [B,Kt,L,D] come from frozen FAFA. The
-    learned Composition supplies reference tokens only to the Context Reasoner.
-    Null members and empty active Subjects keep their contribution to the mean.
-    """
+    pooling: str = "penalized",
+    return_poolings: bool = False,
+) -> Tensor | dict[str, Tensor]:
+    """Compute native FDA once and pool the assigned person pairs."""
+    if pooling not in POOLING_MODES:
+        raise ValueError(f"unknown FAFA pooling: {pooling!r}")
     if not math.isfinite(missing_penalty) or missing_penalty <= 1:
         raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
     if type(k) is not int or k < 1:
@@ -163,13 +205,5 @@ def fafa_binding_scores(
             F.normalize(aligned, dim=-1),
         )
         fda = similarity.topk(min(k, length), dim=-1).values.mean(-1)
-        denominator = member.sum(-1)
-        weights = member / denominator[..., None].clamp_min(1e-6)
-        active = matching.subjects
-
-        value = fda.masked_fill(~matching.matched[:, None], -missing_penalty)
-        per_subject = (value * weights).sum(-1)
-        per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
-        per_subject = per_subject.masked_fill(~active, 0)
-        result = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
-        return result.masked_fill(~active.any(-1), -missing_penalty)
+        scores = pool_fafa_scores(fda, matching, missing_penalty)
+        return scores if return_poolings else scores[pooling]

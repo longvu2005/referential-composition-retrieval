@@ -64,6 +64,12 @@ same optimizer continues, and the base objectives stay active afterwards.
 Set `train.context_warmup_epochs=0` for a joint-training ablation or a one-epoch
 smoke test. When context loss is disabled, all epochs use the remaining objectives.
 
+Both optimizer groups use epoch-wise cosine decay from their configured base
+rates to `optimizer.min_lr_ratio` times those rates (default `0.1`). Decay spans
+all training epochs, independently of context and mining warmup. The first epoch
+uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
+the base rates. Actual rates are recorded in `history.jsonl` and W&B.
+
 Periodic validation uses Context z-score with initial `context_weight=0.0325`,
 normalizing only after scoring a query's complete Coarse Top-M. DINO/BERT checkpoints are
 incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
@@ -116,6 +122,13 @@ context weight. Set `mode: offline`
 to sync later with `wandb sync`, or set `enabled: false` for untracked smoke
 tests.
 
+W&B config also records the effective `optimizer.schedule=cosine`. The existing
+global gradient norm is accompanied by model/text-projection norms at the same
+logging interval. Validation adds only ID-mAP, Full-mAP per populated query case,
+and `val/candidate_recall`: the fraction of Full Positives retained in the
+configured Coarse Top-M (recorded under `retrieval.top_m`). These validation
+diagnostics are also stored in `history.jsonl`; checkpoint selection is unchanged.
+
 ## 4. Retrieve validation once, then calibrate offline
 
 ```bash
@@ -129,10 +142,10 @@ to that run's `val/rankings.pt`. The artifact embeds its actual run configuratio
 checkpoint fingerprint and fixed matching settings; no separate model config or
 top-level `method` is needed in the calibration YAML.
 
-Calibration jointly searches `coarse_beta`, `top_m`, `context_weight` and
+Calibration jointly searches `pooling`, `coarse_beta`, `top_m`, `context_weight` and
 `fine_coarse_weight`, using validation Full-mAP. The fine mode remains the one
-recorded in the source artifact. Grid evaluation groups beta, Top-M, context
-weight, then fusion weight to reuse coarse order, gathered raw scores,
+recorded in the source artifact. Grid evaluation groups beta, Top-M, pooling,
+context weight, then fusion weight to reuse coarse order, gathered raw scores,
 context population statistics, fine diagnostics and fusion z-scores. The first
 maximum in `summary.csv` wins ties. The cache retains only the current group.
 
@@ -149,6 +162,14 @@ partial exports and test artifacts cannot be used to select parameters.
 `selected.yaml` freezes all scoring settings and both checkpoint/validation
 fingerprints. Test retrieval checks the real checkpoint bytes against this hash.
 Matching thresholds, missing penalties and model weights remain fixed.
+
+`retrieval.pooling` accepts `penalized` (default), `matched_mean` and
+`subject_mean`. These select only FAFA aggregation; `method`, checkpoint names,
+model weights and cache formats stay unchanged. Validation exports all three
+binding matrices from the same FDA forward pass, so calibration can sweep
+`pooling` without model execution. If `pooling` is omitted from a calibration
+YAML, the source artifact's pooling is retained. An older artifact can replay
+its recorded pooling, but switching pooling requires a new validation export.
 
 The default context-weight grid includes 0 (context off), the initial 0.0325 and
 a broader range up to 1 for new fixed-alpha training runs. These are validation
@@ -221,17 +242,18 @@ queries, G the split gallery size and M = min(requested Top-M, G-1).
 | `query_indices` | int64 `[Q]` | Query image index in this ordered gallery |
 | `identity_scores`, `state_scores` | float32 `[Q,G]` each | Raw coarse branches, including state when original beta is zero |
 | `fafa_binding`, `context`, `coverage` | float32 `[Q,G]` each | Raw fine evidence for all non-self pairs |
+| `binding_penalized`, `binding_matched_mean`, `binding_subject_mean` | float32 `[Q,G]` each | FAFA reductions from the same assignment; `fafa_binding` selects one |
 | `binding_scale` | float | Recorded alpha; fixed at 1 for new training runs |
 | `state_trained` | bool | A false value forbids a positive beta during replay/calibration |
 | `fine_matching` | dictionary | Fixed assignment thresholds, missing penalty and duplicate policy |
-| `score_config` | dictionary | Fine mode, four selected parameters, normalization/alignment/tie conventions |
+| `score_config` | dictionary | Pooling, fine mode, score weights and normalization/alignment/tie conventions |
 | `provenance` | dictionary | Actual run config, checkpoint/cache fingerprints, benchmark and runtime metadata |
 | `rankings`, `coarse_rankings`, `fine_rankings`, `fafa_rankings` | int32 `[Q,G-1]` each | Complete self-excluded diagnostic/final orders |
 | `coarse_topm` | int32 `[Q,M]` | Coarse prefix defining derived shortlist scores |
 | `coarse_topm_scores`, `gated_context`, `fine_raw_scores`, `fine_scores`, `fused_topm_scores` | float32 `[Q,M]` each | Derived scores for inspecting the selected shortlist |
 | `context_mean`, `context_std` | float32 `[Q]` each | Gated-context population statistics over Top-M |
 
-Official validation retrieval always records the five full-gallery raw matrices.
+Official validation retrieval records all raw branches and FAFA pooling matrices.
 There is no separate tuning payload or opt-in flag. Raw fine values are stored
 once in gallery order; derived shortlist scores keep coarse Top-M order. Raw fine
 self entries are zero sentinels. Coarse self scores and non-finite values are

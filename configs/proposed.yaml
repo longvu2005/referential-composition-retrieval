@@ -1,8 +1,8 @@
-# Proposed: Frozen CLIP B/32 + FAFA + learned relational context.
+# Identity-grounded retrieval with frozen features and learned context.
 method: proposed
 split: val
 
-# Dataset and feature caches.
+# Dataset and cached features.
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
@@ -29,7 +29,7 @@ person_encoder:
   fafa_config: configs/fafa.yaml
   batch_size: 4
 
-# Cache storage and memory limits.
+# Cache storage and memory budgets.
 cache:
   storage_dtype: float16
   lru_mib: 1024                 # Scene cache.
@@ -55,13 +55,13 @@ model:
   fine_matching:
     selection_threshold: 0.5
     identity_threshold: 0.2
-    missing_penalty: 1.1       # Penalty for unmatched persons.
-    duplicate_iou: 0.9        # Suppress duplicate detections.
+    missing_penalty: 1.1       # Magnitude of the missing-evidence penalty.
+    duplicate_iou: 0.9         # Suppress near-identical detections.
 
 # Training schedule and sampling.
 train:
   epochs: 25
-  context_warmup_epochs: 4    # Context starts at epoch 4; 0 = joint from epoch 1.
+  context_warmup_epochs: 4     # Epochs before enabling the context loss.
   batch_size: 18               # Queries per batch.
   candidates: 32              # Gallery candidates per query.
   case_balanced: true         # P(case) proportional to sqrt(N_case).
@@ -84,13 +84,14 @@ train:
     refresh_every_epochs: 2
     pool_size: 100
 
-# AdamW optimization; pretrained encoders remain frozen.
+# Optimization of the trainable projections and reasoning modules.
 optimizer:
   lr: 0.0001
   text_lr: 1.0e-05
+  min_lr_ratio: 0.1           # Final/base LR ratio for cosine decay.
   weight_decay: 0.01
 
-# Grounding + crop identity + coarse identity + conditional context + global state.
+# Training objectives.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
@@ -101,14 +102,16 @@ loss:
   state_weight: 1.0
   state_temperature: 0.1
 
-# Coarse retrieval and Top-M fine reranking.
+# Retrieval scoring and inference batch sizes.
 retrieval:
-  # Fine = alpha * FAFA + gamma * z(coverage * context).
-  # Final = z(fine) + lambda * z(coarse).
+  # penalized: include unmatched members in the mean.
+  # matched_mean: normalize over matched evidence across Subjects.
+  # subject_mean: normalize within each Subject, then average Subjects.
+  pooling: penalized
   fine_score_mode: context_zscore
-  context_weight: 0.01       # gamma
-  coarse_beta: 2.0             # Coarse state weight.
-  fine_coarse_weight: 0.05    # lambda
+  context_weight: 0.01        # Weight of standardized, coverage-gated context.
+  coarse_beta: 2.0            # Weight of the global state branch.
+  fine_coarse_weight: 0.05     # Coarse contribution to the final ranking.
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512

@@ -74,6 +74,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
             "selected config predates the scoring contract; rerun val calibration"
         )
     selected = cfg.get("selected_retrieval")
+    if isinstance(selected, dict):
+        selected = {"pooling": "penalized", **selected}
     if selected is not None and (
         not isinstance(selected, dict) or set(selected) != set(SELECTED_RETRIEVAL_KEYS)
     ):
