@@ -172,18 +172,17 @@ class PositiveState:
         row = validate_submission(source, payload)
 
         with self.lock:
-            updated = {**self.positives, sample_id: row}
+            self.positives[sample_id] = row
             temporary = OUTPUT.with_name(f".{OUTPUT.name}.tmp")
             write_jsonl(
                 temporary,
                 [
-                    updated[source_row["sample_id"]]
+                    self.positives[source_row["sample_id"]]
                     for source_row in self.rows
-                    if source_row["sample_id"] in updated
+                    if source_row["sample_id"] in self.positives
                 ],
             )
             os.replace(temporary, OUTPUT)
-            self.positives = updated
         return row
 
 

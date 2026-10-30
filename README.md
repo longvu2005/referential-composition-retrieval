@@ -34,9 +34,7 @@ Fine normalization uses the complete coarse Top-M, FP32 population standard
 deviation and epsilon `1e-6`. A zero fusion weight returns the fine score directly.
 The remaining gallery retains coarse order.
 
-The current YAML runs 35 epochs, with context disabled for the first 6 and
-cosine learning-rate decay over the full run. Hard-negative mining starts at
-epoch 11, independently of context warmup.
+The default schedule has 20 epochs, with context disabled for the first 3.
 Grounding, identity, coarse and state objectives remain active during warmup.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
 offline calibration then selects scoring parameters using validation Full-mAP.
@@ -137,9 +135,8 @@ overrides for existing keys; `--split` overrides the configured split:
 Use a fresh output directory for each training run. Training refuses an existing
 run; retrieval, evaluation, calibration and reports replace their active outputs.
 When using another run, point `configs/calibration.yaml: rankings` to its saved
-`val/rankings.pt`. The Bash recipe derives the run/selection paths from YAML and
-passes the active run's rankings to calibration. W&B tracking defaults to online;
-set `wandb.mode=offline` or `wandb.enabled=false` as needed.
+`val/rankings.pt`. W&B tracking defaults to online; set `wandb.mode=offline` or
+`wandb.enabled=false` as needed.
 
 CLIP and FAFA baselines have separate environments and recipes. See the
 [baseline guide](docs/baselines.md) and [script reference](scripts/README.md).
@@ -166,12 +163,6 @@ Cache paths follow their role: `cache/detections`, `cache/scene`,
 | `runs/proposed/val/` | `rankings.pt`, `run.json`, `metrics.json` |
 | `runs/proposed-calibration/` | Grid summary, `selection.json`, `selected.yaml` |
 | `runs/proposed-calibration/selected/{val,test}/` | Selected split results |
-
-The default method, W&B run name and training folder use `proposed`.
-`proposed-calibration` names the separate scoring-selection stage. Reports read
-its `selected/<split>` results by default; use `--run proposed=...` for another
-experiment. Ablation configs retain their own experiment names. Existing runs
-keep their saved paths; use their saved configs without renaming their folders.
 
 Validation saves complete raw score matrices for offline calibration/replay.
 It fine-scores every non-self query/gallery pair; periodic training validation

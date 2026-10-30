@@ -13,7 +13,7 @@ bash scripts/methods/proposed.bash val
 # Proposed's cache stage also prepares the detections required by FAFA.
 .venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split val
-python tools/report.py --split val
+python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
 ```
 
 CLIP selects fusion weights on Full-mAP. FAFA evaluates/locks the supplied adapter
@@ -41,19 +41,18 @@ best-method selection are excluded. All selected runs must validate before
 writing any table; reruns overwrite the active tables.
 
 ```bash
-# Default Proposed results come from calibration's selected validation artifact:
-python tools/report.py --split val
+# Use the selected validation artifact written by calibration:
+python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
 # Explicitly request a smaller table or alternative formats:
 python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
 python tools/report.py --split val --formats csv tex --decimals 3
 ```
 
 `--run METHOD=DIRECTORY` takes a split result folder; `--runs-root` changes the
-default run root. Proposed defaults to
-`<runs-root>/proposed-calibration/selected/<split>`, matching the standard
-calibration recipe. CLIP defaults to `<runs-root>/clip/<mode>/<split>` and FAFA
-to `<runs-root>/fafa/<split>`. Missing selected methods are errors. For a custom
-calibration root, pass its selected split directory with `--run proposed=...`.
+default run root. Missing selected methods are errors. Do not replace a selected
+calibrated model with an unselected run.
+Calibration keeps val outputs in each experiment folder; its frozen test output
+is `runs/proposed-calibration/selected/test`, which can be passed with `--run proposed=...`.
 
 ## Historical saved results
 
@@ -66,7 +65,7 @@ for mode in clip_image clip_text early_fusion late_fusion; do
     --set mode="$mode"
 done
 .venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --split val
-.venv-proposed/bin/python tools/run.py evaluate --config runs/proposed-calibration/selected.yaml --split val
+.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --split val
 python tools/report.py --split val
 ```
 
@@ -87,7 +86,7 @@ same frozen policy:
 .venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split test
 .venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split test
 .venv-proposed/bin/python tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
-python tools/report.py --split test
+python tools/report.py --split test --run proposed=runs/proposed-calibration/selected/test
 ```
 
 Report sample/case counts alongside such tables. CPU tests use tiny local fixtures;

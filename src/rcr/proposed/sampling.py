@@ -7,15 +7,6 @@ import torch
 
 from rcr.common.data import required_identity_ids
 
-SAMPLING_METRICS = (
-    "positive",
-    "identity_hard",
-    "identity_random",
-    "coarse_hard",
-    "uniform",
-    "same_identity_negative",
-)
-
 
 def training_batches(samples, batch_size, generator, *, case_balanced=True):
     """Draw one epoch and group rows by Subject count for tensor collation."""
@@ -65,7 +56,6 @@ def sampling_settings(config):
     settings = {
         "positives_per_query": 2,
         "identity_fraction": 0.5,
-        "identity_hard_fraction": 0.0,
         "hard_fraction": 0.0,
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
@@ -75,7 +65,6 @@ def sampling_settings(config):
     known = {
         "positives_per_query",
         "identity_fraction",
-        "identity_hard_fraction",
         "hard_fraction",
         "warmup_epochs",
         "refresh_every_epochs",
@@ -83,24 +72,15 @@ def sampling_settings(config):
     }
     if set(settings) != known:
         raise ValueError("unknown train.sampling setting")
-    for key, minimum in (
-        ("positives_per_query", 1),
-        ("warmup_epochs", 0),
-        ("refresh_every_epochs", 1),
-        ("pool_size", 1),
-    ):
-        if type(settings[key]) is not int or settings[key] < minimum:
-            raise ValueError(f"train.sampling.{key} must be an integer >= {minimum}")
-    for key in ("identity_fraction", "identity_hard_fraction", "hard_fraction"):
-        value = settings[key]
-        if (
-            type(value) not in (int, float)
-            or not math.isfinite(value)
-            or not 0 <= value <= 1
-        ):
-            raise ValueError(f"train.sampling.{key} must be finite and in [0, 1]")
-    if settings["identity_fraction"] + settings["hard_fraction"] > 1:
+    if settings["positives_per_query"] < 1:
+        raise ValueError("positives_per_query must be positive")
+    fractions = settings["identity_fraction"], settings["hard_fraction"]
+    if any(not 0 <= value <= 1 for value in fractions) or sum(fractions) > 1:
         raise ValueError("negative fractions must be in [0, 1] and sum to <= 1")
+    if settings["warmup_epochs"] < 0:
+        raise ValueError("warmup_epochs must be nonnegative")
+    if settings["refresh_every_epochs"] < 1 or settings["pool_size"] < 1:
+        raise ValueError("hard-negative intervals and pool size must be positive")
     return settings
 
 
@@ -109,9 +89,7 @@ class CandidateIndex:
 
     def __init__(self, samples, gallery_ids, identity_pools, excluded=None):
         self.gallery = list(gallery_ids)
-        self.gallery_set = gallery = set(self.gallery)
-        if not gallery or len(gallery) != len(self.gallery):
-            raise ValueError("candidate gallery must be non-empty and unique")
+        gallery = set(gallery_ids)
         self.rows = {}
         for sample in samples:
             sample_id = sample["sample_id"]
@@ -122,18 +100,14 @@ class CandidateIndex:
                     if image_id in gallery and image_id != sample["query_image_id"]
                 )
             )
-            if not positives:
-                raise ValueError(
-                    f"{sample_id}: no non-self Full Positive in the gallery"
-                )
             forbidden = (
                 set(positives)
                 | {sample["query_image_id"]}
                 | set((excluded or {}).get(sample_id, ()))
-            ) & gallery
+            )
             identity = [
                 image_id
-                for image_id in dict.fromkeys(identity_pools.get(sample_id, ()))
+                for image_id in identity_pools.get(sample_id, ())
                 if image_id in gallery and image_id not in forbidden
             ]
             self.rows[sample_id] = positives, forbidden, identity
@@ -147,13 +121,7 @@ def _draw(pool, count, generator):
 
 
 def _random_negatives(gallery, forbidden, count, generator):
-    """Uniform draws without replacement; exclusions are already gallery-scoped."""
-    available = len(gallery) - len(forbidden)
-    if available < count:
-        raise ValueError("not enough negative gallery images")
-    if available <= 2 * count:
-        # Rejection sampling slows down when few eligible images remain.
-        return _draw([i for i in gallery if i not in forbidden], count, generator)
+    """Uniform sampling without replacement; avoid scanning a large gallery."""
     selected = []
     while len(selected) < count:
         draws = torch.randint(len(gallery), (max(16, 2 * count),), generator=generator)
@@ -164,6 +132,8 @@ def _random_negatives(gallery, forbidden, count, generator):
                 forbidden.add(image_id)
                 if len(selected) == count:
                     break
+        if len(gallery) - len(forbidden) < count - len(selected):
+            raise ValueError("not enough negative gallery images")
     return selected
 
 
@@ -177,17 +147,9 @@ def sample_candidates(
     identity_fraction=0.5,
     hard_pools=None,
     hard_fraction=0.0,
-    identity_hard_fraction=0.0,
-    stats=None,
 ):
-    """Reserve same-ID quota, drawing its mined negatives before random ones.
-
-    identity_hard_fraction is a fraction of the existing same-ID quota, not
-    extra candidate slots. Sparse mined/identity pools fall back to same-ID
-    random/uniform draws, respectively. Stats report mean realized counts.
-    """
+    """Sample positives, structured negatives, then uniform negatives."""
     rows = []
-    counts = dict.fromkeys(SAMPLING_METRICS, 0)
     for sample in samples:
         positives, base_forbidden, identity_pool = index.rows[sample["sample_id"]]
         positive_count = min(positives_per_query, len(positives), num_candidates - 1)
@@ -199,33 +161,19 @@ def sample_candidates(
             dict.fromkeys(
                 image_id
                 for image_id in (hard_pools or {}).get(sample["sample_id"], ())
-                if image_id in index.gallery_set and image_id not in forbidden
+                if image_id not in forbidden
             )
         )
-        identity_count = min(
-            int(negative_count * identity_fraction), len(identity_pool)
-        )
-        identity_set = set(identity_pool)
-        hard_identity = [image_id for image_id in hard_pool if image_id in identity_set]
-        chosen = _draw(
-            hard_identity,
-            min(int(identity_count * identity_hard_fraction), len(hard_identity)),
-            generator,
-        )
-        row.extend(chosen)
-        forbidden.update(chosen)
-        counts["positive"] += positive_count
-        counts["identity_hard"] += len(chosen)
-        for pool, count, name in (
-            (identity_pool, identity_count - len(chosen), "identity_random"),
-            (hard_pool, int(negative_count * hard_fraction), "coarse_hard"),
+        for pool, fraction in (
+            (identity_pool, identity_fraction),
+            (hard_pool, hard_fraction),
         ):
             pool = [image_id for image_id in pool if image_id not in forbidden]
-            chosen = _draw(pool, min(count, len(pool)), generator)
+            chosen = _draw(
+                pool, min(int(negative_count * fraction), len(pool)), generator
+            )
             row.extend(chosen)
             forbidden.update(chosen)
-            counts[name] += len(chosen)
-        counts["uniform"] += num_candidates - len(row)
         row.extend(
             _random_negatives(
                 index.gallery,
@@ -236,7 +184,4 @@ def sample_candidates(
         )
         permutation = torch.randperm(num_candidates, generator=generator).tolist()
         rows.append([row[index] for index in permutation])
-        counts["same_identity_negative"] += sum(i in identity_set for i in row)
-    if stats is not None:
-        stats.update({key: value / max(1, len(rows)) for key, value in counts.items()})
     return rows

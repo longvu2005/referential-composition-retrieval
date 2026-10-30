@@ -13,28 +13,6 @@ import pytest
 from rcr.baselines import prepare
 
 
-@pytest.mark.parametrize(
-    "root", ["cache/person-images", "cache/fafa-images", "cache/custom[1]"]
-)
-def test_kaggle_cache_pattern_selects_one_export_directory(root):
-    from download_fafa import cache_pattern
-
-    pattern = cache_pattern(root)
-    for prefix in ("", "referential-composition-retrieval/"):
-        for name in ("index.pt", "targets/17.pt", ".persons/17.pt"):
-            assert pattern.fullmatch(f"{prefix}{root}/{name}")["file"] == name
-    assert pattern.fullmatch("cache/unrelated/index.pt") is None
-    assert pattern.fullmatch(f"{root}/targets/../index.pt") is None
-
-
-@pytest.mark.parametrize("root", ["", ".", "/absolute", "cache/../other"])
-def test_kaggle_cache_pattern_rejects_ambiguous_roots(root):
-    from download_fafa import cache_pattern
-
-    with pytest.raises(ValueError, match="relative export directory"):
-        cache_pattern(root)
-
-
 @pytest.fixture
 def fafa(tmp_path, monkeypatch):
     calls = []

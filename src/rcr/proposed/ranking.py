@@ -288,9 +288,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
     ):
         raise ValueError("retrieval batch sizes and top_m must be positive")
     if any(
-        type(settings[key]) not in (int, float)
-        or not math.isfinite(settings[key])
-        or settings[key] < 0
+        not math.isfinite(float(settings[key])) or settings[key] < 0
         for key in ("coarse_beta", "fine_coarse_weight", "context_weight")
     ):
         raise ValueError("retrieval weights must be finite and nonnegative")

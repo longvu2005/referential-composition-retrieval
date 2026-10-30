@@ -4,23 +4,15 @@ import argparse
 import json
 import re
 from functools import partial
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from time import sleep
 
+PATTERN = re.compile(
+    r"^(?:referential-composition-retrieval/)?cache/fafa-images/"
+    r"(?P<file>index\.pt|targets/[0-9]+\.pt|\.persons/[0-9]+\.pt)$"
+)
 PAGE_SIZE = 200
 RETRIES = 5
-
-
-def cache_pattern(value):
-    """Match one export root and only the known image-cache files beneath it."""
-    path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or not path.parts:
-        raise ValueError("cache path must be a non-empty relative export directory")
-    return re.compile(
-        r"^(?:referential-composition-retrieval/)?"
-        + re.escape(path.as_posix())
-        + r"/(?P<file>index\.pt|targets/[0-9]+\.pt|\.persons/[0-9]+\.pt)$"
-    )
 
 
 def retry(call, label):
@@ -106,18 +98,7 @@ def parse_args(argv=None):
     parser.add_argument("--user", required=True, help="Kaggle notebook owner")
     parser.add_argument("--kernel", required=True, help="Kaggle notebook slug")
     parser.add_argument("--version", required=True, help="Kaggle notebook version")
-    parser.add_argument(
-        "--cache-path",
-        default="cache/person-images",
-        help="Image-cache directory inside the notebook export (default: %(default)s)",
-    )
-    args = parser.parse_args(argv)
-    try:
-        cache_pattern(args.cache_path)
-    except ValueError as error:
-        parser.error(str(error))
-    args.cache_path = PurePosixPath(args.cache_path).as_posix()
-    return args
+    return parser.parse_args(argv)
 
 
 def main(argv=None):
@@ -132,32 +113,22 @@ def main(argv=None):
 
     root = args.output
     root.mkdir(parents=True, exist_ok=True)
-    source = {
-        "user": args.user,
-        "kernel": args.kernel,
-        "version": args.version,
-        "cache_path": args.cache_path,
-    }
+    source = {"user": args.user, "kernel": args.kernel, "version": args.version}
     state_path = root / ".download-state.json"
     state = (
         json.loads(state_path.read_text(encoding="utf-8"))
         if state_path.exists()
         else {}
     )
-    saved_source = state.get("source", {})
-    if saved_source and "cache_path" not in saved_source:
-        # Resume manifests predating --cache-path always used this export root.
-        saved_source = {**saved_source, "cache_path": "cache/fafa-images"}
-    if state and saved_source != source:
+    if state and state.get("source") != source:
         raise ValueError(
-            "download state belongs to another Kaggle notebook/version/cache path; "
+            "download state belongs to another Kaggle notebook/version; "
             f"remove {state_path} or use its original arguments"
         )
     token = state.get("token")
     pages = state.get("pages", 0)
     downloaded = state.get("downloaded", 0)
     skipped = state.get("skipped", 0)
-    pattern = cache_pattern(args.cache_path)
 
     api = KaggleApi()
     api.authenticate()
@@ -178,7 +149,7 @@ def main(argv=None):
             items = response.files or []
             matched = 0
             for item in items:
-                match = pattern.fullmatch(item.file_name)
+                match = PATTERN.fullmatch(item.file_name)
                 if not match:
                     continue
                 matched += 1

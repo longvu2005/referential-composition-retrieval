@@ -231,12 +231,11 @@ class ReviewState:
         row = validate_submission(source, payload)
 
         with self.lock:
-            updated = {**self.reviews, sample_id: row}
+            self.reviews[sample_id] = row
             temporary = OUTPUT.with_name(f".{OUTPUT.name}.tmp")
             # Dict insertion order preserves saved order when a review is edited.
-            write_jsonl(temporary, updated.values())
+            write_jsonl(temporary, self.reviews.values())
             os.replace(temporary, OUTPUT)
-            self.reviews = updated
         return row
 
 

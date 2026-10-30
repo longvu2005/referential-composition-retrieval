@@ -264,8 +264,8 @@ def tiny_training_run(tmp_path, monkeypatch):
         "image_root": "unused",
         "scene_cache": "unused-scene",
         "detection_cache": "unused-detections",
-        "fafa_image_cache": "unused-person-images",
-        "fafa_query_cache": "unused-person-queries",
+        "fafa_image_cache": "unused-fafa-images",
+        "fafa_query_cache": "unused-fafa-queries",
     }
     cfg["cache"]["supervision_cache"] = str(tmp_path / "supervision.json")
     cfg["runtime"]["device"] = "cpu"
@@ -273,8 +273,6 @@ def tiny_training_run(tmp_path, monkeypatch):
     cfg["train"].update(
         epochs=1, context_warmup_epochs=0, batch_size=1, candidates=2, amp=False
     )
-    # Keep lifecycle contracts independent of the current experiment's LR ablation.
-    cfg["optimizer"]["schedule"] = "constant"
     cfg["evaluation"]["every_epochs"] = 1
     cfg["retrieval"].update(
         top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2
@@ -453,59 +451,6 @@ def test_disabled_wandb_needs_no_dependency(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "wandb", None)
     cfg = {"wandb": {"enabled": False}}
     assert training._wandb_run(cfg, tmp_path, None, 1, 1) is None
-
-
-def test_cosine_training_logs_rates_used_and_mines_identity_quota(
-    tiny_training_run, monkeypatch
-):
-    cfg, _, wandb_run, _ = tiny_training_run
-    cfg["train"].update(epochs=3, candidates=2)
-    cfg["optimizer"].update(schedule="cosine", min_lr_ratio=0.1)
-    cfg["train"]["sampling"].update(
-        identity_fraction=1,
-        identity_hard_fraction=1,
-        hard_fraction=0,
-        warmup_epochs=1,
-        refresh_every_epochs=2,
-    )
-    cfg["evaluation"]["enabled"] = False
-    cfg["wandb"]["log_every_steps"] = 1
-    seen_rates, mined = [], []
-    adamw = torch.optim.AdamW
-
-    def create_optimizer(*args, **kwargs):
-        optimizer = adamw(*args, **kwargs)
-        step = optimizer.step
-
-        def observe_step(*args, **kwargs):
-            seen_rates.append([group["lr"] for group in optimizer.param_groups])
-            return step(*args, **kwargs)
-
-        optimizer.step = observe_step
-        return optimizer
-
-    def mine(*args, **kwargs):
-        mined.append(len(seen_rates))
-        return {"train": ["n"]}
-
-    monkeypatch.setattr(torch.optim, "AdamW", create_optimizer)
-    monkeypatch.setattr(training, "mine_hard_negatives", mine)
-    checkpoint = training.train(cfg)
-    history = [
-        json.loads(line)
-        for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
-    ]
-    assert mined == [1]  # Same-ID mining works with general hard_fraction=0.
-    expected = [(1e-4, 1e-5), (5.5e-5, 5.5e-6), (1e-5, 1e-6)]
-    for used, row, pair in zip(seen_rates, history, expected, strict=True):
-        assert used == pytest.approx(pair)
-        assert [row["model_lr"], row["text_lr"]] == pytest.approx(pair)
-    assert [r["mining_active"] for r in history] == [False, True, True]
-    assert all("train_sampled_identity_hard" in r for r in history)
-    step_logs = [row for row in wandb_run.logs if "global_step" in row]
-    assert [r["train/model_lr"] for r in step_logs] == pytest.approx(
-        [p[0] for p in expected]
-    )
 
 
 def test_text_cache_reuses_right_padded_rows_without_saving_frozen_weights():
