@@ -107,7 +107,7 @@ retrieval:
   # penalized: include unmatched members in the mean.
   # matched_mean: normalize over matched evidence across Subjects.
   # subject_mean: normalize within each Subject, then average Subjects.
-  pooling: subject_mean
+  pooling: matched_mean
   fine_score_mode: context_zscore
   context_weight: 0.0225        # Weight of standardized, coverage-gated context.
   coarse_beta: 1.8              # Weight of the global state branch.
