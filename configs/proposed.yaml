@@ -60,9 +60,9 @@ model:
 
 # Training schedule and sampling.
 train:
-  epochs: 25
+  epochs: 35
   context_warmup_epochs: 4     # Epochs before enabling the context loss.
-  batch_size: 18               # Queries per batch.
+  batch_size: 24               # Queries per batch.
   candidates: 32              # Gallery candidates per query.
   case_balanced: true         # P(case) proportional to sqrt(N_case).
   seed: 0
@@ -107,10 +107,10 @@ retrieval:
   # penalized: include unmatched members in the mean.
   # matched_mean: normalize over matched evidence across Subjects.
   # subject_mean: normalize within each Subject, then average Subjects.
-  pooling: penalized
+  pooling: matched_mean
   fine_score_mode: context_zscore
-  context_weight: 0.01        # Weight of standardized, coverage-gated context.
-  coarse_beta: 2.0            # Weight of the global state branch.
+  context_weight: 0.0225       # Weight of standardized, coverage-gated context.
+  coarse_beta: 1.8             # Weight of the global state branch.
   fine_coarse_weight: 0.05     # Coarse contribution to the final ranking.
   top_m: 500
   fine_batch_size: 64
