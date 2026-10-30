@@ -30,7 +30,7 @@ def check_clip_config(cfg: dict) -> None:
 
 
 def _autocast_dtype(device_type: str):
-    """Return the active AMP dtype across old and new PyTorch APIs."""
+    """Return the active AMP dtype across supported PyTorch APIs."""
     try:
         enabled = torch.is_autocast_enabled(device_type)
     except TypeError:
@@ -312,8 +312,7 @@ class TextEncoder(nn.Module):
 
         self.global_dim = backbone.config.projection_dim
         self.proj = nn.Linear(self.global_dim, dim)
-        # Only frozen native CLIP features are cached. Context-projection gradients and
-        # optimizer updates must be recomputed on every visit to a text row.
+        # Cache frozen CLIP tokens; recompute the learned projection for gradients.
         self._hidden: OrderedDict[tuple, Tensor] = OrderedDict()
         self._hidden_limit = cache_mib * 1024**2
         self._hidden_bytes = 0
@@ -340,8 +339,7 @@ class TextEncoder(nn.Module):
         else:
             with torch.no_grad():
                 tokens = self._backbone_tokens(input_ids, attention_mask)
-        # Match CLIP's native pooling, including the legacy HF config whose
-        # eos_token_id=2 represents the highest token ID rather than literal 2.
+        # CLIP's eos_token_id=2 convention pools the highest token ID in each row.
         if self.backbone.config.eos_token_id == 2:
             eot = input_ids.int().argmax(-1)
         else:
@@ -387,8 +385,7 @@ class TextEncoder(nn.Module):
                 missing.setdefault(key, n)
         if missing:
             indices = torch.tensor(list(missing.values()), device=input_ids.device)
-            # Keep the caller's precision; AMP and FP32 visits have separate
-            # keys so validation cannot reuse approximate training features.
+            # Separate AMP/FP32 keys keep validation features at their own precision.
             hidden = self._backbone_tokens(
                 input_ids[indices], attention_mask[indices]
             ).cpu()

@@ -118,8 +118,6 @@ def select_samples(
         if not required_ids <= query_boxes.keys():
             raise ValueError(f"{sample_id}: subject identity missing from boxes")
 
-        # Preserve strict validation: only attach context to the error, never
-        # silently alter, skip, or accept an invalid annotation.
         try:
             validate_review_output(
                 case_type,

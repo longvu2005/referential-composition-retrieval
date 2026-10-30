@@ -56,8 +56,8 @@ context and global-state objectives. The context loss ranks raw `coverage * cont
 against same-ID negatives, without FDA or a trainable binding scale. Pairwise
 losses weight eligible queries equally; see the exact objectives in
 [proposed_method.md](proposed_method.md#objective-and-ranking).
-The default run uses 3 warmup epochs for grounding/identity/coarse/state, followed
-by 17 epochs with context enabled. `train.epochs` is the total, including warmup;
+The run starts with grounding/identity/coarse/state, then enables context after
+the configured warmup. `train.epochs` is the total, including warmup;
 `train.context_warmup_epochs` controls only context loss and must be smaller than
 that total. Composition and fine context scoring are skipped during warmup. The
 same optimizer continues, and the base objectives stay active afterwards.
@@ -70,10 +70,9 @@ all training epochs, independently of context and mining warmup. The first epoch
 uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
 the base rates. Actual rates are recorded in `history.jsonl` and W&B.
 
-Periodic validation uses Context z-score with initial `context_weight=0.0325`,
-normalizing only after scoring a query's complete Coarse Top-M. DINO/BERT checkpoints are
-incompatible; train a fresh CLIP checkpoint. To reproduce the previous fine
-ranking, use `--set retrieval.fine_score_mode=legacy_raw` at retrieval time.
+Periodic validation uses the configured retrieval weights, normalizing context
+after scoring a query's complete Coarse Top-M. `legacy_raw` remains available
+through `retrieval.fine_score_mode` for compatible saved runs.
 
 Training requires a fresh run directory; obsolete loss configs with
 `retrieval_weight` are rejected. Existing compatible checkpoints retain their
@@ -163,17 +162,17 @@ partial exports and test artifacts cannot be used to select parameters.
 fingerprints. Test retrieval checks the real checkpoint bytes against this hash.
 Matching thresholds, missing penalties and model weights remain fixed.
 
-`retrieval.pooling` accepts `penalized` (default), `matched_mean` and
-`subject_mean`. These select only FAFA aggregation; `method`, checkpoint names,
+`retrieval.pooling` accepts `penalized`, `matched_mean` and `subject_mean`.
+The checked-in config uses `matched_mean`; omitted keys fall back to `penalized`.
+These select only FAFA aggregation; `method`, checkpoint names,
 model weights and cache formats stay unchanged. Validation exports all three
 binding matrices from the same FDA forward pass, so calibration can sweep
 `pooling` without model execution. If `pooling` is omitted from a calibration
 YAML, the source artifact's pooling is retained. An older artifact can replay
 its recorded pooling, but switching pooling requires a new validation export.
 
-The default context-weight grid includes 0 (context off), the initial 0.0325 and
-a broader range up to 1 for new fixed-alpha training runs. These are validation
-search points, not measured optima. Refine the grid on validation only.
+The context-weight grid includes context-off and larger weights. These are
+validation search points, not measured optima. Refine the grid on validation only.
 
 ## 5. Run the frozen test configuration
 
@@ -266,8 +265,10 @@ statistics are computed on CPU float32 over the complete relevant vector, never
 per inference chunk. Stable coarse ties retain gallery order; shortlist ties
 retain coarse order, and fine reranking preserves the coarse tail.
 
-The raw matrices occupy `20*Q*G` bytes, about 28.6 MiB at 264 queries and 5,684
-images. Full-gallery collection requires `Q*(G-1)` fine pairs. The training
+The seven distinct raw matrices occupy `28*Q*G` bytes, about 40.1 MiB at 264
+queries and 5,684 images. `fafa_binding` aliases the selected `binding_*` matrix,
+including after saving/loading; treat raw score matrices as immutable.
+Full-gallery collection requires `Q*(G-1)` fine pairs. The training
 validation loop and test retrieval only compute Top-M fine pairs, and record
 `score_alignment: coarse_topm`; their shortlist artifacts cannot supply offline
 calibration. Official validation records `score_alignment: gallery_ids`.

@@ -65,8 +65,12 @@ def negative_exclusions(samples: list[dict]) -> dict[str, set[str]]:
     Retain each query's reviewed positives. Disputed negative pairs are ignored;
     no positives are merged and no evaluation labels are modified.
     """
+    return _negative_exclusions(positive_conflicts(samples))
+
+
+def _negative_exclusions(conflicts):
     excluded = {}
-    for group in positive_conflicts(samples):
+    for group in conflicts:
         for row in group["samples"]:
             excluded[row["sample_id"]] = (
                 set(group["disputed_image_ids"])
@@ -124,7 +128,7 @@ def audit_data(data) -> dict:
             "conflict_groups": len(conflicts),
             "conflict_queries": sum(len(g["samples"]) for g in conflicts),
             "excluded_negative_pairs": sum(
-                len(ids) for ids in negative_exclusions(samples).values()
+                len(ids) for ids in _negative_exclusions(conflicts).values()
             ),
             "conflicts": conflicts,
         }

@@ -34,8 +34,9 @@ Fine normalization uses the complete coarse Top-M, FP32 population standard
 deviation and epsilon `1e-6`. A zero fusion weight returns the fine score directly.
 The remaining gallery retains coarse order.
 
-The default schedule has 20 epochs, with context disabled for the first 3.
-Grounding, identity, coarse and state objectives remain active during warmup.
+`train.epochs` sets the total run length; `train.context_warmup_epochs` disables
+context initially while grounding, identity, coarse and state stay active.
+Both optimizer groups use cosine decay throughout the run.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
 offline calibration then selects scoring parameters using validation Full-mAP.
 Test uses the frozen selection.
@@ -166,8 +167,9 @@ Cache paths follow their role: `cache/detections`, `cache/scene`,
 
 Validation saves complete raw score matrices for offline calibration/replay.
 It fine-scores every non-self query/gallery pair; periodic training validation
-and test fine-score only Top-M. Raw matrices require about `20*Q*G` bytes in
-addition to rankings. Checkpoints omit optimizer state and frozen backbone
+and test fine-score only Top-M. Raw matrices require about `28*Q*G` bytes in
+addition to rankings; `fafa_binding` shares the selected pooling matrix.
+Checkpoints omit optimizer state and frozen backbone
 weights, so they are inference artifacts rather than resumable training states.
 See [score artifacts and CPU replay](docs/proposed_runs.md#score-artifacts-and-cpu-replay).
 

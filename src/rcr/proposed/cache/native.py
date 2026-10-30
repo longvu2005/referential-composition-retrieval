@@ -293,14 +293,12 @@ class NativeFAFACache:
         return out
 
     def load_targets(self, indices: Tensor, max_people: int) -> Tensor:
-        # Keep the on-disk precision through CPU collation and H2D transfer.
-        # FDA converts only the identity-assigned rows to FP32 after gathering.
+        # Transfer storage precision; FDA converts assigned rows to FP32.
         out = None
         rows = {}
         for n, i in enumerate(indices.tolist()):
             rows.setdefault(i, []).append(n)
-        # Retain one shard at a time alongside the padded output, even when
-        # candidate images repeat across queries in a training batch.
+        # Repeated image IDs share one shard read alongside the padded output.
         for i, positions in rows.items():
             count = int(self.gallery.mask[i].sum())
             if count > max_people:

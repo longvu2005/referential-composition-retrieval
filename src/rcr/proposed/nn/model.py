@@ -130,8 +130,7 @@ class RCRModel(nn.Module):
             nn.Linear(person_input_dim, dim), nn.LayerNorm(dim)
         )
         self.identity_head = IdentityHead(dim, identity_dim)
-        # A fixed reference scale: calibration owns the relative context weight.
-        # Keep its state key/value so existing checkpoint inference stays exact.
+        # Keep the checkpoint scale; calibration controls the context weight.
         self.binding_log_scale = nn.Parameter(
             torch.tensor(math.log(math.expm1(1.0))), requires_grad=False
         )
@@ -266,8 +265,7 @@ class RCRModel(nn.Module):
             selection_threshold=self.fine_matching["selection_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )
-        # The fine reference contains only selected, uniquely owned people.
-        # Detaching its weights prevents retrieval from hiding difficult members.
+        # Detached membership prevents context from hiding difficult members.
         member_logits = torch.logit(membership.clamp(1e-6, 1 - 1e-6)).masked_fill(
             membership == 0, -torch.inf
         )
@@ -333,8 +331,7 @@ class RCRModel(nn.Module):
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
         semantic = self.encode_semantic(persons)
-        # Identity fixes the assignment. Only aligned context receives gradients
-        # through this path; crop identity has its own explicit objectives.
+        # Matching uses detached identity; context learns from aligned evidence.
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
         matching = partial_identity_matching(

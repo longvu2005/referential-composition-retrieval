@@ -409,7 +409,7 @@ def train(cfg: dict) -> Path:
     hard_pools = None
 
     for epoch in range(1, epochs + 1):
-        # Use the base rates first and reach each group's floor in the final epoch.
+        # Apply one cosine factor to both groups without resetting AdamW state.
         progress = (epoch - 1) / max(1, epochs - 1)
         lr_factor = (
             min_lr_ratio + (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress)) / 2
@@ -470,6 +470,11 @@ def train(cfg: dict) -> Path:
             ),
             0.0,
         )
+        state_pairs_epoch = (
+            torch.zeros((), dtype=torch.long, device=device)
+            if cfg["loss"]["state_weight"]
+            else None
+        )
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs} ({phase})")
         for rows in progress:
             candidates = sample_candidates(
@@ -499,14 +504,14 @@ def train(cfg: dict) -> Path:
                 identity_crops=identity_crops,
                 text_cache=text_cache,
             )
-            positives = (batch["positive_mask"] & batch["identity_positive_mask"]).sum(
-                1
-            )
-            negatives = (~batch["positive_mask"] & batch["identity_positive_mask"]).sum(
-                1
-            )
-            if cfg["loss"]["state_weight"]:
-                state_pairs_seen += int((positives * negatives).sum())
+            if state_pairs_epoch is not None:
+                positives = (
+                    batch["positive_mask"] & batch["identity_positive_mask"]
+                ).sum(1)
+                negatives = (
+                    ~batch["positive_mask"] & batch["identity_positive_mask"]
+                ).sum(1)
+                state_pairs_epoch += (positives * negatives).sum()
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
@@ -551,6 +556,8 @@ def train(cfg: dict) -> Path:
                     }
                 )
 
+        if state_pairs_epoch is not None:
+            state_pairs_seen += int(state_pairs_epoch)
         epoch_log = {
             "epoch": epoch,
             "phase": phase,

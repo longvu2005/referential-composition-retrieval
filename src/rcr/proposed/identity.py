@@ -12,10 +12,10 @@ def identity_sampling_settings(config):
         "max_crops": 0,
         "crops_per_identity": 2,
         "random_identities": 8,
-        **config,
     }
-    if set(settings) != {"max_crops", "crops_per_identity", "random_identities"}:
+    if config.keys() - settings.keys():
         raise ValueError("unknown train.identity_sampling setting")
+    settings.update(config)
     if settings["max_crops"] < 0 or settings["crops_per_identity"] < 1:
         raise ValueError("invalid identity crop limits")
     if settings["random_identities"] < 0:

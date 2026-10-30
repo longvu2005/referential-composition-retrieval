@@ -20,6 +20,8 @@ def pool_fafa_scores(
     """Pool matched FDA evidence with confidence weights and active Subject masks."""
     member = matching.membership.float()
     active = matching.subjects.bool()
+    subject_count = active.sum(-1).clamp_min(1)
+    empty = ~active.any(-1)
     denominator = member.sum(-1)
     weights = member / denominator[..., None].clamp_min(1e-6)
 
@@ -28,8 +30,8 @@ def pool_fafa_scores(
     per_subject = (value * weights).sum(-1)
     per_subject = per_subject.masked_fill(denominator == 0, -missing_penalty)
     per_subject = per_subject.masked_fill(~active, 0)
-    penalized = per_subject.sum(-1) / active.sum(-1).clamp_min(1)
-    penalized = penalized.masked_fill(~active.any(-1), -missing_penalty)
+    penalized = per_subject.sum(-1) / subject_count
+    penalized = penalized.masked_fill(empty, -missing_penalty)
 
     matched = matching.matched[:, None] & (member > 0) & active[..., None]
     matched_weights = weights.masked_fill(~matched, 0)
@@ -46,8 +48,8 @@ def pool_fafa_scores(
     subject_values = numerator / mass.clamp_min(1e-6)
     subject_values = subject_values.masked_fill(mass == 0, -missing_penalty)
     subject_values = subject_values.masked_fill(~active, 0)
-    subject_mean = subject_values.sum(-1) / active.sum(-1).clamp_min(1)
-    subject_mean = subject_mean.masked_fill(~active.any(-1), -missing_penalty)
+    subject_mean = subject_values.sum(-1) / subject_count
+    subject_mean = subject_mean.masked_fill(empty, -missing_penalty)
     return {
         "penalized": penalized,
         "matched_mean": matched_mean,

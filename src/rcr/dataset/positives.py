@@ -11,9 +11,10 @@ def validate_positive_set(source: dict, payload: dict) -> dict:
         raise ValueError(f"{sample_id}: sample_id mismatch")
 
     candidate_ids = [candidate["image_id"] for candidate in source["candidates"]]
+    candidates = set(candidate_ids)
     if (
         not candidate_ids
-        or len(candidate_ids) != len(set(candidate_ids))
+        or len(candidate_ids) != len(candidates)
         or candidate_ids[0] != source["seed_target_image_id"]
     ):
         raise ValueError(f"{sample_id}: candidates must be unique with seed first")
@@ -22,18 +23,18 @@ def validate_positive_set(source: dict, payload: dict) -> dict:
         not isinstance(image_id, str) or not image_id for image_id in positive_ids
     ):
         raise ValueError(f"{sample_id}: positive_image_ids must be a string list")
-    if len(set(positive_ids)) != len(positive_ids):
+    selected = set(positive_ids)
+    if len(selected) != len(positive_ids):
         raise ValueError(f"{sample_id}: duplicate positive_image_id")
 
-    invalid = set(positive_ids) - set(candidate_ids)
+    invalid = selected - candidates
     if invalid:
         raise ValueError(f"{sample_id}: invalid positive_image_id {sorted(invalid)[0]}")
 
     seed_id = source["seed_target_image_id"]
-    if seed_id not in positive_ids:
+    if seed_id not in selected:
         raise ValueError(f"{sample_id}: seed target must remain selected")
 
-    selected = set(positive_ids)
     return {
         "sample_id": sample_id,
         "positive_image_ids": [

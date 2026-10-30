@@ -15,6 +15,7 @@ from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.evaluation.report import ReportError, load_run
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, retrieve
+from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.replay import replay_rankings
@@ -201,10 +202,12 @@ def test_renamed_architecture_loads_existing_checkpoint_without_changing_scores(
     assert sha256_file(cfg["checkpoint"]) == digest
 
 
+@pytest.mark.parametrize("pooling", ["penalized", "matched_mean", "subject_mean"])
 def test_report_rejects_test_without_complete_validation_selection(
-    saved_pipeline, tmp_path
+    saved_pipeline, tmp_path, pooling
 ):
     cfg, data, _ = saved_pipeline
+    cfg["retrieval"]["pooling"] = pooling
     retrieve.retrieve(cfg)
     evaluate_run(cfg, data=data)
     source = Path(cfg["output"]["dir"]) / "val"
@@ -234,14 +237,9 @@ def test_report_rejects_test_without_complete_validation_selection(
     with pytest.raises(ReportError, match="validation-selected configuration"):
         load_run("proposed", directory, "test")
 
-    keys = (
-        "fine_score_mode",
-        "context_weight",
-        "coarse_beta",
-        "fine_coarse_weight",
-        "top_m",
-    )
-    run["config"]["selected_retrieval"] = {key: run["retrieval"][key] for key in keys}
+    run["config"]["selected_retrieval"] = {
+        key: run["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
+    }
     publish()
     assert load_run("proposed", directory, "test")["run"] == run
 

@@ -33,20 +33,20 @@ person_encoder:
 cache:
   storage_dtype: float16
   lru_mib: 1024                 # Scene cache.
-  native_lru_mib: 256          # FAFA cache.
+  native_lru_mib: 256           # FAFA cache.
   supervision_cache: cache/train-supervision.json
   mmap_shards: false
-  text_lru_mib: 256            # Frozen CLIP text features.
+  text_lru_mib: 256             # Frozen CLIP text features.
 
 # Trainable model architecture.
 model:
   text_model: openai/clip-vit-base-patch32
-  dim: 384                     # Shared feature dimension.
+  dim: 384                      # Shared feature dimension.
   dropout: 0.1
   identity_dim: 128
-  fda_k: 6                     # Top-K FAFA token similarities.
+  fda_k: 6                      # Top-K FAFA token similarities.
   state_dim: 512
-  coarse_beta: 0.4             # Default state fusion weight.
+  coarse_beta: 0.4              # Default state fusion weight.
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
@@ -55,16 +55,16 @@ model:
   fine_matching:
     selection_threshold: 0.5
     identity_threshold: 0.2
-    missing_penalty: 1.1       # Magnitude of the missing-evidence penalty.
-    duplicate_iou: 0.9         # Suppress near-identical detections.
+    missing_penalty: 1.1        # Magnitude of the missing-evidence penalty.
+    duplicate_iou: 0.9          # Suppress near-identical detections.
 
 # Training schedule and sampling.
 train:
   epochs: 35
-  context_warmup_epochs: 4     # Epochs before enabling the context loss.
-  batch_size: 24               # Queries per batch.
-  candidates: 32              # Gallery candidates per query.
-  case_balanced: true         # P(case) proportional to sqrt(N_case).
+  context_warmup_epochs: 4      # Epochs before enabling the context loss.
+  batch_size: 24                # Queries per batch.
+  candidates: 32                # Gallery candidates per query.
+  case_balanced: true           # P(case) proportional to sqrt(N_case).
   seed: 0
   amp: true
   mining_batch_size: 8
@@ -80,15 +80,15 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
-    warmup_epochs: 50          # Delay hard-negative mining only.
+    warmup_epochs: 50           # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
 
 # Optimization of the trainable projections and reasoning modules.
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05
-  min_lr_ratio: 0.1           # Final/base LR ratio for cosine decay.
+  text_lr: 1.0e-05              # Learned text projection.
+  min_lr_ratio: 0.1             # Final/base LR ratio for cosine decay.
   weight_decay: 0.01
 
 # Training objectives.
@@ -109,9 +109,9 @@ retrieval:
   # subject_mean: normalize within each Subject, then average Subjects.
   pooling: matched_mean
   fine_score_mode: context_zscore
-  context_weight: 0.0225       # Weight of standardized, coverage-gated context.
-  coarse_beta: 1.8             # Weight of the global state branch.
-  fine_coarse_weight: 0.05     # Coarse contribution to the final ranking.
+  context_weight: 0.0225        # Weight of standardized, coverage-gated context.
+  coarse_beta: 1.8              # Weight of the global state branch.
+  fine_coarse_weight: 0.05      # Coarse contribution to the final ranking.
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512

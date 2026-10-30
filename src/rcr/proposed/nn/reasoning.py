@@ -121,9 +121,8 @@ class FineReasoner(nn.Module):
                     attn_mask=attn_mask,
                     need_weights=False,
                 )
-                # First update the member tokens with directed pair evidence;
-                # a second round lets CLS/text read those updated members.
-                # A single round would leave pair geometry invisible to CLS.
+                # The first round updates members; the second lets CLS/text
+                # read their directed pair geometry.
                 query = self.norm_self(query + self.dropout(update))
                 update, _ = self.self_attn(
                     query.float(),
@@ -147,8 +146,7 @@ class FineReasoner(nn.Module):
         return self.score(query[:, 0]).squeeze(-1)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        # Checkpoints before the aligned-matching path was finalized contain an
-        # unused cross-attention block. Its weights never affected current scores.
+        # Ignore cross-attention keys absent from the aligned-matching architecture.
         for key in list(state_dict):
             if key.startswith(f"{prefix}cross_attn."):
                 state_dict.pop(key)

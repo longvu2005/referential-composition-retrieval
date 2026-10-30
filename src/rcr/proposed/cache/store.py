@@ -266,8 +266,7 @@ class GalleryCache:
             "image_id" in item and item["image_id"] != self.image_ids[index]
         ):
             raise ValueError(f"cache feature {index} does not match index.pt")
-        # Legacy shards can contain identity_ids. They never enter the feature
-        # API or its LRU; training computes fresh alignment from train GT only.
+        # Keep feature payloads label-free; training owns its GT alignment.
         names = (
             ("boxes_scene", "boxes_pixel")
             if geometry_only
@@ -301,10 +300,8 @@ class GalleryCache:
             )
             item["persons"] = self.person_row(index).clone()
         elif self._scene_cache is not None:
-            # The published person index is authoritative. FAFA shards are only
-            # extraction checkpoints and may be removed during finalization.
-            # Clone the row so a small LRU item does not retain/count the whole
-            # memory-mapped person index as its tensor storage.
+            # The published person index is authoritative. Clone rows so an LRU
+            # item does not retain the entire memory-mapped tensor storage.
             persons = self.person_row(index).clone()
             item = {**self._scene_cache._load_item(index), "persons": persons}
         else:

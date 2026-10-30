@@ -24,9 +24,9 @@ def normalize_review_assignment(
 
     candidate_order = None
     if candidate_identity_ids is not None:
-        if len(candidate_identity_ids) != len(set(candidate_identity_ids)):
-            raise ValueError(f"{submission_id}: duplicate candidate identity_id")
         candidate_order = {x: i for i, x in enumerate(candidate_identity_ids)}
+        if len(candidate_identity_ids) != len(candidate_order):
+            raise ValueError(f"{submission_id}: duplicate candidate identity_id")
 
     assigned = set()
     normalized = []
@@ -50,7 +50,7 @@ def normalize_review_assignment(
 
         identity_set = set(identity_ids)
         if candidate_order is not None:
-            invalid = identity_set - set(candidate_order)
+            invalid = identity_set - candidate_order.keys()
             if invalid:
                 raise ValueError(
                     f"{submission_id}: invalid identity_id for Subject {subject_id}: "

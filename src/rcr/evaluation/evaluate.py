@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from statistics import fmean
 
@@ -90,7 +91,7 @@ def evaluate_retrieval_output(
             samples,
             gallery_ids,
             identities_by_image,
-            decode(output[field], field),
+            coarse if field == "coarse_rankings" else decode(output[field], field),
             candidate_ks=(),
         )
         for key, value in branch_result["overall"].items():
@@ -115,6 +116,23 @@ def evaluate_retrieval_output(
                 }
             )
     return result
+
+
+def _identity_image_index(gallery_ids, identities_by_image):
+    """Index gallery images once for repeated identity-positive lookups."""
+    images = defaultdict(set)
+    for image_id in gallery_ids:
+        for identity in identities_by_image.get(image_id, ()):
+            images[identity].add(image_id)
+    return images
+
+
+def _identity_positive_set(sample, images_by_identity):
+    required_ids = set(required_identity_ids(sample))
+    if not required_ids:
+        raise ValueError(f"{sample['sample_id']}: no required identities")
+    pools = [images_by_identity.get(identity, set()) for identity in required_ids]
+    return set.intersection(*pools) - {sample["query_image_id"]}
 
 
 def identity_positive_ids(
@@ -206,6 +224,7 @@ def evaluate_rankings(
     if any(k <= 0 for k in candidate_ks):
         raise ValueError("candidate_ks must be positive")
 
+    images_by_identity = _identity_image_index(gallery_ids, identities_by_image)
     rows = []
     seen_sample_ids = set()
 
@@ -230,9 +249,7 @@ def evaluate_rankings(
         if not full_positives:
             raise ValueError(f"{sample_id}: no Full Positives")
 
-        id_positives = set(
-            identity_positive_ids(sample, gallery_ids, identities_by_image)
-        )
+        id_positives = _identity_positive_set(sample, images_by_identity)
         if not full_positives <= id_positives:
             raise ValueError(
                 f"{sample_id}: every Full Positive must also be an ID Positive"

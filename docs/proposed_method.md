@@ -164,7 +164,7 @@ alone does not enforce group/relation correctness.
 
 Let `pi(i)` be the shared identity assignment or null. `retrieval.pooling`
 selects the reduction of native FDA evidence; the method remains `proposed`.
-The default `penalized` reduction is:
+The `penalized` reduction is:
 
 ```text
 E_si = a_F_si,pi(i)                        # matched
@@ -190,6 +190,9 @@ They do not change context gating, training losses, model parameters or cache
 features. Identity cosine is not added again. FDA lies in [-1,1], and the null
 penalty magnitude remains greater than 1. Empty selection blocks contextual
 retrieval gradients, preserving the grounding/matching decision.
+
+The checked-in config selects `matched_mean`; omitting `retrieval.pooling`
+retains the `penalized` fallback for existing configs.
 
 `EvidenceBinding` conditions scene patches on the composed reference, but its
 person inputs are gathered using `pi`. Target evidence and geometry are injected

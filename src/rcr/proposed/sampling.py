@@ -60,18 +60,10 @@ def sampling_settings(config):
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
         "pool_size": 100,
-        **config,
     }
-    known = {
-        "positives_per_query",
-        "identity_fraction",
-        "hard_fraction",
-        "warmup_epochs",
-        "refresh_every_epochs",
-        "pool_size",
-    }
-    if set(settings) != known:
+    if config.keys() - settings.keys():
         raise ValueError("unknown train.sampling setting")
+    settings.update(config)
     if settings["positives_per_query"] < 1:
         raise ValueError("positives_per_query must be positive")
     fractions = settings["identity_fraction"], settings["hard_fraction"]

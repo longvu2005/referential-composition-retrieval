@@ -17,6 +17,7 @@ def audit_full_positives(data, catalog=None, decisions=None):
     """
     tasks = index_unique(catalog or [], "sample_id", "positive catalog")
     saved = index_unique(decisions or [], "sample_id", "positive decisions")
+    registered_images = set(data.images_by_id)
     identities = {
         i: {str(r["identity_id"]) for r in rows}
         for i, rows in data.gt_head_boxes_by_image.items()
@@ -61,7 +62,8 @@ def audit_full_positives(data, catalog=None, decisions=None):
                 else set()
             ) & gallery_set - {query}
             raw = sample["positive_image_ids"]
-            full = set(raw) & gallery_set
+            positive_ids = set(raw)
+            full = positive_ids & gallery_set
             issues = []
             if not required:
                 issues.append("empty_required_identities")
@@ -75,11 +77,11 @@ def audit_full_positives(data, catalog=None, decisions=None):
                 issues.append("missing_seed_positive")
             if not full:
                 issues.append("empty_split_positive_set")
-            if len(raw) != len(set(raw)):
+            if len(raw) != len(positive_ids):
                 issues.append("duplicate_positive_ids")
-            if query in raw:
+            if query in positive_ids:
                 issues.append("self_positive")
-            if set(raw) - set(data.images_by_id):
+            if positive_ids - registered_images:
                 issues.append("unregistered_positive_ids")
             invalid = {i for i in raw if not required <= identities.get(i, set())}
             if invalid:
@@ -136,7 +138,9 @@ def audit_full_positives(data, catalog=None, decisions=None):
                     "scope_status": status,
                     "id_positive_image_ids": ordered(eligible),
                     "full_positive_image_ids": ordered(full),
-                    "out_of_split_positive_image_ids": sorted(set(raw) - gallery_set),
+                    "out_of_split_positive_image_ids": sorted(
+                        positive_ids - gallery_set
+                    ),
                     "invalid_identity_positive_image_ids": sorted(invalid),
                     "missing_catalog_image_ids": ordered(eligible - scope),
                     "unconfirmed_negative_image_ids": ordered(unconfirmed),

@@ -111,9 +111,8 @@ class DetectionCache:
         self.mask = (
             torch.arange(int(counts.max()) if count else 0)[None] < counts[:, None]
         )
-        # Grounding DINO may predict boxes crossing the image boundary. Keep
-        # them exact: PIL crop padding and scene-coordinate clipping are owned
-        # by the existing consumers, not an extra detector postprocessing step.
+        # Preserve out-of-frame boxes: cropping handles padding and scene
+        # conversion clips coordinates.
         _validate_boxes(self.boxes)
 
     def validate_gallery(self, image_ids):

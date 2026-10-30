@@ -93,7 +93,7 @@ def test_native_fda_remains_detached_and_default_preserves_penalized_mean():
 
 
 @pytest.mark.parametrize("mode", POOLING_MODES)
-def test_pooling_replay_matches_direct_inference(tiny_ranker, mode):
+def test_pooling_replay_matches_direct_inference(tiny_ranker, mode, tmp_path):
     source = _rank(tiny_ranker)
     result = replay_rankings(source, pooling=mode)
     direct = _rank(tiny_ranker, pooling=mode)
@@ -104,6 +104,12 @@ def test_pooling_replay_matches_direct_inference(tiny_ranker, mode):
     assert torch.equal(result["rankings"], direct["rankings"])
     assert torch.equal(result["fafa_rankings"], direct["fafa_rankings"])
     assert source["score_config"]["pooling"] == "penalized"
+    assert direct["fafa_binding"] is direct[f"binding_{mode}"]
+    path = tmp_path / "rankings.pt"
+    torch.save(direct, path)
+    loaded = torch.load(path, map_location="cpu", weights_only=True)
+    assert loaded["fafa_binding"].data_ptr() == loaded[f"binding_{mode}"].data_ptr()
+    assert torch.equal(replay_rankings(loaded)["rankings"], direct["rankings"])
 
 
 def test_multi_subject_export_retains_a_completely_missing_role(

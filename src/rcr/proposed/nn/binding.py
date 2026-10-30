@@ -54,8 +54,7 @@ class EvidenceBinding(nn.Module):
     ) -> Tensor:
         """scene [B,P,D], persons [B,K,D], boxes [B,K,4], reference [B,L,D]."""
 
-        # Additive membership prior is applied to reference KEYS, before scene
-        # reads the reference. CLS always provides a valid key for empty queries.
+        # Apply membership priors to reference keys; CLS keeps empty queries valid.
         attn_mask = None
         if reference_key_bias is not None or reference_mask is not None:
             prior = (
@@ -82,9 +81,7 @@ class EvidenceBinding(nn.Module):
         if persons.shape[1] == 0:
             return persons
 
-        # A float32 bias alone is insufficient: SDPA under FP16 autocast can
-        # overflow on large geometry offsets. Keep this attention region FP32;
-        # the text encoder, reference attention and FFNs still use outer AMP.
+        # Geometry offsets can overflow FP16 attention; compute this region in FP32.
         with torch.autocast(persons.device.type, enabled=False):
             update, _ = self.person_attn(
                 persons.float(),
@@ -99,9 +96,8 @@ class EvidenceBinding(nn.Module):
     def _geo_bias(self, boxes: Tensor, patch_hw: tuple[int, int]) -> Tensor:
         """Return additive geometry bias [B*H, K, P] for normalized xyxy boxes."""
 
-        # Padding/degenerate boxes have no geometry. Give them a neutral bias
-        # rather than dividing patch offsets by 1e-6. Valid small boxes retain
-        # their original geometry, protected by the FP32 attention above.
+        # Degenerate boxes receive neutral geometry; valid small boxes retain
+        # their offsets under FP32 attention.
         with torch.autocast(boxes.device.type, enabled=False):
             boxes = boxes.float()
             hp, wp = patch_hw

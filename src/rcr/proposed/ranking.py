@@ -445,10 +445,11 @@ def retrieve_rankings(
             order = torch.argsort(coarse, descending=True, stable=True)
             order = order[order != query_index]
             top = order[:top_m]
+            top_device = top.to(device)
+            binding_key = f"binding_{pooling}"
             components = {
                 key: torch.zeros(len(gallery_ids), device=device, dtype=torch.float32)
                 for key in (
-                    "binding",
                     "context",
                     "coverage",
                     *(f"binding_{mode}" for mode in POOLING_MODES),
@@ -479,10 +480,13 @@ def retrieve_rankings(
                             raise ValueError("fine score components contain NaN/Inf")
                         components[key][local] = values
 
-            score_targets(top.to(device))
+            score_targets(top_device)
             raw = {
-                key: components[key][top.to(device)].cpu()
-                for key in ("binding", "context", "coverage")
+                "binding": components[binding_key][top_device].cpu(),
+                **{
+                    key: components[key][top_device].cpu()
+                    for key in ("context", "coverage")
+                },
             }
             scored = fine_score_components(
                 **raw,
@@ -513,7 +517,6 @@ def retrieve_rankings(
                 score_targets(order[len(top) :].to(device))
                 row.update(identity_scores=identity, state_scores=state)
             for field, key in (
-                ("fafa_binding", "binding"),
                 ("context", "context"),
                 ("coverage", "coverage"),
                 *((f"binding_{mode}", f"binding_{mode}") for mode in POOLING_MODES),
@@ -521,10 +524,10 @@ def retrieve_rankings(
                 row[field] = (
                     components[key].cpu()
                     if full_gallery_scores
-                    else components[key][top.to(device)].cpu()
+                    else components[key][top_device].cpu()
                 )
             rows.append(row)
-    return {
+    output = {
         "sample_ids": [sample["sample_id"] for sample in samples],
         "gallery_ids": gallery_ids,
         "score_schema_version": SCORE_SCHEMA_VERSION,
@@ -539,6 +542,9 @@ def retrieve_rankings(
         "provenance": {},
         **{key: torch.stack([row[key] for row in rows]) for key in rows[0]},
     }
+    # The selected binding is an alias, not another full score matrix.
+    output["fafa_binding"] = output[f"binding_{pooling}"]
+    return output
 
 
 @torch.inference_mode()

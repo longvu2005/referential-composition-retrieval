@@ -119,9 +119,8 @@ def _load_data(final_dir, image_root, *, inputs_only):
     samples_by_id = index_unique(samples, "sample_id", "samples.jsonl")
     images_by_id = index_unique(images, "image_id", "images.jsonl")
     gallery_ids = [row["image_id"] for row in gallery]
-    if len(set(gallery_ids)) != len(gallery_ids) or set(gallery_ids) != set(
-        images_by_id
-    ):
+    gallery = set(gallery_ids)
+    if len(gallery) != len(gallery_ids) or gallery != images_by_id.keys():
         raise ValueError("gallery must contain every registered image exactly once")
     splits = _load_split_ids(final_dir)
     seen = set()
