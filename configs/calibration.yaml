@@ -1,9 +1,10 @@
 # Offline validation selection from saved full-gallery scores.
 rankings: runs/proposed/val/rankings.pt
 output_dir: runs/proposed-calibration
+selection_metric: checkpoint_score  # Mean of overall and macro-case Full-mAP.
 pooling: [penalized, matched_mean, subject_mean]
-coarse_beta: [0.0, 0.1, 0.25, 0.4, 0.5, 1.0, 2.0, 4.0]
-fine_coarse_weight: [0.0, 0.0025, 0.005, 0.0064, 0.01, 0.025, 0.05, 0.1, 0.4]
+coarse_beta: [0.0, 0.4, 1.0, 1.25, 1.5, 1.8, 2.0, 2.5, 4.0]
+fine_coarse_weight: [0.0, 0.025, 0.05, 0.075, 0.1, 0.15, 0.4]
 # Include context-off as a reference.
-context_weight: [0.0, 0.01, 0.0325, 0.1, 0.3, 1.0]
+context_weight: [0.0, 0.01, 0.0225, 0.0325, 0.05, 0.1]
 top_m: [100, 250, 500]

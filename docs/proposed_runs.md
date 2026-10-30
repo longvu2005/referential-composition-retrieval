@@ -142,11 +142,25 @@ checkpoint fingerprint and fixed matching settings; no separate model config or
 top-level `method` is needed in the calibration YAML.
 
 Calibration jointly searches `pooling`, `coarse_beta`, `top_m`, `context_weight` and
-`fine_coarse_weight`, using validation Full-mAP. The fine mode remains the one
-recorded in the source artifact. Grid evaluation groups beta, Top-M, pooling,
+`fine_coarse_weight`. The default `selection_metric: checkpoint_score` matches
+training: the mean of overall Full-mAP and macro-case Full-mAP over populated
+cases. `full_map` and `macro_full_map` are also supported. The fine mode remains
+the one recorded in the source artifact. The exact source configuration is
+evaluated first, even outside the grid, so the selected criterion cannot regress
+against this baseline. Duplicate grid values are evaluated once.
+
+Grid evaluation groups beta, Top-M, pooling,
 context weight, then fusion weight to reuse coarse order, gathered raw scores,
 context population statistics, fine diagnostics and fusion z-scores. The first
-maximum in `summary.csv` wins ties. The cache retains only the current group.
+maximum in `summary.csv` wins ties, preserving the source on an equal score.
+Labels are indexed once; AP/R@K use positive ranks with the official arithmetic.
+Unchanged diagnostic branches reuse their metrics. The selected result is
+evaluated again through the complete official evaluator before export is done.
+The caches retain only the current group and one result per ranking branch.
+`summary.csv` retains the existing metrics and adds `macro_full_map` and
+`checkpoint_score`. `selection.json` records the criterion, baseline value and
+improvement. Calibration still compares all poolings listed in its YAML; use
+`pooling: [subject_mean]` to restrict the grid while retaining the source baseline.
 
 Outputs are `summary.csv`, `selection.json`, `selected.yaml` and the best
 `selected/val/{rankings.pt,run.json,metrics.json}`. Evaluation cutoffs

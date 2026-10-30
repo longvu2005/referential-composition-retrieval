@@ -261,13 +261,13 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
             "top_m": [cfg["retrieval"]["top_m"]],
         }
     )
-    assert len(rows) == 4
+    assert len(rows) == 5  # Source configuration plus four grid candidates.
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     assert selected["retrieval"]["fine_score_mode"] == "context_zscore"
     assert selected["retrieval"]["context_weight"] == cfg["retrieval"]["context_weight"]
     assert selected["selected_validation_sha256"] == split_fingerprint(data, "val")
     assert len(selected["selected_checkpoint_sha256"]) == 64
-    best = max(rows, key=lambda row: row["full_map"])
+    best = max(rows, key=lambda row: row["checkpoint_score"])
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     assert expected["score_config"]["coarse_beta"] == best["coarse_beta"]
     output = retrieve.retrieve(selected)

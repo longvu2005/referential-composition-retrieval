@@ -2,9 +2,11 @@
 
 import math
 from copy import deepcopy
-from itertools import product
+from itertools import chain, product
 from pathlib import Path
+from statistics import fmean
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -21,7 +23,13 @@ from rcr.common.io import (
     write_json,
     write_summary,
 )
-from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.evaluate import (
+    RECALL_KS,
+    _aggregate_cases,
+    _aggregate_overall,
+    evaluate_retrieval_output,
+    identity_positive_ids,
+)
 from rcr.evaluation.provenance import digest_json, runtime_metadata
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
@@ -30,9 +38,120 @@ from rcr.proposed.replay import _replay_rankings, _validate_artifact
 from rcr.proposed.scores import POOLING_MODES
 
 
-def _write_selection(cfg: dict, root: Path, rows: list[dict]) -> dict:
+class _CalibrationEvaluator:
+    """Reuse labels and unchanged branches for validated CPU replay outputs."""
+
+    def __init__(self, data, samples, source, candidate_ks):
+        gallery = source["gallery_ids"]
+        evaluate_retrieval_output(
+            data,
+            samples,
+            {key: source[key] for key in ("sample_ids", "gallery_ids", "rankings")},
+            candidate_ks=candidate_ks,
+            split="val",
+        )
+        by_id = {image_id: i for i, image_id in enumerate(gallery)}
+        identities = {
+            image_id: {
+                box["identity_id"]
+                for box in data.gt_head_boxes_by_image.get(image_id, [])
+            }
+            for image_id in gallery
+        }
+        self.targets = [
+            {
+                "id": [
+                    by_id[i] for i in identity_positive_ids(row, gallery, identities)
+                ],
+                "full": [by_id[i] for i in set(row["positive_image_ids"])],
+            }
+            for row in samples
+        ]
+        self.samples = samples
+        self.gallery_size = len(gallery)
+        self.candidate_ks = tuple(candidate_ks)
+        self._cache = {}
+
+    def _branch(self, field, ranking):
+        cached = self._cache.get(field)
+        if cached is not None and cached[0] is ranking:
+            return cached[1]
+        # Positive ranks suffice for AP/R@K; avoid decoding every gallery ID.
+        inverse = np.full(
+            (len(self.samples), self.gallery_size),
+            self.gallery_size + 1,
+            dtype=np.int32,
+        )
+        inverse[np.arange(len(self.samples))[:, None], ranking.numpy()] = np.arange(
+            1, self.gallery_size
+        )
+        rows = []
+        for n, (sample, targets) in enumerate(
+            zip(self.samples, self.targets, strict=True)
+        ):
+            row = {"case_type": sample["case_type"]}
+            for prefix, indices in targets.items():
+                ranks = sorted(inverse[n, indices].tolist())
+                # Python accumulation retains the official evaluator's AP arithmetic.
+                precision_sum = 0.0
+                for hit, rank in enumerate(ranks, 1):
+                    precision_sum += hit / rank
+                row[f"{prefix}_ap"] = precision_sum / len(ranks)
+                for k in RECALL_KS:
+                    row[f"{prefix}_r{k}"] = float(ranks[0] <= k)
+                if field == "coarse_rankings" and prefix == "full":
+                    for k in self.candidate_ks:
+                        row[f"candidate_recall_{k}"] = sum(
+                            rank <= k for rank in ranks
+                        ) / len(ranks)
+                        row[f"candidate_hit_{k}"] = float(ranks[0] <= k)
+            rows.append(row)
+        result = {
+            "overall": _aggregate_overall(
+                rows, self.candidate_ks if field == "coarse_rankings" else ()
+            ),
+            "by_case": _aggregate_cases(rows),
+        }
+        self._cache[field] = ranking, result
+        return result
+
+    def __call__(self, output):
+        final = self._branch("rankings", output["rankings"])
+        result = {
+            "overall": dict(final["overall"]),
+            "by_case": {case: dict(row) for case, row in final["by_case"].items()},
+        }
+        for field, prefix in (
+            ("coarse_rankings", "coarse"),
+            ("fine_rankings", "fine"),
+            ("fafa_rankings", "fafa"),
+        ):
+            branch = self._branch(field, output[field])
+            if prefix == "coarse":
+                result["overall"].update(
+                    (key, value)
+                    for key, value in branch["overall"].items()
+                    if key.startswith("candidate_")
+                )
+            result["overall"].update(
+                (f"{prefix}_{key}", value)
+                for key, value in branch["overall"].items()
+                if key != "num_queries" and not key.startswith("candidate_")
+            )
+            for case, row in branch["by_case"].items():
+                result["by_case"][case].update(
+                    (f"{prefix}_{key}", value)
+                    for key, value in row.items()
+                    if key != "num_queries"
+                )
+        return result
+
+
+def _write_selection(
+    cfg: dict, root: Path, rows: list[dict], *, selection_metric="checkpoint_score"
+) -> dict:
     """Freeze one complete scoring contract for test inference."""
-    best = max(rows, key=lambda row: row["full_map"])
+    best = max(rows, key=lambda row: row[selection_metric])
     selected = override_config(
         cfg,
         {
@@ -50,9 +169,11 @@ def _write_selection(cfg: dict, root: Path, rows: list[dict]) -> dict:
         root / "selection.json",
         {
             **best,
-            "metric": "full_map",
-            "value": best["full_map"],
-            "tie_break": "first configuration in summary.csv order",
+            "metric": selection_metric,
+            "value": best[selection_metric],
+            "baseline_value": rows[0][selection_metric],
+            "improvement": best[selection_metric] - rows[0][selection_metric],
+            "tie_break": "first configuration in summary.csv order; source first",
         },
     )
     return selected
@@ -73,7 +194,7 @@ def _grid(settings: dict, key: str, *, integer=False) -> list:
         )
     ):
         raise ValueError(f"{key} must be a non-empty list of valid tuning values")
-    return values
+    return list(dict.fromkeys(values))
 
 
 def calibrate(settings: dict) -> list[dict]:
@@ -86,11 +207,17 @@ def calibrate(settings: dict) -> list[dict]:
         "context_weight",
         "top_m",
         "pooling",
+        "selection_metric",
     }
     if unknown:
         raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
     if missing := {"rankings", "output_dir"} - settings.keys():
         raise ValueError(f"missing calibration settings: {', '.join(sorted(missing))}")
+    selection_metric = settings.get("selection_metric", "checkpoint_score")
+    if selection_metric not in ("checkpoint_score", "full_map", "macro_full_map"):
+        raise ValueError(
+            "selection_metric must be checkpoint_score, full_map or macro_full_map"
+        )
     # Fusion weight varies fastest so normalization and sorting are shared.
     keys = ("coarse_beta", "top_m", "context_weight", "fine_coarse_weight")
     grids = [_grid(settings, key, integer=key == "top_m") for key in keys]
@@ -127,7 +254,7 @@ def calibrate(settings: dict) -> list[dict]:
             "retrieve validation again with the updated scorer"
         )
     keys = (*keys[:2], "pooling", *keys[2:])
-    grids = [*grids[:2], poolings, *grids[2:]]
+    grids = [*grids[:2], list(dict.fromkeys(poolings)), *grids[2:]]
     digest = provenance.get("checkpoint_sha256", "")
     if (
         not isinstance(digest, str)
@@ -181,20 +308,29 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "use a separate calibration output root to retain the source artifact"
         )
+    evaluator = _CalibrationEvaluator(data, samples, source, cfg["candidate_ks"])
     root.mkdir(parents=True, exist_ok=True)
     rows, best_output, cache = [], None, {}
-    best_full_map = -math.inf
+    best_value = -math.inf
     source_sha256 = sha256_file(source_path)
+    baseline = tuple(score_config[key] for key in keys)
+    baseline_in_grid = all(
+        value in grid for value, grid in zip(baseline, grids, strict=True)
+    )
+    configurations = chain(
+        [baseline], (values for values in product(*grids) if values != baseline)
+    )
     for values in tqdm(
-        product(*grids), total=math.prod(map(len, grids)), desc="offline calibration"
+        configurations,
+        total=1 + math.prod(map(len, grids)) - int(baseline_in_grid),
+        desc="offline calibration",
     ):
         parameters = dict(zip(keys, values, strict=True))
         output = _replay_rankings(
             source, {**source["score_config"], **parameters}, cache
         )
-        metrics = evaluate_retrieval_output(
-            data, samples, output, candidate_ks=cfg["candidate_ks"], split="val"
-        )
+        metrics = evaluator(output)
+        macro = fmean(row["full_map"] for row in metrics["by_case"].values())
         row = {
             "index": len(rows),
             "split": "val",
@@ -204,19 +340,23 @@ def calibrate(settings: dict) -> list[dict]:
             "validation_sha256": fingerprint,
             "score_source_sha256": source_sha256,
             **metrics["overall"],
+            "macro_full_map": macro,
+            "checkpoint_score": 0.5 * (metrics["overall"]["full_map"] + macro),
             **{
                 f"{case.lower()}_{key}": value
                 for case, values in metrics["by_case"].items()
                 for key, value in values.items()
             },
         }
-        if not math.isfinite(row["full_map"]):
-            raise ValueError("calibration requires finite validation Full-mAP")
-        if row["full_map"] > best_full_map:
-            best_output, best_full_map = output, row["full_map"]
+        if not math.isfinite(row[selection_metric]):
+            raise ValueError(
+                f"calibration requires finite validation {selection_metric}"
+            )
+        if row[selection_metric] > best_value:
+            best_output, best_value = output, row[selection_metric]
         rows.append(row)
     write_summary(root, rows)
-    selected = _write_selection(cfg, root, rows)
+    selected = _write_selection(cfg, root, rows, selection_metric=selection_metric)
     metadata = {
         **best_output["provenance"],
         **runtime_metadata(torch.device("cpu")),
@@ -227,9 +367,15 @@ def calibrate(settings: dict) -> list[dict]:
             "source_sha256": source_sha256,
             "scope": "full_gallery",
             "selection_split": "val",
+            "selection_metric": selection_metric,
         },
     }
     best_output["provenance"] = metadata
     save_results(root / "selected/val", best_output, metadata)
     evaluate_run(selected, data=data, samples=samples, output=best_output)
+    print(
+        f"Selected {selection_metric}={best_value:.6f}; "
+        f"source baseline={rows[0][selection_metric]:.6f}",
+        flush=True,
+    )
     return rows

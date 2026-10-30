@@ -191,8 +191,8 @@ features. Identity cosine is not added again. FDA lies in [-1,1], and the null
 penalty magnitude remains greater than 1. Empty selection blocks contextual
 retrieval gradients, preserving the grounding/matching decision.
 
-The checked-in config selects `matched_mean`; omitting `retrieval.pooling`
-retains the `penalized` fallback for existing configs.
+`retrieval.pooling` selects the reduction; omitting it retains the `penalized`
+fallback for existing configs.
 
 `EvidenceBinding` conditions scene patches on the composed reference, but its
 person inputs are gathered using `pi`. Target evidence and geometry are injected
@@ -422,10 +422,16 @@ run/provenance metadata. Each non-self pair is fine-scored once during official
 validation retrieval. Offline calibration reads this file and validation
 annotations, without opening any checkpoint, backbone or feature cache. It
 jointly searches `pooling`, `coarse_beta`, `fine_coarse_weight`, `context_weight` and `top_m`,
-using validation Full-mAP. Context mode stays fixed. Coarse eligibility and
+using `selection_metric`: by default, the mean of overall and macro-case
+validation Full-mAP, matching checkpoint selection. Overall-only `full_map` and
+`macro_full_map` are also supported. The exact source configuration is included
+first and wins equal-score ties. Context mode stays fixed. Coarse eligibility and
 population normalization use the existing complete-gallery helper; fine and
 fusion normalization use the newly selected Top-M, with self always excluded.
-Unchanged coarse order, shortlist statistics and fusion z-scores are cached.
+Unchanged coarse order, shortlist statistics, fusion z-scores and branch metrics
+are cached. Positive ranks reproduce the official AP/R@K arithmetic without
+decoding the full gallery for every candidate; the winner receives full official
+evaluation.
 
 `candidate_ks` remains fixed independently of Top-M and is evaluated from the
 complete coarse order. `selected.yaml` freezes the scoring settings, checkpoint

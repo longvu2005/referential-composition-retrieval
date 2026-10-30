@@ -90,6 +90,7 @@ def test_calibration_cli_accepts_its_own_config_without_top_level_method(monkeyp
         "context_weight",
         "top_m",
         "pooling",
+        "selection_metric",
     } == calls[0].keys()
 
 

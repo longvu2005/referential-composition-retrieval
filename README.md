@@ -38,7 +38,8 @@ The remaining gallery retains coarse order.
 context initially while grounding, identity, coarse and state stay active.
 Both optimizer groups use cosine decay throughout the run.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
-offline calibration then selects scoring parameters using validation Full-mAP.
+offline calibration uses the same criterion by default and includes the source
+configuration as a baseline (`selection_metric: full_map` selects overall-only).
 Test uses the frozen selection.
 
 See [method and equations](docs/proposed_method.md),

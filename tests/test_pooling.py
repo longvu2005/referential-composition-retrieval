@@ -192,7 +192,7 @@ def test_calibration_selects_and_freezes_pooling(saved_pipeline, tmp_path):
     rows = calibration.calibrate(settings)
     assert {row["pooling"] for row in rows} == set(POOLING_MODES)
     selected = yaml.safe_load((tmp_path / "calibration/selected.yaml").read_text())
-    best = max(rows, key=lambda row: row["full_map"])
+    best = max(rows, key=lambda row: row["checkpoint_score"])
     assert selected["method"] == "proposed"
     assert selected["retrieval"]["pooling"] == best["pooling"]
     assert selected["selected_retrieval"]["pooling"] == best["pooling"]

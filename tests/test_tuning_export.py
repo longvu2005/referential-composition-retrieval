@@ -388,10 +388,10 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         guard.setattr(RCRModel, "score_target", forbidden)
         rows = calibration.calibrate(_settings(source_path, root))
     assert opened == [source_path]
-    assert len(rows) == 16
+    assert len(rows) == 17  # Source configuration plus sixteen grid candidates.
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
-    best = max(rows, key=lambda row: row["full_map"])
+    best = max(rows, key=lambda row: row["checkpoint_score"])
     for key in ("coarse_beta", "fine_coarse_weight", "context_weight", "top_m"):
         assert selected["retrieval"][key] == best[key] == expected["score_config"][key]
         assert selected["selected_retrieval"][key] == best[key]
@@ -458,6 +458,7 @@ def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
     saved_pipeline, tmp_path, monkeypatch
 ):
     cfg, data, _ = saved_pipeline
+    cfg["retrieval"]["top_m"] = 1
     retrieve.retrieve(cfg)
     root = tmp_path / "calibration"
     settings = _settings(Path(cfg["output"]["dir"]) / "val/rankings.pt", root)
