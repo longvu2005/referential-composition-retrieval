@@ -61,7 +61,7 @@ model:
 
 # Training schedule and sampling.
 train:
-  epochs: 35
+  epochs: 25
   context_warmup_epochs: 4      # Epochs before enabling the context loss.
   batch_size: 24                # Queries per batch.
   candidates: 32                # Gallery candidates per query.
