@@ -64,6 +64,26 @@ def align_identities(item, heads):
     return labels
 
 
+def supplemental_identities(item, heads, labels):
+    """Conservative crop IDs for extra SupCon evidence; leave BCE alignment intact."""
+    persons = item["boxes_pixel"]
+    if not len(persons) or not heads:
+        return [None] * len(persons)
+    centers = persons.new_tensor(
+        [[r["x"] + r["width"] / 2, r["y"] + r["height"] / 2] for r in heads]
+    )
+    inside = (
+        (centers[:, None] >= persons[None, :, :2])
+        & (centers[:, None] <= persons[None, :, 2:])
+    ).all(-1)
+    # A greedy one-to-one match alone can assign an ID to a multi-person crop.
+    single = inside.sum(0) == 1
+    return [
+        identity if valid else None
+        for identity, valid in zip(labels, single, strict=True)
+    ]
+
+
 class TrainSupervision:
     """Train-only alignment, optionally reused across runs with identical inputs."""
 
@@ -72,7 +92,8 @@ class TrainSupervision:
         allowed = split_image_ids(data, "train")
         self.heads = {i: data.gt_head_boxes_by_image.get(i, []) for i in allowed}
         self._ids = {}
-        self._saved_count = 0
+        self._supplemental_ids = {}
+        self._saved_count = (0, 0)
         self._prepared = False
         self.cache_file = Path(cache_file) if cache_file is not None else None
         if self.cache_file is None:
@@ -98,39 +119,52 @@ class TrainSupervision:
             stored = json.loads(self.cache_file.read_text(encoding="utf-8"))
             if stored.get("key") == self.key:
                 self._ids = stored["identities"]
-                if not self._ids.keys() <= self.heads.keys():
+                self._supplemental_ids = stored.get("supplemental_identities", {})
+                if (
+                    not (self._ids.keys() | self._supplemental_ids.keys())
+                    <= self.heads.keys()
+                ):
                     raise ValueError("supervision cache contains non-train images")
-                self._saved_count = len(self._ids)
+                self._saved_count = (len(self._ids), len(self._supplemental_ids))
 
     def save(self):
         """Publish completed train alignments atomically."""
-        if self.cache_file is None or len(self._ids) == self._saved_count:
+        counts = (len(self._ids), len(self._supplemental_ids))
+        if self.cache_file is None or counts == self._saved_count:
             return
         atomic_write_text(
             self.cache_file,
             json.dumps(
-                {"key": self.key, "identities": self._ids}, separators=(",", ":")
+                {
+                    "key": self.key,
+                    "identities": self._ids,
+                    "supplemental_identities": self._supplemental_ids,
+                },
+                separators=(",", ":"),
             )
             + "\n",
         )
-        self._saved_count = len(self._ids)
+        self._saved_count = counts
 
-    def _load_image_ids(self, image_id):
+    def _load_image_ids(self, image_id, *, supplemental=False):
         if image_id not in self.heads:
             raise ValueError(
                 f"train supervision cannot read non-train image {image_id}"
             )
-        if image_id not in self._ids:
+        missing = image_id not in self._ids
+        if missing or (supplemental and image_id not in self._supplemental_ids):
             if self._prepared:
                 raise RuntimeError(f"train labels were not prepared for {image_id}")
             item = self.cache.load_geometry(self.cache.by_id[image_id])
-            self._ids[image_id] = align_identities(
-                item,
-                self.heads[image_id],
-            )
-        return self._ids[image_id]
+            if missing:
+                self._ids[image_id] = align_identities(item, self.heads[image_id])
+            if supplemental:
+                self._supplemental_ids[image_id] = supplemental_identities(
+                    item, self.heads[image_id], self._ids[image_id]
+                )
+        return (self._supplemental_ids if supplemental else self._ids)[image_id]
 
-    def prepare(self, samples, *, all_train=False):
+    def prepare(self, samples, *, all_train=False, supplemental=False):
         """Align required images once; optionally index the full train gallery."""
         required = set()
         for sample in samples:
@@ -140,7 +174,14 @@ class TrainSupervision:
             raise ValueError("train supervision cannot prepare non-train images")
         if all_train:
             required = set(self.heads)
-        missing = [i for i in self.heads if i in required and i not in self._ids]
+        missing = [
+            i
+            for i in self.heads
+            if i in required
+            and (
+                i not in self._ids or (supplemental and i not in self._supplemental_ids)
+            )
+        ]
         self._prepared = False
         print(
             f"Train supervision: {len(required) - len(missing)}/{len(required)} "
@@ -149,7 +190,7 @@ class TrainSupervision:
         )
         try:
             for image_id in tqdm(missing, desc="prepare train supervision"):
-                self._load_image_ids(image_id)
+                self._load_image_ids(image_id, supplemental=supplemental)
         finally:
             self.save()
         self._prepared = True
@@ -166,15 +207,17 @@ class TrainSupervision:
                     crops[str(identity)].append((image_id, person))
         return dict(crops)
 
-    def load_ids(self, image_ids, max_people):
+    def load_ids(self, image_ids, max_people=None, *, supplemental=False):
+        """Read prepared train IDs, optionally padding to a visual batch width."""
         result = []
         for image_id in image_ids:
-            ids = self._load_image_ids(image_id)
-            if len(ids) > max_people:
+            ids = self._load_image_ids(image_id, supplemental=supplemental)
+            if max_people is not None and len(ids) > max_people:
                 raise ValueError(
                     "supervision crop order/count differs from visual batch"
                 )
-            result.append([*ids, *([None] * (max_people - len(ids)))])
+            padding = 0 if max_people is None else max_people - len(ids)
+            result.append([*ids, *([None] * padding)])
         return result
 
 
@@ -198,9 +241,12 @@ def prepare_train_supervision(cfg):
         cache_file=cache_file,
     )
     settings = identity_sampling_settings(cfg["train"].get("identity_sampling", {}))
+    use_extra = (
+        settings["max_crops"] > 0 and cfg["loss"].get("identity_weight", 0.1) != 0
+    )
     supervision.prepare(
         split_samples(data, "train"),
-        all_train=settings["max_crops"] > 0
-        and cfg["loss"].get("identity_weight", 0.1) != 0,
+        all_train=use_extra,
+        supplemental=use_extra and settings["hard_negative_fraction"] > 0,
     )
     return supervision.cache_file

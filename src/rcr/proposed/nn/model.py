@@ -262,6 +262,7 @@ class RCRModel(nn.Module):
             subjects,
             query_person_mask,
             query_boxes,
+            background_logit=self.fine_matching["background_logit"],
             selection_threshold=self.fine_matching["selection_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )

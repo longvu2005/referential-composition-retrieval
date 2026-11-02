@@ -3,6 +3,7 @@
 import torch
 from torch import Tensor, nn
 
+from rcr.common.data import required_identity_ids
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 
@@ -82,7 +83,8 @@ def prepare_visual_batch(
     supervision,
     identity_image_ids: list[set[str]],
     identity_crops=(),
-) -> dict[str, Tensor]:
+    identity_sampling=None,
+) -> dict[str, Tensor | dict]:
     """Load CPU visual features and labels. No model is executed here."""
     if not samples or len(samples) != len(candidate_image_ids):
         raise ValueError("training requires matching non-empty query/candidate rows")
@@ -147,8 +149,37 @@ def prepare_visual_batch(
         t_mask,
     )
 
+    # This branch is absent at fraction=0, during warmup, or with no ID budget.
+    mining = (
+        identity_sampling is not None
+        and identity_sampling["max_crops"] > 0
+        and identity_sampling["hard_negative_fraction"] > 0
+    )
+    safe_ids = {}
+    if mining:
+        image_ids = list(
+            dict.fromkeys(
+                [row["query_image_id"] for row in samples]
+                + [image_id for row in candidate_image_ids for image_id in row]
+                + [image_id for image_id, _, _ in identity_crops]
+            )
+        )
+        safe_ids = dict(
+            zip(
+                image_ids,
+                supervision.load_ids(image_ids, supplemental=True),
+                strict=True,
+            )
+        )
+
     extra = []
     for image_id, person, identity in identity_crops:
+        if mining and (
+            identity is None
+            or person >= len(safe_ids[image_id])
+            or safe_ids[image_id][person] != str(identity)
+        ):
+            continue
         if (image_id, person) not in seen:
             seen.add((image_id, person))
             extra.append((image_id, person, identity))
@@ -166,6 +197,79 @@ def prepare_visual_batch(
                 [[identity for _, _, identity in extra]], vocabulary
             )[0],
         }
+
+    if mining:
+        # Deduplicate physical detections on CPU, once, before model execution.
+        # Extra crops may reuse target embeddings instead of a second ID forward.
+        base_seen = {
+            (row["query_image_id"], person)
+            for n, row in enumerate(samples)
+            for person in q_mask[n].nonzero(as_tuple=True)[0].tolist()
+        }
+        base_seen.update(
+            (image_id, person)
+            for n, row in enumerate(candidate_image_ids)
+            for j, image_id in enumerate(row)
+            if image_id in positives[n]
+            for person in t_mask[n * candidates_per_query + j]
+            .nonzero(as_tuple=True)[0]
+            .tolist()
+        )
+        target_positions, supplemental = {}, []
+        for n, row in enumerate(candidate_image_ids):
+            for j, image_id in enumerate(row):
+                if image_id in positives[n]:
+                    continue
+                slot = n * candidates_per_query + j
+                for person, identity in enumerate(safe_ids[image_id]):
+                    key = (image_id, person)
+                    if identity is None or not t_mask[slot, person] or key in base_seen:
+                        continue
+                    base_seen.add(key)
+                    index = slot * t_people.shape[1] + person
+                    target_positions[key] = index
+                    supplemental.append((index, identity))
+        required = {str(i) for row in samples for i in required_identity_ids(row)}
+        anchor_mask = torch.zeros_like(q_mask)
+        anchor_seen = set()
+        for n, (row, ids) in enumerate(zip(samples, q_ids, strict=True)):
+            requested = set(map(str, required_identity_ids(row)))
+            safe = safe_ids[row["query_image_id"]]
+            for person, identity in enumerate(ids):
+                key = (row["query_image_id"], person)
+                if (
+                    q_mask[n, person]
+                    and identity is not None
+                    and person < len(safe)
+                    and safe[person] == str(identity)
+                    and str(identity) in requested
+                    and key not in anchor_seen
+                ):
+                    anchor_seen.add(key)
+                    anchor_mask[n, person] = True
+        # Deduplicate requested anchors separately: an earlier query of the same
+        # image may contain this person without requesting their identity.
+        extra_batch.update(
+            identity_sampling=identity_sampling,
+            identity_anchor_mask=anchor_mask,
+            supplemental_target_indices=torch.tensor(
+                [index for index, _ in supplemental], dtype=torch.long
+            ),
+            supplemental_target_labels=_identity_labels(
+                [[identity for _, identity in supplemental]], vocabulary
+            )[0],
+            extra_identity_positive_mask=torch.tensor(
+                [str(identity) in required for _, _, identity in extra],
+                dtype=torch.bool,
+            ),
+            extra_identity_target_indices=torch.tensor(
+                [
+                    target_positions.get((image_id, person), -1)
+                    for image_id, person, _ in extra
+                ],
+                dtype=torch.long,
+            ),
+        )
 
     batch = {
         **extra_batch,
@@ -216,8 +320,9 @@ def build_batch(
     supervision,
     identity_image_ids: list[set[str]],
     identity_crops=(),
+    identity_sampling=None,
     text_cache: QueryTextCache | None = None,
-) -> dict[str, Tensor]:
+) -> dict[str, Tensor | dict]:
     text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
         samples,
@@ -226,7 +331,11 @@ def build_batch(
         supervision=supervision,
         identity_image_ids=identity_image_ids,
         identity_crops=identity_crops,
+        identity_sampling=identity_sampling,
     )
-    visual = {key: value.to(device) for key, value in visual.items()}
+    visual = {
+        key: value.to(device) if isinstance(value, Tensor) else value
+        for key, value in visual.items()
+    }
     text = encode_tokenized_text(text_cache.batch(samples), text_encoder, device)
     return {**visual, **text}

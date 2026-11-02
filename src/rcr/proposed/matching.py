@@ -12,6 +12,7 @@ from torch import Tensor
 def matching_settings(config: dict | None = None) -> dict[str, float]:
     """Resolve architecture settings, shared by training and inference."""
     defaults = {
+        "background_logit": 0.0,
         "selection_threshold": 0.5,
         "identity_threshold": 0.2,
         "missing_penalty": 1.1,
@@ -84,17 +85,20 @@ def exclusive_membership(
     person_mask: Tensor | None = None,
     boxes: Tensor | None = None,
     *,
+    background_logit: float = 0.0,
     selection_threshold: float = 0.5,
     duplicate_iou: float = 0.9,
 ) -> Tensor:
     """Select a variable-sized set per Subject, with one owner per query person.
 
-    Background has fixed logit zero. Softmax is over Subject/background, never
+    Background has a fixed configurable logit. Softmax is over Subject/background, never
     over people. Masked BCE supervises the raw grounding logits; the exclusive
     distribution limits each person to one owner. Fine decisions are detached
     from retrieval loss; coarse scoring uses sigmoid of the raw logits.
     """
     b, s, k = logits.shape
+    if not math.isfinite(background_logit):
+        raise ValueError("background_logit must be finite")
     if s == 0:
         raise ValueError("a query must have at least one Subject slot")
     valid = (
@@ -104,7 +108,8 @@ def exclusive_membership(
     )
     foreground = logits.detach().float().masked_fill(~subjects[:, :, None], -torch.inf)
     foreground = foreground.masked_fill(~valid[:, None], -torch.inf)
-    probability = torch.cat((foreground.new_zeros(b, 1, k), foreground), 1).softmax(1)
+    background = foreground.new_full((b, 1, k), background_logit)
+    probability = torch.cat((background, foreground), 1).softmax(1)
     confidence = 1 - probability[:, 0]
     best, owner = probability[:, 1:].max(1)
     selected = valid & (confidence >= selection_threshold) & (best > probability[:, 0])

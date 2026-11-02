@@ -53,6 +53,7 @@ model:
 
   # Subject selection and partial identity matching.
   fine_matching:
+    background_logit: -3.5
     selection_threshold: 0.5
     identity_threshold: 0.2
     missing_penalty: 1.1        # Magnitude of the missing-evidence penalty.
@@ -74,6 +75,7 @@ train:
     max_crops: 128
     crops_per_identity: 2
     random_identities: 8
+    hard_negative_fraction: 0.5
 
   # Positive and negative sampling.
   sampling:

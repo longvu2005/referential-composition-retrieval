@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import identity_scores
 
@@ -111,7 +112,7 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
 
 def compute_loss(
     model: RCRModel,
-    batch: dict[str, Tensor],
+    batch: dict[str, Tensor | dict],
     patch_hw: tuple[int, int],
     *,
     grounding_weight: float,
@@ -160,6 +161,7 @@ def compute_loss(
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     context_active = zero.detach()
+    hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
         target_identity = model.encode_identity(
@@ -184,9 +186,37 @@ def compute_loss(
             batch["target_identity_labels"][target_keep],
         ]
         features = [query_identity[query_keep], target_identity[target_keep]]
-        if batch.get("extra_identity_labels", labels[0][:0]).numel():
+        if "identity_sampling" in batch:
+            hard, extra = select_identity_observations(
+                query_identity, target_identity, batch, batch["identity_sampling"]
+            )
+            target_flat = target_identity.flatten(0, 2)
+            # Index selection is detached; these gathers preserve head/projection
+            # gradients. A crop present in targets needs no extra identity encode.
+            features.append(target_flat[hard])
+            target_labels = torch.full_like(batch["target_identity_labels"], -1)
+            target_labels.view(-1)[batch["supplemental_target_indices"]] = batch[
+                "supplemental_target_labels"
+            ]
+            labels.append(target_labels.flatten()[hard])
+            reused = batch["extra_identity_target_indices"][extra]
+            in_target = reused >= 0
+            features.append(target_flat[reused[in_target]])
+            if extra.numel():
+                extra_labels = batch["extra_identity_labels"][extra]
+                labels.extend((extra_labels[in_target], extra_labels[~in_target]))
+                outside = extra[~in_target]
+                if outside.numel():
+                    features.append(
+                        model.encode_identity(batch["extra_identity_persons"][outside])
+                    )
+                else:
+                    features.append(target_flat[:0])
+            hard_count, random_count = hard.numel(), extra.numel()
+        elif batch.get("extra_identity_labels", labels[0][:0]).numel():
             labels.append(batch["extra_identity_labels"])
             features.append(model.encode_identity(batch["extra_identity_persons"]))
+            random_count = batch["extra_identity_labels"].numel()
         identity = identity_loss(
             torch.cat(features), torch.cat(labels), identity_temperature
         )
@@ -260,4 +290,7 @@ def compute_loss(
         "context": context.detach(),
         "state": state.detach(),
         "context_active_fraction": context_active.detach(),
+        "identity_hard_crops": hard_count,
+        "identity_random_crops": random_count,
+        "identity_supplemental_crops": hard_count + random_count,
     }

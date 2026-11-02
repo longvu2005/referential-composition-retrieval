@@ -95,6 +95,22 @@ The identity loss can additionally read up to
 `train.identity_sampling.max_crops` detector-aligned train crops. These crops do
 not enter the candidate set, FAFA scoring or state loss; they only keep the
 supervised contrastive objective supplied with cross-image positives.
+With `hard_negative_fraction=0.5`, after the existing sampling warmup, this same
+budget also includes hard known-ID target crops mined inside the current batch.
+Required-ID supplemental positives keep their baseline quota first; the remaining
+budget is split between hard crops and the baseline random pool, with random
+fallback when hard evidence is short. Unknown/multi-head crops are excluded from
+this extra supervision. Fraction zero restores baseline sampling; image-level
+`train.sampling.hard_fraction` retains its separate meaning. Epoch history and
+W&B record `identity_hard_crops`, `identity_random_crops` (including sampled
+positives), and `identity_supplemental_crops` as counts, not query averages.
+
+The current model config sets `fine_matching.background_logit=-3.5`. This is
+checkpoint-authoritative for train validation, `retrieve` and `run`; missing old
+fields mean zero. Changing only an inference YAML does not override it. Use a new
+training output and regenerate validation retrieval/calibration for a new
+background. Feature caches do not need rebuilding. Test retains the background
+frozen in validation selection; score replay cannot simulate a different one.
 
 After context warmup, the model is evaluated on the complete validation split at
 `evaluation.every_epochs` and on the final epoch. Warmup checkpoints are saved as

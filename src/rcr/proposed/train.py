@@ -219,7 +219,10 @@ def _make_checkpoint(
         "text_model_revision": getattr(
             text_encoder.backbone.config, "_commit_hash", None
         ),
-        "config": cfg,
+        "config": {
+            **cfg,
+            "model": {**cfg["model"], "fine_matching": dict(model.fine_matching)},
+        },
         "dim": dim,
         "input_dim": scene_dim,
         "person_input_dim": person_dim,
@@ -297,7 +300,12 @@ def train(cfg: dict) -> Path:
         identity_settings["max_crops"] > 0
         and cfg["loss"].get("identity_weight", 0.1) != 0
     )
-    supervision.prepare(train_samples, all_train=use_extra_identities)
+    supervision.prepare(
+        train_samples,
+        all_train=use_extra_identities,
+        supplemental=use_extra_identities
+        and identity_settings["hard_negative_fraction"] > 0,
+    )
     identity_sampler = (
         IdentityCropSampler(supervision, identity_settings)
         if use_extra_identities
@@ -336,6 +344,11 @@ def train(cfg: dict) -> Path:
         global_dim=cache.global_dim,
         person_input_dim=person_dim,
     ).to(device)
+    cfg = {
+        **cfg,
+        "model": {**model_cfg, "fine_matching": dict(model.fine_matching)},
+        "train": {**cfg["train"], "identity_sampling": identity_settings},
+    }
 
     optimizer = torch.optim.AdamW(
         [
@@ -427,6 +440,11 @@ def train(cfg: dict) -> Path:
             cfg["train"]["seed"] + epoch + 1_000_002
         )
         epoch_index = epoch - 1
+        crop_mining = (
+            use_extra_identities
+            and identity_settings["hard_negative_fraction"] > 0
+            and epoch_index >= sampling["warmup_epochs"]
+        )
         hard_quota = int((cfg["train"]["candidates"] - 1) * sampling["hard_fraction"])
         if (
             hard_quota
@@ -470,6 +488,14 @@ def train(cfg: dict) -> Path:
             ),
             0.0,
         )
+        crop_totals = dict.fromkeys(
+            (
+                "identity_hard_crops",
+                "identity_random_crops",
+                "identity_supplemental_crops",
+            ),
+            0,
+        )
         state_pairs_epoch = (
             torch.zeros((), dtype=torch.long, device=device)
             if cfg["loss"]["state_weight"]
@@ -502,6 +528,7 @@ def train(cfg: dict) -> Path:
                 supervision=supervision,
                 identity_image_ids=[identity_images[row["sample_id"]] for row in rows],
                 identity_crops=identity_crops,
+                identity_sampling=identity_settings if crop_mining else None,
                 text_cache=text_cache,
             )
             if state_pairs_epoch is not None:
@@ -536,8 +563,14 @@ def train(cfg: dict) -> Path:
 
             values = {
                 "loss": float(loss.detach()),
-                **{key: float(value) for key, value in parts.items()},
+                **{
+                    key: float(value)
+                    for key, value in parts.items()
+                    if key not in crop_totals
+                },
             }
+            for key in crop_totals:
+                crop_totals[key] += int(parts[key])
             for name, value in values.items():
                 totals[name] += value * len(rows)
             progress.set_postfix(loss=f"{values['loss']:.4f}")
@@ -568,6 +601,7 @@ def train(cfg: dict) -> Path:
                 f"train_{name}": value / len(train_samples)
                 for name, value in totals.items()
             },
+            **{f"train_{name}": value for name, value in crop_totals.items()},
         }
         optimizer.zero_grad(set_to_none=True)
         is_best = False
@@ -634,6 +668,7 @@ def train(cfg: dict) -> Path:
                 "epoch/model_lr": epoch_log["model_lr"],
                 "epoch/text_lr": epoch_log["text_lr"],
                 **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
+                **{f"epoch/{name}": value for name, value in crop_totals.items()},
             }
             if should_evaluate:
                 tracked_epoch.update(

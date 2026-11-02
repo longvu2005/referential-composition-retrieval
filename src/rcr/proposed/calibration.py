@@ -33,6 +33,7 @@ from rcr.evaluation.evaluate import (
 from rcr.evaluation.provenance import digest_json, runtime_metadata
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
+from rcr.proposed.matching import matching_settings
 from rcr.proposed.ranking import FINE_SCORE_MODES
 from rcr.proposed.replay import _replay_rankings, _validate_artifact
 from rcr.proposed.scores import POOLING_MODES
@@ -164,6 +165,9 @@ def _write_selection(
     selected["selected_retrieval"] = {
         key: selected["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
     }
+    selected["selected_background_logit"] = matching_settings(
+        cfg.get("model", {}).get("fine_matching")
+    )["background_logit"]
     save_config(root / "selected.yaml", selected)
     write_json(
         root / "selection.json",
@@ -279,6 +283,10 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "embedded provenance disagrees with the saved scoring contract"
         )
+    # Freeze the actual selection background, including legacy artifacts (zero).
+    cfg.setdefault("model", {})["fine_matching"] = matching_settings(
+        source["fine_matching"]
+    )
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     samples = split_samples(data, "val")
     fingerprint = split_fingerprint(data, "val")

@@ -29,6 +29,7 @@ from rcr.proposed.contracts import (
     COMPATIBLE_ARCHITECTURE_VERSIONS,
     SELECTED_RETRIEVAL_KEYS,
 )
+from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
     check_clip_config,
     load_text_encoder_state,
@@ -64,7 +65,13 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         raise ValueError("checkpoint changed since val selection; rerun the sweep")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     train_cfg = checkpoint["config"]
-    model_cfg = train_cfg["model"]
+    # Architecture settings, including background, are checkpoint-authoritative.
+    # A retrieval YAML cannot silently change query encoding after val selection.
+    model_cfg = {
+        **train_cfg["model"],
+        "fine_matching": matching_settings(train_cfg["model"].get("fine_matching")),
+    }
+    background = model_cfg["fine_matching"]["background_logit"]
     settings = retrieval_settings(
         cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
@@ -88,6 +95,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         raise ValueError(
             "retrieval settings changed since val selection; rerun the sweep"
         )
+    if selected is not None and cfg.get("selected_background_logit", 0.0) != background:
+        raise ValueError("background changed since val selection; rerun val retrieval")
     if checkpoint.get("architecture_version") not in COMPATIBLE_ARCHITECTURE_VERSIONS:
         raise ValueError(
             "checkpoint architecture is incompatible; rebuild CLIP scene/FAFA caches "
@@ -190,7 +199,11 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     )
     metadata = {
         "method": "proposed",
-        "config": {**cfg, "retrieval": settings},
+        "config": {
+            **cfg,
+            "model": {**cfg.get("model", {}), "fine_matching": model.fine_matching},
+            "retrieval": settings,
+        },
         "retrieval": settings,
         "score_schema_version": output["score_schema_version"],
         "schema_version": output["schema_version"],

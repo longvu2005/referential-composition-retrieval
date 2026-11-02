@@ -62,10 +62,10 @@ a_si = sigmoid(g_si)
 ```
 
 Coarse uses these independent sigmoid memberships. Fine uses one
-exclusive owner per query detection, with a fixed background logit of zero:
+exclusive owner per query detection, with a fixed `background_logit`:
 
 ```text
-p_0i, p_1i, ..., p_Si = softmax_over_subjects(0, g_1i, ..., g_Si)
+p_0i, p_1i, ..., p_Si = softmax_over_subjects(background_logit, g_1i, ..., g_Si)
 a_i = 1 - p_0i
 owner_i = argmax_s p_si
 selected_i = (a_i >= selection_threshold) AND (max_s p_si > p_0i)
@@ -78,6 +78,10 @@ roles in query text. There is no forced top-1 fallback. An empty Subject remains
 missing. Fine decisions/weights are detached; raw logits retain masked BCE
 supervision. The exclusive distribution conditions the independent odds on at
 most one owner; it is not assumed to be a calibrated correctness probability.
+The current experiment uses `background_logit=-3.5`; missing fields in older
+configs/checkpoints resolve to zero. This constant only enters fine selection,
+never the raw grounding BCE logits or coarse sigmoid identity scores. The same
+membership drives composition, assignment, context and native fine scoring.
 
 High-IoU NMS suppresses near-duplicate query boxes by grounding confidence and
 target boxes by area, with stable detection-order ties. This is a conservative
@@ -237,6 +241,33 @@ Each term has one explicit task:
 | `L_context` | Raw `coverage * context`, unit temperature | Full Positives versus same-required-ID negatives, both with nonzero predicted coverage |
 | `L_global_state` | Global state cosine, temperature 0.1 | Full Positives versus same-required-ID negatives, independently of person detection coverage |
 
+After `train.sampling.warmup_epochs`, nonzero
+`train.identity_sampling.hard_negative_fraction` also admits known-ID crops from
+Full-negative candidate images into SupCon. Supplementary labels use the existing
+train-only alignment and require exactly one annotated head center in the crop;
+ambiguous/unknown/padded crops are excluded without changing BCE alignment.
+The label cache is extended before epoch 1; frozen features are reused.
+
+Baseline query/Full Positive observations remain outside the supplemental budget.
+Preserve the baseline sampler's additional required-ID positives first (`P`),
+then reserve `floor(hard_negative_fraction * (max_crops - P))` slots for hard
+target crops. Hardness is the maximum FP32 cosine against unambiguous requested-ID
+query anchors with a different GT ID. Multiple Subject slots use actual IDs;
+same-ID wrong-condition crops stay identity positives. Random remainder/fallback
+comes from the existing sampler with its `crops_per_identity` and
+`random_identities` limits. Physical `(image_id, detection_index)` keys are unique
+across all sources, while different-image observations of the same ID remain.
+Missing valid evidence leaves slots unused; no repetitions are created.
+
+Selection uses detached embeddings, then SupCon gathers the original query/target
+embeddings, reusing targets for any sampled crop already in candidates. Only
+selected crops outside candidates need the normal extra identity-head forward.
+SupCon, temperature, weights and its handling of anchors without positives are
+unchanged. Fraction zero (the code default) and the sampling warmup retain the
+baseline path. Identity weight zero or a zero supplemental budget skips mining.
+Epoch counters record hard, random (including preserved sampled positives), and
+total supplemental observations; no per-crop logging is added.
+
 For query q, let P and N be its eligible positive and negative candidate sets:
 
 ```text
@@ -394,12 +425,18 @@ conditions, counting tokenized input before tokenizer truncation. Train/retrieve
 check a native YAML when present; cache-only machines can omit it and rely on the
 recorded policy and checkpoint contract without installing native FAFA.
 
-`model.fine_matching` defines selection/identity thresholds, missing penalty and
+`model.fine_matching` defines background, selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
 Calibration selects pooling, coarse/context/fusion weights and Top-M. Changing
 `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
+New checkpoints save the resolved matching settings, including the actual
+background. Retrieval metadata records that effective configuration even if its
+input YAML differs. Calibration freezes `selected_background_logit` from the
+validation artifact; test rejects a checkpoint background that differs from that
+selection (legacy selections default to zero). Changing background requires new
+query encoding and fine scoring; raw-score replay cannot change it.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
 Subject/overall coverage, all three binding reductions, raw/gated context and
