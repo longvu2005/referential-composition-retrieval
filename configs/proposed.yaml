@@ -61,7 +61,7 @@ model:
 
 # Training schedule and sampling.
 train:
-  epochs: 25
+  epochs: 20
   context_warmup_epochs: 4      # Epochs before enabling the context loss.
   batch_size: 24                # Queries per batch.
   candidates: 32                # Gallery candidates per query.
@@ -75,7 +75,7 @@ train:
     max_crops: 128
     crops_per_identity: 2
     random_identities: 8
-    hard_negative_fraction: 0.5
+    hard_negative_fraction: 0.1
 
   # Positive and negative sampling.
   sampling:
