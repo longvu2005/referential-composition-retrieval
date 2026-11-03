@@ -129,6 +129,11 @@ inference.
 
 ## Saved results
 
+For an additional inference-only method that compares `matched_mean` and
+`subject_mean` on one shared FAFA assignment, see
+[FAFA pooling](baselines/fafa_pooling.md). It uses `configs/fafa_pooling.yaml` and
+the existing FAFA environment/cache; original FAFA scoring is retained.
+
 `output.dir` is the run root (default `runs/clip` or `runs/fafa`). The CLI appends
 mode for CLIP and then split. Each folder contains `scores.npy`, `rankings.pt`,
 `run.json`, `metrics.json`. CLIP selections are in `<root>/tuning.json`;

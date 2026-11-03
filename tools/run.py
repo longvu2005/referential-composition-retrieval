@@ -60,8 +60,8 @@ def main(argv=None):
         from rcr.proposed.calibration import calibrate
 
         return calibrate(cfg)
-    if method not in ("proposed", "clip", "fafa"):
-        parser.error("method must be proposed, clip or fafa")
+    if method not in ("proposed", "clip", "fafa", "fafa_pooling"):
+        parser.error("method must be proposed, clip, fafa or fafa_pooling")
     if (
         command in ("train", "build-cache", "prepare-supervision")
         and method != "proposed"

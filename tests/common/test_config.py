@@ -105,7 +105,7 @@ def test_run_allows_candidate_cutoffs_larger_than_fine_shortlist(monkeypatch):
     assert calls[0]["retrieval"]["top_m"] == 1
 
 
-@pytest.mark.parametrize("method", ["proposed", "clip", "fafa"])
+@pytest.mark.parametrize("method", ["proposed", "clip", "fafa", "fafa_pooling"])
 @pytest.mark.parametrize("split_flag,expected", [(None, "test"), ("val", "val")])
 def test_run_honors_yaml_overrides_and_split_precedence(
     monkeypatch, method, split_flag, expected

@@ -75,3 +75,21 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(tmp_path, spl
                 "test",
             ]
         ]
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_fafa_pooling_workflow_uses_fafa_environment_without_training(split):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / "scripts/methods/fafa_pooling.bash"), split],
+        env={**os.environ, "PYTHON": "/bin/echo"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected = [
+        "tools/run.py run --config configs/fafa_pooling.yaml --split " + split
+    ]
+    if split == "val":
+        expected.insert(0, "tools/run.py prepare --config configs/fafa_pooling.yaml")
+    assert result.stdout.splitlines() == expected

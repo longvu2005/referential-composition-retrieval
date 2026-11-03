@@ -195,7 +195,7 @@ def prepare_fafa_model(cfg: dict, *, force: bool = False) -> None:
 def prepare(cfg: dict, *, force: bool = False) -> None:
     if cfg["method"] == "clip":
         prepare_clip(cfg["model"]["name"], cfg["model"]["checkpoint"], force)
-    elif cfg["method"] == "fafa":
+    elif cfg["method"] in ("fafa", "fafa_pooling"):
         require_shared_detection_cache(cfg)
         prepare_fafa_model(cfg, force=force)
         selector = cfg["localization"]["query_selector"]

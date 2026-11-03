@@ -15,7 +15,16 @@ from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.provenance import BENCHMARK_FIELDS, PROTOCOL, digest_json
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 
-METHODS = ("clip_image", "clip_text", "early_fusion", "late_fusion", "fafa", "proposed")
+DEFAULT_METHODS = (
+    "clip_image",
+    "clip_text",
+    "early_fusion",
+    "late_fusion",
+    "fafa",
+    "proposed",
+)
+FAFA_POOLING_METHODS = ("fafa_matched_mean", "fafa_subject_mean")
+METHODS = (*DEFAULT_METHODS, *FAFA_POOLING_METHODS)
 OVERALL_METRICS = (
     ("id_map", "ID-mAP", "id_ap"),
     ("id_r1", "ID-R@1", "id_r1"),
@@ -38,6 +47,8 @@ def default_runs(root: str | Path, split: str) -> dict[str, Path]:
     return {
         name: root / "clip" / name / split
         if name in METHODS[:4]
+        else root / "fafa_pooling" / name.removeprefix("fafa_") / split
+        if name in FAFA_POOLING_METHODS
         else root / name / split
         for name in METHODS
     }
@@ -99,7 +110,13 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
     config = run.get("config")
     if not isinstance(config, dict):
         raise ReportError(f"{label}: missing run.config")
-    method = "clip" if name in METHODS[:4] else name
+    method = (
+        "clip"
+        if name in METHODS[:4]
+        else "fafa_pooling"
+        if name in FAFA_POOLING_METHODS
+        else name
+    )
     if run.get("method") != method or config.get("method") != method:
         raise ReportError(f"{label}: method metadata does not match {name}")
     if method == "clip":
@@ -109,6 +126,11 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
             for value in (run.get("mode"), config.get("mode"))
         ):
             raise ReportError(f"{label}: CLIP mode metadata does not match {name}")
+    if method == "fafa_pooling" and any(
+        value != name.removeprefix("fafa_")
+        for value in (run.get("mode"), config.get("mode"), run.get("pooling"))
+    ):
+        raise ReportError(f"{label}: FAFA pooling metadata does not match {name}")
     if config.get("split") != split or run.get("split", split) != split:
         raise ReportError(f"{label}: split metadata does not match requested {split}")
     if run.get("query_subset") is not False:
@@ -127,9 +149,12 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
             raise ReportError(f"{label}: incompatible {key}")
     nq = _integer(run.get("num_queries"), f"{label}: num_queries", 1)
     _integer(run.get("num_gallery"), f"{label}: num_gallery", 2)
-    if method in ("clip", "fafa") and run.get("rcr_training") is not False:
+    if (
+        method in ("clip", "fafa", "fafa_pooling")
+        and run.get("rcr_training") is not False
+    ):
         raise ReportError(f"{label}: baseline must declare rcr_training=false")
-    if method == "fafa" and split == "test":
+    if method in ("fafa", "fafa_pooling") and split == "test":
         selection = run.get("adapter_selection", {})
         if (
             not isinstance(selection, dict)

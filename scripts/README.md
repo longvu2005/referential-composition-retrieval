@@ -58,6 +58,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | --- | --- | --- |
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
+| `scripts/methods/fafa_pooling.bash` | Run both frozen FAFA pooling variants in `.venv-fafa` | Reuse its own protocol lock |
 | `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `runs/proposed-calibration/selected.yaml` |
 
 ```bash

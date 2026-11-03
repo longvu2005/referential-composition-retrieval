@@ -3,7 +3,13 @@
 import argparse
 from pathlib import Path
 
-from rcr.evaluation.report import METHODS, ReportError, default_runs, generate_report
+from rcr.evaluation.report import (
+    DEFAULT_METHODS,
+    METHODS,
+    ReportError,
+    default_runs,
+    generate_report,
+)
 
 
 def main(argv=None):
@@ -11,7 +17,9 @@ def main(argv=None):
     parser.add_argument("--split", required=True, choices=("val", "test"))
     parser.add_argument("--runs-root", type=Path, default=Path("runs"))
     parser.add_argument("--output-dir", type=Path, default=Path("runs/reports"))
-    parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument(
+        "--methods", nargs="+", choices=METHODS, default=list(DEFAULT_METHODS)
+    )
     parser.add_argument(
         "--run",
         action="append",

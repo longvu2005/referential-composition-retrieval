@@ -21,6 +21,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from rcr.baselines import FAFA_POOLING_VERSION, FAFA_POOLINGS
 from rcr.baselines.fafa_adapter import (
     ADAPTER_VERSION,
     VISUAL_CACHE_VERSION,
@@ -28,7 +29,7 @@ from rcr.baselines.fafa_adapter import (
     choose_boxes,
 )
 from rcr.baselines.fafa_detector import detect_gallery
-from rcr.baselines.fafa_matching import aggregate_people
+from rcr.baselines.fafa_matching import aggregate_people, aggregate_subject_poolings
 from rcr.common.io import (
     cache_directory,
     image_signature,
@@ -535,22 +536,46 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
         device,
         cfg["checkpoint"],
     )
-    output = output_directory(cfg)
-    output.mkdir(parents=True, exist_ok=True)
-    temporary = output / "scores.npy.tmp"
-    scores = np.lib.format.open_memmap(
-        temporary, mode="w+", dtype=np.float32, shape=(len(samples), len(gallery_ids))
-    )
+    subject_pooling = cfg["method"] == "fafa_pooling"
+    modes = FAFA_POOLINGS if subject_pooling else (None,)
+    directories, scores = {}, {}
+    for mode in modes:
+        output = output_directory({**cfg, "mode": mode})
+        output.mkdir(parents=True, exist_ok=True)
+        directories[mode] = output
+        scores[mode] = np.lib.format.open_memmap(
+            output / "scores.npy.tmp",
+            mode="w+",
+            dtype=np.float32,
+            shape=(len(samples), len(gallery_ids)),
+        )
     offsets = np.asarray(gallery_offsets, dtype=np.int64)
     for qi in tqdm(range(len(samples)), desc="FAFA Partial SetMatch", unit="query"):
         matrix = component_scores[query_offsets[qi] : query_offsets[qi + 1]]
-        scores[qi] = aggregate_people(
-            matrix, offsets, float(cfg["setmatch"]["unmatched_score"])
+        penalty = float(cfg["setmatch"]["unmatched_score"])
+        if subject_pooling:
+            values = aggregate_subject_poolings(
+                matrix,
+                offsets,
+                [component[3] for component in grouped[qi]],
+                [subject["subject_id"] for subject in samples[qi]["subjects"]],
+                penalty,
+            )
+        else:
+            values = {None: aggregate_people(matrix, offsets, penalty)}
+        for mode in modes:
+            scores[mode][qi] = values[mode]
+    results = {}
+    for mode in modes:
+        mapped = scores.pop(mode)
+        mapped.flush()
+        del mapped
+        output = directories[mode]
+        (output / "scores.npy.tmp").replace(output / "scores.npy")
+        results[mode] = np.load(
+            output / "scores.npy", mmap_mode="r", allow_pickle=False
         )
-    scores.flush()
-    del scores
-    temporary.replace(output / "scores.npy")
-    return np.load(output / "scores.npy", mmap_mode="r", allow_pickle=False), {
+    details = {
         "adapter_version": ADAPTER_VERSION,
         "checkpoint_sha256": checkpoint_sha,
         "selector_checkpoint_sha256": selector_sha,
@@ -570,3 +595,11 @@ def retrieve_fafa(data, samples, gallery_ids, cfg, device):
             "conditions are approximated, not jointly reasoned.",
         ],
     }
+    if subject_pooling:
+        details.update(
+            pooling_version=FAFA_POOLING_VERSION,
+            pooling_modes=list(FAFA_POOLINGS),
+            pooling_weights="uniform within each predicted Subject",
+            assignment="native FDA rectangular max-sum; mandatory real pairs",
+        )
+    return (results if subject_pooling else results[None]), details

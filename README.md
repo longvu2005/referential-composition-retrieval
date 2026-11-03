@@ -143,6 +143,9 @@ When using another run, point `configs/calibration.yaml: rankings` to its saved
 CLIP and FAFA baselines have separate environments and recipes. See the
 [baseline guide](docs/baselines.md) and [script reference](scripts/README.md).
 
+`fafa_pooling` compares two frozen FAFA aggregation rules in one run, reusing
+FAFA's environment and feature caches; see [FAFA pooling](docs/baselines/fafa_pooling.md).
+
 ## Caches and outputs
 
 | Config key | Cached evidence | Rebuild when |

@@ -93,3 +93,83 @@ def aggregate_people(pair_scores, offsets, unmatched_score: float = -1.0):
                 s[:, offsets[gi] : offsets[gi + 1]], unmatched_score
             )
     return result.astype(np.float32)
+
+
+def aggregate_subject_poolings(
+    pair_scores, offsets, component_subjects, subject_ids, unmatched_score=-1.0
+):
+    """Pool one shared native-FDA assignment with uniform within-Subject weights.
+
+    Unlike the original component mean, matched_mean drops unmatched mass.
+    subject_mean renormalizes matches in each Subject and retains empty roles.
+    Matching remains rectangular max-sum Hungarian: no learned head, threshold,
+    null rejection, case label, GT identity or GT cardinality is introduced.
+    """
+    s = np.asarray(pair_scores, dtype=np.float64)
+    offsets = np.asarray(offsets)
+    owners = np.asarray(component_subjects)
+    subjects = np.asarray(subject_ids)
+    if (
+        s.ndim != 2
+        or not np.isfinite(s).all()
+        or offsets.ndim != 1
+        or len(offsets) < 2
+        or not np.issubdtype(offsets.dtype, np.integer)
+        or offsets[0] != 0
+        or np.any(np.diff(offsets) < 0)
+        or offsets[-1] != s.shape[1]
+        or owners.shape != (s.shape[0],)
+        or subjects.ndim != 1
+        or not len(subjects)
+        or len(np.unique(subjects)) != len(subjects)
+        or not np.isin(owners, subjects).all()
+        or not np.isfinite(unmatched_score)
+    ):
+        raise ValueError("Invalid component scores, offsets or public Subject mapping")
+    k, nsubjects = len(s), len(subjects)
+    counts = np.diff(offsets)
+    matched_mean = np.full(len(counts), unmatched_score, dtype=np.float64)
+    subject_mean = matched_mean.copy()
+    if not k:
+        return {
+            "matched_mean": matched_mean.astype(np.float32),
+            "subject_mean": subject_mean.astype(np.float32),
+        }
+    # With at most two components all nonempty Subject sizes are equal. Reuse
+    # the original exact vectorized assignment shortcuts for the common cases.
+    if k <= 2:
+        original = aggregate_people(s, offsets, unmatched_score).astype(np.float64)
+        matched = np.minimum(k, counts)
+        valid = matched > 0
+        matched_mean[valid] = (
+            k * original[valid] - (k - matched[valid]) * unmatched_score
+        ) / matched[valid]
+        roles = np.where(matched == k, len(np.unique(owners)), matched)
+        subject_mean = (
+            matched_mean * roles + (nsubjects - roles) * unmatched_score
+        ) / nsubjects
+    else:
+        membership = owners[None] == subjects[:, None]
+        sizes = membership.sum(1)
+        weights = membership / np.maximum(sizes[:, None], 1)
+        # Single-person galleries need only a maximum, independently of role.
+        one = counts == 1
+        matched_mean[one] = s[:, offsets[:-1][one]].max(axis=0)
+        subject_mean[one] = (
+            matched_mean[one] + (nsubjects - 1) * unmatched_score
+        ) / nsubjects
+        for gi in np.flatnonzero(counts >= 2):
+            matrix = s[:, offsets[gi] : offsets[gi + 1]]
+            rows, cols = linear_sum_assignment(-matrix)
+            values = matrix[rows, cols]
+            selected_weights = weights[:, rows]
+            numerator = selected_weights @ values
+            mass = selected_weights.sum(1)
+            matched_mean[gi] = numerator.sum() / mass.sum()
+            per_subject = np.full(nsubjects, unmatched_score, dtype=np.float64)
+            np.divide(numerator, mass, out=per_subject, where=mass > 0)
+            subject_mean[gi] = per_subject.mean()
+    return {
+        "matched_mean": matched_mean.astype(np.float32),
+        "subject_mean": subject_mean.astype(np.float32),
+    }

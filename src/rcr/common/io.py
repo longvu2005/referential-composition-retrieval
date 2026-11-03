@@ -86,7 +86,7 @@ def image_relative_path(url: str) -> Path:
 def output_directory(cfg: dict) -> Path:
     """Each run root owns separate mode/split directories; no path templates."""
     root = Path(cfg["output"]["dir"])
-    if cfg["method"] == "clip":
+    if cfg["method"] in ("clip", "fafa_pooling"):
         root /= cfg["mode"]
     return root / cfg["split"]
 

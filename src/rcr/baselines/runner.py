@@ -10,6 +10,7 @@ from time import perf_counter
 
 import numpy as np
 
+from rcr.baselines import FAFA_POOLING_VERSION, FAFA_POOLINGS
 from rcr.baselines.clip import (
     MODES,
     canonical_mode,
@@ -71,7 +72,7 @@ def run_retrieval(
         from rcr.baselines.clip import retrieve_clip
 
         scores, details = retrieve_clip(public_data, samples, gallery_ids, cfg, device)
-    elif cfg["method"] == "fafa":
+    elif cfg["method"] in ("fafa", "fafa_pooling"):
         from rcr.baselines.fafa import retrieve_fafa
 
         scores, details = retrieve_fafa(public_data, samples, gallery_ids, cfg, device)
@@ -79,6 +80,21 @@ def run_retrieval(
         raise ValueError(f"unknown baseline {cfg['method']!r}")
     if selection_metadata is not None:
         details["adapter_selection"] = selection_metadata
+    if cfg["method"] == "fafa_pooling":
+        outputs = {}
+        elapsed = perf_counter() - start
+        for mode in FAFA_POOLINGS:
+            run_cfg = {**cfg, "mode": mode}
+            outputs[mode] = scores_to_rankings(samples, gallery_ids, scores[mode])
+            save_run(
+                run_cfg,
+                data,
+                outputs[mode],
+                {**details, "pooling": mode, "timing_scope": "both pooling variants"},
+                elapsed,
+                query_subset=len(samples) != full_num_queries,
+            )
+        return outputs
     output = scores_to_rankings(samples, gallery_ids, scores)
     save_run(
         cfg,
@@ -192,6 +208,14 @@ def fafa_context(data, cfg, device):
             "checkpoint": cfg["checkpoint"],
             "localization": cfg["localization"],
             "setmatch": cfg["setmatch"],
+            **(
+                {
+                    "pooling_version": FAFA_POOLING_VERSION,
+                    "pooling_modes": list(FAFA_POOLINGS),
+                }
+                if cfg["method"] == "fafa_pooling"
+                else {}
+            ),
             "gallery_feature_dtype": cfg["runtime"]["gallery_feature_dtype"],
             "device_type": device.type,
             "weight_hashes": {
@@ -228,7 +252,7 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
     splits = [s for s in ("val", "test") if s in splits]
     if cfg["method"] == "clip":
         modes = list(dict.fromkeys(canonical_mode(m) for m in (modes or MODES)))
-    elif cfg["method"] == "fafa":
+    elif cfg["method"] in ("fafa", "fafa_pooling"):
         if modes:
             raise ValueError("modes are only for CLIP")
         modes = [None]
@@ -242,7 +266,7 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
             )
     device = resolve_device(cfg)
     adapter_selection, adapter_path = None, None
-    if cfg["method"] == "fafa":
+    if cfg["method"] in ("fafa", "fafa_pooling"):
         if not data.splits["val"]:
             raise ValueError("FAFA benchmark runs require complete validation first")
         context = fafa_context(data, cfg, device)
@@ -343,6 +367,33 @@ def run_experiment(cfg, *, modes=None, splits=("val",)):
                 output = run_retrieval(
                     run_cfg, data=data, selection_metadata=adapter_selection
                 )
+            if cfg["method"] == "fafa_pooling":
+                values = {}
+                for pooling in FAFA_POOLINGS:
+                    metrics = evaluate_run(
+                        {**run_cfg, "mode": pooling},
+                        data=data,
+                        samples=samples,
+                        output=output[pooling],
+                    )
+                    values[pooling] = metrics["overall"]["full_map"]
+                    rows.append(
+                        {
+                            "method": f"fafa_{pooling}",
+                            "split": split,
+                            **metrics["overall"],
+                        }
+                    )
+                if split == "val":
+                    write_json(
+                        adapter_path,
+                        {
+                            **adapter_selection,
+                            "val_full_map": values,
+                            "config": run_cfg,
+                        },
+                    )
+                continue
             metrics = evaluate_run(run_cfg, data=data, samples=samples, output=output)
             if cfg["method"] == "fafa" and split == "val":
                 write_json(
