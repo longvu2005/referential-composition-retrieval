@@ -45,6 +45,19 @@ The FAFA worker runs through `person_encoder.python`, so native FAFA never enter
 the proposed environment. Training and retrieval read cache files and do not load
 FAFA weights.
 
+The proposed FAFA branch now keeps the complete condition for each Subject and
+anchors its mentions to “the reference person”, without splitting clauses. After
+updating from the split-condition code, rerun only the query stage:
+
+```bash
+python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
+```
+
+Content-based keys reject stale query entries and reuse unchanged condition
+shards. Detection, scene and FAFA image/target caches remain reusable; no retraining
+is required for this text-routing change. Re-evaluate saved checkpoints with the
+rebuilt queries before comparing metrics or tuning retrieval weights.
+
 ## 3. Train and select a checkpoint
 
 ```bash

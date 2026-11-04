@@ -18,7 +18,7 @@ NATIVE_VERSION = "fafa-multimodal-fda-v1"
 
 
 def subject_conditions(sample: dict) -> list[str]:
-    """Split only independent, explicit Subject clauses; keep relations intact.
+    """Anchor the complete condition to each public Subject, without splitting.
 
     No case label, GT identity, membership or member count is consulted. The
     complete original change still goes to the RCR Context Reasoner.
@@ -30,23 +30,6 @@ def subject_conditions(sample: dict) -> list[str]:
         sample["final_change"],
         flags=re.IGNORECASE,
     ).strip()
-    parts = re.split(
-        r"\s+and\s+(?=(?:the\s+)?(?:members\s+of\s+)?Subject\s+\d+\b)", text
-    )
-    clauses = {}
-    for part in parts:
-        start = re.match(r"(?:the\s+)?(?:members\s+of\s+)?Subject\s+(\d+)\b", part)
-        mentions = set(map(int, re.findall(r"\bSubject\s+(\d+)\b", part)))
-        if (
-            not start
-            or not part[start.end() :].strip(" .,;")
-            or mentions != {int(start[1])}
-            or int(start[1]) in clauses
-        ):
-            clauses = {}
-            break
-        clauses[int(start[1])] = part
-    independent = set(clauses) == set(ids)
     result = []
     for sid in ids:
 
@@ -60,7 +43,7 @@ def subject_conditions(sample: dict) -> list[str]:
         condition = re.sub(
             r"(?:the\s+members\s+of\s+|members\s+of\s+)?\bSubject\s+(\d+)\b",
             replace,
-            clauses[sid] if independent else text,
+            text,
         )
         # Per-crop FAFA describes one person even when a public Subject is a group.
         # Keep the condition itself; only fix adjacent plural auxiliary agreement.

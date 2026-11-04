@@ -159,12 +159,14 @@ There is no learned projection between these native query and target features.
 Target cache uses `cache.storage_dtype`; query cache stays FP32. FDA arithmetic
 renormalizes cached features in FP32, including under AMP.
 
-`subject_conditions` splits a change only when each explicit Subject clause
-mentions its own Subject and every Subject has a clause. Ambiguous/group/relation
-text is retained, with the current role expressed as “the reference person”.
-It never reads case labels, GT identities or member counts. Complete original
-change text still enters the Context Reasoner. Independent crop composition
-alone does not enforce group/relation correctness.
+`subject_conditions` retains the complete condition for every public Subject,
+without clause splitting or case-specific rules. Mentions of the current Subject
+become “the reference person”; other Subject mentions become “the other referenced
+person (Subject N)”. Per-crop group wording keeps the existing singular auxiliary
+agreement. It never reads case labels, GT identities or member counts. Complete
+original change text still enters the Context Reasoner. Independent crop
+composition alone does not enforce group/relation correctness. The original FAFA
+baseline and `fafa_pooling` retain their separate CPR text adapter.
 
 Let `pi(i)` be the shared identity assignment or null. `retrieval.pooling`
 selects the reduction of native FDA evidence; the method remains `proposed`.
