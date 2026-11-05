@@ -82,6 +82,7 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
+    semantic_hard_fraction: 0.5 # Hard share inside the same-ID quota.
     warmup_epochs: 8           # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
@@ -99,6 +100,7 @@ loss:
   identity_weight: 0.1
   coarse_weight: 1.0
   context_weight: 1.0           # Loss weight; inference gamma is under retrieval.
+  context_rejection_weight: 0.2 # Within context: semantic + weight * rejection.
   identity_temperature: 0.1
   coarse_temperature: 0.1
   state_weight: 1.0
@@ -111,9 +113,9 @@ retrieval:
   # subject_mean: normalize within each Subject, then average Subjects.
   pooling: subject_mean
   fine_score_mode: context_zscore
-  context_weight: 0.0154        # Weight of standardized, coverage-gated context.
-  coarse_beta: 1.26              # Weight of the global state branch.
-  fine_coarse_weight: 0.0875      # Coarse contribution to the final ranking.
+  context_weight: 0.01015        # Weight of standardized, coverage-gated context.
+  coarse_beta: 1.16              # Weight of the global state branch.
+  fine_coarse_weight: 0.090625      # Coarse contribution to the final ranking.
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512

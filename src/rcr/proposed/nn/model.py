@@ -42,6 +42,14 @@ class QueryEncoding:
     membership: Tensor
     subjects: Tensor
 
+    def select(self, index: int) -> "QueryEncoding":
+        """Keep one query's batch axis for per-query candidate scoring."""
+        values = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            values[field.name] = None if value is None else value[index : index + 1]
+        return QueryEncoding(**values)
+
     def repeat_candidates(self, count: int) -> "QueryEncoding":
         """Expand [B,...] into query-major [B*C,...], preserving autograd."""
         if count < 1:

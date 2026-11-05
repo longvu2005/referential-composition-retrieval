@@ -2,6 +2,7 @@
 
 import math
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 import torch
 
@@ -57,6 +58,7 @@ def sampling_settings(config):
         "positives_per_query": 2,
         "identity_fraction": 0.5,
         "hard_fraction": 0.0,
+        "semantic_hard_fraction": 0.0,
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
         "pool_size": 100,
@@ -67,7 +69,13 @@ def sampling_settings(config):
     if settings["positives_per_query"] < 1:
         raise ValueError("positives_per_query must be positive")
     fractions = settings["identity_fraction"], settings["hard_fraction"]
-    if any(not 0 <= value <= 1 for value in fractions) or sum(fractions) > 1:
+    if (
+        any(
+            type(value) not in (int, float) or not 0 <= value <= 1
+            for value in (*fractions, settings["semantic_hard_fraction"])
+        )
+        or sum(fractions) > 1
+    ):
         raise ValueError("negative fractions must be in [0, 1] and sum to <= 1")
     if settings["warmup_epochs"] < 0:
         raise ValueError("warmup_epochs must be nonnegative")
@@ -129,6 +137,16 @@ def _random_negatives(gallery, forbidden, count, generator):
     return selected
 
 
+@dataclass
+class SampledCandidates:
+    """Candidate IDs and the train-only provenance of actual hard selections."""
+
+    images: list[list[str]]
+    hard_identity_ids: list[set[str]]
+    semantic_hard_count: int
+    identity_hard_count: int
+
+
 def sample_candidates(
     samples,
     num_candidates,
@@ -139,9 +157,16 @@ def sample_candidates(
     identity_fraction=0.5,
     hard_pools=None,
     hard_fraction=0.0,
+    semantic_hard_fraction=0.0,
+    identity_rejection=False,
 ):
-    """Sample positives, structured negatives, then uniform negatives."""
-    rows = []
+    """Split the same-ID quota; reserve hard wrong-ID images for rejection.
+
+    Small same-ID pools are retained in full. Fallback images are never tagged
+    as mined hard identity negatives, even if they happen to have a wrong ID.
+    """
+    rows, hard_identity_ids = [], []
+    semantic_hard_count = identity_hard_count = 0
     for sample in samples:
         positives, base_forbidden, identity_pool = index.rows[sample["sample_id"]]
         positive_count = min(positives_per_query, len(positives), num_candidates - 1)
@@ -149,23 +174,44 @@ def sample_candidates(
         forbidden = set(base_forbidden)
 
         negative_count = num_candidates - positive_count
-        hard_pool = list(
-            dict.fromkeys(
-                image_id
-                for image_id in (hard_pools or {}).get(sample["sample_id"], ())
-                if image_id not in forbidden
-            )
-        )
-        for pool, fraction in (
-            (identity_pool, identity_fraction),
-            (hard_pool, hard_fraction),
-        ):
-            pool = [image_id for image_id in pool if image_id not in forbidden]
-            chosen = _draw(
-                pool, min(int(negative_count * fraction), len(pool)), generator
-            )
+        pools = (hard_pools or {}).get(sample["sample_id"], {})
+        identity_set = set(identity_pool)
+
+        def draw(pool, count, *, hard=False, row=row, forbidden=forbidden):
+            pool = list(dict.fromkeys(i for i in pool if i not in forbidden))
+            # Draw from a small hardest window instead of repeating a fixed top-K.
+            if hard:
+                pool = pool[: 2 * count]
+            chosen = _draw(pool, count, generator)
             row.extend(chosen)
             forbidden.update(chosen)
+            return chosen
+
+        identity_quota = int(negative_count * identity_fraction)
+        semantic_quota = math.ceil(identity_quota * semantic_hard_fraction)
+        semantic_hard = []
+        if len(identity_pool) > identity_quota:
+            semantic_hard = draw(
+                [i for i in pools.get("semantic", ()) if i in identity_set],
+                semantic_quota,
+                hard=True,
+            )
+        semantic_hard_count += len(semantic_hard)
+        draw(identity_pool, identity_quota - len(semantic_hard))
+
+        hard_quota = int(negative_count * hard_fraction)
+        if identity_rejection:
+            identity_hard = draw(
+                [i for i in pools.get("identity", ()) if i not in identity_set],
+                hard_quota,
+                hard=True,
+            )
+        else:
+            # The zero-feature ablation retains the original coarse hard pool.
+            draw(pools.get("coarse", ()), hard_quota)
+            identity_hard = []
+        hard_identity_ids.append(set(identity_hard))
+        identity_hard_count += len(identity_hard)
         row.extend(
             _random_negatives(
                 index.gallery,
@@ -176,4 +222,6 @@ def sample_candidates(
         )
         permutation = torch.randperm(num_candidates, generator=generator).tolist()
         rows.append([row[index] for index in permutation])
-    return rows
+    return SampledCandidates(
+        rows, hard_identity_ids, semantic_hard_count, identity_hard_count
+    )

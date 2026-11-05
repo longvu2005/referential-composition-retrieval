@@ -84,6 +84,7 @@ def prepare_visual_batch(
     identity_image_ids: list[set[str]],
     identity_crops=(),
     identity_sampling=None,
+    hard_identity_image_ids=None,
 ) -> dict[str, Tensor | dict]:
     """Load CPU visual features and labels. No model is executed here."""
     if not samples or len(samples) != len(candidate_image_ids):
@@ -306,6 +307,26 @@ def prepare_visual_batch(
     )
     if (positive_mask & ~batch["identity_positive_mask"]).any():
         raise ValueError("every Full Positive must contain all required IDs")
+    hard_ids = (
+        [set() for _ in samples]
+        if hard_identity_image_ids is None
+        else hard_identity_image_ids
+    )
+    if len(hard_ids) != batch_size or any(
+        not set(hard) <= set(candidates)
+        for hard, candidates in zip(hard_ids, candidate_image_ids, strict=True)
+    ):
+        raise ValueError("hard identity provenance must match sampled candidates")
+    hard_mask = torch.tensor(
+        [
+            [image_id in hard for image_id in candidates]
+            for hard, candidates in zip(hard_ids, candidate_image_ids, strict=True)
+        ],
+        dtype=torch.bool,
+    )
+    if (hard_mask & batch["identity_positive_mask"]).any():
+        raise ValueError("hard identity negatives cannot contain all required IDs")
+    batch["hard_identity_negative_mask"] = hard_mask
     return batch
 
 
@@ -321,6 +342,7 @@ def build_batch(
     identity_image_ids: list[set[str]],
     identity_crops=(),
     identity_sampling=None,
+    hard_identity_image_ids=None,
     text_cache: QueryTextCache | None = None,
 ) -> dict[str, Tensor | dict]:
     text_cache = text_cache or QueryTextCache(tokenizer)
@@ -332,6 +354,7 @@ def build_batch(
         identity_image_ids=identity_image_ids,
         identity_crops=identity_crops,
         identity_sampling=identity_sampling,
+        hard_identity_image_ids=hard_identity_image_ids,
     )
     visual = {
         key: value.to(device) if isinstance(value, Tensor) else value

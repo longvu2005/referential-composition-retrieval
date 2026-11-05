@@ -231,6 +231,7 @@ require validation.
 
 ```text
 L = L_ground + 0.1 L_id + L_coarse + L_context + L_global_state
+L_context = L_semantic + context_rejection_weight * L_rejection
 ```
 
 Each term has one explicit task:
@@ -240,7 +241,7 @@ Each term has one explicit task:
 | `L_ground` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
 | `L_id` | Normalized person embeddings; SupCon, temperature 0.1 | Deduplicated known-ID crops from queries, Full Positive targets and extra train-only identity observations |
 | `L_coarse` | Actual raw `identity_scores`, temperature 0.1 | All-required-ID images are positives, other candidate images are negatives; both query and target need person support |
-| `L_context` | Raw `coverage * context`, unit temperature | Full Positives versus same-required-ID negatives, both with nonzero predicted coverage |
+| `L_context` | Raw `coverage * context`, unit temperature | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
 | `L_global_state` | Global state cosine, temperature 0.1 | Full Positives versus same-required-ID negatives, independently of person detection coverage |
 
 After `train.sampling.warmup_epochs`, nonzero
@@ -294,26 +295,38 @@ teacher-forced membership, identities or group cardinalities enter model scoring
 
 The same `identity_positive_mask`, derived only from train annotations, serves
 three different targets. A same-ID wrong-state image is a **coarse positive**,
-but a **context/state negative**. Wrong-ID images have no context/state label.
+but a **semantic-context/state negative**. Only explicitly mined wrong-ID images
+receive a rejection label; random wrong-ID fallback images do not. State retains
+its identity-restricted supervision.
 Candidate sampling still excludes self, all unsampled Full Positives and disputed
 negatives from equivalent queries. No validation/test annotation enters a train
 loss or negative pool.
 
 The context objective uses the shared `score_context()` path, with the exact
 inference matching, coverage gating and reasoner. Context queries lacking a
-supported positive/negative pair are skipped; `context_active_fraction` is logged.
-There is no fallback that labels wrong-ID images as wrong-state examples. Global
-state can still learn when detections fail. Crop identity and coarse supervision
+supported positive/negative pair are skipped. Semantic and rejection losses each
+average pairs per eligible query, then average eligible queries independently.
+`loss.context_rejection_weight` defaults to zero for omitted old settings; the
+current YAML uses `0.2`. This weight is nested under `loss.context_weight`, not a
+sixth standalone objective or the inference context coefficient. Rejection is
+disabled until the sampling warmup ends. A mined image whose predicted coverage
+becomes zero is excluded again in the current training forward. No extra model
+forward or classifier is added. `context_active_fraction` retains its semantic
+meaning; `context_rejection_active_fraction` is logged separately, alongside
+`context_semantic` and `context_rejection`. Global state can still learn when
+detections fail. Crop identity and coarse supervision
 train the identity head; context gradients train composition, evidence binding,
 reasoner and shared projections without differentiating through matching.
 
 Frozen FDA binding is not part of the train loss and native FAFA query/target
-tokens are not loaded during optimization. Pooled FAFA person features remain
+tokens are not loaded during gradient-bearing optimization. Fine negative mining
+reads those frozen cache tokens in eval/inference mode only. Pooled FAFA person features remain
 inputs to learned identity/semantic modules. `binding_log_scale` is fixed rather
 than optimized for new runs; its state key/value remains available to unchanged
 checkpoint inference. The optimizer includes trainable parameters only.
 
-`loss` contains five weights and three cosine temperatures. The default weights
+`loss` contains five task weights, one nested rejection weight and three cosine
+temperatures. The default weights
 are starting values, not measured optima. The fine mode and inference fusion
 weights are selected independently on validation. An untrained/disabled state
 branch cannot enter training validation with a positive coarse beta. Checkpoint
@@ -323,8 +336,9 @@ The default 20-epoch run has a short context warmup:
 
 | Epochs | Active objective |
 | --- | --- |
-| 1-3 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
-| 4-20 | All five terms, with the configured `loss.context_weight` |
+| 1-4 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
+| 5-8 | All five terms; context uses semantic pairs only |
+| 9-20 | Fine negative mining and context rejection are also enabled |
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
@@ -337,7 +351,7 @@ there is no parameter freezing or teacher forcing added at the boundary.
 zero means joint training from epoch 1. A positive warmup requires a non-context
 objective. When `loss.context_weight=0`, no context phase is scheduled. This is
 independent of `train.sampling.warmup_epochs`, which delays hard-negative mining.
-The three-epoch default is a starting schedule, not a measured optimum. Compare
+The four-epoch default is a starting schedule, not a measured optimum. Compare
 against zero warmup with the same total optimizer steps and select on validation.
 
 Full validation and checkpoint selection skip warmup epochs, then follow the

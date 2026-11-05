@@ -99,10 +99,62 @@ alignment is cached separately from visual features.
 Each batch contains:
 
 - up to `positives_per_query` Full Positives;
-- `identity_fraction` same-identity, wrong-state negatives;
-- `hard_fraction` coarse hard negatives after `train.sampling.warmup_epochs`,
-  independently of context warmup;
+- `identity_fraction` same-identity, wrong-state negatives, with
+  `ceil(same_ID_quota * semantic_hard_fraction)` selected from the semantic hard
+  pool when it is available and the same-ID pool exceeds the quota;
+- `hard_fraction` mined wrong/missing-ID negatives when context rejection is
+  enabled, or the original coarse hard negatives when it is disabled;
 - uniform negatives for the remaining slots.
+
+Small same-ID pools are retained in full. Missing hard semantic evidence falls
+back to random same-ID images first. Missing hard identity evidence falls back
+to uniform negatives, without marking fallback images as rejection examples.
+Self, all Full Positives (including unsampled ones), disputed negatives and
+duplicate candidate IDs stay excluded. GT identity remains a crop-level label
+for SupCon: a Full-negative image can still supply same-ID positive crops.
+
+After `train.sampling.warmup_epochs` (default 8), fine mining refreshes every two
+epochs. It first takes at most `pool_size` finite coarse candidates **per enabled
+negative group** (same-ID/non-Full versus missing at least one required ID), then
+fine-scores their union with the current model in eval/inference mode. Fine/context
+and coarse fusion use the existing retrieval formulas, normalized over the entire
+mining union, never per chunk or per group. This bounded mining support differs
+from the inference Top-M. Zero-coverage images do not enter fine hard pools.
+Sampling draws from a hardest window of twice the requested hard quota, rather
+than always taking the same top-K. No FAFA backbone is loaded for mining.
+
+The default 32-candidate query with two positives and sufficient evidence has
+8 hard semantic, 7 random same-ID, 3 hard identity and 12 uniform negatives.
+`candidate_semantic_hard` and `candidate_identity_hard` report actual epoch counts,
+not requested quotas. `hard_negatives.json` records the last refresh epoch,
+retrieval settings, normalization support and per-query pools. The `coarse` pool
+is retained only when the original hard sampler is in use.
+
+Fine mining requires native FAFA query features for **train** as well as val;
+their index/text compatibility is checked before label preparation and epoch 1.
+If those queries are absent/stale, extend the existing query cache with:
+
+```bash
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
+```
+
+Completed detection, scene and FAFA image caches remain reusable. For controlled
+ablations use a fresh `output.dir` for each run:
+
+| Ablation | `train.sampling.semantic_hard_fraction` | `loss.context_rejection_weight` |
+| --- | ---: | ---: |
+| Original sampler/objective | 0 | 0 |
+| Semantic hard mining only | 0.5 | 0 |
+| Identity rejection only | 0 | 0.2 |
+| Both (current YAML) | 0.5 | 0.2 |
+
+Omitted new settings default to zero. Training optimizes
+`L_context = L_semantic + context_rejection_weight * L_rejection` using the same
+raw coverage-gated context score. Only mined wrong-ID candidates enter rejection,
+and only when both the positive and negative retain predicted coverage. Each
+component averages valid pairs per query and valid queries separately; empty
+components return differentiable zero. Inference scores and checkpoint selection
+are unchanged. All pool classification/loss masks use train annotations only.
 
 The identity loss can additionally read up to
 `train.identity_sampling.max_crops` detector-aligned train crops. These crops do

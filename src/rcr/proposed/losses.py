@@ -18,6 +18,7 @@ def loss_settings(config: dict) -> dict:
         "identity_weight": 0.1,
         "coarse_weight": 1.0,
         "context_weight": 1.0,
+        "context_rejection_weight": 0.0,
         "state_weight": 1.0,
         "identity_temperature": 0.1,
         "coarse_temperature": 0.1,
@@ -36,7 +37,11 @@ def loss_settings(config: dict) -> dict:
                 f"invalid loss.{key}: weights must be nonnegative "
                 "and temperatures positive"
             )
-    if not any(value for key, value in settings.items() if key.endswith("weight")):
+    if not any(
+        value
+        for key, value in settings.items()
+        if key.endswith("weight") and key != "context_rejection_weight"
+    ):
         raise ValueError("at least one loss weight must be positive")
     return settings
 
@@ -123,6 +128,7 @@ def compute_loss(
     identity_temperature: float,
     coarse_temperature: float,
     state_temperature: float,
+    context_rejection_weight: float = 0.0,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
     if context_weight:
@@ -160,7 +166,8 @@ def compute_loss(
     batch_size, candidates = positive.shape
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
-    context_active = zero.detach()
+    semantic = rejection = zero
+    context_active = rejection_active = zero.detach()
     hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
@@ -264,9 +271,24 @@ def compute_loss(
             matching.coverage.reshape(batch_size, candidates) > 0
         )
         context = retrieval_loss(scores, positive, valid)
+        semantic = context
         context_active = (
             ((positive & valid).any(1) & (~positive & valid).any(1)).float().mean()
         )
+        if context_rejection_weight:
+            hard = batch["hard_identity_negative_mask"].bool()
+            if (hard & identity_positive).any():
+                raise ValueError("rejection negatives must lack required identities")
+            rejection_valid = (positive | hard) & (
+                matching.coverage.reshape(batch_size, candidates) > 0
+            )
+            rejection = retrieval_loss(scores, positive, rejection_valid)
+            rejection_active = (
+                ((positive & rejection_valid).any(1) & (hard & rejection_valid).any(1))
+                .float()
+                .mean()
+            )
+            context = semantic + context_rejection_weight * rejection
 
     if state_weight:
         text_state = model.encode_text_state(batch["change_global"])
@@ -288,8 +310,11 @@ def compute_loss(
         "identity": identity.detach(),
         "coarse": coarse.detach(),
         "context": context.detach(),
+        "context_semantic": semantic.detach(),
+        "context_rejection": rejection.detach(),
         "state": state.detach(),
         "context_active_fraction": context_active.detach(),
+        "context_rejection_active_fraction": rejection_active.detach(),
         "identity_hard_crops": hard_count,
         "identity_random_crops": random_count,
         "identity_supplemental_crops": hard_count + random_count,

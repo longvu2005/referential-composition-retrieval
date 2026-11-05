@@ -273,6 +273,10 @@ def tiny_training_run(tmp_path, monkeypatch):
     cfg["train"].update(
         epochs=1, context_warmup_epochs=0, batch_size=1, candidates=2, amp=False
     )
+    # Existing contracts exercise the zero-feature ablation. Fine-mining tests
+    # explicitly enable the new sampler/loss on this same fixture.
+    cfg["train"]["sampling"]["semantic_hard_fraction"] = 0
+    cfg["loss"]["context_rejection_weight"] = 0
     cfg["evaluation"]["every_epochs"] = 1
     cfg["retrieval"].update(
         top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2
@@ -554,7 +558,7 @@ def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
     def mine(*args, **kwargs):
         assert kwargs["gallery_ids"] == ["q", "a", "n"]
         mined_after_steps.append(completed_steps)
-        return {"train": ["n"]}
+        return {"train": {"coarse": ["n"]}}
 
     monkeypatch.setattr(torch.optim, "AdamW", create_optimizer)
     monkeypatch.setattr(training, "compute_loss", observe_loss)

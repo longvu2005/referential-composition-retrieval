@@ -321,6 +321,40 @@ def _gallery_scope(cache, gallery_ids, samples, label):
     return gallery_ids, local, indices
 
 
+def _score_target_components(
+    query, cache, model, device, image_indices, batch_size, pooling
+):
+    """Collect raw fine evidence; callers normalize the complete shortlist once."""
+    components = {
+        key: torch.empty(len(image_indices), device=device, dtype=torch.float32)
+        for key in (
+            "context",
+            "coverage",
+            *(f"binding_{mode}" for mode in POOLING_MODES),
+        )
+    }
+    for start in range(0, len(image_indices), batch_size):
+        targets = image_indices[start : start + batch_size]
+        scene, persons, boxes, mask = cache.load(targets)
+        details = model.score_target(
+            query.repeat_candidates(len(targets)),
+            scene.to(device),
+            persons.to(device),
+            boxes.to(device),
+            cache.patch_hw,
+            mask.to(device),
+            fafa_targets=cache.native_targets(targets, persons.shape[1]).to(device),
+            return_details=True,
+            pooling=pooling,
+        )
+        for key, output in components.items():
+            values = details[key].float()
+            if not torch.isfinite(values).all():
+                raise ValueError("fine score components contain NaN/Inf")
+            output[start : start + len(targets)] = values
+    return components
+
+
 @torch.inference_mode()
 def retrieve_rankings(
     samples: Sequence[dict],
@@ -457,28 +491,17 @@ def retrieve_rankings(
             }
 
             def score_targets(indices, *, query=query, components=components):
-                for start in range(0, len(indices), fine_batch_size):
-                    local = indices[start : start + fine_batch_size]
-                    targets = image_indices[local.cpu()]
-                    scene, persons, boxes, mask = cache.load(targets)
-                    details = model.score_target(
-                        query.repeat_candidates(len(local)),
-                        scene.to(device),
-                        persons.to(device),
-                        boxes.to(device),
-                        cache.patch_hw,
-                        mask.to(device),
-                        fafa_targets=cache.native_targets(targets, persons.shape[1]).to(
-                            device
-                        ),
-                        return_details=True,
-                        pooling=pooling,
-                    )
-                    for key in components:
-                        values = details[key].float()
-                        if not torch.isfinite(values).all():
-                            raise ValueError("fine score components contain NaN/Inf")
-                        components[key][local] = values
+                values = _score_target_components(
+                    query,
+                    cache,
+                    model,
+                    device,
+                    image_indices[indices.cpu()],
+                    fine_batch_size,
+                    pooling,
+                )
+                for key in components:
+                    components[key][indices] = values[key]
 
             score_targets(top_device)
             raw = {
@@ -562,11 +585,29 @@ def mine_hard_negatives(
     excluded=None,
     query_batch_size=1,
     text_cache=None,
+    identity_image_ids=None,
+    semantic_hard=False,
+    identity_rejection=False,
 ):
-    """Return each query's highest-scoring non-positive coarse candidates."""
+    """Mine train-only coarse or fine-ranked semantic/identity negative pools.
+
+    Coarse filters each requested group to ``pool_size`` images. Fine scores use
+    the shared retrieval arithmetic over their union, never per inference chunk
+    or separately per negative group. Labels classify pools outside the scorer.
+    """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
     settings = retrieval_settings(retrieval, model.coarse_beta)
+    if type(pool_size) is not int or pool_size < 1:
+        raise ValueError("mining pool_size must be a positive integer")
+    if type(query_batch_size) is not int or query_batch_size < 1:
+        raise ValueError("mining query_batch_size must be a positive integer")
+    fine_mining = semantic_hard or identity_rejection
+    if fine_mining and (
+        identity_image_ids is None
+        or any(row["sample_id"] not in identity_image_ids for row in samples)
+    ):
+        raise ValueError("fine mining requires train identity candidate sets")
     gallery_ids, gallery_by_id, image_indices = _gallery_scope(
         cache, gallery_ids, samples, "mining"
     )
@@ -579,12 +620,14 @@ def mine_hard_negatives(
     }
     limit = pool_size + max(map(len, forbidden.values()))
     samples = inference_samples(samples)
+    if fine_mining:
+        cache.validate_samples(samples)
     text_cache = text_cache or QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
 
-    groups = {}
+    subject_groups = {}
     for sample in samples:
-        groups.setdefault(len(sample["subjects"]), []).append(sample)
+        subject_groups.setdefault(len(sample["subjects"]), []).append(sample)
     need_state = uses_state(settings, model.coarse_beta)
     pools = {}
 
@@ -608,9 +651,9 @@ def mine_hard_negatives(
             else None
         )
         progress = tqdm(total=len(samples), desc="mine train negatives")
-        for group in groups.values():
-            for start in range(0, len(group), query_batch_size):
-                rows = group[start : start + query_batch_size]
+        for sample_group in subject_groups.values():
+            for start in range(0, len(sample_group), query_batch_size):
+                rows = sample_group[start : start + query_batch_size]
                 text = encode_query_text(
                     rows, tokenizer, text_encoder, device, text_cache=text_cache
                 )
@@ -619,14 +662,32 @@ def mine_hard_negatives(
                 )
                 scene, people, boxes, mask = cache.load(indices)
                 mask = mask.to(device)
-                logits, query_identity = model.encode_grounded_identity(
-                    scene.to(device),
-                    people.to(device),
-                    boxes.to(device),
-                    text["selections"],
-                    cache.patch_hw,
-                    text["selection_mask"],
-                )
+                if fine_mining:
+                    queries = model.encode_query(
+                        scene.to(device),
+                        people.to(device),
+                        boxes.to(device),
+                        patch_hw=cache.patch_hw,
+                        query_person_mask=mask,
+                        fafa_query=cache.native_queries(rows, people.shape[1]).to(
+                            device
+                        ),
+                        **{
+                            key: value
+                            for key, value in text.items()
+                            if key != "change_global"
+                        },
+                    )
+                    logits, query_identity = queries.logits, queries.identity
+                else:
+                    logits, query_identity = model.encode_grounded_identity(
+                        scene.to(device),
+                        people.to(device),
+                        boxes.to(device),
+                        text["selections"],
+                        cache.patch_hw,
+                        text["selection_mask"],
+                    )
 
                 identity = query_identity.new_empty(len(rows), len(gallery_ids))
                 offset = 0
@@ -663,11 +724,71 @@ def mine_hard_negatives(
                         exclude_index=query_index,
                     )
                     order = torch.argsort(scores, descending=True, stable=True)
-                    pools[row["sample_id"]] = [
-                        gallery_ids[index]
-                        for index in order[:limit].cpu().tolist()
-                        if gallery_ids[index] not in forbidden[row["sample_id"]]
-                    ][:pool_size]
+                    sample_id = row["sample_id"]
+                    pools[sample_id] = {}
+                    if not identity_rejection:
+                        pools[sample_id]["coarse"] = [
+                            gallery_ids[index]
+                            for index in order[:limit].cpu().tolist()
+                            if gallery_ids[index] not in forbidden[sample_id]
+                        ][:pool_size]
+                    if not fine_mining:
+                        continue
+                    # Build the bounded union in coarse order for stable ties.
+                    scores, order = scores.cpu(), order.cpu()
+                    eligible = (
+                        torch.tensor(
+                            [i not in forbidden[sample_id] for i in gallery_ids]
+                        )
+                        & scores.isfinite()
+                    )
+                    same_id = torch.tensor(
+                        [i in identity_image_ids[sample_id] for i in gallery_ids]
+                    )
+                    negative_groups = {}
+                    if semantic_hard:
+                        negative_groups["semantic"] = eligible & same_id
+                    if identity_rejection:
+                        negative_groups["identity"] = eligible & ~same_id
+                    screened = [
+                        order[membership[order]][:pool_size]
+                        for membership in negative_groups.values()
+                    ]
+                    selected = torch.cat(screened)
+                    shortlist = order[torch.isin(order, selected)]
+                    pools[sample_id].update({name: [] for name in negative_groups})
+                    if not shortlist.numel():
+                        continue
+                    components = _score_target_components(
+                        queries.select(n),
+                        cache,
+                        model,
+                        device,
+                        image_indices[shortlist],
+                        settings["fine_batch_size"],
+                        settings["pooling"],
+                    )
+                    fine = fine_score_components(
+                        components[f"binding_{settings['pooling']}"].cpu(),
+                        components["context"].cpu(),
+                        components["coverage"].cpu(),
+                        model.binding_scale.item(),
+                        settings["fine_score_mode"],
+                        settings["context_weight"],
+                    )
+                    fused = fuse_fine_coarse_scores(
+                        fine["fine_scores"],
+                        scores[shortlist],
+                        settings["fine_coarse_weight"],
+                    )
+                    ranked = fused.argsort(descending=True, stable=True)
+                    covered = components["coverage"].cpu() > 0
+                    for name, membership in negative_groups.items():
+                        keep = covered & membership[shortlist]
+                        pools[sample_id][name] = [
+                            gallery_ids[i]
+                            for i in shortlist[ranked[keep[ranked]]].tolist()
+                        ]
                 progress.update(len(rows))
         progress.close()
     return pools

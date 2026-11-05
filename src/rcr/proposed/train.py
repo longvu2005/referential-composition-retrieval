@@ -265,12 +265,25 @@ def train(cfg: dict) -> Path:
     if warmup_epochs and not any(
         value
         for key, value in cfg["loss"].items()
-        if key.endswith("weight") and key != "context_weight"
+        if key.endswith("weight")
+        and key not in ("context_weight", "context_rejection_weight")
     ):
         raise ValueError(
             "context warmup requires a non-context loss; "
             "set train.context_warmup_epochs=0 for context-only training"
         )
+    sampling = sampling_settings(cfg["train"].get("sampling", {}))
+    max_negatives = cfg["train"]["candidates"] - 1
+    semantic_hard = (
+        sampling["semantic_hard_fraction"] > 0
+        and int(max_negatives * sampling["identity_fraction"]) > 0
+    )
+    identity_rejection = (
+        cfg["loss"]["context_weight"] > 0
+        and cfg["loss"]["context_rejection_weight"] > 0
+        and int(max_negatives * sampling["hard_fraction"]) > 0
+    )
+    fine_mining = semantic_hard or identity_rejection
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
@@ -286,6 +299,9 @@ def train(cfg: dict) -> Path:
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(inference_samples(val_samples))
+    if fine_mining:
+        # Fail before label preparation or epoch 1, not at the first refresh.
+        cache.validate_samples(inference_samples(train_samples))
     check_query_text_config(cache, cfg)
 
     supervision = TrainSupervision(
@@ -319,7 +335,6 @@ def train(cfg: dict) -> Path:
     identity_images = {
         sample_id: set(pool) for sample_id, pool in identity_pools.items()
     }
-    sampling = sampling_settings(cfg["train"].get("sampling", {}))
 
     scene, people, *_ = cache.load(torch.tensor([0]))
     scene_dim, person_dim = scene.shape[-1], people.shape[-1]
@@ -347,7 +362,11 @@ def train(cfg: dict) -> Path:
     cfg = {
         **cfg,
         "model": {**model_cfg, "fine_matching": dict(model.fine_matching)},
-        "train": {**cfg["train"], "identity_sampling": identity_settings},
+        "train": {
+            **cfg["train"],
+            "identity_sampling": identity_settings,
+            "sampling": sampling,
+        },
     }
 
     optimizer = torch.optim.AdamW(
@@ -434,6 +453,11 @@ def train(cfg: dict) -> Path:
         epoch_loss = {
             **cfg["loss"],
             "context_weight": 0.0 if in_warmup else cfg["loss"]["context_weight"],
+            "context_rejection_weight": (
+                cfg["loss"]["context_rejection_weight"]
+                if identity_rejection and epoch - 1 >= sampling["warmup_epochs"]
+                else 0.0
+            ),
         }
         generator = torch.Generator().manual_seed(cfg["train"]["seed"] + epoch - 1)
         identity_generator = torch.Generator().manual_seed(
@@ -447,7 +471,7 @@ def train(cfg: dict) -> Path:
         )
         hard_quota = int((cfg["train"]["candidates"] - 1) * sampling["hard_fraction"])
         if (
-            hard_quota
+            (hard_quota or semantic_hard)
             and epoch_index >= sampling["warmup_epochs"]
             and (epoch_index - sampling["warmup_epochs"])
             % sampling["refresh_every_epochs"]
@@ -466,8 +490,25 @@ def train(cfg: dict) -> Path:
                 excluded=excluded,
                 query_batch_size=cfg["train"].get("mining_batch_size", 1),
                 text_cache=text_cache,
+                identity_image_ids=identity_images,
+                semantic_hard=semantic_hard,
+                identity_rejection=identity_rejection,
             )
-            write_json(output / "hard_negatives.json", hard_pools)
+            write_json(
+                output / "hard_negatives.json",
+                {
+                    "epoch": epoch,
+                    "mining": "coarse_then_fine" if fine_mining else "coarse",
+                    "normalization": (
+                        "per_query_screened_union_population"
+                        if fine_mining
+                        else "split_gallery_population"
+                    ),
+                    "retrieval": cfg["retrieval"],
+                    "screen_pool_size": sampling["pool_size"],
+                    "pools": hard_pools,
+                },
+            )
         batches = training_batches(
             train_samples,
             cfg["train"]["batch_size"],
@@ -483,8 +524,11 @@ def train(cfg: dict) -> Path:
                 "identity",
                 "coarse",
                 "context",
+                "context_semantic",
+                "context_rejection",
                 "state",
                 "context_active_fraction",
+                "context_rejection_active_fraction",
             ),
             0.0,
         )
@@ -501,9 +545,10 @@ def train(cfg: dict) -> Path:
             if cfg["loss"]["state_weight"]
             else None
         )
+        candidate_totals = {"candidate_semantic_hard": 0, "candidate_identity_hard": 0}
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs} ({phase})")
         for rows in progress:
-            candidates = sample_candidates(
+            sampled = sample_candidates(
                 rows,
                 cfg["train"]["candidates"],
                 generator,
@@ -512,7 +557,12 @@ def train(cfg: dict) -> Path:
                 identity_fraction=sampling["identity_fraction"],
                 hard_pools=hard_pools,
                 hard_fraction=sampling["hard_fraction"],
+                semantic_hard_fraction=sampling["semantic_hard_fraction"],
+                identity_rejection=identity_rejection,
             )
+            candidates = sampled.images
+            candidate_totals["candidate_semantic_hard"] += sampled.semantic_hard_count
+            candidate_totals["candidate_identity_hard"] += sampled.identity_hard_count
             identity_crops = (
                 identity_sampler.sample(rows, candidates, identity_generator)
                 if identity_sampler is not None
@@ -529,6 +579,7 @@ def train(cfg: dict) -> Path:
                 identity_image_ids=[identity_images[row["sample_id"]] for row in rows],
                 identity_crops=identity_crops,
                 identity_sampling=identity_settings if crop_mining else None,
+                hard_identity_image_ids=sampled.hard_identity_ids,
                 text_cache=text_cache,
             )
             if state_pairs_epoch is not None:
@@ -585,6 +636,9 @@ def train(cfg: dict) -> Path:
                         "train/model_lr": optimizer.param_groups[0]["lr"],
                         "train/text_lr": optimizer.param_groups[1]["lr"],
                         "train/context_weight": epoch_loss["context_weight"],
+                        "train/context_rejection_weight": epoch_loss[
+                            "context_rejection_weight"
+                        ],
                         "train/warmup": in_warmup,
                     }
                 )
@@ -595,6 +649,7 @@ def train(cfg: dict) -> Path:
             "epoch": epoch,
             "phase": phase,
             "context_weight": epoch_loss["context_weight"],
+            "context_rejection_weight": epoch_loss["context_rejection_weight"],
             "model_lr": optimizer.param_groups[0]["lr"],
             "text_lr": optimizer.param_groups[1]["lr"],
             **{
@@ -602,6 +657,7 @@ def train(cfg: dict) -> Path:
                 for name, value in totals.items()
             },
             **{f"train_{name}": value for name, value in crop_totals.items()},
+            **{f"train_{name}": value for name, value in candidate_totals.items()},
         }
         optimizer.zero_grad(set_to_none=True)
         is_best = False
@@ -664,11 +720,15 @@ def train(cfg: dict) -> Path:
             tracked_epoch = {
                 "epoch": epoch,
                 "epoch/context_weight": epoch_loss["context_weight"],
+                "epoch/context_rejection_weight": epoch_loss[
+                    "context_rejection_weight"
+                ],
                 "epoch/warmup": in_warmup,
                 "epoch/model_lr": epoch_log["model_lr"],
                 "epoch/text_lr": epoch_log["text_lr"],
                 **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
                 **{f"epoch/{name}": value for name, value in crop_totals.items()},
+                **{f"epoch/{name}": value for name, value in candidate_totals.items()},
             }
             if should_evaluate:
                 tracked_epoch.update(

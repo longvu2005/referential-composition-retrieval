@@ -433,8 +433,8 @@ def test_new_settings_are_accepted_by_hard_negative_mining(tiny_ranker):
         query_batch_size=2,
     )
     for sample in samples:
-        assert len(pools[sample["sample_id"]]) == 2
-        assert not set(pools[sample["sample_id"]]) & {
+        assert len(pools[sample["sample_id"]]["coarse"]) == 2
+        assert not set(pools[sample["sample_id"]]["coarse"]) & {
             sample["query_image_id"],
             *sample["positive_image_ids"],
         }

@@ -37,6 +37,13 @@ The remaining gallery retains coarse order.
 `train.epochs` sets the total run length; `train.context_warmup_epochs` disables
 context initially while grounding, identity, coarse and state stay active.
 Both optimizer groups use cosine decay throughout the run.
+After the sampling warmup, train-only fine mining selects hard same-ID condition
+negatives and wrong/missing-ID negatives. Context learns from semantic pairs plus
+a rejection term weighted by `loss.context_rejection_weight`; defaults in the
+YAML are `semantic_hard_fraction=0.5` and `context_rejection_weight=0.2`.
+Omitting both settings retains the original sampler/objective. Fine mining reads
+frozen FAFA query tokens for train; ensure the query cache covers train before
+starting. See [training and ablations](docs/proposed_runs.md) for details.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
 offline calibration uses the same criterion by default and includes the source
 configuration as a baseline (`selection_metric: full_map` selects overall-only).

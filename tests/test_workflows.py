@@ -87,9 +87,7 @@ def test_fafa_pooling_workflow_uses_fafa_environment_without_training(split):
         text=True,
         check=True,
     )
-    expected = [
-        "tools/run.py run --config configs/fafa_pooling.yaml --split " + split
-    ]
+    expected = ["tools/run.py run --config configs/fafa_pooling.yaml --split " + split]
     if split == "val":
         expected.insert(0, "tools/run.py prepare --config configs/fafa_pooling.yaml")
     assert result.stdout.splitlines() == expected
