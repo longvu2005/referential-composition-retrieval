@@ -82,7 +82,7 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
-    semantic_hard_fraction: 0.5 # Hard share inside the same-ID quota.
+    semantic_hard_fraction: 0.1 # Hard share inside the same-ID quota.
     warmup_epochs: 8           # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
