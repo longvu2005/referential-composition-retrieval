@@ -3,9 +3,10 @@
 import torch
 from torch import Tensor, nn
 
-from rcr.common.data import required_identity_ids
+from rcr.common.data import inference_samples, required_identity_ids
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
+from rcr.proposed.scores import POOLING_MODES
 
 
 def _identity_labels(rows, vocabulary: dict[str, int]) -> Tensor:
@@ -85,8 +86,16 @@ def prepare_visual_batch(
     identity_crops=(),
     identity_sampling=None,
     hard_identity_image_ids=None,
+    fafa_pooling: str | None = None,
 ) -> dict[str, Tensor | dict]:
-    """Load CPU visual features and labels. No model is executed here."""
+    """Load CPU visual features and labels. No model is executed here.
+
+    ``fafa_pooling`` is set only for the residual context objective. It adds the
+    frozen native FAFA query/target tokens that objective needs and records the
+    pooling used for them. Without it no native token is read.
+    """
+    if fafa_pooling is not None and fafa_pooling not in POOLING_MODES:
+        raise ValueError(f"unknown FAFA pooling: {fafa_pooling!r}")
     if not samples or len(samples) != len(candidate_image_ids):
         raise ValueError("training requires matching non-empty query/candidate rows")
     batch_size = len(samples)
@@ -327,6 +336,15 @@ def prepare_visual_batch(
     if (hard_mask & batch["identity_positive_mask"]).any():
         raise ValueError("hard identity negatives cannot contain all required IDs")
     batch["hard_identity_negative_mask"] = hard_mask
+    if fafa_pooling is not None:
+        # Public query inputs only: native query features never see annotations.
+        batch["fafa_query"] = cache.native_queries(
+            inference_samples(samples), q_people.shape[1]
+        )
+        batch["fafa_targets"] = cache.native_targets(
+            target_indices, t_people.shape[1]
+        ).unflatten(0, (batch_size, candidates_per_query))
+        batch["fafa_pooling"] = fafa_pooling
     return batch
 
 
@@ -344,6 +362,7 @@ def build_batch(
     identity_sampling=None,
     hard_identity_image_ids=None,
     text_cache: QueryTextCache | None = None,
+    fafa_pooling: str | None = None,
 ) -> dict[str, Tensor | dict]:
     text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
@@ -355,6 +374,7 @@ def build_batch(
         identity_crops=identity_crops,
         identity_sampling=identity_sampling,
         hard_identity_image_ids=hard_identity_image_ids,
+        fafa_pooling=fafa_pooling,
     )
     visual = {
         key: value.to(device) if isinstance(value, Tensor) else value

@@ -284,6 +284,9 @@ def train(cfg: dict) -> Path:
         and int(max_negatives * sampling["hard_fraction"]) > 0
     )
     fine_mining = semantic_hard or identity_rejection
+    context_residual = (
+        cfg["loss"]["context_weight"] > 0 and cfg["loss"]["context_residual_scale"] > 0
+    )
     torch.manual_seed(cfg["train"]["seed"])
     device = resolve_device(cfg)
 
@@ -299,7 +302,7 @@ def train(cfg: dict) -> Path:
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(inference_samples(val_samples))
-    if fine_mining:
+    if fine_mining or context_residual:
         # Fail before label preparation or epoch 1, not at the first refresh.
         cache.validate_samples(inference_samples(train_samples))
     check_query_text_config(cache, cfg)
@@ -460,6 +463,10 @@ def train(cfg: dict) -> Path:
                 else 0.0
             ),
         }
+        # Context is skipped during warmup, so native tokens are read only afterwards.
+        fafa_pooling = (
+            cfg["retrieval"]["pooling"] if context_residual and not in_warmup else None
+        )
         generator = torch.Generator().manual_seed(cfg["train"]["seed"] + epoch - 1)
         identity_generator = torch.Generator().manual_seed(
             cfg["train"]["seed"] + epoch + 1_000_002
@@ -527,6 +534,7 @@ def train(cfg: dict) -> Path:
                 "context",
                 "context_semantic",
                 "context_rejection",
+                "context_fda_error",
                 "state",
                 "context_active_fraction",
                 "context_rejection_active_fraction",
@@ -583,6 +591,7 @@ def train(cfg: dict) -> Path:
                 identity_sampling=identity_settings if crop_mining else None,
                 hard_identity_image_ids=sampled.hard_identity_ids,
                 text_cache=text_cache,
+                fafa_pooling=fafa_pooling,
             )
             if state_pairs_epoch is not None:
                 positives = (

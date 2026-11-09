@@ -9,7 +9,7 @@ from torch.utils.checkpoint import checkpoint
 
 from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
-from rcr.proposed.scores import identity_scores
+from rcr.proposed.scores import fafa_binding_scores, identity_scores
 
 
 def loss_settings(config: dict) -> dict:
@@ -20,6 +20,7 @@ def loss_settings(config: dict) -> dict:
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_rejection_weight": 0.0,
+        "context_residual_scale": 0.0,
         "state_weight": 1.0,
         "identity_temperature": 0.1,
         "coarse_temperature": 0.1,
@@ -116,35 +117,77 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
     return per_query.sum() / (counts > 0).sum().clamp_min(1)
 
 
-def _context_scores(model, query, batch, patch_hw, batch_size):
-    """Score bounded context chunks before computing the full ranking loss."""
+def _context_scores(model, query, batch, patch_hw, batch_size, residual_scale=0.0):
+    """Score bounded context chunks before computing the full ranking loss.
+
+    With ``residual_scale > 0`` the ranking score is ``scale * B + coverage * context``.
+    ``B`` is the frozen native FDA binding pooled over the same detached assignment
+    that gates the context path. It is computed without autograd, so it is a constant
+    offset: the loss gradient reaches only the context modules, and context is trained
+    to correct pairs that FDA alone ranks wrongly.
+
+    Returns ``(scores, coverage, binding)``; ``binding`` is zero when disabled.
+    """
     queries, candidates = batch["positive_mask"].shape
     pairs = queries * candidates
-    targets = tuple(
-        batch[name].flatten(0, 1)
-        for name in ("target_scene", "target_persons", "target_boxes", "target_mask")
-    )
+    names = ["target_scene", "target_persons", "target_boxes", "target_mask"]
+    residual = residual_scale > 0
+    if residual:
+        names.append("fafa_targets")
+    targets = tuple(batch[name].flatten(0, 1) for name in names)
+    pooling = batch["fafa_pooling"] if residual else None
 
-    def score_pairs(indices, scene, persons, boxes, mask):
+    def score_pairs(indices, scene, persons, boxes, mask, fafa_targets=None):
+        selected = query.index_select(indices)
         raw, matching = model.score_context(
-            query.index_select(indices), scene, persons, boxes, patch_hw, mask
+            selected, scene, persons, boxes, patch_hw, mask
         )
-        return matching.coverage * raw, matching.coverage
+        score = matching.coverage * raw
+        binding = torch.zeros_like(score)
+        if fafa_targets is not None:
+            binding = fafa_binding_scores(
+                selected.fafa,
+                fafa_targets,
+                matching=matching,
+                k=model.fda_k,
+                missing_penalty=model.fine_matching["missing_penalty"],
+                pooling=pooling,
+            )
+            score = score + residual_scale * binding
+        return score, matching.coverage, binding
 
-    scores, coverage = [], []
+    scores, coverage, binding = [], [], []
     for start in range(0, pairs, batch_size):
         stop = min(start + batch_size, pairs)
         indices = torch.arange(start, stop, device=query.reference.device) // candidates
         inputs = (indices, *(value[start:stop] for value in targets))
         if pairs > batch_size and torch.is_grad_enabled():
-            values, covered = checkpoint(score_pairs, *inputs, use_reentrant=False)
+            values, covered, offset = checkpoint(
+                score_pairs, *inputs, use_reentrant=False
+            )
         else:
-            values, covered = score_pairs(*inputs)
+            values, covered, offset = score_pairs(*inputs)
         scores.append(values)
         coverage.append(covered)
-    return torch.cat(scores).view(queries, candidates), torch.cat(coverage).view(
-        queries, candidates
+        binding.append(offset)
+    shape = (queries, candidates)
+    return (
+        torch.cat(scores).view(shape),
+        torch.cat(coverage).view(shape),
+        torch.cat(binding).view(shape),
     )
+
+
+def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
+    """Share of eligible (positive, negative) pairs that FDA alone ranks wrong or ties.
+
+    This is the headroom the residual context can correct. It uses the same
+    eligible pairs as the context ranking loss and carries no gradient.
+    """
+    positive = positive.bool() & valid
+    pairs = positive[:, :, None] & (valid & ~positive)[:, None]
+    wrong = (binding[:, None, :] >= binding[:, :, None]) & pairs
+    return (wrong.sum() / pairs.sum().clamp_min(1)).detach()
 
 
 def compute_loss(
@@ -161,9 +204,16 @@ def compute_loss(
     coarse_temperature: float,
     state_temperature: float,
     context_rejection_weight: float = 0.0,
+    context_residual_scale: float = 0.0,
     context_batch_size: int = 64,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
+    residual = bool(context_weight) and context_residual_scale > 0
+    if residual and not {"fafa_query", "fafa_targets", "fafa_pooling"} <= batch.keys():
+        raise ValueError(
+            "loss.context_residual_scale requires native FAFA tokens in the batch; "
+            "build it with fafa_pooling"
+        )
     if context_weight:
         query = model.encode_query(
             batch["query_scene"],
@@ -179,6 +229,7 @@ def compute_loss(
             subject_mask=batch.get("subject_mask"),
             subject_token_mask=batch.get("subject_token_mask"),
             subject_ids=batch.get("subject_ids"),
+            fafa_query=batch["fafa_query"] if residual else None,
         )
         logits, query_identity = query.logits, query.identity
     else:
@@ -200,7 +251,7 @@ def compute_loss(
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = zero
-    context_active = rejection_active = zero.detach()
+    context_active = rejection_active = fda_error = zero.detach()
     hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
@@ -291,12 +342,19 @@ def compute_loss(
         )
 
     if context_weight:
-        scores, coverage = _context_scores(
-            model, query, batch, patch_hw, context_batch_size
+        scores, coverage, binding = _context_scores(
+            model,
+            query,
+            batch,
+            patch_hw,
+            context_batch_size,
+            context_residual_scale if residual else 0.0,
         )
         valid = identity_positive & (coverage > 0)
         context = retrieval_loss(scores, positive, valid)
         semantic = context
+        if residual:
+            fda_error = _fda_pair_error(binding, positive, valid)
         context_active = (
             ((positive & valid).any(1) & (~positive & valid).any(1)).float().mean()
         )
@@ -335,6 +393,7 @@ def compute_loss(
         "context": context.detach(),
         "context_semantic": semantic.detach(),
         "context_rejection": rejection.detach(),
+        "context_fda_error": fda_error,
         "state": state.detach(),
         "context_active_fraction": context_active.detach(),
         "context_rejection_active_fraction": rejection_active.detach(),

@@ -318,15 +318,19 @@ detections fail. Crop identity and coarse supervision
 train the identity head; context gradients train composition, evidence binding,
 reasoner and shared projections without differentiating through matching.
 
-Frozen FDA binding is not part of the train loss and native FAFA query/target
-tokens are not loaded during gradient-bearing optimization. Fine negative mining
-reads those frozen cache tokens in eval/inference mode only. Pooled FAFA person features remain
+By default frozen FDA binding is not part of the train loss and native FAFA
+query/target tokens are not loaded during gradient-bearing optimization. Fine
+negative mining reads those frozen cache tokens in eval/inference mode only. The
+optional [residual context objective](#residual-context-objective) is the one
+exception: with `loss.context_residual_scale > 0` the batch also carries those
+frozen tokens and FDA enters the context ranking score as a constant offset.
+Pooled FAFA person features remain
 inputs to learned identity/semantic modules. `binding_log_scale` is fixed rather
 than optimized for new runs; its state key/value remains available to unchanged
 checkpoint inference. The optimizer includes trainable parameters only.
 
-`loss` contains five task weights, one nested rejection weight and three cosine
-temperatures. The default weights
+`loss` contains five task weights, one nested rejection weight, one residual
+scale and three cosine temperatures. The default weights
 are starting values, not measured optima. The fine mode and inference fusion
 weights are selected independently on validation. An untrained/disabled state
 branch cannot enter training validation with a positive coarse beta. Checkpoint
@@ -366,12 +370,13 @@ Within Top-M:
 ```text
 gated_context = C * S_context
 z(x) = (float32(x) - mean(x)) / max(std(x, unbiased=False), 1e-6)
-S_fine = alpha * B_FAFA + 0.0325 * z_topM(gated_context)
+S_fine = alpha * B_FAFA + context_weight * z_topM(gated_context)
 S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
 ```
 
-Training context ranking uses raw gated-context logits, not the combined FDA
-score or a z-score over a sampled minibatch. It learns the order of the component
+By default, training context ranking uses raw gated-context logits, not the
+combined FDA score or a z-score over a sampled minibatch (the residual objective
+below adds FDA as a constant offset instead). It learns the order of the component
 that can change; matching coverage is detached. A training candidate set is not
 the inference Top-M population, and z-scoring a two-candidate set can remove the
 useful score-gap gradient. Inference keeps its complete-shortlist statistics:
@@ -397,6 +402,47 @@ and ignores `context_weight`. No architecture, weights, losses, optimizer or
 their recorded `binding_scale` normally. Periodic evaluation, candidate sampling, AMP
 and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
+
+### Residual context objective
+
+By default `L_context` ranks the raw gated context. With
+`loss.context_residual_scale = kappa > 0` the score entering the same ranking loss
+becomes
+
+```text
+s(q,c) = kappa * B_FAFA(q,c) + C(q,c) * S_context(q,c)
+L_context = L_semantic + context_rejection_weight * L_rejection
+```
+
+`B_FAFA` is the pooled native FDA binding from `fafa_binding_scores`, using the
+detached identity assignment that already gates context, `retrieval.pooling` and
+the model's `fda_k` and `missing_penalty`. It runs without autograd and the
+assignment is detached, so only composition, evidence binding, the reasoner and the
+shared projections receive context gradients. Eligible pairs, masks and the
+zero-coverage exclusion are those of the original loss. A constant `B_FAFA` across
+candidates leaves the loss unchanged, and a pair that FDA already separates by far
+more than the context margin contributes almost no gradient. Context is therefore
+trained to correct pairs that FDA alone ranks wrongly.
+
+`kappa` multiplies a unit-temperature loss and `B_FAFA` differences between
+candidates are small, so a small `kappa` makes FDA invisible and recovers the
+original objective. The inference form `B_FAFA + context_weight * z(...)` suggests an
+order of `1 / context_weight` as a starting point, to be tuned on validation like
+every other default here. `kappa = 0` keeps the original objective exactly and
+reads no native token during training.
+
+When enabled the training batch carries `fafa_query` `[B,S,Kq,D]`,
+`fafa_targets` `[B,C,Kt,L,D]` and `fafa_pooling`, read from the independent FAFA
+query and image caches. The query cache must cover train, which is checked before
+epoch 1. Nothing is read during the context warmup. History and W&B record
+`context_fda_error`: the share of eligible (positive, negative) pairs that FDA
+alone ranks wrong or tied, which measures the headroom for this objective.
+
+Inference scoring is unchanged. Periodic validation and `best.pt` selection use
+`retrieval.*` as configured, so set `retrieval.context_weight` to a plausible value
+for a residual run and recalibrate afterwards. Positives whose `B_FAFA` is lowered
+by missing or partial identity matching are not excluded beyond the original
+`coverage > 0` filter.
 
 ## Configuration and checkpoints
 

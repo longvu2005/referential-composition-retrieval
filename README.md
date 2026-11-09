@@ -39,11 +39,25 @@ context initially while grounding, identity, coarse and state stay active.
 Both optimizer groups use cosine decay throughout the run.
 After the sampling warmup, train-only fine mining selects hard same-ID condition
 negatives and wrong/missing-ID negatives. Context learns from semantic pairs plus
-a rejection term weighted by `loss.context_rejection_weight`; defaults in the
-YAML are `semantic_hard_fraction=0.5` and `context_rejection_weight=0.2`.
-Omitting both settings retains the original sampler/objective. Fine mining reads
-frozen FAFA query tokens for train; ensure the query cache covers train before
-starting. See [training and ablations](docs/proposed_runs.md) for details.
+a rejection term weighted by `loss.context_rejection_weight`; the checked-in YAML
+sets `semantic_hard_fraction=0.1`, `hard_fraction=0.1` and
+`context_rejection_weight=0.2`. Omitting `semantic_hard_fraction` and the rejection
+weight retains the original sampler/objective. Fine mining reads frozen FAFA query
+tokens for train; ensure the query cache covers train before starting.
+
+By default context is trained alone: its ranking score is `coverage * context`.
+Setting `loss.context_residual_scale > 0` trains it as a residual on the frozen
+native FDA binding instead, ranking `scale * B_FAFA + coverage * context`.
+`B_FAFA` is pooled with `retrieval.pooling` over the same detached assignment and
+is a constant offset with no gradient, so context learns to correct the pairs FDA
+alone ranks wrongly. The checked-in value is `0`, which keeps the original
+objective. A positive scale reads frozen FAFA query and target tokens for train,
+so the query cache must cover train; inference scoring is unchanged, but
+`retrieval.context_weight` should be recalibrated for such a run. The training
+log reports `context_fda_error`, the share of eligible (positive, negative) pairs
+that FDA alone ranks wrong or tied. See the
+[residual objective](docs/proposed_method.md#residual-context-objective) and
+[training and ablations](docs/proposed_runs.md) for details.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
 offline calibration uses the same criterion by default and includes the source
 configuration as a baseline (`selection_metric: full_map` selects overall-only).
@@ -146,6 +160,28 @@ run; retrieval, evaluation, calibration and reports replace their active outputs
 When using another run, point `configs/calibration.yaml: rankings` to its saved
 `val/rankings.pt`. W&B tracking defaults to online; set `wandb.mode=offline` or
 `wandb.enabled=false` as needed.
+
+The checked-in `configs/proposed.yaml` sets these defaults:
+
+| Group | Values |
+| --- | --- |
+| Schedule | `train.epochs=20`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
+| Optimizer | AdamW, `lr=1e-4`, `text_lr=1e-5`, `weight_decay=0.01`, cosine decay to `min_lr_ratio=0.1` |
+| Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.1` |
+| Fine mining | `warmup_epochs=8`, `refresh_every_epochs=2`, `pool_size=100` |
+| Identity crops | `max_crops=128`, `crops_per_identity=2`, `random_identities=8`, `hard_negative_fraction=0.1` |
+| Loss | weights `1`/`0.1`/`1`/`1`/`1` for grounding/identity/coarse/context/state, `context_rejection_weight=0.2`, `context_residual_scale=0`, temperatures `0.1` |
+| Model | `dim=384`, `identity_dim=128`, `state_dim=512`, `num_heads=6`, `mlp_ratio=2`, `geo_dim=32`, `dropout=0.1`, `fda_k=6`, `coarse_beta=0.4` |
+| Matching | `background_logit=-3.5`, `selection_threshold=0.5`, `identity_threshold=0.2`, `missing_penalty=1.1`, `duplicate_iou=0.9` |
+| Retrieval | `pooling=subject_mean`, `fine_score_mode=context_zscore`, `context_weight=0.01015`, `coarse_beta=1.16`, `fine_coarse_weight=0.090625`, `top_m=500`, `candidate_ks=[100, 500]` |
+| Validation | `evaluation.every_epochs=2` |
+
+With two positives and enough same-ID evidence, the sampling rows give each query 2
+positives, 2 hard and 13 random same-ID negatives, 3 hard wrong-ID negatives and 12
+uniform negatives. `retrieval.coarse_beta` overrides `model.coarse_beta` at
+inference. The `retrieval` weights are starting values for validation;
+`calibrate` selects the weights used for test and writes them to
+`runs/proposed-calibration/selected.yaml`.
 
 CLIP and FAFA baselines have separate environments and recipes. See the
 [baseline guide](docs/baselines.md) and [script reference](scripts/README.md).

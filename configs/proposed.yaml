@@ -102,6 +102,7 @@ loss:
   coarse_weight: 1.0
   context_weight: 1.0           # Loss weight; inference gamma is under retrieval.
   context_rejection_weight: 0.2 # Within context: semantic + weight * rejection.
+  context_residual_scale: 95.0
   identity_temperature: 0.1
   coarse_temperature: 0.1
   state_weight: 1.0
