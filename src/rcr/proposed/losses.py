@@ -5,6 +5,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
@@ -115,6 +116,37 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
     return per_query.sum() / (counts > 0).sum().clamp_min(1)
 
 
+def _context_scores(model, query, batch, patch_hw, batch_size):
+    """Score bounded context chunks before computing the full ranking loss."""
+    queries, candidates = batch["positive_mask"].shape
+    pairs = queries * candidates
+    targets = tuple(
+        batch[name].flatten(0, 1)
+        for name in ("target_scene", "target_persons", "target_boxes", "target_mask")
+    )
+
+    def score_pairs(indices, scene, persons, boxes, mask):
+        raw, matching = model.score_context(
+            query.index_select(indices), scene, persons, boxes, patch_hw, mask
+        )
+        return matching.coverage * raw, matching.coverage
+
+    scores, coverage = [], []
+    for start in range(0, pairs, batch_size):
+        stop = min(start + batch_size, pairs)
+        indices = torch.arange(start, stop, device=query.reference.device) // candidates
+        inputs = (indices, *(value[start:stop] for value in targets))
+        if pairs > batch_size and torch.is_grad_enabled():
+            values, covered = checkpoint(score_pairs, *inputs, use_reentrant=False)
+        else:
+            values, covered = score_pairs(*inputs)
+        scores.append(values)
+        coverage.append(covered)
+    return torch.cat(scores).view(queries, candidates), torch.cat(coverage).view(
+        queries, candidates
+    )
+
+
 def compute_loss(
     model: RCRModel,
     batch: dict[str, Tensor | dict],
@@ -129,6 +161,7 @@ def compute_loss(
     coarse_temperature: float,
     state_temperature: float,
     context_rejection_weight: float = 0.0,
+    context_batch_size: int = 64,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
     if context_weight:
@@ -163,7 +196,7 @@ def compute_loss(
     identity_positive = batch["identity_positive_mask"]
     if (positive & ~identity_positive).any():
         raise ValueError("every Full Positive must also be an identity positive")
-    batch_size, candidates = positive.shape
+    batch_size = len(positive)
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = zero
@@ -258,18 +291,10 @@ def compute_loss(
         )
 
     if context_weight:
-        raw_context, matching = model.score_context(
-            query.repeat_candidates(candidates),
-            batch["target_scene"].flatten(0, 1),
-            batch["target_persons"].flatten(0, 1),
-            batch["target_boxes"].flatten(0, 1),
-            patch_hw,
-            batch["target_mask"].flatten(0, 1),
+        scores, coverage = _context_scores(
+            model, query, batch, patch_hw, context_batch_size
         )
-        scores = (matching.coverage * raw_context).reshape(batch_size, candidates)
-        valid = identity_positive & (
-            matching.coverage.reshape(batch_size, candidates) > 0
-        )
+        valid = identity_positive & (coverage > 0)
         context = retrieval_loss(scores, positive, valid)
         semantic = context
         context_active = (
@@ -279,9 +304,7 @@ def compute_loss(
             hard = batch["hard_identity_negative_mask"].bool()
             if (hard & identity_positive).any():
                 raise ValueError("rejection negatives must lack required identities")
-            rejection_valid = (positive | hard) & (
-                matching.coverage.reshape(batch_size, candidates) > 0
-            )
+            rejection_valid = (positive | hard) & (coverage > 0)
             rejection = retrieval_loss(scores, positive, rejection_valid)
             rejection_active = (
                 ((positive & rejection_valid).any(1) & (hard & rejection_valid).any(1))

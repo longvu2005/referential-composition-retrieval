@@ -59,6 +59,9 @@ def validate_training_schedule(cfg: dict) -> None:
         value = cfg["train"][key]
         if type(value) is not int or value < 1:
             raise ValueError(f"train.{key} must be a positive integer")
+    context_batch_size = cfg["train"].get("context_batch_size", 64)
+    if type(context_batch_size) is not int or context_batch_size < 1:
+        raise ValueError("train.context_batch_size must be a positive integer")
     candidates = cfg["train"].get("candidates", 2)
     if type(candidates) is not int or candidates < 2:
         raise ValueError("train.candidates must be an integer >= 2")

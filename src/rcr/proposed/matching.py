@@ -181,7 +181,7 @@ def partial_identity_matching(
         similarity = torch.einsum(
             "bqd,btd->bqt", F.normalize(query, dim=-1), F.normalize(target, dim=-1)
         )
-        similarity_cpu = similarity.cpu().numpy()
+        similarity_cpu = similarity.cpu().float().numpy()
         priority_cpu = importance.cpu().numpy()
         selected_cpu = (confidence > 0).cpu().numpy()
         valid_cpu = valid.cpu().numpy()

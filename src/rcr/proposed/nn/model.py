@@ -50,6 +50,16 @@ class QueryEncoding:
             values[field.name] = None if value is None else value[index : index + 1]
         return QueryEncoding(**values)
 
+    def index_select(self, indices: Tensor) -> "QueryEncoding":
+        """Gather query rows while preserving autograd."""
+        values = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            values[field.name] = (
+                None if value is None else value.index_select(0, indices)
+            )
+        return QueryEncoding(**values)
+
     def repeat_candidates(self, count: int) -> "QueryEncoding":
         """Expand [B,...] into query-major [B*C,...], preserving autograd."""
         if count < 1:

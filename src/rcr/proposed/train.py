@@ -364,6 +364,7 @@ def train(cfg: dict) -> Path:
         "model": {**model_cfg, "fine_matching": dict(model.fine_matching)},
         "train": {
             **cfg["train"],
+            "context_batch_size": cfg["train"].get("context_batch_size", 64),
             "identity_sampling": identity_settings,
             "sampling": sampling,
         },
@@ -548,6 +549,7 @@ def train(cfg: dict) -> Path:
         candidate_totals = {"candidate_semantic_hard": 0, "candidate_identity_hard": 0}
         progress = tqdm(batches, desc=f"epoch {epoch}/{epochs} ({phase})")
         for rows in progress:
+            optimizer.zero_grad(set_to_none=True)
             sampled = sample_candidates(
                 rows,
                 cfg["train"]["candidates"],
@@ -591,9 +593,14 @@ def train(cfg: dict) -> Path:
                 ).sum(1)
                 state_pairs_epoch += (positives * negatives).sum()
 
-            optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
-                loss, parts = compute_loss(model, batch, cache.patch_hw, **epoch_loss)
+                loss, parts = compute_loss(
+                    model,
+                    batch,
+                    cache.patch_hw,
+                    context_batch_size=cfg["train"]["context_batch_size"],
+                    **epoch_loss,
+                )
             if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"non-finite loss at epoch {epoch}: "
@@ -642,6 +649,7 @@ def train(cfg: dict) -> Path:
                         "train/warmup": in_warmup,
                     }
                 )
+            del batch, loss, parts
 
         if state_pairs_epoch is not None:
             state_pairs_seen += int(state_pairs_epoch)

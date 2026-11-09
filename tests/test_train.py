@@ -335,9 +335,17 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert cfg == original
     assert [settings["context_weight"] for settings in weights] == expected_weights
     assert all(
-        {k: v for k, v in settings.items() if k != "context_weight"}
+        {
+            k: v
+            for k, v in settings.items()
+            if k not in ("context_weight", "context_batch_size")
+        }
         == {k: v for k, v in cfg["loss"].items() if k != "context_weight"}
         for settings in weights
+    )
+    assert all(
+        row["context_batch_size"] == cfg["train"]["context_batch_size"]
+        for row in weights
     )
     assert evaluated == expected_evaluations
     history = [
