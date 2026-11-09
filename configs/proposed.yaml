@@ -67,7 +67,7 @@ train:
   candidates: 32                # Gallery candidates per query.
   context_batch_size: 64        # Fine pairs per checkpointed training chunk.
   case_balanced: true           # P(case) proportional to sqrt(N_case).
-  seed: 0
+  seed: 12
   amp: true
   mining_batch_size: 8
 
