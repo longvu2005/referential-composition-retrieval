@@ -67,7 +67,7 @@ train:
   candidates: 32                # Gallery candidates per query.
   context_batch_size: 64        # Fine pairs per checkpointed training chunk.
   case_balanced: true           # P(case) proportional to sqrt(N_case).
-  seed: 0
+  seed: 0                       # Every random stream of the run derives from it.
   amp: true
   mining_batch_size: 8
 
@@ -140,6 +140,7 @@ wandb:
 # Runtime and checkpoints.
 runtime:
   device: cuda
+  deterministic: true           # Reproducible kernels; set false only for speed.
 
 checkpoint: runs/proposed/best.pt
 output:

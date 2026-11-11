@@ -193,6 +193,33 @@ python tools/run.py train --config configs/proposed.yaml \
 python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
 ```
 
+### Seeds and reproducibility
+
+`train.seed` fixes every random choice of a run. It seeds the Python, NumPy and
+PyTorch generators once, which covers initialization and dropout. Each epoch
+draws its batches and candidates from one generator and its identity crops from
+another; both are derived from `(seed, stream, epoch)` with SHA-256, so no two
+seeds, streams or epochs share a stream. `train.seed` must be a non-negative
+integer.
+
+`runtime.deterministic` (default `true`) also asks PyTorch for reproducible
+kernels: `torch.use_deterministic_algorithms(True, warn_only=True)`, deterministic
+cuDNN with benchmarking off, and `CUBLAS_WORKSPACE_CONFIG=:4096:8` unless it is
+already set. An operation without a deterministic kernel warns instead of
+failing. Set it to `false` only to trade reproducibility for speed. `runtime.json`
+records the seed and this flag.
+
+Repeating a run with the same seed, YAML, caches, software stack and GPU model is
+meant to give identical weights. Other GPUs or CUDA/PyTorch builds can still
+differ in low-order bits, so compare seeds only within one environment. Hard
+negative mining, validation, retrieval and calibration draw no random numbers.
+
+Earlier revisions derived the epoch streams as `seed + epoch`, so seed 1 replayed
+seed 0 shifted by one epoch, and they seeded neither NumPy nor Python and did not
+request deterministic kernels. A run trained that way cannot be reproduced exactly
+by this scheme: the same seed now samples different batches. Its checkpoint still
+loads for retrieval.
+
 W&B tracking is configured by the `wandb` block in `configs/proposed.yaml`.
 Each run records only research configuration and cache provenance, not local
 dataset paths. It logs losses, gradient norm and learning rates every
@@ -258,7 +285,7 @@ fingerprints. Test retrieval checks the real checkpoint bytes against this hash.
 Matching thresholds, missing penalties and model weights remain fixed.
 
 `retrieval.pooling` accepts `penalized`, `matched_mean` and `subject_mean`.
-The checked-in config uses `matched_mean`; omitted keys fall back to `penalized`.
+The checked-in config uses `subject_mean`; omitted keys fall back to `penalized`.
 These select only FAFA aggregation; `method`, checkpoint names,
 model weights and cache formats stay unchanged. Validation exports all three
 binding matrices from the same FDA forward pass, so calibration can sweep
@@ -360,7 +387,7 @@ statistics are computed on CPU float32 over the complete relevant vector, never
 per inference chunk. Stable coarse ties retain gallery order; shortlist ties
 retain coarse order, and fine reranking preserves the coarse tail.
 
-The seven distinct raw matrices occupy `28*Q*G` bytes, about 40.1 MiB at 264
+The seven distinct raw matrices occupy `28*Q*G` bytes, about 273 MiB at 1,799
 queries and 5,684 images. `fafa_binding` aliases the selected `binding_*` matrix,
 including after saving/loading; treat raw score matrices as immutable.
 Full-gallery collection requires `Q*(G-1)` fine pairs. The training

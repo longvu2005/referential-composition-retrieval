@@ -535,6 +535,29 @@ def test_wandb_diagnostics_do_not_change_learned_parameters(tiny_training_run):
     assert left["best_score"] == right["best_score"]
 
 
+def test_same_seed_reproduces_training_and_another_seed_differs(tiny_training_run):
+    cfg, _, _, _ = tiny_training_run
+    cfg["wandb"]["enabled"] = False
+    cfg["train"].update(epochs=2, context_warmup_epochs=1)
+    states = {}
+    for name, seed in (("first", 3), ("again", 3), ("other", 4)):
+        run = deepcopy(cfg)
+        run["train"]["seed"] = seed
+        run["output"]["dir"] += f"-{name}"
+        checkpoint = torch.load(
+            training.train(run), map_location="cpu", weights_only=True
+        )
+        states[name] = checkpoint["model"]
+        runtime = json.loads((Path(run["output"]["dir"]) / "runtime.json").read_text())
+        assert (runtime["seed"], runtime["deterministic"]) == (seed, True)
+    for name, tensor in states["first"].items():
+        torch.testing.assert_close(tensor, states["again"][name], rtol=0, atol=0)
+    assert any(
+        not torch.equal(tensor, states["other"][name])
+        for name, tensor in states["first"].items()
+    )
+
+
 def test_warmup_keeps_optimizer_and_independent_hard_mining_schedule(
     tiny_training_run, monkeypatch
 ):

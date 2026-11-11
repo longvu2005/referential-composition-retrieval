@@ -101,8 +101,10 @@ def test_run_allows_candidate_cutoffs_larger_than_fine_shortlist(monkeypatch):
     runner.run_experiment = lambda cfg, *args: calls.append(cfg)
     monkeypatch.setitem(sys.modules, name, runner)
     cli.main(["run", "--config", "configs/proposed.yaml", "--set", "retrieval.top_m=1"])
-    assert calls[0]["candidate_ks"] == [100, 500]
-    assert calls[0]["retrieval"]["top_m"] == 1
+    # Cutoffs come from the YAML and are not clipped to the shortlist size.
+    expected = load_config("configs/proposed.yaml")["candidate_ks"]
+    assert calls[0]["candidate_ks"] == expected
+    assert max(expected) > calls[0]["retrieval"]["top_m"] == 1
 
 
 @pytest.mark.parametrize("method", ["proposed", "clip", "fafa", "fafa_pooling"])

@@ -50,9 +50,10 @@ Setting `loss.context_residual_scale > 0` trains it as a residual on the frozen
 native FDA binding instead, ranking `scale * B_FAFA + coverage * context`.
 `B_FAFA` is pooled with `retrieval.pooling` over the same detached assignment and
 is a constant offset with no gradient, so context learns to correct the pairs FDA
-alone ranks wrongly. The checked-in value is `0`, which keeps the original
-objective. A positive scale reads frozen FAFA query and target tokens for train,
-so the query cache must cover train; inference scoring is unchanged, but
+alone ranks wrongly. The default is `0`, which keeps the original objective; the
+checked-in YAML sets `95`. A positive scale reads frozen FAFA query and target
+tokens for train, so the query cache must cover train; inference scoring is
+unchanged, but
 `retrieval.context_weight` should be recalibrated for such a run. The training
 log reports `context_fda_error`, the share of eligible (positive, negative) pairs
 that FDA alone ranks wrong or tied. See the
@@ -161,6 +162,13 @@ When using another run, point `configs/calibration.yaml: rankings` to its saved
 `val/rankings.pt`. W&B tracking defaults to online; set `wandb.mode=offline` or
 `wandb.enabled=false` as needed.
 
+`train.seed` fixes every random choice of a training run: it seeds Python, NumPy
+and PyTorch once, and each epoch's sampling streams derive from
+`(seed, stream, epoch)`, so different seeds never share a stream.
+`runtime.deterministic=true` (the default) also asks PyTorch for reproducible
+kernels. The same seed, YAML, caches, software stack and GPU model are meant to
+give identical weights; see [seeds and reproducibility](docs/proposed_runs.md#seeds-and-reproducibility).
+
 The checked-in `configs/proposed.yaml` sets these defaults:
 
 | Group | Values |
@@ -170,11 +178,11 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 | Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.1` |
 | Fine mining | `warmup_epochs=8`, `refresh_every_epochs=2`, `pool_size=100` |
 | Identity crops | `max_crops=128`, `crops_per_identity=2`, `random_identities=8`, `hard_negative_fraction=0.1` |
-| Loss | weights `1`/`0.1`/`1`/`1`/`1` for grounding/identity/coarse/context/state, `context_rejection_weight=0.2`, `context_residual_scale=0`, temperatures `0.1` |
+| Loss | weights `1`/`0.1`/`1`/`1`/`1` for grounding/identity/coarse/context/state, `context_rejection_weight=0.2`, `context_residual_scale=95`, temperatures `0.1` |
 | Model | `dim=384`, `identity_dim=128`, `state_dim=512`, `num_heads=6`, `mlp_ratio=2`, `geo_dim=32`, `dropout=0.1`, `fda_k=6`, `coarse_beta=0.4` |
 | Matching | `background_logit=-3.5`, `selection_threshold=0.5`, `identity_threshold=0.2`, `missing_penalty=1.1`, `duplicate_iou=0.9` |
-| Retrieval | `pooling=subject_mean`, `fine_score_mode=context_zscore`, `context_weight=0.01015`, `coarse_beta=1.16`, `fine_coarse_weight=0.090625`, `top_m=500`, `candidate_ks=[100, 500]` |
-| Validation | `evaluation.every_epochs=2` |
+| Retrieval | `pooling=subject_mean`, `fine_score_mode=context_zscore`, `context_weight=0.01015`, `coarse_beta=1.16`, `fine_coarse_weight=0.090625`, `top_m=500`, `candidate_ks=[500]` |
+| Validation | `evaluation.every_epochs=4` |
 
 With two positives and enough same-ID evidence, the sampling rows give each query 2
 positives, 2 hard and 13 random same-ID negatives, 3 hard wrong-ID negatives and 12
@@ -222,17 +230,17 @@ See [score artifacts and CPU replay](docs/proposed_runs.md#score-artifacts-and-c
 
 ## Dataset
 
-Version `0.1.0` contains 4,311 queries and 37,107 images. Each query searches its
+Version `0.1.0` contains 8,999 queries and 37,107 images. Each query searches its
 own PIPA split, excluding the reference image.
 
 | Split | INDIVIDUAL | GROUP | DUAL | RELATIONAL | Total |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| train | 3,472 | 137 | 269 | 155 | 4,033 |
-| val | 194 | 12 | 36 | 22 | 264 |
-| test | 5 | 2 | 3 | 4 | 14 |
+| train | 3,590 | 444 | 395 | 464 | 4,893 |
+| val | 1,320 | 168 | 149 | 162 | 1,799 |
+| test | 1,319 | 329 | 318 | 341 | 2,307 |
 
-The 14-query test split checks the pipeline; it is not a publication-scale
-holdout. See the [benchmark protocol](docs/benchmark_protocol.md),
+Test never trains or selects parameters. See the
+[benchmark protocol](docs/benchmark_protocol.md),
 [dataset construction](dataset/README.md) and [reporting guide](docs/experiments.md).
 
 ## Code layout and development

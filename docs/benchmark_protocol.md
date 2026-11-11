@@ -94,13 +94,14 @@ Version 0.1.0 currently contains:
 
 | Split | Queries | Gallery | INDIVIDUAL | GROUP | DUAL | RELATIONAL |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 4,033 | 17,000 | 3,472 | 137 | 269 | 155 |
-| val | 264 | 5,684 | 194 | 12 | 36 | 22 |
-| test | 14 | 7,868 | 5 | 2 | 3 | 4 |
+| train | 4,893 | 17,000 | 3,590 | 444 | 395 | 464 |
+| val | 1,799 | 5,684 | 1,320 | 168 | 149 | 162 |
+| test | 2,307 | 7,868 | 1,319 | 329 | 318 | 341 |
 
-The **14-query test is only a pipeline-validation split**, not a publication-scale
-benchmark. Final publication testing needs a sufficiently large, independently
-reviewed export and fresh validation locks. This work does not change annotations.
+Validation locks and saved rankings from an earlier export are rejected because
+their validation digest or split fingerprint no longer matches these annotations.
+Regenerate them on this export before testing. This work does not change
+annotations.
 
 ## Reproducibility and saved-run compatibility
 

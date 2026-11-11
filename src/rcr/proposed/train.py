@@ -16,7 +16,7 @@ from rcr.common.data import (
     split_samples,
 )
 from rcr.common.io import atomic_write_text, write_json
-from rcr.common.runtime import resolve_device
+from rcr.common.runtime import derived_generator, resolve_device, seed_everything
 from rcr.common.torch_io import link_checkpoint, save_torch
 from rcr.dataset.audit import negative_exclusions
 from rcr.evaluation.evaluate import evaluate_retrieval_output
@@ -287,7 +287,9 @@ def train(cfg: dict) -> Path:
     context_residual = (
         cfg["loss"]["context_weight"] > 0 and cfg["loss"]["context_residual_scale"] > 0
     )
-    torch.manual_seed(cfg["train"]["seed"])
+    seed = cfg["train"]["seed"]
+    deterministic = cfg["runtime"].get("deterministic", True)
+    seed_everything(seed, deterministic=deterministic)
     device = resolve_device(cfg)
 
     cache_paths(cfg)
@@ -406,6 +408,8 @@ def train(cfg: dict) -> Path:
                 torch.cuda.get_device_name(device) if device.type == "cuda" else None
             ),
             "amp": amp,
+            "seed": seed,
+            "deterministic": deterministic,
             "scene_dim": scene_dim,
             "person_dim": person_dim,
             "patch_hw": list(cache.patch_hw),
@@ -467,10 +471,9 @@ def train(cfg: dict) -> Path:
         fafa_pooling = (
             cfg["retrieval"]["pooling"] if context_residual and not in_warmup else None
         )
-        generator = torch.Generator().manual_seed(cfg["train"]["seed"] + epoch - 1)
-        identity_generator = torch.Generator().manual_seed(
-            cfg["train"]["seed"] + epoch + 1_000_002
-        )
+        # One independent stream per (seed, purpose, epoch); see derive_seed.
+        generator = derived_generator(seed, "sampling", epoch)
+        identity_generator = derived_generator(seed, "identity", epoch)
         epoch_index = epoch - 1
         crop_mining = (
             use_extra_identities

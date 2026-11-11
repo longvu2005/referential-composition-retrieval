@@ -30,7 +30,8 @@ Proposed requires a separate FAFA environment only to extract FAFA person
 features. Configure `person_encoder.python` in `configs/proposed.yaml`.
 Training/retrieval from completed caches need only the proposed environment.
 Training optimization uses pooled FAFA image features and the shared context
-scorer; native FDA tokens are read for validation/retrieval only.
+scorer. Native FDA tokens are read for validation/retrieval, and for training
+only when `loss.context_residual_scale > 0` (the checked-in YAML).
 The standalone FAFA baseline also requires the shared completed detection cache;
 its `prepare` command checks this prerequisite and reports the build command.
 

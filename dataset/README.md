@@ -130,10 +130,10 @@ catalog. See [audit findings and review workflow](../docs/full_positive_audit.md
 
 The canonical Stage 2 file has 14 fields per row: `sample_id`, `split`,
 `annotator_email`, Query/Target image ID, path and normalized boxes, `case_type`,
-`subjects`, and the three final text fields. The current 8,001 source rows have
+`subjects`, and the three final text fields. The current 8,999 source rows have
 passed Stage 2 QC and contain the accepted instruction. Review preparation
 reports the current task/completion counts; positive decisions are stored
-separately. The final version 0.1.0 remains the earlier 4,311-sample snapshot.
+separately. The checked-in final version 0.1.0 contains all 8,999 samples.
 
 ```bash
 bash scripts/setup.bash dataset
@@ -199,8 +199,8 @@ serving an older in-memory copy.
 The builder checks IDs, reviewed Subject structure, seed and query exclusions,
 identity membership, gallery consistency and split membership. It creates
 `final_instruction` from `<final_desc>; <final_change>.`. The checked-in
-`final/` has **4,311 samples, 37,107 gallery images, version `0.1.0`**, with
-split counts 4,033/264/14 for train/val/test. To generate a partial export as
+`final/` has **8,999 samples, 37,107 gallery images, version `0.1.0`**, with
+split counts 4,893/1,799/2,307 for train/val/test. To generate a partial export as
 labels arrive, pass `--allow-partial` to the finalization launcher; it writes
 to `final_partial/` and sets `partial: true`. A full build still requires every
 selected sample to have reviewed text and positive decisions.

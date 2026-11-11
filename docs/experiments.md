@@ -77,10 +77,9 @@ results or historical Git/runtime metadata.
 
 ## Frozen test
 
-Test currently contains only 14 queries, so it is not a publication-scale final
-benchmark. After independent expansion/review, validate and lock against the new
-export before test. An explicitly requested current test smoke check uses the
-same frozen policy:
+Validate and lock against the current export before test; locks from an earlier
+export are rejected because their validation digest no longer matches. Test uses
+the frozen policy:
 
 ```bash
 .venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split test

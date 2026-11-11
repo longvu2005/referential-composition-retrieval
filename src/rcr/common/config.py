@@ -54,11 +54,17 @@ def parse_overrides(items: list[str]) -> dict:
 
 
 def validate_training_schedule(cfg: dict) -> None:
-    """Reject no-op training and invalid validation intervals before any writes."""
+    """Reject no-op training, bad seeds and invalid intervals before any writes."""
     for key in ("epochs", "batch_size"):
         value = cfg["train"][key]
         if type(value) is not int or value < 1:
             raise ValueError(f"train.{key} must be a positive integer")
+    seed = cfg["train"].get("seed")
+    if seed is not None and (type(seed) is not int or seed < 0):
+        raise ValueError("train.seed must be a non-negative integer")
+    deterministic = cfg.get("runtime", {}).get("deterministic", True)
+    if type(deterministic) is not bool:
+        raise ValueError("runtime.deterministic must be true or false")
     context_batch_size = cfg["train"].get("context_batch_size", 64)
     if type(context_batch_size) is not int or context_batch_size < 1:
         raise ValueError("train.context_batch_size must be a positive integer")
