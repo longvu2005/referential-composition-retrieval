@@ -126,7 +126,7 @@ retrieval:
 candidate_ks: [500]
 evaluation:
   enabled: true
-  every_epochs: 4
+  every_epochs: 6
 
 # Experiment logging.
 wandb:
