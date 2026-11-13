@@ -41,6 +41,7 @@ from rcr.proposed.ranking import (
     retrieve_rankings,
     uses_state,
 )
+from rcr.proposed.scores import FINE_SCORE_MODE
 
 
 def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
@@ -65,6 +66,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         raise ValueError("checkpoint changed since val selection; rerun the sweep")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     train_cfg = checkpoint["config"]
+    if train_cfg.get("retrieval", {}).get("fine_score_mode") != FINE_SCORE_MODE:
+        raise ValueError("checkpoint uses an obsolete fine scorer; train a new run")
     # Architecture settings, including background, are checkpoint-authoritative.
     # A retrieval YAML cannot silently change query encoding after val selection.
     model_cfg = {
@@ -75,6 +78,15 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     settings = retrieval_settings(
         cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
+    trained_settings = retrieval_settings(
+        train_cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
+    )
+    if any(
+        settings[key] != trained_settings[key] for key in ("pooling", "context_weight")
+    ):
+        raise ValueError(
+            "residual weight and pooling must match training; train a new run"
+        )
     present = [key in cfg for key in selection_keys]
     if any(present) and not all(present):
         raise ValueError(

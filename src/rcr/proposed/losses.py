@@ -9,7 +9,12 @@ from torch.utils.checkpoint import checkpoint
 
 from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
-from rcr.proposed.scores import fafa_binding_scores, identity_scores
+from rcr.proposed.scores import (
+    DEFAULT_CONTEXT_WEIGHT,
+    fafa_binding_scores,
+    identity_scores,
+    residual_score_components,
+)
 
 
 def loss_settings(config: dict) -> dict:
@@ -20,7 +25,7 @@ def loss_settings(config: dict) -> dict:
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_rejection_weight": 0.0,
-        "context_residual_scale": 0.0,
+        "context_temperature": 0.1,
         "state_weight": 1.0,
         "identity_temperature": 0.1,
         "coarse_temperature": 0.1,
@@ -117,43 +122,43 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
     return per_query.sum() / (counts > 0).sum().clamp_min(1)
 
 
-def _context_scores(model, query, batch, patch_hw, batch_size, residual_scale=0.0):
-    """Score bounded context chunks before computing the full ranking loss.
-
-    With ``residual_scale > 0`` the ranking score is ``scale * B + coverage * context``.
-    ``B`` is the frozen native FDA binding pooled over the same detached assignment
-    that gates the context path. It is computed without autograd, so it is a constant
-    offset: the loss gradient reaches only the context modules, and context is trained
-    to correct pairs that FDA alone ranks wrongly.
-
-    Returns ``(scores, coverage, binding)``; ``binding`` is zero when disabled.
-    """
+def _context_scores(
+    model,
+    query,
+    batch,
+    patch_hw,
+    batch_size,
+    context_score_weight=DEFAULT_CONTEXT_WEIGHT,
+):
+    """Compute the inference score in chunks, retaining only context gradients."""
     queries, candidates = batch["positive_mask"].shape
     pairs = queries * candidates
-    names = ["target_scene", "target_persons", "target_boxes", "target_mask"]
-    residual = residual_scale > 0
-    if residual:
-        names.append("fafa_targets")
+    names = [
+        "target_scene",
+        "target_persons",
+        "target_boxes",
+        "target_mask",
+        "fafa_targets",
+    ]
     targets = tuple(batch[name].flatten(0, 1) for name in names)
-    pooling = batch["fafa_pooling"] if residual else None
+    pooling = batch["fafa_pooling"]
 
-    def score_pairs(indices, scene, persons, boxes, mask, fafa_targets=None):
+    def score_pairs(indices, scene, persons, boxes, mask, fafa_targets):
         selected = query.index_select(indices)
         raw, matching = model.score_context(
             selected, scene, persons, boxes, patch_hw, mask
         )
-        score = matching.coverage * raw
-        binding = torch.zeros_like(score)
-        if fafa_targets is not None:
-            binding = fafa_binding_scores(
-                selected.fafa,
-                fafa_targets,
-                matching=matching,
-                k=model.fda_k,
-                missing_penalty=model.fine_matching["missing_penalty"],
-                pooling=pooling,
-            )
-            score = score + residual_scale * binding
+        binding = fafa_binding_scores(
+            selected.fafa,
+            fafa_targets,
+            matching=matching,
+            k=model.fda_k,
+            missing_penalty=model.fine_matching["missing_penalty"],
+            pooling=pooling,
+        )
+        score = residual_score_components(
+            binding, raw, matching.coverage, model.binding_scale, context_score_weight
+        )["fine_scores"]
         return score, matching.coverage, binding
 
     scores, coverage, binding = [], [], []
@@ -204,14 +209,17 @@ def compute_loss(
     coarse_temperature: float,
     state_temperature: float,
     context_rejection_weight: float = 0.0,
-    context_residual_scale: float = 0.0,
+    context_temperature: float = 0.1,
+    context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
     context_batch_size: int = 64,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
-    residual = bool(context_weight) and context_residual_scale > 0
-    if residual and not {"fafa_query", "fafa_targets", "fafa_pooling"} <= batch.keys():
+    if (
+        context_weight
+        and not {"fafa_query", "fafa_targets", "fafa_pooling"} <= batch.keys()
+    ):
         raise ValueError(
-            "loss.context_residual_scale requires native FAFA tokens in the batch; "
+            "context ranking requires native FAFA tokens in the batch; "
             "build it with fafa_pooling"
         )
     if context_weight:
@@ -229,7 +237,7 @@ def compute_loss(
             subject_mask=batch.get("subject_mask"),
             subject_token_mask=batch.get("subject_token_mask"),
             subject_ids=batch.get("subject_ids"),
-            fafa_query=batch["fafa_query"] if residual else None,
+            fafa_query=batch["fafa_query"],
         )
         logits, query_identity = query.logits, query.identity
     else:
@@ -348,13 +356,12 @@ def compute_loss(
             batch,
             patch_hw,
             context_batch_size,
-            context_residual_scale if residual else 0.0,
+            context_score_weight,
         )
         valid = identity_positive & (coverage > 0)
-        context = retrieval_loss(scores, positive, valid)
+        context = retrieval_loss(scores / context_temperature, positive, valid)
         semantic = context
-        if residual:
-            fda_error = _fda_pair_error(binding, positive, valid)
+        fda_error = _fda_pair_error(binding, positive, valid)
         context_active = (
             ((positive & valid).any(1) & (~positive & valid).any(1)).float().mean()
         )
@@ -363,7 +370,9 @@ def compute_loss(
             if (hard & identity_positive).any():
                 raise ValueError("rejection negatives must lack required identities")
             rejection_valid = (positive | hard) & (coverage > 0)
-            rejection = retrieval_loss(scores, positive, rejection_valid)
+            rejection = retrieval_loss(
+                scores / context_temperature, positive, rejection_valid
+            )
             rejection_active = (
                 ((positive & rejection_valid).any(1) & (hard & rejection_valid).any(1))
                 .float()

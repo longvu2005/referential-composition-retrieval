@@ -24,7 +24,11 @@ from rcr.proposed.nn.composition import (
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
-from rcr.proposed.scores import fafa_binding_scores
+from rcr.proposed.scores import (
+    DEFAULT_CONTEXT_WEIGHT,
+    fafa_binding_scores,
+    residual_score_components,
+)
 
 DEFAULT_COARSE_BETA = 0.4
 
@@ -148,7 +152,7 @@ class RCRModel(nn.Module):
             nn.Linear(person_input_dim, dim), nn.LayerNorm(dim)
         )
         self.identity_head = IdentityHead(dim, identity_dim)
-        # Keep the checkpoint scale; calibration controls the context weight.
+        # Keep a fixed binding scale shared by training and inference.
         self.binding_log_scale = nn.Parameter(
             torch.tensor(math.log(math.expm1(1.0))), requires_grad=False
         )
@@ -205,6 +209,7 @@ class RCRModel(nn.Module):
         fafa_query: Tensor,
         fafa_targets: Tensor,
         pooling: str = "penalized",
+        context_weight: float = DEFAULT_CONTEXT_WEIGHT,
     ) -> tuple[Tensor, Tensor]:
         query = self.encode_query(
             query_scene,
@@ -231,6 +236,7 @@ class RCRModel(nn.Module):
             target_mask,
             fafa_targets=fafa_targets,
             pooling=pooling,
+            context_weight=context_weight,
         )
 
     def encode_query(
@@ -343,8 +349,8 @@ class RCRModel(nn.Module):
     ) -> tuple[Tensor, PersonMatching]:
         """Learnable context path shared by training and fine inference.
 
-        Selection/assignment stay prediction-based and detached. Training needs
-        no native FAFA query/target tokens to supervise this component.
+        Selection/assignment stay prediction-based and detached. The caller
+        combines raw context with frozen native FDA using the shared scorer.
         """
         if person_mask is not None:
             persons = persons.masked_fill(~person_mask[..., None], 0)
@@ -414,6 +420,7 @@ class RCRModel(nn.Module):
         fafa_targets: Tensor,
         return_details: bool = False,
         pooling: str = "penalized",
+        context_weight: float = DEFAULT_CONTEXT_WEIGHT,
     ) -> Tensor | dict[str, Tensor]:
         """Shared identity matching -> aligned evidence/context -> null-aware score.
 
@@ -437,13 +444,15 @@ class RCRModel(nn.Module):
             return_poolings=True,
         )
         binding = poolings[pooling]
-        gated_context = matching.coverage * context
-        score = gated_context + self.binding_scale * binding
+        scored = residual_score_components(
+            binding, context, matching.coverage, self.binding_scale, context_weight
+        )
+        score = scored["fine_scores"]
         if return_details:
             return {
                 "score": score,
                 "context": context,
-                "gated_context": gated_context,
+                **scored,
                 "binding": binding,
                 "coverage": matching.coverage,
                 "subject_coverage": matching.subject_coverage,

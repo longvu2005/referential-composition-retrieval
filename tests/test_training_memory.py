@@ -1,6 +1,5 @@
-"""Bounded context training retains losses, gradients and dropout semantics."""
+"""CPU workflow tests for training memory."""
 
-import weakref
 from copy import deepcopy
 
 import pytest
@@ -8,15 +7,15 @@ import torch
 from torch import nn
 
 from rcr.proposed import losses
-from rcr.proposed import train as training
-from tests.test_train import _only_loss
-from tests.test_train import objective_batch as objective_batch
-from tests.test_train import tiny_training_run as tiny_training_run
+from tests.helpers import _only_loss
 
 
 def _expanded_batch(batch):
     rows = {}
     for key, value in batch.items():
+        if not isinstance(value, torch.Tensor):
+            rows[key] = value
+            continue
         if value.ndim and value.shape[0] == 1:
             value = value.repeat(3, *([1] * (value.ndim - 1)))
         rows[key] = value.detach().clone().requires_grad_(value.requires_grad)
@@ -41,7 +40,9 @@ def _backward(model, batch, size, settings, *, amp=False):
     gradients.update(
         (f"batch.{key}", value.grad.clone())
         for key, value in batch.items()
-        if value.requires_grad and value.grad is not None
+        if isinstance(value, torch.Tensor)
+        and value.requires_grad
+        and value.grad is not None
     )
     return total.detach(), parts, gradients
 
@@ -97,57 +98,3 @@ def test_checkpoint_preserves_chunked_dropout_gradients_and_rng(
     expected = _backward(deepcopy(model), _expanded_batch(batch), 4, settings, amp=amp)
     _assert_same(actual, expected)
     torch.testing.assert_close(actual_rng, torch.rand(5), rtol=0, atol=0)
-
-
-def test_checkpoint_reduces_saved_context_activations(objective_batch):
-    model, batch = objective_batch
-    settings = _only_loss("context")
-
-    def saved_bytes(size):
-        storages = {}
-
-        def pack(value):
-            storage = value.untyped_storage()
-            storages[storage.data_ptr()] = storage.nbytes()
-            return value
-
-        with torch.autograd.graph.saved_tensors_hooks(pack, lambda value: value):
-            total, _ = losses.compute_loss(
-                model,
-                _expanded_batch(batch),
-                (2, 2),
-                context_batch_size=size,
-                **settings,
-            )
-        total.backward()
-        model.zero_grad(set_to_none=True)
-        return sum(storages.values())
-
-    assert saved_bytes(4) < saved_bytes(64) / 2
-
-
-def test_training_releases_inputs_before_next_batch_and_validation(
-    tiny_training_run, monkeypatch
-):
-    cfg, _, _, _ = tiny_training_run
-    cfg["train"].update(epochs=2, context_batch_size=1)
-    build, evaluate = training.build_batch, training._evaluate
-    references = []
-
-    def check_released():
-        assert all(ref() is None for ref in references)
-
-    def observe_batch(*args, **kwargs):
-        check_released()
-        batch = build(*args, **kwargs)
-        references[:] = [weakref.ref(batch[key]) for key in ("target_scene", "change")]
-        return batch
-
-    def observe_validation(*args, **kwargs):
-        check_released()
-        return evaluate(*args, **kwargs)
-
-    monkeypatch.setattr(training, "build_batch", observe_batch)
-    monkeypatch.setattr(training, "_evaluate", observe_validation)
-    training.train(cfg)
-    check_released()

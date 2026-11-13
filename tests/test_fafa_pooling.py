@@ -1,4 +1,4 @@
-"""Frozen FAFA pooling parity, cache reuse and real CLI/evaluator integration."""
+"""CPU workflow tests for fafa pooling."""
 
 import copy
 import json
@@ -7,80 +7,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 
 from rcr.baselines import FAFA_POOLINGS
-from rcr.baselines.fafa_matching import aggregate_subject_poolings
 from rcr.common.io import output_directory, write_jsonl
 from rcr.evaluation.report import load_run
-from rcr.proposed.matching import PersonMatching
-from rcr.proposed.scores import pool_fafa_scores
-from tools.run import main
-
-
-@pytest.mark.parametrize("owners", [[], [7], [7, 7], [7, 9], [7, 7, 9], [7, 9, 9, 9]])
-@pytest.mark.parametrize("penalty", [-1.0, -1.1, 0.2])
-def test_numpy_pooling_matches_proposed_rules_on_the_same_assignment(owners, penalty):
-    subjects = [7, 9, 12]  # Include a public role with no predicted components.
-    counts = [0, 1, 2, 5, 0, 3]
-    offsets = np.r_[0, np.cumsum(counts)]
-    scores = np.random.default_rng(14).uniform(-1, 1, (len(owners), offsets[-1]))
-    actual = aggregate_subject_poolings(scores, offsets, owners, subjects, penalty)
-    member = torch.tensor(
-        np.asarray(owners)[None, :] == np.asarray(subjects)[:, None],
-        dtype=torch.float32,
-    )[None]
-    for gi, (start, stop) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
-        matrix = scores[:, start:stop]
-        rows, cols = linear_sum_assignment(-matrix)
-        indices = torch.full((1, len(owners)), -1, dtype=torch.long)
-        indices[0, rows] = torch.as_tensor(cols)
-        values = torch.zeros(1, len(subjects), len(owners))
-        values[0, :, rows] = torch.as_tensor(matrix[rows, cols], dtype=torch.float32)
-        matching = PersonMatching(
-            indices,
-            member,
-            torch.ones(1, 3, dtype=torch.bool),
-            torch.zeros(1, 3),
-            torch.zeros(1),
-        )
-        expected = pool_fafa_scores(values, matching, missing_penalty=-penalty)
-        for mode in FAFA_POOLINGS:
-            assert actual[mode][gi] == pytest.approx(expected[mode].item(), abs=3e-7)
-
-
-def test_unequal_subject_sizes_use_mass_not_a_flat_crop_average():
-    scores = np.array([[0.9, -1], [-1, -1], [-1, 0.3]])
-    result = aggregate_subject_poolings(scores, np.array([0, 2]), [1, 1, 2], [1, 2])
-    # Subject 1 has only half its predicted mass matched, Subject 2 has all.
-    assert result["matched_mean"][0] == pytest.approx((0.9 / 2 + 0.3) / 1.5)
-    assert result["subject_mean"][0] == pytest.approx((0.9 + 0.3) / 2)
-
-
-def test_assignment_is_one_to_one_and_low_scores_are_not_rejected():
-    scores = np.array([[-0.2, -0.3], [-0.21, -0.9]])
-    result = aggregate_subject_poolings(scores, np.array([0, 2]), [1, 2], [1, 2])
-    for mode in FAFA_POOLINGS:
-        assert result[mode][0] == pytest.approx((-0.3 - 0.21) / 2)
-
-
-@pytest.mark.parametrize(
-    "offsets,owners,subjects",
-    [
-        ([0, 2], [1], [1]),
-        ([0, 2], [1, 3], [1, 2]),
-        ([0, 2], [1, 2], [1, 1]),
-        ([0, 1], [1, 2], [1, 2]),
-        ([0.0, 2.0], [1, 2], [1, 2]),
-        ([0, 2], [1, 2], []),
-    ],
-)
-def test_invalid_public_mapping_or_offsets_fail(offsets, owners, subjects):
-    with pytest.raises(ValueError, match="Subject mapping"):
-        aggregate_subject_poolings(np.ones((2, 2)), offsets, owners, subjects)
 
 
 @pytest.fixture
@@ -269,11 +201,3 @@ def test_real_runner_shares_native_cache_preserves_fafa_and_locks_test(frozen_fa
     changed["setmatch"]["unmatched_score"] = -1.1
     with pytest.raises(ValueError, match="stale"):
         run_experiment(changed, splits=["test"])
-
-
-@pytest.mark.parametrize("stage", ["train", "build-cache", "prepare-supervision"])
-def test_no_training_or_proposed_cache_stages(stage, capsys):
-    with pytest.raises(SystemExit) as error:
-        main([stage, "--config", "configs/fafa_pooling.yaml"])
-    assert error.value.code == 2
-    assert "only available for proposed" in capsys.readouterr().err

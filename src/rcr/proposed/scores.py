@@ -12,6 +12,42 @@ from rcr.proposed.matching import (
 )
 
 POOLING_MODES = ("penalized", "matched_mean", "subject_mean")
+DEFAULT_CONTEXT_WEIGHT = 0.1
+FINE_SCORE_MODE = "bounded_residual"
+
+
+def residual_score_components(
+    binding: Tensor,
+    context: Tensor,
+    coverage: Tensor,
+    binding_scale: float | Tensor,
+    context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+) -> dict[str, Tensor]:
+    """Score each pair independently with a bounded, null-aware residual."""
+    if binding.shape != context.shape or binding.shape != coverage.shape:
+        raise ValueError("binding, context and coverage must have matching shapes")
+    if not math.isfinite(context_weight) or context_weight < 0:
+        raise ValueError("context weight must be finite and nonnegative")
+    scale = torch.as_tensor(binding_scale, device=binding.device).float()
+    if scale.numel() != 1 or not torch.isfinite(scale).all() or (scale < 0).any():
+        raise ValueError("binding scale must be finite and nonnegative")
+    binding, context, coverage = binding.float(), context.float(), coverage.float()
+    if not all(torch.isfinite(x).all() for x in (binding, context, coverage)):
+        raise ValueError("fine score components contain NaN/Inf")
+    if ((coverage < 0) | (coverage > 1)).any():
+        raise ValueError("coverage must be in [0, 1]")
+    gated = coverage * context.tanh()
+    penalty = 1 - coverage
+    residual = context_weight * (gated - penalty)
+    fine = scale * binding + residual
+    if not torch.isfinite(fine).all():
+        raise ValueError("fine scores overflowed float32")
+    return {
+        "gated_context": gated,
+        "coverage_penalty": context_weight * penalty,
+        "context_residual": residual,
+        "fine_scores": fine,
+    }
 
 
 def pool_fafa_scores(

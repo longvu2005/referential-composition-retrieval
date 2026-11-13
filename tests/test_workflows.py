@@ -1,4 +1,4 @@
-"""Keep the Bash workflow aligned with the configured research output paths."""
+"""CPU workflow tests for workflows."""
 
 import json
 import os

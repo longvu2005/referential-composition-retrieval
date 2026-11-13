@@ -192,8 +192,8 @@ an absent Subject. Partial evidence can still miss an identity inside a GROUP;
 coverage is a model estimate, not a ground-truth completeness certificate.
 
 All reductions use the same detached identity assignment and grounding weights.
-They do not change context gating, training losses, model parameters or cache
-features. Identity cosine is not added again. FDA lies in [-1,1], and the null
+They set the binding offset in training and inference without changing model
+parameters or cache features. Identity cosine is not added again. FDA lies in [-1,1], and the null
 penalty magnitude remains greater than 1. Empty selection blocks contextual
 retrieval gradients, preserving the grounding/matching decision.
 
@@ -218,14 +218,19 @@ a proof of correct semantic ownership.
 C_s = sum_i w_si [pi(i) is not null]       # zero for an empty query Subject
 C = mean_active_subjects C_s
 alpha = softplus(binding_log_scale)
-S_fine_raw = alpha * B_FAFA + C * S_context
+h = tanh(S_context)
+S_fine = alpha * B_FAFA + beta * (C * h - (1 - C))
 ```
 
-The scale is fixed at 1 for new training runs; the existing state key preserves
-a loaded checkpoint's recorded value. An entirely unmatched query has zero context contribution
-and finite negative binding. Context remains unbounded. Detector misses and
-grounding mistakes can still lower positive scores. Thresholds and ranking quality
-require validation.
+The scale is fixed at 1 for new training runs. `beta` is
+`retrieval.context_weight`, used by training, inference and mining. The raw
+reasoner scalar is unbounded, but its score contribution is bounded. At zero
+coverage the residual is exactly `-beta`, independently of the reasoner.
+For fixed binding and raw context, the derivative with respect to coverage is
+`beta * (tanh(S_context) + 1) >= 0`. This is a conditional monotonicity guarantee,
+not a claim that every partially matched image ranks below every complete one.
+Coverage is predicted matching support, not a ground-truth identity oracle.
+Detector misses and grounding mistakes can still lower positive scores.
 
 ## Objective and ranking
 
@@ -241,7 +246,7 @@ Each term has one explicit task:
 | `L_ground` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
 | `L_id` | Normalized person embeddings; SupCon, temperature 0.1 | Deduplicated known-ID crops from queries, Full Positive targets and extra train-only identity observations |
 | `L_coarse` | Actual raw `identity_scores`, temperature 0.1 | All-required-ID images are positives, other candidate images are negatives; both query and target need person support |
-| `L_context` | Raw `coverage * context`, unit temperature | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
+| `L_context` | Shared bounded fine score, `loss.context_temperature` | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
 | `L_global_state` | Global state cosine, temperature 0.1 | Full Positives versus same-required-ID negatives, independently of person detection coverage |
 
 After `train.sampling.warmup_epochs`, nonzero
@@ -318,23 +323,19 @@ detections fail. Crop identity and coarse supervision
 train the identity head; context gradients train composition, evidence binding,
 reasoner and shared projections without differentiating through matching.
 
-By default frozen FDA binding is not part of the train loss and native FAFA
-query/target tokens are not loaded during gradient-bearing optimization. Fine
-negative mining reads those frozen cache tokens in eval/inference mode only. The
-optional [residual context objective](#residual-context-objective) is the one
-exception: with `loss.context_residual_scale > 0` the batch also carries those
-frozen tokens and FDA enters the context ranking score as a constant offset.
-Pooled FAFA person features remain
-inputs to learned identity/semantic modules. `binding_log_scale` is fixed rather
-than optimized for new runs; its state key/value remains available to unchanged
-checkpoint inference. The optimizer includes trainable parameters only.
+Frozen native FDA binding enters the context ranking score without autograd.
+The batch carries query/target native FAFA tokens only when context is active.
+Pooled FAFA person features remain inputs to learned identity/semantic modules.
+`binding_log_scale` is fixed rather than optimized; the optimizer includes only
+trainable parameters.
 
-`loss` contains five task weights, one nested rejection weight, one residual
-scale and three cosine temperatures. The default weights
-are starting values, not measured optima. The fine mode and inference fusion
-weights are selected independently on validation. An untrained/disabled state
-branch cannot enter training validation with a positive coarse beta. Checkpoint
-selection and the ID/Full evaluation protocol remain unchanged.
+`loss` contains five task weights, one nested rejection weight and four positive
+temperatures. `loss.context_temperature` scales the pairwise context loss;
+`retrieval.context_weight` sets the residual bound. These are separate from the
+task weight `loss.context_weight`. Defaults are starting values, not measured
+optima. Pooling and the residual weight must match training during retrieval and
+remain fixed during offline calibration. An untrained state branch cannot enter
+training validation with a positive coarse beta.
 
 The default 20-epoch run has a short context warmup:
 
@@ -365,84 +366,49 @@ intermediate snapshot. History records `phase` and the effective `context_weight
 W&B records the effective weight and warmup flag per step and epoch. The saved
 configuration retains the final objective weights rather than the temporary zero.
 
-Within Top-M:
-
-```text
-gated_context = C * S_context
-z(x) = (float32(x) - mean(x)) / max(std(x, unbiased=False), 1e-6)
-S_fine = alpha * B_FAFA + context_weight * z_topM(gated_context)
-S_final = z_topM(S_fine) + fine_coarse_weight * z_topM(S_coarse)
-```
-
-By default, training context ranking uses raw gated-context logits, not the
-combined FDA score or a z-score over a sampled minibatch (the residual objective
-below adds FDA as a constant offset instead). It learns the order of the component
-that can change; matching coverage is detached. A training candidate set is not
-the inference Top-M population, and z-scoring a two-candidate set can remove the
-useful score-gap gradient. Inference keeps its complete-shortlist statistics:
-coverage is applied first, each query has its own population mean/std, and
-constants, zero coverage or M=1 contribute zero normalized context. NaN/Inf fine
-components and FP32 arithmetic overflow remain explicit errors.
-
-Ranking arithmetic and stable shortlist sorting run on CPU FP32, shared with
-offline replay. Model forwards retain their configured device/chunking. Small
-floating point differences between differently sized model-forward batches may
-remain; changing batch sizes never changes the normalization population.
-
-Final fusion normalizes both branches on common **finite Coarse** support. A
-positive fusion weight leaves unsupported candidates at minus infinity; weight
-zero uses `S_fine` directly and preserves the previous policy of ignoring Coarse
-support. The context statistics above always use the entire Top-M. These are two
-distinct normalization steps. Fine/FAFA/fused ties retain Coarse order; Coarse
-ties retain canonical gallery order. The remaining gallery keeps coarse order.
-
-`retrieval.fine_score_mode: legacy_raw` uses `S_fine_raw` as the fine ranking score
-and ignores `context_weight`. No architecture, weights, losses, optimizer or
-`ARCHITECTURE_VERSION` changes are required; old compatible checkpoints load
-their recorded `binding_scale` normally. Periodic evaluation, candidate sampling, AMP
-and bounded cache reads use the shared experiment protocol. `best.pt` maximizes
-`0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
+Within Top-M, the final order is the fine-score order. Coarse scores select
+candidates and order the tail; they are not fused back into the fine score.
+Fine scoring is independent of the number and distribution of other candidates.
+All derived ranking arithmetic uses CPU FP32 in inference/replay, while model
+forwards retain their configured device and chunking. Small floating-point
+forward differences can remain between batch sizes. Stable fine/FAFA ties
+retain coarse order; coarse ties retain canonical gallery order.
+`best.pt` maximizes `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
 
 ### Residual context objective
 
-By default `L_context` ranks the raw gated context. With
-`loss.context_residual_scale = kappa > 0` the score entering the same ranking loss
-becomes
+Training uses the same pairwise score as inference:
 
 ```text
-s(q,c) = kappa * B_FAFA(q,c) + C(q,c) * S_context(q,c)
+h(q,c) = tanh(S_context(q,c))
+s(q,c) = alpha * B_FAFA(q,c) + beta * (C(q,c) * h(q,c) - (1 - C(q,c)))
 L_context = L_semantic + context_rejection_weight * L_rejection
+L_pair = softplus((s_negative - s_positive) / context_temperature)
 ```
 
-`B_FAFA` is the pooled native FDA binding from `fafa_binding_scores`, using the
-detached identity assignment that already gates context, `retrieval.pooling` and
-the model's `fda_k` and `missing_penalty`. It runs without autograd and the
-assignment is detached, so only composition, evidence binding, the reasoner and the
-shared projections receive context gradients. Eligible pairs, masks and the
-zero-coverage exclusion are those of the original loss. A constant `B_FAFA` across
-candidates leaves the loss unchanged, and a pair that FDA already separates by far
-more than the context margin contributes almost no gradient. Context is therefore
-trained to correct pairs that FDA alone ranks wrongly.
+`B_FAFA` uses the same detached identity assignment, `retrieval.pooling`, FDA-k
+and missing penalty as inference. FDA is frozen; context gradients reach
+composition, evidence binding, the reasoner and shared projections. Eligibility
+masks remain unchanged: semantic pairs use identity positives with positive
+coverage; rejection pairs use Full Positives and explicitly mined wrong-ID
+negatives with positive coverage. Zero-coverage pairs cannot train the reasoner
+through a detached coverage gate. Grounding and identity retain their explicit
+supervision.
 
-`kappa` multiplies a unit-temperature loss and `B_FAFA` differences between
-candidates are small, so a small `kappa` makes FDA invisible and recovers the
-original objective. The inference form `B_FAFA + context_weight * z(...)` suggests an
-order of `1 / context_weight` as a starting point, to be tuned on validation like
-every other default here. `kappa = 0` keeps the original objective exactly and
-reads no native token during training.
+The residual lies in `[-beta, beta]` in both training and inference, including
+single-candidate shortlists. Context cannot compensate for an arbitrarily large
+binding gap by increasing its raw magnitude. At equal full coverage, its maximum
+pairwise correction is `2 * beta`. Choose beta by inspecting binding gaps on
+train/validation and retrain with the final value; offline changes are diagnostic
+ablations rather than deployment calibration.
 
-When enabled the training batch carries `fafa_query` `[B,S,Kq,D]`,
-`fafa_targets` `[B,C,Kt,L,D]` and `fafa_pooling`, read from the independent FAFA
-query and image caches. The query cache must cover train, which is checked before
-epoch 1. Nothing is read during the context warmup. History and W&B record
-`context_fda_error`: the share of eligible (positive, negative) pairs that FDA
-alone ranks wrong or tied, which measures the headroom for this objective.
-
-Inference scoring is unchanged. Periodic validation and `best.pt` selection use
-`retrieval.*` as configured, so set `retrieval.context_weight` to a plausible value
-for a residual run and recalibrate afterwards. Positives whose `B_FAFA` is lowered
-by missing or partial identity matching are not excluded beyond the original
-`coverage > 0` filter.
+The training batch carries `fafa_query` `[B,S,Kq,D]`, `fafa_targets`
+`[B,C,Kt,L,D]` and `fafa_pooling` from independent FAFA query/image caches.
+The query cache must cover train; this is checked before epoch 1. Warmup skips
+native-token batch reads and context computation. History and W&B record
+`context_fda_error`, the share of eligible positive/negative pairs that FDA alone
+ranks wrong or tied. Matching, sampling, auxiliary losses and checkpoint selection
+retain their existing supervision boundaries.
 
 ## Configuration and checkpoints
 
@@ -468,13 +434,15 @@ conversion with the original code revision or a fresh detection build; see
 Build format-7 FAFA caches once in the new independent paths. Their crop-source
 identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
-Fresh experiments train from scratch in `runs/proposed`. Existing checkpoints
-from this CLIP/FAFA architecture also load through their previous architecture-name
-alias without changing model weights. See [feature contracts](feature_contracts.md).
-Offline replay requires the complete version-1 raw-score artifact.
+Fresh experiments train from scratch in `runs/proposed`. The architecture
+identifier and parameter layout stay unchanged, including the architecture-name
+alias. Retrieval requires a checkpoint trained with the bounded residual scorer;
+an older checkpoint's parameter layout alone does not establish scoring
+compatibility. See [feature contracts](feature_contracts.md).
+Offline replay requires the complete version-2 raw-score artifact.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
-only train candidates; validation selects checkpoints and fusion coefficients.
+only train candidates; validation selects checkpoints and coarse shortlist settings.
 
 `checkpoint.max_txt_len` in the native FAFA YAML explicitly selects 128 tokens,
 including special tokens, for both the baseline and proposed extraction. The
@@ -490,8 +458,8 @@ recorded policy and checkpoint contract without installing native FAFA.
 `model.fine_matching` defines background, selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
-Calibration selects pooling, coarse/context/fusion weights and Top-M. Changing
-`model.fine_matching` in a retrieval YAML does not override the checkpoint; use
+Calibration selects coarse beta and Top-M; trained pooling and residual weight
+stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 New checkpoints save the resolved matching settings, including the actual
 background. Retrieval metadata records that effective configuration even if its
@@ -505,32 +473,31 @@ Subject/overall coverage, all three binding reductions, raw/gated context and
 final score from the same forward pass. Small tests verify structure and
 numerics, not benchmark mAP.
 
-Saved rankings include `fafa_rankings` in addition to coarse/fine/fused rankings.
+Saved rankings include `fafa_rankings` in addition to coarse/fine/final rankings.
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
 order outside it; it is not the full-gallery FAFA + SetMatch baseline.
 Official validation stores `identity_scores`, `state_scores`, `fafa_binding`,
 `context` and `coverage` as float32 `[Q,G]` matrices aligned with `gallery_ids`.
 It also stores `binding_penalized`, `binding_matched_mean` and
-`binding_subject_mean` for offline pooling selection. Derived diagnostics retain coarse
-Top-M order. The evaluator reports `fafa_*` metrics with the same official protocol.
+`binding_subject_mean` for diagnostic pooling ablations. Derived diagnostics
+retain coarse Top-M order. The evaluator reports `fafa_*` metrics with the same official protocol.
 Training validation and test still fine-score only Top-M.
 
-The one `rankings.pt` artifact retains schema version **1**, with query indices,
+The one `rankings.pt` artifact uses schema version **2**, with query indices,
 recorded binding scale, fixed matching policy, scoring configuration and embedded
-run/provenance metadata. Each non-self pair is fine-scored once during official
-validation retrieval. Offline calibration reads this file and validation
-annotations, without opening any checkpoint, backbone or feature cache. It
-jointly searches `pooling`, `coarse_beta`, `fine_coarse_weight`, `context_weight` and `top_m`,
-using `selection_metric`: by default, the mean of overall and macro-case
-validation Full-mAP, matching checkpoint selection. Overall-only `full_map` and
-`macro_full_map` are also supported. The exact source configuration is included
-first and wins equal-score ties. Context mode stays fixed. Coarse eligibility and
-population normalization use the existing complete-gallery helper; fine and
-fusion normalization use the newly selected Top-M, with self always excluded.
-Unchanged coarse order, shortlist statistics, fusion z-scores and branch metrics
-are cached. Positive ranks reproduce the official AP/R@K arithmetic without
-decoding the full gallery for every candidate; the winner receives full official
-evaluation.
+run/provenance metadata. Schema-1 artifacts and checkpoints trained with previous
+fine scorers are rejected; train a fresh run using the existing frozen caches.
+Each non-self pair is fine-scored once during official validation retrieval.
+Offline calibration reads this file and validation annotations, without opening
+any checkpoint, backbone or feature cache. It searches `coarse_beta` and `top_m`,
+keeping pooling and the residual weight fixed from training. The default
+`selection_metric` averages overall and macro-case validation Full-mAP, matching
+checkpoint selection; `full_map` and `macro_full_map` are also supported.
+The exact source configuration is included first and wins equal-score ties.
+Coarse population normalization uses the complete eligible gallery; fine scoring
+has no population normalization. Coarse orders, gathered raw scores and unchanged
+branch metrics are cached. The winning configuration receives full official
+evaluation before export.
 
 `candidate_ks` remains fixed independently of Top-M and is evaluated from the
 complete coarse order. `selected.yaml` freezes the scoring settings, checkpoint

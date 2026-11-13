@@ -206,10 +206,11 @@ def partial_identity_matching(
             assigned[n, rows[row[real]]] = columns[column[real]]
         indices = torch.as_tensor(assigned, device=membership.device)
     matched = indices >= 0
-    subject_coverage = (per_subject * matched[:, None]).sum(-1)
+    subject_coverage = (per_subject * matched[:, None]).sum(-1).clamp(0, 1)
     coverage = subject_coverage.masked_fill(~active, 0).sum(-1) / active.sum(
         -1
     ).clamp_min(1)
+    coverage = coverage.clamp(0, 1)
     return PersonMatching(indices, weights, active, subject_coverage, coverage)
 
 

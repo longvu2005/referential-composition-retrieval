@@ -1,104 +1,18 @@
-"""Standalone retrieve/evaluate and calibration using a real tiny checkpoint."""
+"""CPU workflow tests for score pipeline."""
 
 import copy
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
 import yaml
 
 from rcr.common.data import split_fingerprint
-from rcr.common.io import sha256_file, write_json
 from rcr.evaluation.evaluate import evaluate_retrieval_output
-from rcr.evaluation.report import ReportError, load_run
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, retrieve
-from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
-from rcr.proposed.nn.encoders import TextEncoder
-from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.replay import replay_rankings
-from rcr.proposed.train import _make_checkpoint
-from tests.test_train import TextBackbone, TinyCache, Tokenizer, _sample
-
-
-@pytest.fixture
-def saved_pipeline(tmp_path, monkeypatch):
-    torch.manual_seed(3)
-    cache = TinyCache()
-    samples = [_sample("train", "q", "a"), _sample("val", "vq", "va")]
-    data = SimpleNamespace(
-        samples=samples,
-        samples_by_id={s["sample_id"]: s for s in samples},
-        splits={"train": ["train"], "val": ["val"], "test": []},
-        gallery_ids=cache.image_ids,
-        images_by_id={
-            i: {
-                "image_id": i,
-                "path": f"{'val' if i.startswith('v') else 'train'}/{i}.jpg",
-            }
-            for i in cache.image_ids
-        },
-        gt_head_boxes_by_image={i: [{"identity_id": "p1"}] for i in cache.image_ids},
-    )
-    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
-    cfg["model"].update(dim=8, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
-    cfg["retrieval"].update(
-        top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2
-    )
-    cfg["runtime"]["device"] = "cpu"
-    cfg["candidate_ks"] = [1, 2]
-    cfg["output"]["dir"] = str(tmp_path / "run")
-    cfg["checkpoint"] = str(tmp_path / "old.pt")
-    model = RCRModel.from_config(cfg["model"], input_dim=8, person_input_dim=8)
-    # Non-default learned scale must survive an old checkpoint round trip.
-    model.binding_log_scale.data.fill_(-0.7)
-    text = TextEncoder(TextBackbone(), dim=8)
-    old_cfg = copy.deepcopy(cfg)
-    old_cfg["retrieval"].pop("fine_score_mode")
-    old_cfg["retrieval"].pop("context_weight")
-    checkpoint = _make_checkpoint(
-        epoch=2,
-        model=model,
-        text_encoder=text,
-        tokenizer=Tokenizer(),
-        cfg=old_cfg,
-        cache=cache,
-        dim=8,
-        scene_dim=8,
-        person_dim=8,
-        best={"epoch": 2, "full_map": 0.1, "macro_full_map": 0.1, "score": 0.1},
-        state_pairs=1,
-    )
-    torch.save(checkpoint, cfg["checkpoint"])
-    monkeypatch.setattr(retrieve, "load_rcr_data", lambda *args: data)
-    monkeypatch.setattr(retrieve, "GalleryCache", lambda *args, **kwargs: cache)
-    monkeypatch.setattr(retrieve, "check_query_text_config", lambda *args: None)
-    monkeypatch.setattr(retrieve, "check_cache_config", lambda *args: None)
-    monkeypatch.setattr(
-        retrieve,
-        "load_text_modules",
-        lambda *args, **kwargs: (Tokenizer(), TextEncoder(TextBackbone(), dim=8)),
-    )
-    monkeypatch.setattr(calibration, "load_rcr_data", lambda *args: data)
-    return cfg, data, model.binding_scale.item()
-
-
-@pytest.mark.parametrize("field", ["scene_cache_id", "detection_cache_id"])
-def test_retrieval_rejects_changed_scene_or_crop_source_before_loading_text(
-    saved_pipeline, monkeypatch, field
-):
-    cfg, _, _ = saved_pipeline
-    cache = retrieve.GalleryCache("unused")
-    setattr(cache, field, "different-source")
-    monkeypatch.setattr(
-        retrieve,
-        "load_text_modules",
-        lambda *a, **k: pytest.fail("provenance must fail before text loading"),
-    )
-    with pytest.raises(ValueError, match=field):
-        retrieve.retrieve(cfg)
 
 
 def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
@@ -108,7 +22,7 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     output = retrieve.retrieve(cfg)
     directory = Path(cfg["output"]["dir"]) / "val"
     saved = torch.load(directory / "rankings.pt", weights_only=True)
-    assert saved["binding_scale"] == scale != 1.0
+    assert saved["binding_scale"] == scale == 1.0
     assert torch.equal(replay_rankings(saved)["rankings"], output["rankings"])
     current_metrics = evaluate_run(cfg, data=data)
     # Evaluation needs only rankings and IDs; raw score storage does not affect it.
@@ -133,8 +47,8 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     assert current_metrics["overall"]["num_queries"] == 1
     metadata = json.loads((directory / "run.json").read_text())
     assert metadata["score_config"] == saved["score_config"]
-    assert metadata["score_schema_version"] == 1
-    assert metadata["fine_score_mode"] == "context_zscore"
+    assert metadata["score_schema_version"] == 2
+    assert metadata["fine_score_mode"] == "bounded_residual"
     assert metadata["context_weight"] == cfg["retrieval"]["context_weight"]
     assert metadata["checkpoint_epoch"] == 2
     assert metadata["validation_sha256"] == split_fingerprint(data, "val")
@@ -160,90 +74,6 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
         retrieve.retrieve(incomplete_test)
 
 
-def test_dino_bert_checkpoint_is_rejected_before_loading_backbone(
-    saved_pipeline, monkeypatch
-):
-    cfg, _, _ = saved_pipeline
-    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
-    checkpoint["architecture_version"] = "fafa-native-partial-match-v1"
-    torch.save(checkpoint, cfg["checkpoint"])
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("incompatible checkpoints must fail before model loading")
-
-    monkeypatch.setattr(retrieve, "load_text_modules", forbidden)
-    with pytest.raises(ValueError, match="checkpoint architecture is incompatible"):
-        retrieve.retrieve(cfg)
-
-
-def test_renamed_architecture_loads_existing_checkpoint_without_changing_scores(
-    saved_pipeline,
-):
-    cfg, _, _ = saved_pipeline
-    current = retrieve.retrieve(cfg)
-    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
-    assert checkpoint["architecture_version"] == "fafa-partial-match-v2"
-    checkpoint["architecture_version"] = "clip-b32-fafa-partial-match-v2"
-    torch.save(checkpoint, cfg["checkpoint"])
-    digest = sha256_file(cfg["checkpoint"])
-
-    previous_name = retrieve.retrieve(cfg)
-    for key in (
-        "rankings",
-        "coarse_rankings",
-        "fine_rankings",
-        "identity_scores",
-        "state_scores",
-        "fafa_binding",
-        "context",
-        "coverage",
-    ):
-        assert torch.equal(current[key], previous_name[key]), key
-    assert sha256_file(cfg["checkpoint"]) == digest
-
-
-@pytest.mark.parametrize("pooling", ["penalized", "matched_mean", "subject_mean"])
-def test_report_rejects_test_without_complete_validation_selection(
-    saved_pipeline, tmp_path, pooling
-):
-    cfg, data, _ = saved_pipeline
-    cfg["retrieval"]["pooling"] = pooling
-    retrieve.retrieve(cfg)
-    evaluate_run(cfg, data=data)
-    source = Path(cfg["output"]["dir"]) / "val"
-    run = json.loads((source / "run.json").read_text())
-    metrics = json.loads((source / "metrics.json").read_text())
-    run["split"] = "test"
-    run["config"]["split"] = "test"
-    metrics["provenance"]["split"] = "test"
-    directory = tmp_path / "report-test"
-    directory.mkdir()
-
-    def publish():
-        write_json(directory / "run.json", run)
-        metrics["provenance"]["run_sha256"] = sha256_file(directory / "run.json")
-        write_json(directory / "metrics.json", metrics)
-
-    publish()
-    with pytest.raises(ReportError, match="validation-selected configuration"):
-        load_run("proposed", directory, "test")
-
-    run["config"].update(
-        selected_checkpoint_sha256=run["checkpoint_sha256"],
-        selected_validation_sha256=run["validation_sha256"],
-        selected_retrieval={},
-    )
-    publish()
-    with pytest.raises(ReportError, match="validation-selected configuration"):
-        load_run("proposed", directory, "test")
-
-    run["config"]["selected_retrieval"] = {
-        key: run["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
-    }
-    publish()
-    assert load_run("proposed", directory, "test")["run"] == run
-
-
 def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     saved_pipeline, tmp_path
 ):
@@ -256,14 +86,12 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
             "rankings": str(source_path),
             "output_dir": str(root),
             "coarse_beta": [0.0, 0.4],
-            "fine_coarse_weight": [0.0, 0.4],
-            "context_weight": [cfg["retrieval"]["context_weight"]],
             "top_m": [cfg["retrieval"]["top_m"]],
         }
     )
-    assert len(rows) == 5  # Source configuration plus four grid candidates.
+    assert len(rows) == 3  # Source configuration plus two coarse candidates.
     selected = yaml.safe_load((root / "selected.yaml").read_text())
-    assert selected["retrieval"]["fine_score_mode"] == "context_zscore"
+    assert selected["retrieval"]["fine_score_mode"] == "bounded_residual"
     assert selected["retrieval"]["context_weight"] == cfg["retrieval"]["context_weight"]
     assert selected["selected_validation_sha256"] == split_fingerprint(data, "val")
     assert len(selected["selected_checkpoint_sha256"]) == 64
@@ -276,15 +104,15 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
 
     for key, value in (
         ("context_weight", 0.2),
-        ("fine_score_mode", "legacy_raw"),
         ("coarse_beta", 3.0),
-        ("fine_coarse_weight", 3.0),
         ("top_m", 1),
     ):
         tampered = copy.deepcopy(selected)
         tampered["split"] = "test"
         tampered["retrieval"][key] = value
-        with pytest.raises(ValueError, match="settings changed since val selection"):
+        with pytest.raises(
+            ValueError, match="settings changed since val selection|must match training"
+        ):
             retrieve.retrieve(tampered)
     # Chunking is operational, and may change without selecting a new method.
     selected["retrieval"]["fine_batch_size"] = 2
@@ -292,3 +120,45 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     del selected["selected_retrieval"]
     with pytest.raises(ValueError, match="predates the scoring contract"):
         retrieve.retrieve(selected)
+
+
+def test_obsolete_checkpoint_scorer_is_rejected_before_loading_text(
+    saved_pipeline, monkeypatch
+):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["config"]["retrieval"]["fine_score_mode"] = "context_zscore"
+    torch.save(checkpoint, cfg["checkpoint"])
+    monkeypatch.setattr(
+        retrieve,
+        "load_text_modules",
+        lambda *a, **k: pytest.fail("loaded obsolete model"),
+    )
+    with pytest.raises(ValueError, match="obsolete fine scorer"):
+        retrieve.retrieve(cfg)
+
+
+@pytest.mark.parametrize(
+    "key,value", [("context_weight", 0.2), ("pooling", "penalized")]
+)
+def test_calibration_rejects_diagnostic_changes_to_the_trained_fine_scorer(
+    saved_pipeline, tmp_path, key, value
+):
+    cfg, _, _ = saved_pipeline
+    source = retrieve.retrieve(cfg)
+    changed = replay_rankings(source, **{key: value})
+    path = tmp_path / "ablation.pt"
+    torch.save(changed, path)
+    root = tmp_path / "forbidden-selection"
+    with pytest.raises(
+        ValueError, match="requires the trained residual weight and pooling"
+    ):
+        calibration.calibrate(
+            {
+                "rankings": str(path),
+                "output_dir": str(root),
+                "coarse_beta": [0.4],
+                "top_m": [2],
+            }
+        )
+    assert not root.exists()

@@ -1,4 +1,4 @@
-"""Select pooling and score weights from complete validation rankings."""
+"""Select coarse shortlist settings with the trained fine scorer held fixed."""
 
 import math
 from copy import deepcopy
@@ -34,9 +34,7 @@ from rcr.evaluation.provenance import digest_json, runtime_metadata
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.matching import matching_settings
-from rcr.proposed.ranking import FINE_SCORE_MODES
 from rcr.proposed.replay import _replay_rankings, _validate_artifact
-from rcr.proposed.scores import POOLING_MODES
 
 
 class _CalibrationEvaluator:
@@ -207,10 +205,7 @@ def calibrate(settings: dict) -> list[dict]:
         "rankings",
         "output_dir",
         "coarse_beta",
-        "fine_coarse_weight",
-        "context_weight",
         "top_m",
-        "pooling",
         "selection_metric",
     }
     if unknown:
@@ -222,15 +217,17 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "selection_metric must be checkpoint_score, full_map or macro_full_map"
         )
-    # Fusion weight varies fastest so normalization and sorting are shared.
-    keys = ("coarse_beta", "top_m", "context_weight", "fine_coarse_weight")
+    keys = ("coarse_beta", "top_m")
     grids = [_grid(settings, key, integer=key == "top_m") for key in keys]
     source_path = Path(settings["rankings"])
     source = torch.load(source_path, map_location="cpu", weights_only=True)
     _validate_artifact(source)
-    if source["score_config"]["fine_score_mode"] not in FINE_SCORE_MODES:
-        raise ValueError("calibration requires an inference-supported fine_score_mode")
     provenance = source["provenance"]
+    if provenance.get("fine_score_ablation"):
+        raise ValueError(
+            "calibration requires the trained residual weight and pooling; "
+            "use the official validation export"
+        )
     if provenance.get("split") != "val" or provenance.get("query_subset") is not False:
         raise ValueError("offline calibration requires the complete validation split")
     cfg = deepcopy(provenance.get("config"))
@@ -242,23 +239,6 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError("rankings.pt must embed its proposed validation config")
     score_config = {"pooling": "penalized", **source["score_config"]}
     cfg["retrieval"].setdefault("pooling", "penalized")
-    poolings = settings.get("pooling", [score_config["pooling"]])
-    if (
-        not isinstance(poolings, list)
-        or not poolings
-        or any(mode not in POOLING_MODES for mode in poolings)
-    ):
-        raise ValueError("pooling must be a non-empty list of supported modes")
-    if any(
-        mode != score_config["pooling"] and f"binding_{mode}" not in source
-        for mode in poolings
-    ):
-        raise ValueError(
-            "changing pooling requires saved binding scores for that mode; "
-            "retrieve validation again with the updated scorer"
-        )
-    keys = (*keys[:2], "pooling", *keys[2:])
-    grids = [*grids[:2], list(dict.fromkeys(poolings)), *grids[2:]]
     digest = provenance.get("checkpoint_sha256", "")
     if (
         not isinstance(digest, str)
@@ -275,7 +255,7 @@ def calibrate(settings: dict) -> list[dict]:
         or provenance.get("score_config") != source["score_config"]
         or any(
             cfg["retrieval"].get(key) != score_config[key]
-            for key in (*keys, "fine_score_mode")
+            for key in SELECTED_RETRIEVAL_KEYS
         )
         or provenance.get("binding_scale") != source["binding_scale"]
         or provenance.get("fine_matching") != source["fine_matching"]
@@ -283,7 +263,7 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "embedded provenance disagrees with the saved scoring contract"
         )
-    # Freeze the actual selection background, including legacy artifacts (zero).
+    # Matching settings remain checkpoint-authoritative.
     cfg.setdefault("model", {})["fine_matching"] = matching_settings(
         source["fine_matching"]
     )
@@ -342,8 +322,8 @@ def calibrate(settings: dict) -> list[dict]:
         row = {
             "index": len(rows),
             "split": "val",
+            **{key: score_config[key] for key in SELECTED_RETRIEVAL_KEYS},
             **parameters,
-            "fine_score_mode": source["score_config"]["fine_score_mode"],
             "checkpoint_sha256": digest,
             "validation_sha256": fingerprint,
             "score_source_sha256": source_sha256,

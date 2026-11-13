@@ -45,18 +45,12 @@ The FAFA worker runs through `person_encoder.python`, so native FAFA never enter
 the proposed environment. Training and retrieval read cache files and do not load
 FAFA weights.
 
-The proposed FAFA branch now keeps the complete condition for each Subject and
-anchors its mentions to “the reference person”, without splitting clauses. After
-updating from the split-condition code, rerun only the query stage:
-
-```bash
-python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
-```
-
-Content-based keys reject stale query entries and reuse unchanged condition
-shards. Detection, scene and FAFA image/target caches remain reusable; no retraining
-is required for this text-routing change. Re-evaluate saved checkpoints with the
-rebuilt queries before comparing metrics or tuning retrieval weights.
+FAFA query extraction keeps the complete condition for each Subject and anchors
+its mentions to “the reference person”, without splitting clauses. Content-based
+keys reuse unchanged condition shards and reject stale query entries. Rerun the
+query stage after editing query text; detection, scene and FAFA image/target
+caches remain reusable. Checkpoint scoring compatibility is described in the
+[feature contracts](feature_contracts.md#checkpoint-compatibility).
 
 ## 3. Train and select a checkpoint
 
@@ -65,8 +59,10 @@ python tools/run.py train --config configs/proposed.yaml
 ```
 
 Training has separate grounding, crop-identity, coarse-identity, conditional
-context and global-state objectives. The context loss ranks raw `coverage * context`
-against same-ID negatives, without FDA or a trainable binding scale. Pairwise
+context and global-state objectives. Context ranks the shared score
+`alpha * B_FAFA + beta * (coverage * tanh(context) - (1 - coverage))`, using
+`beta = retrieval.context_weight` and `loss.context_temperature`. FDA binding and
+the binding scale are frozen. Pairwise
 losses weight eligible queries equally; see the exact objectives in
 [proposed_method.md](proposed_method.md#objective-and-ranking).
 The run starts with grounding/identity/coarse/state, then enables context after
@@ -83,14 +79,14 @@ all training epochs, independently of context and mining warmup. The first epoch
 uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
 the base rates. Actual rates are recorded in `history.jsonl` and W&B.
 
-Periodic validation uses the configured retrieval weights, normalizing context
-after scoring a query's complete Coarse Top-M. `legacy_raw` remains available
-through `retrieval.fine_score_mode` for compatible saved runs.
+Periodic validation uses the same fine score and pooling as training. Coarse
+scores select Top-M; final ranking uses the fine score directly. Changing
+`retrieval.context_weight` or `retrieval.pooling` requires a newly trained run.
 
-Training requires a fresh run directory; obsolete loss configs with
-`retrieval_weight` are rejected. Existing compatible checkpoints retain their
-inference behavior, including when loaded through the previous architecture-name
-alias. To disable global-state training, also set `retrieval.coarse_beta=0`.
+Training requires a fresh run directory. Obsolete loss/scoring configs and
+checkpoints trained with a previous fine scorer are rejected. Frozen feature
+caches can be reused when their provenance matches. To disable global-state
+training, also set `retrieval.coarse_beta=0`.
 
 Training uses only train annotations. Before epoch 1, GT heads are aligned to the
 fixed detector crops required by train queries and their Full Positives. The
@@ -116,18 +112,18 @@ for SupCon: a Full-negative image can still supply same-ID positive crops.
 After `train.sampling.warmup_epochs` (default 8), fine mining refreshes every two
 epochs. It first takes at most `pool_size` finite coarse candidates **per enabled
 negative group** (same-ID/non-Full versus missing at least one required ID), then
-fine-scores their union with the current model in eval/inference mode. Fine/context
-and coarse fusion use the existing retrieval formulas, normalized over the entire
-mining union, never per chunk or per group. This bounded mining support differs
-from the inference Top-M. Zero-coverage images do not enter fine hard pools.
+fine-scores their union with the current model in eval/inference mode. The
+shared bounded residual scorer ranks each candidate independently; mining
+support differs from inference Top-M without changing the pairwise score.
+Zero-coverage images do not enter fine hard pools.
 Sampling draws from a hardest window of twice the requested hard quota, rather
 than always taking the same top-K. No FAFA backbone is loaded for mining.
 
 The default 32-candidate query with two positives and sufficient evidence has
-8 hard semantic, 7 random same-ID, 3 hard identity and 12 uniform negatives.
+2 hard semantic, 13 random same-ID, 3 hard identity and 12 uniform negatives.
 `candidate_semantic_hard` and `candidate_identity_hard` report actual epoch counts,
 not requested quotas. `hard_negatives.json` records the last refresh epoch,
-retrieval settings, normalization support and per-query pools. The `coarse` pool
+retrieval settings, candidate support and per-query pools. The `coarse` pool
 is retained only when the original hard sampler is in use.
 
 Fine mining requires native FAFA query features for **train** as well as val;
@@ -143,14 +139,14 @@ ablations use a fresh `output.dir` for each run:
 
 | Ablation | `train.sampling.semantic_hard_fraction` | `loss.context_rejection_weight` |
 | --- | ---: | ---: |
-| Original sampler/objective | 0 | 0 |
+| No semantic hard mining or rejection | 0 | 0 |
 | Semantic hard mining only | 0.5 | 0 |
 | Identity rejection only | 0 | 0.2 |
-| Both (current YAML) | 0.5 | 0.2 |
+| Both (current YAML) | 0.1 | 0.2 |
 
 Omitted new settings default to zero. Training optimizes
 `L_context = L_semantic + context_rejection_weight * L_rejection` using the same
-raw coverage-gated context score. Only mined wrong-ID candidates enter rejection,
+bounded residual fine score. Only mined wrong-ID candidates enter rejection,
 and only when both the positive and negative retain predicted coverage. Each
 component averages valid pairs per query and valid queries separately; empty
 components return differentiable zero. Inference scores and checkpoint selection
@@ -249,26 +245,19 @@ to that run's `val/rankings.pt`. The artifact embeds its actual run configuratio
 checkpoint fingerprint and fixed matching settings; no separate model config or
 top-level `method` is needed in the calibration YAML.
 
-Calibration jointly searches `pooling`, `coarse_beta`, `top_m`, `context_weight` and
-`fine_coarse_weight`. The default `selection_metric: checkpoint_score` matches
-training: the mean of overall Full-mAP and macro-case Full-mAP over populated
-cases. `full_map` and `macro_full_map` are also supported. The fine mode remains
-the one recorded in the source artifact. The exact source configuration is
-evaluated first, even outside the grid, so the selected criterion cannot regress
-against this baseline. Duplicate grid values are evaluated once.
+Calibration searches `coarse_beta` and `top_m`. The residual weight and pooling
+remain the trained values and are not calibration grid keys. The default
+`selection_metric: checkpoint_score` matches training: the mean of overall
+Full-mAP and macro-case Full-mAP over populated cases. `full_map` and
+`macro_full_map` are also supported. The exact source configuration is evaluated
+first, even outside the grid, so the selected criterion cannot regress against
+that baseline. Duplicate grid values are evaluated once; source wins ties.
 
-Grid evaluation groups beta, Top-M, pooling,
-context weight, then fusion weight to reuse coarse order, gathered raw scores,
-context population statistics, fine diagnostics and fusion z-scores. The first
-maximum in `summary.csv` wins ties, preserving the source on an equal score.
-Labels are indexed once; AP/R@K use positive ranks with the official arithmetic.
-Unchanged diagnostic branches reuse their metrics. The selected result is
-evaluated again through the complete official evaluator before export is done.
-The caches retain only the current group and one result per ranking branch.
-`summary.csv` retains the existing metrics and adds `macro_full_map` and
-`checkpoint_score`. `selection.json` records the criterion, baseline value and
-improvement. Calibration still compares all poolings listed in its YAML; use
-`pooling: [subject_mean]` to restrict the grid while retaining the source baseline.
+Grid evaluation reuses coarse order and gathered pairwise scores. Labels are
+indexed once; positive ranks use the official AP/R@K arithmetic. The selected
+result receives full official evaluation before export. `summary.csv` records
+`macro_full_map` and `checkpoint_score`; `selection.json` records the criterion,
+baseline value and improvement.
 
 Outputs are `summary.csv`, `selection.json`, `selected.yaml` and the best
 `selected/val/{rankings.pt,run.json,metrics.json}`. Evaluation cutoffs
@@ -285,16 +274,12 @@ fingerprints. Test retrieval checks the real checkpoint bytes against this hash.
 Matching thresholds, missing penalties and model weights remain fixed.
 
 `retrieval.pooling` accepts `penalized`, `matched_mean` and `subject_mean`.
-The checked-in config uses `subject_mean`; omitted keys fall back to `penalized`.
-These select only FAFA aggregation; `method`, checkpoint names,
-model weights and cache formats stay unchanged. Validation exports all three
-binding matrices from the same FDA forward pass, so calibration can sweep
-`pooling` without model execution. If `pooling` is omitted from a calibration
-YAML, the source artifact's pooling is retained. An older artifact can replay
-its recorded pooling, but switching pooling requires a new validation export.
-
-The context-weight grid includes context-off and larger weights. These are
-validation search points, not measured optima. Refine the grid on validation only.
+The checked-in config uses `subject_mean`; omitted keys use `penalized`.
+Validation exports all three binding matrices for diagnostic replay. Deployable
+retrieval and calibration retain the pooling and residual weight used in training.
+Compare alternative values by training separate runs and selecting on validation.
+The checked-in residual weight `0.1` is a starting value, not a measured optimum.
+Monitor raw-context saturation when training the bounded reasoner output.
 
 ## 5. Run the frozen test configuration
 
@@ -342,7 +327,7 @@ See [detection separation](detection_cache.md) for import and independent builds
 
 `history.jsonl` contains one compact row per epoch. Each validation directory
 contains overall and by-case metrics. Split retrieval output additionally stores
-coarse, fine, fused and FAFA diagnostic rankings. The FAFA diagnostic reranks the
+coarse, fine, final and FAFA diagnostic rankings. The FAFA diagnostic reranks the
 same coarse Top-M with FDA binding only; it is not the standalone FAFA baseline.
 Checkpoints are inference/reproducibility artifacts, not resumable trainer states:
 they omit optimizer/scaler state and store only the learned text projection,
@@ -354,7 +339,7 @@ record the commit, full YAML, seed, runtime and validation result.
 ## Score artifacts and CPU replay
 
 `rankings.pt` is the sole score artifact. `SCORE_SCHEMA_VERSION`,
-`score_schema_version` and `schema_version` are all **1**. Let Q be the number of
+`score_schema_version` and `schema_version` are all **2**. Let Q be the number of
 queries, G the split gallery size and M = min(requested Top-M, G-1).
 
 | Key | Type/shape | Meaning |
@@ -371,20 +356,19 @@ queries, G the split gallery size and M = min(requested Top-M, G-1).
 | `provenance` | dictionary | Actual run config, checkpoint/cache fingerprints, benchmark and runtime metadata |
 | `rankings`, `coarse_rankings`, `fine_rankings`, `fafa_rankings` | int32 `[Q,G-1]` each | Complete self-excluded diagnostic/final orders |
 | `coarse_topm` | int32 `[Q,M]` | Coarse prefix defining derived shortlist scores |
-| `coarse_topm_scores`, `gated_context`, `fine_raw_scores`, `fine_scores`, `fused_topm_scores` | float32 `[Q,M]` each | Derived scores for inspecting the selected shortlist |
-| `context_mean`, `context_std` | float32 `[Q]` each | Gated-context population statistics over Top-M |
+| `coarse_topm_scores`, `gated_context`, `coverage_penalty`, `context_residual`, `fine_scores` | float32 `[Q,M]` each | Derived scores for inspecting the selected shortlist |
 
 Official validation retrieval records all raw branches and FAFA pooling matrices.
 There is no separate tuning payload or opt-in flag. Raw fine values are stored
 once in gallery order; derived shortlist scores keep coarse Top-M order. Raw fine
 self entries are zero sentinels. Coarse self scores and non-finite values are
-excluded from normalization by the existing `combine_scores` helper. Positive
-fine/coarse fusion masks candidates with non-finite coarse scores as before.
+excluded from normalization by the existing `combine_scores` helper. Fine scores
+remain finite, including null matches; coarse support does not introduce a second
+fine-score formula.
 
 The direct shortlist is scored first, followed by the remaining coarse tail,
-once per query/target and in bounded `fine_batch_size` chunks. Population
-statistics are computed on CPU float32 over the complete relevant vector, never
-per inference chunk. Stable coarse ties retain gallery order; shortlist ties
+once per query/target and in bounded `fine_batch_size` chunks. Fine scores are
+computed independently per pair in FP32, with no shortlist statistics. Stable coarse ties retain gallery order; shortlist ties
 retain coarse order, and fine reranking preserves the coarse tail.
 
 The seven distinct raw matrices occupy `28*Q*G` bytes, about 273 MiB at 1,799
@@ -405,25 +389,25 @@ only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cach
 python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
-# Rebuild coarse order, choose another Top-M, normalize and fuse offline.
+# Rebuild coarse order and choose another Top-M offline.
 python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
-  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500 \
-  --context-weight 0.0288 --fine-coarse-weight 0.0064
+  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500
 
 # Evaluate with the same fixed candidate_ks; no image/model inference.
 python tools/run.py evaluate --config configs/proposed.yaml --split val \
   --set output.dir=runs/replayed
 ```
 
-Omitted replay parameters reuse recorded values. The existing `legacy_raw`,
-`raw_gamma`, `context_zscore` and `both_zscore` fine modes remain available through
-`--mode`; `--fine-coarse-weight 0` yields fine-only ordering. Replay carries the
-source hash/provenance into a separate directory and retains every raw matrix
-for successive replays, including after reducing Top-M. It removes stale test
-selection guards from replayed config metadata. Use calibration to generate a
-new frozen `selected.yaml`.
+Omitted replay parameters reuse recorded values. The only fine scorer is
+`bounded_residual`. `--context-weight` and `--pooling` are available for diagnostic
+ablations on fixed model evidence; changing them does not retrain the reasoner
+and cannot be used as a calibration source. Official retrieval verifies both
+against the training checkpoint. Replay carries source provenance into a separate
+directory, retains raw matrices for successive replays and removes stale test
+selection guards. Use calibration on the official validation export to generate
+`selected.yaml` with the trained fine scorer held fixed.
 
-Replay requires the complete version-1 raw-score contract. Missing evidence must
+Replay requires the complete version-2 raw-score contract. Missing evidence must
 be collected by running official validation retrieval again; it is never
 fabricated from a saved shortlist. Changing model weights, FDA-k, matching rules,
 detections, gallery or query text requires new retrieval. Only validation labels

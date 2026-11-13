@@ -1,4 +1,4 @@
-"""Rebuild rankings from schema-1 full-gallery raw scores on CPU."""
+"""Rebuild rankings from schema-2 full-gallery raw scores on CPU."""
 
 import argparse
 import math
@@ -12,13 +12,10 @@ from rcr.evaluation.provenance import digest_json, runtime_metadata
 from rcr.proposed.ranking import (
     SCORE_EPS,
     SCORE_SCHEMA_VERSION,
-    _score_statistics,
-    _zscore_1d,
     fine_score_components,
-    fuse_fine_coarse_scores,
     rerank_topm,
 )
-from rcr.proposed.scores import POOLING_MODES, combine_scores
+from rcr.proposed.scores import FINE_SCORE_MODE, POOLING_MODES, combine_scores
 
 
 def _validate_settings(config: dict, state_trained: bool) -> None:
@@ -26,16 +23,11 @@ def _validate_settings(config: dict, state_trained: bool) -> None:
         raise ValueError("unknown FAFA pooling")
     if type(config.get("top_m")) is not int or config["top_m"] < 1:
         raise ValueError("top_m must be a positive integer")
-    for key in ("coarse_beta", "fine_coarse_weight", "context_weight", "binding_scale"):
+    for key in ("coarse_beta", "context_weight", "binding_scale"):
         value = config.get(key)
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError(f"{key} must be finite and nonnegative")
-    if config.get("fine_score_mode") not in (
-        "legacy_raw",
-        "context_zscore",
-        "raw_gamma",
-        "both_zscore",
-    ):
+    if config.get("fine_score_mode") != FINE_SCORE_MODE:
         raise ValueError("unknown fine_score_mode")
     if not state_trained and config["coarse_beta"] != 0:
         raise ValueError("checkpoint state branch is untrained; use coarse_beta=0")
@@ -47,7 +39,7 @@ def _validate_artifact(output: dict) -> None:
         for key in ("score_schema_version", "schema_version")
     ):
         raise ValueError(
-            "offline replay requires score_schema_version=1 and schema_version=1"
+            "offline replay requires score_schema_version=2 and schema_version=2"
         )
     required = {
         "sample_ids",
@@ -77,7 +69,7 @@ def _validate_artifact(output: dict) -> None:
         for key, value in {
             "eps": SCORE_EPS,
             "std_unbiased": False,
-            "normalization": "per_query_coarse_topm_population",
+            "normalization": "none",
             "normalization_dtype": "float32",
             "normalization_device": "cpu",
             "binding_scale": output["binding_scale"],
@@ -172,7 +164,7 @@ def _validate_artifact(output: dict) -> None:
 
 @torch.inference_mode()
 def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
-    """Replay scores with a bounded cache of coarse order and shortlist statistics."""
+    """Replay scores with a bounded cache of coarse order and pairwise evidence."""
     beta = config["coarse_beta"]
     pooling = config.get("pooling", "penalized")
     config = {**config, "pooling": pooling}
@@ -221,10 +213,6 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
             top=top,
             raw=raw,
             coarse_topm=cache["coarse"].gather(1, top.long()),
-            context_statistics=[
-                _score_statistics(c * s)
-                for c, s in zip(raw["coverage"], raw["context"], strict=True)
-            ],
             fafa_rankings=torch.stack(
                 [
                     rerank_topm(o, t, b)
@@ -243,9 +231,8 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
                 cache["raw"]["coverage"][i],
                 output["binding_scale"],
                 *fine_key,
-                context_statistics=statistics,
             )
-            for i, statistics in enumerate(cache["context_statistics"])
+            for i in range(len(top))
         ]
         cache.update(
             fine_key=fine_key,
@@ -259,31 +246,12 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
                 ]
             ),
         )
-        cache.pop("normalized_scores", None)
-    fine = cache["scored"]["fine_scores"]
-    if config["fine_coarse_weight"] > 0 and "normalized_scores" not in cache:
-        if "coarse_z" not in cache or cache.get("coarse_z_top_m") != top_m:
-            cache["coarse_z"] = [
-                _zscore_1d(row[torch.isfinite(row)]) for row in coarse_topm
-            ]
-            cache["coarse_z_top_m"] = top_m
-        cache["normalized_scores"] = [
-            (_zscore_1d(f[torch.isfinite(c)]), z)
-            for f, c, z in zip(fine, coarse_topm, cache["coarse_z"], strict=True)
-        ]
-    normalized = cache.get("normalized_scores")
-    fused = torch.stack(
-        [
-            fuse_fine_coarse_scores(
-                f,
-                c,
-                config["fine_coarse_weight"],
-                normalized_scores=None if normalized is None else normalized[i],
-            )
-            for i, (f, c) in enumerate(zip(fine, coarse_topm, strict=True))
-        ]
-    )
     metadata = deepcopy(output["provenance"])
+    if any(
+        config[key] != output["score_config"].get(key, "penalized")
+        for key in ("pooling", "context_weight")
+    ):
+        metadata["fine_score_ablation"] = True
     retrieval = {
         **metadata.get("retrieval", {}),
         **{
@@ -293,7 +261,6 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
                 "fine_score_mode",
                 "context_weight",
                 "coarse_beta",
-                "fine_coarse_weight",
                 "top_m",
             )
         },
@@ -323,10 +290,7 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
         **cache["scored"],
         "fafa_rankings": cache["fafa_rankings"],
         "fine_rankings": cache["fine_rankings"],
-        "fused_topm_scores": fused,
-        "rankings": torch.stack(
-            [rerank_topm(o, t, f) for o, t, f in zip(order, top, fused, strict=True)]
-        ),
+        "rankings": cache["fine_rankings"],
     }
 
 
@@ -334,9 +298,7 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
 def replay_rankings(
     output: dict,
     *,
-    fine_score_mode: str | None = None,
     context_weight: float | None = None,
-    fine_coarse_weight: float | None = None,
     coarse_beta: float | None = None,
     top_m: int | None = None,
     pooling: str | None = None,
@@ -346,9 +308,7 @@ def replay_rankings(
     config = dict(output["score_config"])
     for key, value in (
         ("pooling", pooling),
-        ("fine_score_mode", fine_score_mode),
         ("context_weight", context_weight),
-        ("fine_coarse_weight", fine_coarse_weight),
         ("coarse_beta", coarse_beta),
         ("top_m", top_m),
     ):
@@ -362,11 +322,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rankings", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--mode", choices=("legacy_raw", "raw_gamma", "context_zscore", "both_zscore")
-    )
     parser.add_argument("--context-weight", type=float)
-    parser.add_argument("--fine-coarse-weight", type=float)
     parser.add_argument("--coarse-beta", type=float)
     parser.add_argument("--top-m", type=int)
     parser.add_argument("--pooling", choices=POOLING_MODES)
@@ -375,9 +331,7 @@ def main(argv=None):
         parser.error("use a separate output directory to retain the source artifact")
     output = replay_rankings(
         torch.load(args.rankings, map_location="cpu", weights_only=True),
-        fine_score_mode=args.mode,
         context_weight=args.context_weight,
-        fine_coarse_weight=args.fine_coarse_weight,
         coarse_beta=args.coarse_beta,
         top_m=args.top_m,
         pooling=args.pooling,

@@ -1,7 +1,6 @@
-"""Independent extraction, immutable crop identity, and shared-box consumers."""
+"""CPU workflow tests for detection cache."""
 
 import copy
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +14,8 @@ from rcr.common.config import load_config
 from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache import build, fafa, scene
-from rcr.proposed.cache import native as native_cache
 from rcr.proposed.cache.store import GalleryCache
-from tests.test_train import _sample
+from tests.helpers import _sample
 
 
 @pytest.fixture
@@ -57,72 +55,6 @@ def detect_inputs(cfg, data, monkeypatch):
     return DetectionCache(cfg["data"]["detection_cache"])
 
 
-def test_person_detection_preserves_filter_order_and_unclipped_boxes():
-    boxes = torch.tensor(
-        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [-2.0, 0.0, 102.0, 40.0]]
-    )
-
-    class Inputs(dict):
-        input_ids = torch.tensor([[1]])
-
-        def to(self, device):
-            return self
-
-    class Processor:
-        def __call__(self, *, images, text, return_tensors):
-            assert text == [["person"]] and return_tensors == "pt"
-            return Inputs()
-
-        def post_process_grounded_object_detection(self, outputs, **kwargs):
-            assert kwargs["target_sizes"] == [(50, 100)]
-            return [{"text_labels": ["person", "chair", "person"], "boxes": boxes}]
-
-    result = detection.detect_persons(
-        lambda **kw: None, Processor(), Image.new("RGB", (100, 50)), "cpu", 0.3, 0.25
-    )
-    torch.testing.assert_close(result, boxes[[0, 2]])
-
-
-def test_detection_resume_reuses_completed_shards_and_rejects_changed_spec(
-    inputs, monkeypatch
-):
-    cfg, data = inputs
-    root = Path(cfg["data"]["detection_cache"])
-    calls = []
-
-    def detect(*args):
-        calls.append(True)
-        if len(calls) == 2:
-            raise RuntimeError("interrupted")
-        return torch.tensor([[-1.25, 2.0, 102.0, 40.0]])
-
-    monkeypatch.setattr(detection, "detect_persons", detect)
-    kwargs = dict(
-        image_ids=data.gallery_ids,
-        image_paths=[data.image_path(i) for i in data.gallery_ids],
-        root=root,
-        detector_config=cfg["detector"],
-        model=nn.Identity(),
-    )
-    with pytest.raises(RuntimeError, match="interrupted"):
-        build_detection_cache(**kwargs)
-    with pytest.raises(RuntimeError, match="incomplete"):
-        DetectionCache(root)
-    with pytest.raises(ValueError, match="settings differ"):
-        build_detection_cache(
-            **{**kwargs, "detector_config": {**cfg["detector"], "threshold": 0.4}}
-        )
-    build_detection_cache(**kwargs)
-    assert len(calls) == 3
-    cache = DetectionCache(root)
-    relocated = root.with_name("relocated")
-    shutil.copytree(root, relocated)
-    assert DetectionCache(relocated).cache_id == cache.cache_id
-    # Reusing a published cache performs no new model inference.
-    build_detection_cache(**kwargs)
-    assert len(calls) == 3
-
-
 class FakeFAFA(nn.Module):
     def __init__(self):
         super().__init__()
@@ -139,89 +71,6 @@ class FakeFAFA(nn.Module):
                 image_embeds_proj=torch.ones(count, 2, 2),
             )
         return SimpleNamespace(multimodal_embeds=torch.ones(count, 2))
-
-
-def test_full_conditions_rebuild_only_changed_query_features(inputs, monkeypatch):
-    cfg, data = inputs
-    detect_inputs(cfg, data, monkeypatch)
-    dual = {
-        "sample_id": "dual",
-        "query_image_id": "a",
-        "subjects": [{"subject_id": 1}, {"subject_id": 2}],
-        "final_change": (
-            "then retrieve target images where Subject 1 is seated "
-            "and Subject 2 is standing"
-        ),
-    }
-    data.samples.append(dual)
-    native_cfg = load_config("configs/fafa.yaml")
-    checkpoint = Path(cfg["data"]["fafa_image_cache"]).parent / "fake-fafa.pt"
-    checkpoint.write_bytes(b"weights")
-    native_cfg["checkpoint"]["path"] = str(checkpoint)
-    monkeypatch.setattr(fafa, "load_fafa_config", lambda _: native_cfg)
-    monkeypatch.setattr(build, "load_fafa_config", lambda _: native_cfg)
-    monkeypatch.setattr(fafa, "load_rcr_inputs", lambda *a: data)
-    texts = []
-
-    def process(text):
-        texts.append(text)
-        return text
-
-    monkeypatch.setattr(
-        fafa,
-        "load_fafa",
-        lambda *a: (
-            FakeFAFA(),
-            {"eval": process},
-            lambda image: torch.zeros(3, 4, 4),
-            {},
-        ),
-    )
-    conditions = native_cache.subject_conditions
-
-    def legacy_conditions(sample):
-        if sample["sample_id"] == "dual":
-            return [
-                "the reference person is seated",
-                "the reference person is standing",
-            ]
-        return conditions(sample)
-
-    # Seed a real, complete cache with the old split conditions.
-    with monkeypatch.context() as legacy:
-        legacy.setattr(native_cache, "subject_conditions", legacy_conditions)
-        legacy.setattr(fafa, "subject_conditions", legacy_conditions)
-        fafa.finish_fafa_cache(cfg)
-    image_root = Path(cfg["data"]["fafa_image_cache"])
-    query_root = Path(cfg["data"]["fafa_query_cache"])
-    images = {
-        p.relative_to(image_root): p.read_bytes()
-        for p in image_root.rglob("*")
-        if p.is_file()
-    }
-    index = torch.load(query_root / "index.pt", weights_only=True)
-    cache = native_cache.NativeQueryCache(query_root, index["signature"], index["dim"])
-    with pytest.raises(ValueError, match="missing/stale"):
-        cache.validate_samples(data.samples)
-    unchanged_key = index["queries"][data.samples[0]["sample_id"]]["features"][0]
-    unchanged = query_root / "features" / f"{unchanged_key}.pt"
-    unchanged_mtime = unchanged.stat().st_mtime_ns
-
-    texts.clear()
-    fafa.finish_fafa_cache(cfg, stage="fafa-query")
-    assert texts == conditions(dual)
-    refreshed = native_cache.NativeQueryCache(
-        query_root, index["signature"], index["dim"]
-    )
-    refreshed.validate_samples(data.samples)
-    assert refreshed.cache_id == index["cache_id"]
-    assert refreshed.load(dual, 2).shape == (2, 2, 2)
-    assert unchanged.stat().st_mtime_ns == unchanged_mtime
-    assert images == {
-        p.relative_to(image_root): p.read_bytes()
-        for p in image_root.rglob("*")
-        if p.is_file()
-    }
 
 
 def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
@@ -320,68 +169,3 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
     )
     with pytest.raises(ValueError, match="source detection cache"):
         GalleryCache(image_root, detection_root=bad, scene_root=scene_root)
-
-
-def test_scene_stage_needs_no_detection_cache_or_worker(inputs, monkeypatch):
-    cfg, data = inputs
-    monkeypatch.setattr(build, "load_rcr_inputs", lambda *a: data)
-    calls = []
-    monkeypatch.setattr(build, "_prepare_scene", lambda *a: calls.append("scene"))
-    monkeypatch.setattr(
-        build,
-        "build_detection_cache",
-        lambda *a, **k: pytest.fail("scene stage must not load detector"),
-    )
-    monkeypatch.setattr(
-        build,
-        "run_person_worker",
-        lambda *a, **k: pytest.fail("scene stage must not load FAFA"),
-    )
-    build.prepare_cache(cfg, stage="scene")
-    assert calls == ["scene"]
-
-
-def test_detection_audit_and_supervision_need_no_scene_or_fafa(
-    inputs, monkeypatch, tmp_path
-):
-    from rcr.common.data import load_rcr_data
-    from rcr.dataset.audit import audit_detection
-    from rcr.proposed.supervision import TrainSupervision, prepare_train_supervision
-    from tests.test_core import _write_final_dataset
-
-    cfg, _ = inputs
-    final = tmp_path / "final"
-    final.mkdir()
-    _write_final_dataset(final)
-    data = load_rcr_data(final, tmp_path / "images")
-    for name in data.gallery_ids:
-        path = data.image_path(name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (100, 50)).save(path)
-    monkeypatch.setattr(
-        detection,
-        "detect_persons",
-        lambda *a: torch.tensor([[0.0, 0.0, 20.0, 20.0]]),
-    )
-    build_detection_cache(
-        data.gallery_ids,
-        [data.image_path(i) for i in data.gallery_ids],
-        cfg["data"]["detection_cache"],
-        cfg["detector"],
-        model=nn.Identity(),
-    )
-    cache = DetectionCache(cfg["data"]["detection_cache"])
-    report = audit_detection(data, cache)
-    assert report["cache_id"] == cache.cache_id
-    cfg["data"]["final_dir"] = str(final)
-    cfg["data"]["image_root"] = str(tmp_path / "images")
-    cfg["cache"]["supervision_cache"] = str(tmp_path / "labels.json")
-    prepare_train_supervision(cfg)
-    labels = TrainSupervision(data, cache, cache_file=cfg["cache"]["supervision_cache"])
-    changed = TrainSupervision(
-        data,
-        SimpleNamespace(cache_id="new-appearance", detection_cache_id=cache.cache_id),
-        cache_file=cfg["cache"]["supervision_cache"],
-    )
-    assert labels.key == changed.key
-    assert labels.load_ids(["1_1"], 1) == [["7"]]

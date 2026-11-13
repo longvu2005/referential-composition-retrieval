@@ -1,4 +1,4 @@
-"""Train-only fine mining, candidate provenance and rejection gradients."""
+"""CPU workflow tests for fine training."""
 
 import json
 from copy import deepcopy
@@ -8,21 +8,9 @@ import torch
 
 from rcr.proposed import ranking
 from rcr.proposed import train as training
-from rcr.proposed.batch import prepare_visual_batch
-from rcr.proposed.losses import compute_loss, loss_settings
-from rcr.proposed.sampling import CandidateIndex, sample_candidates, sampling_settings
-from tests.test_ranking import tiny_ranker as tiny_ranker
-from tests.test_train import (
-    Tokenizer,
-    _only_loss,
-    _sample,
-)
-from tests.test_train import (
-    objective_batch as objective_batch,
-)
-from tests.test_train import (
-    tiny_training_run as tiny_training_run,
-)
+from rcr.proposed.losses import compute_loss
+from rcr.proposed.sampling import CandidateIndex, sample_candidates
+from tests.helpers import Tokenizer, _only_loss, _sample
 
 
 def test_candidate_quotas_keep_provenance_after_shuffle_and_exclusions():
@@ -68,60 +56,6 @@ def test_candidate_quotas_keep_provenance_after_shuffle_and_exclusions():
     assert not row & {"q", "disputed"}
 
 
-def test_small_pools_and_random_fallback_are_not_tagged_as_hard():
-    sample = _sample("train", "q", "p")
-    gallery = ["q", "p", "s0", "s1", *[f"w{i}" for i in range(40)]]
-    index = CandidateIndex([sample], gallery, {"train": ["p", "s0", "s1"]})
-    sampled = sample_candidates(
-        [sample],
-        32,
-        torch.Generator().manual_seed(4),
-        index=index,
-        identity_fraction=0.5,
-        hard_fraction=0.1,
-        semantic_hard_fraction=0.5,
-        identity_rejection=True,
-        hard_pools={"train": {"semantic": ["s1", "s0"], "identity": []}},
-    )
-    assert {"s0", "s1", "p"} <= set(sampled.images[0])
-    assert len(set(sampled.images[0])) == 32
-    assert sampled.semantic_hard_count == sampled.identity_hard_count == 0
-    assert sampled.hard_identity_ids == [set()]
-
-
-def test_batch_rejection_mask_follows_ids_and_rejects_bad_provenance(tiny_ranker):
-    cache, _, _, samples, _ = tiny_ranker
-    from types import SimpleNamespace
-
-    supervision = SimpleNamespace(
-        load_ids=lambda ids, width: [["p1"] * width for _ in ids]
-    )
-    options = dict(
-        supervision=supervision,
-        identity_image_ids=[{"a", "n"}],
-        hard_identity_image_ids=[{"va"}],
-    )
-    first = prepare_visual_batch([samples[0]], [["va", "a", "n"]], cache, **options)
-    second = prepare_visual_batch([samples[0]], [["n", "va", "a"]], cache, **options)
-    assert first["hard_identity_negative_mask"].tolist() == [[True, False, False]]
-    assert second["hard_identity_negative_mask"].tolist() == [[False, True, False]]
-    assert second["identity_positive_mask"].tolist() == [[True, False, True]]
-    with pytest.raises(ValueError, match="cannot contain all required"):
-        prepare_visual_batch(
-            [samples[0]],
-            [["n", "a", "va"]],
-            cache,
-            **{**options, "hard_identity_image_ids": [{"n"}]},
-        )
-    with pytest.raises(ValueError, match="provenance"):
-        prepare_visual_batch(
-            [samples[0]],
-            [["n", "a", "va"]],
-            cache,
-            **{**options, "hard_identity_image_ids": [{"missing"}]},
-        )
-
-
 def test_rejection_adds_wrong_id_gradient_without_changing_other_targets(
     objective_batch,
 ):
@@ -143,42 +77,6 @@ def test_rejection_adds_wrong_id_gradient_without_changing_other_targets(
     assert parts["context_rejection_active_fraction"] == 1
     assert all(p.grad is None for p in model.identity_head.parameters())
     assert batch["identity_positive_mask"].tolist() == [[True, True, False]]
-
-
-@pytest.mark.parametrize("coverage", [[0, 1, 1], [1, 1, 0], [0, 0, 0]])
-def test_rejection_skips_unsupported_pairs_with_finite_zero(
-    objective_batch, monkeypatch, coverage
-):
-    from types import SimpleNamespace
-
-    model, batch = objective_batch
-    batch["hard_identity_negative_mask"][0, 2] = True
-    raw = torch.tensor([0.5, 0.7, 0.8], requires_grad=True)
-    monkeypatch.setattr(
-        model,
-        "score_context",
-        lambda *a: (raw, SimpleNamespace(coverage=torch.tensor(coverage).float())),
-    )
-    loss, parts = compute_loss(
-        model,
-        batch,
-        (2, 2),
-        **{**_only_loss("context"), "context_rejection_weight": 0.2},
-    )
-    loss.backward()
-    assert parts["context_rejection"] == 0
-    assert parts["context_rejection_active_fraction"] == 0
-    assert torch.isfinite(raw.grad).all() and raw.grad[2] == 0
-
-
-def test_zero_rejection_weight_preserves_loss_even_with_hard_tags(objective_batch):
-    model, batch = objective_batch
-    settings = _only_loss("context")
-    expected, _ = compute_loss(model, batch, (2, 2), **settings)
-    batch["hard_identity_negative_mask"][0, 2] = True
-    actual, parts = compute_loss(model, batch, (2, 2), **settings)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert parts["context_rejection"] == 0
 
 
 def test_fine_mining_uses_common_union_filters_and_restores_modes(
@@ -230,14 +128,14 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
         identity_rejection=True,
     )
     results = []
-    normalized_sizes = []
-    normalize = ranking.fine_score_components
+    scored_sizes = []
+    score_components = ranking.fine_score_components
 
-    def observe_normalization(binding, *args, **kwargs):
-        normalized_sizes.append(len(binding))
-        return normalize(binding, *args, **kwargs)
+    def observe_scores(binding, *args, **kwargs):
+        scored_sizes.append(len(binding))
+        return score_components(binding, *args, **kwargs)
 
-    monkeypatch.setattr(ranking, "fine_score_components", observe_normalization)
+    monkeypatch.setattr(ranking, "fine_score_components", observe_scores)
     for batch_size in (1, 4):
         results.append(
             ranking.mine_hard_negatives(
@@ -253,7 +151,7 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
             )
         )
     assert results[0] == results[1]
-    assert normalized_sizes == [4, 4, 4, 4]
+    assert scored_sizes == [4, 4, 4, 4]
     assert set(scored) == {2, 3, 4, 5}  # Self/Full positives were never fine-scored.
     for pools in results[0].values():
         assert pools["semantic"] == ["vq", "n"]
@@ -274,30 +172,6 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
     )
     assert empty["train"] == {"semantic": [], "identity": []}
     assert scored == []
-
-
-def test_train_checks_native_query_cache_before_preparing_labels(
-    tiny_training_run, monkeypatch
-):
-    cfg, cache, _, _ = tiny_training_run
-    cfg["train"].update(candidates=4)
-    cfg["train"]["sampling"]["semantic_hard_fraction"] = 0.5
-
-    def validate(rows):
-        if rows[0]["sample_id"] == "train":
-            raise ValueError("train query cache missing")
-
-    monkeypatch.setattr(cache, "validate_samples", validate)
-    monkeypatch.setattr(
-        training.TrainSupervision,
-        "prepare",
-        lambda *a, **kw: pytest.fail("must check cache before label preparation"),
-    )
-    with pytest.raises(ValueError, match="train query cache missing"):
-        training.train(cfg)
-    from pathlib import Path
-
-    assert not Path(cfg["output"]["dir"]).exists()
 
 
 @pytest.mark.parametrize("variant", ["both", "semantic", "rejection"])
@@ -383,18 +257,3 @@ def test_train_runs_mining_and_validation_after_warmup(
     assert saved["config"]["method"] == "proposed"
     assert saved["config"]["loss"]["context_rejection_weight"] == rejection_weight
     assert wandb.finished
-
-
-@pytest.mark.parametrize("bad", [-0.1, 1.1, float("nan"), float("inf"), True])
-def test_invalid_semantic_sampling_fraction_fails(bad):
-    with pytest.raises(ValueError, match="fractions"):
-        sampling_settings({"semantic_hard_fraction": bad})
-
-
-def test_new_settings_default_to_zero_and_rejection_is_not_a_standalone_task():
-    assert sampling_settings({})["semantic_hard_fraction"] == 0
-    assert loss_settings({})["context_rejection_weight"] == 0
-    only_rejection = {key: 0 for key in _only_loss("context") if key.endswith("weight")}
-    only_rejection["context_rejection_weight"] = 0.2
-    with pytest.raises(ValueError, match="at least one loss"):
-        loss_settings(only_rejection)

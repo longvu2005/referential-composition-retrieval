@@ -284,9 +284,7 @@ def train(cfg: dict) -> Path:
         and int(max_negatives * sampling["hard_fraction"]) > 0
     )
     fine_mining = semantic_hard or identity_rejection
-    context_residual = (
-        cfg["loss"]["context_weight"] > 0 and cfg["loss"]["context_residual_scale"] > 0
-    )
+    context_residual = cfg["loss"]["context_weight"] > 0
     seed = cfg["train"]["seed"]
     deterministic = cfg["runtime"].get("deterministic", True)
     seed_everything(seed, deterministic=deterministic)
@@ -611,6 +609,7 @@ def train(cfg: dict) -> Path:
                     batch,
                     cache.patch_hw,
                     context_batch_size=cfg["train"]["context_batch_size"],
+                    context_score_weight=cfg["retrieval"]["context_weight"],
                     **epoch_loss,
                 )
             if not torch.isfinite(loss):

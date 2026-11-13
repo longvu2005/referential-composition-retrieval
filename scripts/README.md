@@ -29,9 +29,11 @@ supports deterministic annotation and JSON reports without Torch.
 Proposed requires a separate FAFA environment only to extract FAFA person
 features. Configure `person_encoder.python` in `configs/proposed.yaml`.
 Training/retrieval from completed caches need only the proposed environment.
-Training optimization uses pooled FAFA image features and the shared context
-scorer. Native FDA tokens are read for validation/retrieval, and for training
-only when `loss.context_residual_scale > 0` (the checked-in YAML).
+Training uses pooled FAFA image features and a shared bounded residual scorer.
+Native FDA query/target tokens are read for context training after warmup and
+for validation/retrieval. The query cache must cover train before starting.
+Calibration selects coarse beta and Top-M while retaining the trained residual
+weight and pooling.
 The standalone FAFA baseline also requires the shared completed detection cache;
 its `prepare` command checks this prerequisite and reports the build command.
 

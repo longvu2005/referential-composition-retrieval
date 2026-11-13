@@ -12,6 +12,5 @@ SELECTED_RETRIEVAL_KEYS = (
     "fine_score_mode",
     "context_weight",
     "coarse_beta",
-    "fine_coarse_weight",
     "top_m",
 )

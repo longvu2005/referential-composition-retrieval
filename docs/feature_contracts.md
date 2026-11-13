@@ -74,11 +74,16 @@ reuse it. Renaming defaults does not move or rebuild local artifacts.
 
 ## Checkpoint compatibility
 
-New checkpoints use architecture name `fafa-partial-match-v2`. Retrieval also
-accepts the previous CLIP-prefixed name for this exact architecture; only that
-explicit alias is accepted. Tensor layouts, state keys and equations are
-unchanged, including the recorded `binding_log_scale`. Existing compatible
-checkpoints do not need conversion or retraining because of the name cleanup.
+The architecture name remains `fafa-partial-match-v2`, with its existing
+CLIP-prefixed alias. Tensor layouts and state keys, including the fixed
+`binding_log_scale`, remain unchanged.
+
+Fine scoring uses the bounded residual formula in both training and inference.
+Retrieval requires a checkpoint trained with `fine_score_mode: bounded_residual`
+and rejects earlier fine scorers. Train in a fresh output directory; compatible
+frozen caches remain reusable. Residual weight and pooling must match training.
+Offline calibration selects only coarse beta and Top-M; replay artifacts use
+score schema version 2.
 
 Historical DINO/BERT architecture checkpoints remain incompatible and are
 rejected before loading text weights. Matching feature dimensions alone do
@@ -93,8 +98,9 @@ fresh output directory and calibrate its validation artifact separately.
 
 ## Verification scope
 
-CPU tests cover training, retrieval, calibration, full-gallery replay and native
-CLIP behavior using tiny Transformers models without pretrained downloads.
-They also compare scores from the current and previous checkpoint names.
+CPU workflow tests cover cache construction, bounded residual scoring and
+coverage, training/backward, mining, retrieval, calibration, replay and frozen
+test inference. Native CLIP behavior uses tiny Transformers models without
+pretrained downloads. Shared fixtures contain synthetic cached features.
 A full GPU experiment requires raw images, pretrained assets and compatible
 caches; CPU checks do not establish benchmark mAP.
