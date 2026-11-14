@@ -16,7 +16,7 @@ from rcr.common.io import (
     save_results,
     sha256_file,
 )
-from rcr.common.runtime import resolve_device
+from rcr.common.runtime import configure_determinism, resolve_device
 from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
 from rcr.proposed.cache.build import (
     cache_paths,
@@ -45,8 +45,9 @@ from rcr.proposed.scores import FINE_SCORE_MODE
 
 
 def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
-    """Save complete raw scores for val; fine-score only Top-M for other splits."""
+    """Rank one split and save its Top-M scores with complete provenance."""
     started = perf_counter()
+    configure_determinism(cfg["runtime"].get("deterministic", True))
     device = resolve_device(cfg)
     checkpoint_path = Path(cfg["checkpoint"])
     checkpoint_sha256 = sha256_file(checkpoint_path)
@@ -206,7 +207,6 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         gallery_ids=split_image_ids(data, cfg["split"]),
         **settings,
         description=cfg["split"],
-        full_gallery_scores=cfg["split"] == "val",
         state_trained=not state_untrained,
     )
     metadata = {

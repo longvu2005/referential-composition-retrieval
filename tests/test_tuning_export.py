@@ -1,4 +1,4 @@
-"""CPU workflow tests for tuning export."""
+"""CPU workflow tests for Top-M score export, offline replay and selection."""
 
 from pathlib import Path
 
@@ -11,19 +11,15 @@ from rcr.proposed import calibration, retrieve
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
+from rcr.proposed.scores import POOLING_MODES
 from tests.helpers import _rank, _sample
 
 
-def _settings(source_path, root):
-    return {
-        "rankings": str(source_path),
-        "output_dir": str(root),
-        "coarse_beta": [0.0, 1.5],
-        "top_m": [1, 2],
-    }
+def _settings(paths, root):
+    return {"rankings": [str(path) for path in paths], "output_dir": str(root)}
 
 
-def test_export_scores_every_nonself_pair_once_and_retains_gallery_alignment(
+def test_retrieval_scores_each_shortlist_pair_once_and_stores_topm_evidence(
     tiny_ranker, monkeypatch
 ):
     cache, model, _, samples, _ = tiny_ranker
@@ -48,32 +44,28 @@ def test_export_scores_every_nonself_pair_once_and_retains_gallery_alignment(
         output["schema_version"]
         == output["score_schema_version"]
         == SCORE_SCHEMA_VERSION
-        == 2
+        == 3
     )
-    assert output["score_config"]["score_alignment"] == "gallery_ids"
-    assert "tuning_scores" not in output
+    assert "score_alignment" not in output["score_config"]
+    assert {"identity_scores", "state_scores", "tuning_scores"}.isdisjoint(output)
     expected = {
-        (cache.by_id[sample["query_image_id"]], j)
-        for sample in samples
-        for j in range(len(cache.image_ids))
-        if cache.image_ids[j] != sample["query_image_id"]
+        (cache.by_id[sample["query_image_id"]], int(output["coarse_topm"][n, 0]))
+        for n, sample in enumerate(samples)
     }
-    assert len(pairs) == len(set(pairs)) == len(expected)
+    assert len(pairs) == len(set(pairs)) == len(samples)
     assert set(pairs) == expected
     for key in (
-        "identity_scores",
-        "state_scores",
         "fafa_binding",
         "context",
         "coverage",
+        *(f"binding_{mode}" for mode in POOLING_MODES),
     ):
-        assert output[key].shape == (len(samples), len(cache.image_ids))
+        assert output[key].shape == (len(samples), 1)
         assert output[key].dtype == torch.float32
         assert output[key].device.type == "cpu"
-    top = output["coarse_topm"].long()
-    binding, context, coverage = [
-        output[key].gather(1, top) for key in ("fafa_binding", "context", "coverage")
-    ]
+    binding, context, coverage = (
+        output[key] for key in ("fafa_binding", "context", "coverage")
+    )
     torch.testing.assert_close(
         output["fine_scores"],
         output["binding_scale"] * binding
@@ -82,13 +74,8 @@ def test_export_scores_every_nonself_pair_once_and_retains_gallery_alignment(
         rtol=0,
         atol=0,
     )
-    for key in ("fafa_binding", "context", "coverage"):
-        assert (
-            output[key][
-                torch.arange(len(samples)), output["query_indices"]
-            ].count_nonzero()
-            == 0
-        )
+    pooling = output["score_config"]["pooling"]
+    assert torch.equal(output["fafa_binding"], output[f"binding_{pooling}"])
     assert {
         "case_type",
         "identity_ids",
@@ -98,18 +85,12 @@ def test_export_scores_every_nonself_pair_once_and_retains_gallery_alignment(
     assert torch.equal(replay_rankings(output)["rankings"], output["rankings"])
 
 
-@pytest.mark.parametrize("beta,top_m", [(0.0, 1), (0.4, 3), (2.0, 20)])
-def test_replay_matches_direct_retrieval_for_shortlist_settings(
-    tiny_ranker, beta, top_m
-):
-    source = _rank(tiny_ranker, top_m=1, coarse_beta=0.0)
-    parameters = dict(
-        coarse_beta=beta,
-        top_m=top_m,
-        context_weight=0.13,
-    )
+@pytest.mark.parametrize("pooling", POOLING_MODES)
+def test_replay_matches_direct_retrieval_for_fine_score_settings(tiny_ranker, pooling):
+    source = _rank(tiny_ranker)
+    parameters = dict(pooling=pooling, context_weight=0.13)
     replayed = replay_rankings(source, **parameters)
-    direct = _rank(tiny_ranker, full_gallery_scores=False, **parameters)
+    direct = _rank(tiny_ranker, **parameters)
     for key in (
         "coarse_rankings",
         "coarse_topm",
@@ -118,24 +99,29 @@ def test_replay_matches_direct_retrieval_for_shortlist_settings(
         "rankings",
     ):
         assert torch.equal(replayed[key], direct[key]), key
-    for key in (
-        "coarse_topm_scores",
-        "fine_scores",
-    ):
+    for key in ("coarse_topm_scores", "fine_scores", "fafa_binding", "context"):
         torch.testing.assert_close(replayed[key], direct[key], atol=2e-6, rtol=2e-5)
-    for key in ("fafa_binding", "context", "coverage"):
-        torch.testing.assert_close(
-            replayed[key].gather(1, replayed["coarse_topm"].long()),
-            direct[key],
-            atol=2e-6,
-            rtol=2e-5,
-        )
-        assert replayed[key] is source[key]
-    assert source["score_config"]["coarse_beta"] == 0.0
-    assert source["score_config"]["top_m"] == 1
-    again = replay_rankings(replayed, coarse_beta=0.4, top_m=4)
-    fresh = replay_rankings(source, coarse_beta=0.4, top_m=4)
-    assert torch.equal(again["rankings"], fresh["rankings"])
+    torch.testing.assert_close(
+        replayed["coverage"], direct["coverage"], atol=2e-6, rtol=2e-5
+    )
+    assert replayed["score_config"]["pooling"] == pooling
+    assert replayed["provenance"]["fine_score_ablation"]
+    assert "fine_score_ablation" not in replay_rankings(source)["provenance"]
+
+
+def test_replay_rejects_settings_that_change_the_shortlist(tiny_ranker):
+    source = _rank(tiny_ranker)
+    recorded = source["score_config"]
+    for parameters in (
+        {"coarse_beta": recorded["coarse_beta"] + 1.0},
+        {"top_m": recorded["top_m"] - 1},
+    ):
+        with pytest.raises(ValueError, match="changes the Top-M shortlist"):
+            replay_rankings(source, **parameters)
+    unchanged = replay_rankings(
+        source, coarse_beta=recorded["coarse_beta"], top_m=recorded["top_m"]
+    )
+    assert torch.equal(unchanged["rankings"], source["rankings"])
 
 
 def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
@@ -144,11 +130,14 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
     from rcr.evaluation.report import load_run
 
     cfg, data, _ = saved_pipeline
-    cfg["retrieval"].update(top_m=1, coarse_beta=0.0)
-    source = retrieve.retrieve(cfg)
-    source_path = tmp_path / "scores-only.pt"
-    torch.save(source, source_path)
-    digest = sha256_file(source_path)
+    cfg["retrieval"]["top_m"] = 1
+    paths, sources = [], []
+    for name, beta in (("zero", 0.0), ("tuned", 1.5)):
+        cfg["retrieval"]["coarse_beta"] = beta
+        sources.append(retrieve.retrieve(cfg))
+        paths.append(tmp_path / f"{name}-scores.pt")
+        torch.save(sources[-1], paths[-1])
+    digests = [sha256_file(path) for path in paths]
     checkpoint = Path(cfg["checkpoint"])
     moved = tmp_path / "hidden.pt"
     checkpoint.rename(moved)
@@ -157,7 +146,7 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
     opened = []
 
     def only_scores(path, *args, **kwargs):
-        assert Path(path) == source_path
+        assert Path(path) in paths
         opened.append(Path(path))
         return original_load(path, *args, **kwargs)
 
@@ -172,9 +161,9 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         guard.setattr(retrieve, "GalleryCache", forbidden)
         guard.setattr(RCRModel, "from_config", forbidden)
         guard.setattr(RCRModel, "score_target", forbidden)
-        rows = calibration.calibrate(_settings(source_path, root))
-    assert opened == [source_path]
-    assert len(rows) == 4  # Source is also one of the four coarse grid candidates.
+        rows = calibration.calibrate(_settings(paths, root))
+    assert opened == paths
+    assert [row["coarse_beta"] for row in rows] == [0.0, 1.5]
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     best = max(rows, key=lambda row: row["checkpoint_score"])
@@ -183,6 +172,8 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         assert selected["selected_retrieval"][key] == best[key]
     assert selected["candidate_ks"] == cfg["candidate_ks"] == [1, 2]
     assert all("candidate_recall_2" in row for row in rows)
+    source = sources[best["index"]]
+    assert torch.equal(expected["rankings"], source["rankings"])
     assert (
         selected["selected_checkpoint_sha256"]
         == source["provenance"]["checkpoint_sha256"]
@@ -191,14 +182,13 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         selected["selected_validation_sha256"]
         == source["provenance"]["validation_sha256"]
     )
-    assert sha256_file(source_path) == digest
+    assert [sha256_file(path) for path in paths] == digests
     assert (
         load_run("proposed", root / "selected/val", "val")["metrics"]["overall"][
             "full_map"
         ]
         == best["full_map"]
     )
-    assert not list(root.glob("grid_*"))
     assert {"summary.csv", "selection.json", "selected.yaml"} <= {
         path.name for path in root.iterdir()
     }
@@ -214,9 +204,9 @@ def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
     cfg["retrieval"]["top_m"] = 1
     retrieve.retrieve(cfg)
     root = tmp_path / "calibration"
-    settings = _settings(Path(cfg["output"]["dir"]) / "val/rankings.pt", root)
-    settings["top_m"] = [1]
-    calibration.calibrate(settings)
+    calibration.calibrate(
+        _settings([Path(cfg["output"]["dir"]) / "val/rankings.pt"], root)
+    )
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     selected["split"] = "test"
     # Reuse the tiny cache's other images as a separate test gallery.
@@ -238,7 +228,6 @@ def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
     assert len(pairs) == 1
     assert output["rankings"].shape == (1, 2)
     assert output["fafa_binding"].shape == (1, 1)
-    assert output["score_config"]["score_alignment"] == "coarse_topm"
     checkpoint = torch.load(selected["checkpoint"], weights_only=True)
     checkpoint["epoch"] += 1
     torch.save(checkpoint, selected["checkpoint"])
@@ -283,7 +272,7 @@ def test_calibration_cli_runs_with_no_model_imports_and_only_real_annotations(
     scores = tmp_path / "standalone-scores.pt"
     torch.save(source, scores)
     Path(cfg["checkpoint"]).unlink()
-    settings = _settings(scores, tmp_path / "calibrated")
+    settings = _settings([scores], tmp_path / "calibrated")
     path = tmp_path / "calibration.yaml"
     path.write_text(yaml.safe_dump(settings))
     result = subprocess.run(

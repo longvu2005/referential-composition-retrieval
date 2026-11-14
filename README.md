@@ -57,11 +57,11 @@ training, so the query cache must cover train. Warmup skips these reads.
 tied. See the [residual objective](docs/proposed_method.md#residual-context-objective).
 
 Fine scoring requires a newly trained checkpoint. Previous scoring modes,
-residual-scale configs and schema-1 replay artifacts are rejected. Existing
-frozen feature caches remain reusable when their provenance matches.
+residual-scale configs and score artifacts of an earlier schema are rejected.
+Existing frozen feature caches remain reusable when their provenance matches.
 Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
-offline calibration uses the same criterion by default and includes the source
-configuration as a baseline (`selection_metric: full_map` selects overall-only).
+calibration applies the same criterion by default to choose among saved
+validation artifacts (`selection_metric: full_map` selects overall-only).
 Test uses the frozen selection.
 
 See [method and equations](docs/proposed_method.md),
@@ -123,7 +123,7 @@ training and retrieval using only the proposed environment.
 ## Run experiments
 
 The validation recipe prepares assets, builds or reuses caches, trains,
-retrieves validation scores, and calibrates them offline:
+retrieves validation scores, and freezes the selected validation result:
 
 ```bash
 bash scripts/methods/proposed.bash val
@@ -158,8 +158,9 @@ overrides for existing keys; `--split` overrides the configured split:
 
 Use a fresh output directory for each training run. Training refuses an existing
 run; retrieval, evaluation, calibration and reports replace their active outputs.
-When using another run, point `configs/calibration.yaml: rankings` to its saved
-`val/rankings.pt`. W&B tracking defaults to online; set `wandb.mode=offline` or
+When using another run, list its saved `val/rankings.pt` under
+`configs/calibration.yaml: rankings`; several validation artifacts, for example
+retrieved with different `retrieval.coarse_beta`, are compared there. W&B tracking defaults to online; set `wandb.mode=offline` or
 `wandb.enabled=false` as needed.
 
 `train.seed` fixes every random choice of a training run: it seeds Python, NumPy
@@ -187,9 +188,10 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 With two positives and enough same-ID evidence, the sampling rows give each query 2
 positives, 2 hard and 13 random same-ID negatives, 3 hard wrong-ID negatives and 12
 uniform negatives. `retrieval.coarse_beta` overrides `model.coarse_beta` at
-inference. The residual weight and pooling are fixed from training;
-`calibrate` selects coarse beta and Top-M for test and writes the complete
-configuration to `runs/proposed-calibration/selected.yaml`.
+inference. The residual weight and pooling are fixed from training; coarse beta
+and Top-M define the shortlist of each retrieval run. `calibrate` selects among
+the saved validation artifacts and writes the complete configuration to
+`runs/proposed-calibration/selected.yaml`.
 
 CLIP and FAFA baselines have separate environments and recipes. See the
 [baseline guide](docs/baselines.md) and [script reference](scripts/README.md).
@@ -217,13 +219,12 @@ Cache paths follow their role: `cache/detections`, `cache/scene`,
 | --- | --- |
 | `runs/proposed/` | Effective config, runtime, history, tokenizer, `last.pt`, `best.pt` |
 | `runs/proposed/val/` | `rankings.pt`, `run.json`, `metrics.json` |
-| `runs/proposed-calibration/` | Grid summary, `selection.json`, `selected.yaml` |
+| `runs/proposed-calibration/` | Candidate summary, `selection.json`, `selected.yaml` |
 | `runs/proposed-calibration/selected/{val,test}/` | Selected split results |
 
-Validation saves complete raw score matrices for offline calibration/replay.
-It fine-scores every non-self query/gallery pair; periodic training validation
-and test fine-score only Top-M. Raw matrices require about `28*Q*G` bytes in
-addition to rankings; `fafa_binding` shares the selected pooling matrix.
+Every split fine-scores only the Top-M shortlist of each query and saves that
+evidence as `Q x M` tensors for offline replay. They require about `20*Q*M`
+bytes in addition to rankings; `fafa_binding` shares the selected pooling tensor.
 Checkpoints omit optimizer state and frozen backbone
 weights, so they are inference artifacts rather than resumable training states.
 See [score artifacts and CPU replay](docs/proposed_runs.md#score-artifacts-and-cpu-replay).

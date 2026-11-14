@@ -12,6 +12,7 @@ from rcr.common.data import split_fingerprint
 from rcr.evaluation.evaluate import evaluate_retrieval_output
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, retrieve
+from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
 
 
@@ -19,7 +20,10 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     saved_pipeline,
 ):
     cfg, data, scale = saved_pipeline
+    cfg["candidate_ks"] = [1]
+    torch.use_deterministic_algorithms(False)
     output = retrieve.retrieve(cfg)
+    assert torch.are_deterministic_algorithms_enabled()
     directory = Path(cfg["output"]["dir"]) / "val"
     saved = torch.load(directory / "rankings.pt", weights_only=True)
     assert saved["binding_scale"] == scale == 1.0
@@ -45,9 +49,11 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
         data, [data.samples[1]], ranking_only, [1, 2], split="val"
     ) == evaluate_retrieval_output(data, [data.samples[1]], saved, [1, 2], split="val")
     assert current_metrics["overall"]["num_queries"] == 1
+    # The shortlist size is always a candidate-recall cutoff, as in training.
+    assert f"candidate_recall_{cfg['retrieval']['top_m']}" in current_metrics["overall"]
     metadata = json.loads((directory / "run.json").read_text())
     assert metadata["score_config"] == saved["score_config"]
-    assert metadata["score_schema_version"] == 2
+    assert metadata["score_schema_version"] == SCORE_SCHEMA_VERSION
     assert metadata["fine_score_mode"] == "bounded_residual"
     assert metadata["context_weight"] == cfg["retrieval"]["context_weight"]
     assert metadata["checkpoint_epoch"] == 2
@@ -78,18 +84,17 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     saved_pipeline, tmp_path
 ):
     cfg, data, _ = saved_pipeline
-    retrieve.retrieve(cfg)
-    source_path = Path(cfg["output"]["dir"]) / "val/rankings.pt"
+    paths = []
+    for name, beta in (("zero", 0.0), ("tuned", 0.4)):
+        cfg["retrieval"]["coarse_beta"] = beta
+        retrieve.retrieve(cfg)
+        paths.append(tmp_path / f"{name}.pt")
+        (Path(cfg["output"]["dir"]) / "val/rankings.pt").rename(paths[-1])
     root = tmp_path / "calibration"
     rows = calibration.calibrate(
-        {
-            "rankings": str(source_path),
-            "output_dir": str(root),
-            "coarse_beta": [0.0, 0.4],
-            "top_m": [cfg["retrieval"]["top_m"]],
-        }
+        {"rankings": [str(path) for path in paths], "output_dir": str(root)}
     )
-    assert len(rows) == 3  # Source configuration plus two coarse candidates.
+    assert [row["coarse_beta"] for row in rows] == [0.0, 0.4]
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     assert selected["retrieval"]["fine_score_mode"] == "bounded_residual"
     assert selected["retrieval"]["context_weight"] == cfg["retrieval"]["context_weight"]
@@ -98,6 +103,7 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     best = max(rows, key=lambda row: row["checkpoint_score"])
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     assert expected["score_config"]["coarse_beta"] == best["coarse_beta"]
+    assert json.loads((root / "selection.json").read_text())["index"] == best["index"]
     output = retrieve.retrieve(selected)
     evaluate_run(selected, data=data)
     assert torch.equal(output["rankings"], expected["rankings"])
@@ -120,6 +126,21 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
     del selected["selected_retrieval"]
     with pytest.raises(ValueError, match="predates the scoring contract"):
         retrieve.retrieve(selected)
+
+    with pytest.raises(ValueError, match="unknown calibration settings: top_m"):
+        calibration.calibrate(
+            {"rankings": [str(paths[0])], "output_dir": str(root), "top_m": [1]}
+        )
+    foreign = torch.load(paths[0], weights_only=True)
+    foreign["provenance"]["checkpoint_sha256"] = "0" * 64
+    torch.save(foreign, tmp_path / "foreign.pt")
+    with pytest.raises(ValueError, match="must come from one checkpoint"):
+        calibration.calibrate(
+            {
+                "rankings": [str(paths[1]), str(tmp_path / "foreign.pt")],
+                "output_dir": str(tmp_path / "mixed"),
+            }
+        )
 
 
 def test_obsolete_checkpoint_scorer_is_rejected_before_loading_text(
@@ -153,12 +174,5 @@ def test_calibration_rejects_diagnostic_changes_to_the_trained_fine_scorer(
     with pytest.raises(
         ValueError, match="requires the trained residual weight and pooling"
     ):
-        calibration.calibrate(
-            {
-                "rankings": str(path),
-                "output_dir": str(root),
-                "coarse_beta": [0.4],
-                "top_m": [2],
-            }
-        )
+        calibration.calibrate({"rankings": [str(path)], "output_dir": str(root)})
     assert not root.exists()

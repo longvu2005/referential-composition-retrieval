@@ -32,8 +32,8 @@ Training/retrieval from completed caches need only the proposed environment.
 Training uses pooled FAFA image features and a shared bounded residual scorer.
 Native FDA query/target tokens are read for context training after warmup and
 for validation/retrieval. The query cache must cover train before starting.
-Calibration selects coarse beta and Top-M while retaining the trained residual
-weight and pooling.
+Calibration selects among saved validation artifacts while retaining the trained
+residual weight and pooling.
 The standalone FAFA baseline also requires the shared completed detection cache;
 its `prepare` command checks this prerequisite and reports the build command.
 
@@ -62,7 +62,7 @@ are never automatically completed. See [dataset contracts](../dataset/README.md)
 | `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
 | `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
 | `scripts/methods/fafa_pooling.bash` | Run both frozen FAFA pooling variants in `.venv-fafa` | Reuse its own protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, calibrate offline and save selected val results | Use `runs/proposed-calibration/selected.yaml` |
+| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, select the validation artifact and save its results | Use `runs/proposed-calibration/selected.yaml` |
 
 ```bash
 bash scripts/methods/clip.bash val

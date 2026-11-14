@@ -8,7 +8,9 @@ import torch
 
 from rcr.common.io import save_results
 from rcr.proposed import ranking
+from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
+from rcr.proposed.scores import POOLING_MODES
 from tests.helpers import _rank
 
 
@@ -82,9 +84,9 @@ def test_complete_topm_is_independent_of_inference_chunks(tiny_ranker):
 
 
 @pytest.mark.parametrize("top_m", [1, 4])
-def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m):
+def test_save_load_and_replay_topm_contract(tiny_ranker, tmp_path, top_m):
     output = _rank(tiny_ranker, top_m=top_m)
-    save_results(tmp_path, output, {"score_schema_version": 2})
+    save_results(tmp_path, output, {"score_schema_version": SCORE_SCHEMA_VERSION})
     loaded = torch.load(tmp_path / "rankings.pt", weights_only=True)
     replayed = replay_rankings(loaded)
     m = min(top_m, len(output["gallery_ids"]) - 1)
@@ -92,21 +94,19 @@ def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m
         "coarse_topm_scores",
         "gated_context",
         "fine_scores",
-    ):
-        assert loaded[field].shape == (2, m)
-        assert loaded[field].dtype == torch.float32
-        torch.testing.assert_close(replayed[field], loaded[field], rtol=0, atol=0)
-    for field in (
-        "identity_scores",
-        "state_scores",
         "fafa_binding",
         "context",
         "coverage",
+        *(f"binding_{mode}" for mode in POOLING_MODES),
     ):
-        assert loaded[field].shape == (2, len(output["gallery_ids"]))
+        assert loaded[field].shape == (2, m)
         assert loaded[field].dtype == torch.float32
-        assert loaded[field] is replayed[field]
-    assert loaded["score_schema_version"] == loaded["schema_version"] == 2
+        assert torch.equal(replayed[field], loaded[field])
+    assert (
+        loaded["score_schema_version"]
+        == loaded["schema_version"]
+        == SCORE_SCHEMA_VERSION
+    )
     for field in ("rankings", "fine_rankings"):
         assert torch.equal(loaded[field], replayed[field])
         for sample, row in zip(tiny_ranker[3], loaded[field], strict=True):
@@ -114,7 +114,13 @@ def test_save_load_replay_and_full_gallery_contract(tiny_ranker, tmp_path, top_m
             assert {loaded["gallery_ids"][j] for j in row} == set(
                 loaded["gallery_ids"]
             ) - {sample["query_image_id"]}
-    assert {"positive_image_ids", "case_type", "identity_ids"}.isdisjoint(loaded)
+    assert {
+        "positive_image_ids",
+        "case_type",
+        "identity_ids",
+        "identity_scores",
+        "state_scores",
+    }.isdisjoint(loaded)
     (tmp_path / "metrics.json").write_text('{"old": true}')
     save_results(tmp_path, replayed, {})
     assert not (tmp_path / "metrics.json").exists()
@@ -137,7 +143,7 @@ def test_masked_gallery_candidate_gets_a_finite_null_residual(tiny_ranker):
     assert torch.equal(replay_rankings(output)["rankings"], output["rankings"])
 
 
-def test_training_and_test_only_score_their_shortlist(tiny_ranker, monkeypatch):
+def test_every_split_only_fine_scores_the_shortlist(tiny_ranker, monkeypatch):
     cache, model, _, samples, _ = tiny_ranker
     pairs = []
     original = model.score_target
@@ -147,14 +153,9 @@ def test_training_and_test_only_score_their_shortlist(tiny_ranker, monkeypatch):
         return original(query, scene, *args, **kwargs)
 
     monkeypatch.setattr(model, "score_target", counted)
-    output = _rank(tiny_ranker, top_m=1, full_gallery_scores=False)
+    output = _rank(tiny_ranker, top_m=1)
     assert len(pairs) == len(samples)
     assert output["fafa_binding"].shape == (len(samples), 1)
-    assert output["score_config"]["score_alignment"] == "coarse_topm"
-    assert output["schema_version"] == 2
-    assert "identity_scores" not in output
-    with pytest.raises(ValueError, match="missing fields|full-gallery"):
-        replay_rankings(output)
     assert len(cache.image_ids) - 1 == output["rankings"].shape[1]
 
 

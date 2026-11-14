@@ -35,16 +35,12 @@ def derived_generator(seed: int, stream: str, index: int = 0) -> torch.Generator
     return torch.Generator().manual_seed(derive_seed(seed, stream, index))
 
 
-def seed_everything(seed: int, *, deterministic: bool = True) -> None:
-    """Seed Python, NumPy and PyTorch (CPU and every CUDA device) from one value.
+def configure_determinism(deterministic: bool = True) -> None:
+    """Request reproducible PyTorch kernels, shared by training and retrieval.
 
-    With ``deterministic`` also request reproducible kernels. An operation that
-    has no deterministic implementation only warns, so a run is never aborted.
-    ``deterministic=False`` leaves the PyTorch backend settings untouched.
+    An operation that has no deterministic implementation only warns, so a run is
+    never aborted. ``deterministic=False`` leaves the backend settings untouched.
     """
-    random.seed(seed)
-    np.random.seed(seed % 2**32)
-    torch.manual_seed(seed)
     if not deterministic:
         return
     # Read when cuBLAS is first used, so it must be set before any CUDA matmul.
@@ -52,6 +48,14 @@ def seed_everything(seed: int, *, deterministic: bool = True) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def seed_everything(seed: int, *, deterministic: bool = True) -> None:
+    """Seed Python, NumPy and PyTorch (CPU and every CUDA device) from one value."""
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
+    torch.manual_seed(seed)
+    configure_determinism(deterministic)
 
 
 @contextmanager

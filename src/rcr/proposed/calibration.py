@@ -1,12 +1,9 @@
-"""Select coarse shortlist settings with the trained fine scorer held fixed."""
+"""Select the validation result that is frozen for test inference."""
 
 import math
 from copy import deepcopy
-from itertools import chain, product
 from pathlib import Path
-from statistics import fmean
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -17,211 +14,26 @@ from rcr.common.data import (
     split_image_ids,
     split_samples,
 )
-from rcr.common.io import (
-    save_results,
-    sha256_file,
-    write_json,
-    write_summary,
-)
+from rcr.common.io import save_results, sha256_file, write_json, write_summary
 from rcr.evaluation.evaluate import (
-    RECALL_KS,
-    _aggregate_cases,
-    _aggregate_overall,
+    candidate_cutoffs,
     evaluate_retrieval_output,
-    identity_positive_ids,
+    selection_metrics,
 )
-from rcr.evaluation.provenance import digest_json, runtime_metadata
+from rcr.evaluation.provenance import digest_json
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.matching import matching_settings
-from rcr.proposed.replay import _replay_rankings, _validate_artifact
+from rcr.proposed.replay import validate_artifact
+
+SETTINGS = {"rankings", "output_dir", "selection_metric"}
+SELECTION_METRICS = ("checkpoint_score", "full_map", "macro_full_map")
 
 
-class _CalibrationEvaluator:
-    """Reuse labels and unchanged branches for validated CPU replay outputs."""
-
-    def __init__(self, data, samples, source, candidate_ks):
-        gallery = source["gallery_ids"]
-        evaluate_retrieval_output(
-            data,
-            samples,
-            {key: source[key] for key in ("sample_ids", "gallery_ids", "rankings")},
-            candidate_ks=candidate_ks,
-            split="val",
-        )
-        by_id = {image_id: i for i, image_id in enumerate(gallery)}
-        identities = {
-            image_id: {
-                box["identity_id"]
-                for box in data.gt_head_boxes_by_image.get(image_id, [])
-            }
-            for image_id in gallery
-        }
-        self.targets = [
-            {
-                "id": [
-                    by_id[i] for i in identity_positive_ids(row, gallery, identities)
-                ],
-                "full": [by_id[i] for i in set(row["positive_image_ids"])],
-            }
-            for row in samples
-        ]
-        self.samples = samples
-        self.gallery_size = len(gallery)
-        self.candidate_ks = tuple(candidate_ks)
-        self._cache = {}
-
-    def _branch(self, field, ranking):
-        cached = self._cache.get(field)
-        if cached is not None and cached[0] is ranking:
-            return cached[1]
-        # Positive ranks suffice for AP/R@K; avoid decoding every gallery ID.
-        inverse = np.full(
-            (len(self.samples), self.gallery_size),
-            self.gallery_size + 1,
-            dtype=np.int32,
-        )
-        inverse[np.arange(len(self.samples))[:, None], ranking.numpy()] = np.arange(
-            1, self.gallery_size
-        )
-        rows = []
-        for n, (sample, targets) in enumerate(
-            zip(self.samples, self.targets, strict=True)
-        ):
-            row = {"case_type": sample["case_type"]}
-            for prefix, indices in targets.items():
-                ranks = sorted(inverse[n, indices].tolist())
-                # Python accumulation retains the official evaluator's AP arithmetic.
-                precision_sum = 0.0
-                for hit, rank in enumerate(ranks, 1):
-                    precision_sum += hit / rank
-                row[f"{prefix}_ap"] = precision_sum / len(ranks)
-                for k in RECALL_KS:
-                    row[f"{prefix}_r{k}"] = float(ranks[0] <= k)
-                if field == "coarse_rankings" and prefix == "full":
-                    for k in self.candidate_ks:
-                        row[f"candidate_recall_{k}"] = sum(
-                            rank <= k for rank in ranks
-                        ) / len(ranks)
-                        row[f"candidate_hit_{k}"] = float(ranks[0] <= k)
-            rows.append(row)
-        result = {
-            "overall": _aggregate_overall(
-                rows, self.candidate_ks if field == "coarse_rankings" else ()
-            ),
-            "by_case": _aggregate_cases(rows),
-        }
-        self._cache[field] = ranking, result
-        return result
-
-    def __call__(self, output):
-        final = self._branch("rankings", output["rankings"])
-        result = {
-            "overall": dict(final["overall"]),
-            "by_case": {case: dict(row) for case, row in final["by_case"].items()},
-        }
-        for field, prefix in (
-            ("coarse_rankings", "coarse"),
-            ("fine_rankings", "fine"),
-            ("fafa_rankings", "fafa"),
-        ):
-            branch = self._branch(field, output[field])
-            if prefix == "coarse":
-                result["overall"].update(
-                    (key, value)
-                    for key, value in branch["overall"].items()
-                    if key.startswith("candidate_")
-                )
-            result["overall"].update(
-                (f"{prefix}_{key}", value)
-                for key, value in branch["overall"].items()
-                if key != "num_queries" and not key.startswith("candidate_")
-            )
-            for case, row in branch["by_case"].items():
-                result["by_case"][case].update(
-                    (f"{prefix}_{key}", value)
-                    for key, value in row.items()
-                    if key != "num_queries"
-                )
-        return result
-
-
-def _write_selection(
-    cfg: dict, root: Path, rows: list[dict], *, selection_metric="checkpoint_score"
-) -> dict:
-    """Freeze one complete scoring contract for test inference."""
-    best = max(rows, key=lambda row: row[selection_metric])
-    selected = override_config(
-        cfg,
-        {
-            **{f"retrieval.{key}": best[key] for key in SELECTED_RETRIEVAL_KEYS},
-            "output.dir": str(root / "selected"),
-        },
-    )
-    for key in ("checkpoint_sha256", "validation_sha256"):
-        selected[f"selected_{key}"] = best[key]
-    selected["selected_retrieval"] = {
-        key: selected["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
-    }
-    selected["selected_background_logit"] = matching_settings(
-        cfg.get("model", {}).get("fine_matching")
-    )["background_logit"]
-    save_config(root / "selected.yaml", selected)
-    write_json(
-        root / "selection.json",
-        {
-            **best,
-            "metric": selection_metric,
-            "value": best[selection_metric],
-            "baseline_value": rows[0][selection_metric],
-            "improvement": best[selection_metric] - rows[0][selection_metric],
-            "tie_break": "first configuration in summary.csv order; source first",
-        },
-    )
-    return selected
-
-
-def _grid(settings: dict, key: str, *, integer=False) -> list:
-    values = settings.get(key)
-    if (
-        not isinstance(values, list)
-        or not values
-        or any(
-            (type(value) is not int or value < 1)
-            if integer
-            else (
-                type(value) not in (int, float) or not math.isfinite(value) or value < 0
-            )
-            for value in values
-        )
-    ):
-        raise ValueError(f"{key} must be a non-empty list of valid tuning values")
-    return list(dict.fromkeys(values))
-
-
-def calibrate(settings: dict) -> list[dict]:
-    """Read only rankings.pt and annotations; never load a checkpoint or cache."""
-    unknown = settings.keys() - {
-        "rankings",
-        "output_dir",
-        "coarse_beta",
-        "top_m",
-        "selection_metric",
-    }
-    if unknown:
-        raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
-    if missing := {"rankings", "output_dir"} - settings.keys():
-        raise ValueError(f"missing calibration settings: {', '.join(sorted(missing))}")
-    selection_metric = settings.get("selection_metric", "checkpoint_score")
-    if selection_metric not in ("checkpoint_score", "full_map", "macro_full_map"):
-        raise ValueError(
-            "selection_metric must be checkpoint_score, full_map or macro_full_map"
-        )
-    keys = ("coarse_beta", "top_m")
-    grids = [_grid(settings, key, integer=key == "top_m") for key in keys]
-    source_path = Path(settings["rankings"])
-    source = torch.load(source_path, map_location="cpu", weights_only=True)
-    _validate_artifact(source)
+def _load_candidate(path: Path) -> dict:
+    """Read one validation artifact and check it against its embedded contract."""
+    source = torch.load(path, map_location="cpu", weights_only=True)
+    validate_artifact(source)
     provenance = source["provenance"]
     if provenance.get("fine_score_ablation"):
         raise ValueError(
@@ -237,8 +49,6 @@ def calibrate(settings: dict) -> list[dict]:
         or cfg.get("split") != "val"
     ):
         raise ValueError("rankings.pt must embed its proposed validation config")
-    score_config = {"pooling": "penalized", **source["score_config"]}
-    cfg["retrieval"].setdefault("pooling", "penalized")
     digest = provenance.get("checkpoint_sha256", "")
     if (
         not isinstance(digest, str)
@@ -250,9 +60,10 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "checkpoint fingerprint differs from the validation-selected config"
         )
+    score_config = source["score_config"]
     if (
         cfg.get("checkpoint") != provenance.get("checkpoint")
-        or provenance.get("score_config") != source["score_config"]
+        or provenance.get("score_config") != score_config
         or any(
             cfg["retrieval"].get(key) != score_config[key]
             for key in SELECTED_RETRIEVAL_KEYS
@@ -267,13 +78,22 @@ def calibrate(settings: dict) -> list[dict]:
     cfg.setdefault("model", {})["fine_matching"] = matching_settings(
         source["fine_matching"]
     )
-    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-    samples = split_samples(data, "val")
-    fingerprint = split_fingerprint(data, "val")
+    return {
+        "path": path,
+        "source": source,
+        "cfg": cfg,
+        "checkpoint_sha256": digest,
+        "source_sha256": sha256_file(path),
+    }
+
+
+def _check_validation(candidate: dict, data, samples, fingerprint: str) -> None:
+    source, provenance = candidate["source"], candidate["source"]["provenance"]
     if (
         fingerprint != provenance.get("validation_sha256")
         or fingerprint != provenance.get("split_sha256")
-        or cfg.get("selected_validation_sha256", fingerprint) != fingerprint
+        or candidate["cfg"].get("selected_validation_sha256", fingerprint)
+        != fingerprint
         or provenance.get("num_queries") != len(samples)
         or provenance.get("num_gallery") != len(source["gallery_ids"])
         or source["sample_ids"] != [sample["sample_id"] for sample in samples]
@@ -286,84 +106,137 @@ def calibrate(settings: dict) -> list[dict]:
         raise ValueError(
             "validation text/labels/ordered gallery changed since retrieval"
         )
-    if not source["state_trained"] and any(beta != 0 for beta in grids[0]):
-        raise ValueError("checkpoint state branch is untrained; use a beta=0 grid")
-    root = Path(settings["output_dir"])
+
+
+def _row(index: int, candidate: dict, result: dict, fingerprint: str) -> dict:
+    score_config = candidate["source"]["score_config"]
+    return {
+        "index": index,
+        "split": "val",
+        **{key: score_config[key] for key in SELECTED_RETRIEVAL_KEYS},
+        "checkpoint_sha256": candidate["checkpoint_sha256"],
+        "validation_sha256": fingerprint,
+        "score_source": str(candidate["path"]),
+        "score_source_sha256": candidate["source_sha256"],
+        **result["overall"],
+        **selection_metrics(result),
+        **{
+            f"{case.lower()}_{key}": value
+            for case, values in result["by_case"].items()
+            for key, value in values.items()
+        },
+    }
+
+
+def _write_selection(
+    candidate: dict, root: Path, rows: list[dict], best: dict, metric: str
+) -> dict:
+    """Freeze one complete scoring contract for test inference."""
+    selected = override_config(candidate["cfg"], {"output.dir": str(root / "selected")})
+    selected["selected_checkpoint_sha256"] = best["checkpoint_sha256"]
+    selected["selected_validation_sha256"] = best["validation_sha256"]
+    selected["selected_retrieval"] = {
+        key: selected["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
+    }
+    selected["selected_background_logit"] = matching_settings(
+        selected["model"]["fine_matching"]
+    )["background_logit"]
+    save_config(root / "selected.yaml", selected)
+    write_json(
+        root / "selection.json",
+        {
+            **best,
+            "metric": metric,
+            "value": best[metric],
+            "baseline_value": rows[0][metric],
+            "improvement": best[metric] - rows[0][metric],
+            "tie_break": "first artifact in the configured rankings order",
+        },
+    )
+    return selected
+
+
+def _read_settings(settings: dict) -> tuple[list[Path], Path, str]:
+    if unknown := settings.keys() - SETTINGS:
+        raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
+    if missing := {"rankings", "output_dir"} - settings.keys():
+        raise ValueError(f"missing calibration settings: {', '.join(sorted(missing))}")
+    rankings = settings["rankings"]
     if (
-        root.resolve() in (source_path.resolve(), source_path.parent.resolve())
-        or (root / "selected/val/rankings.pt").resolve() == source_path.resolve()
+        not isinstance(rankings, list)
+        or not rankings
+        or any(not isinstance(path, str) for path in rankings)
+        or len(set(rankings)) != len(rankings)
+    ):
+        raise ValueError("rankings must be a non-empty list of distinct artifact paths")
+    metric = settings.get("selection_metric", "checkpoint_score")
+    if metric not in SELECTION_METRICS:
+        raise ValueError(
+            "selection_metric must be checkpoint_score, full_map or macro_full_map"
+        )
+    root = Path(settings["output_dir"])
+    paths = [Path(path) for path in rankings]
+    if any(
+        root.resolve() in (path.resolve(), path.parent.resolve())
+        or (root / "selected/val/rankings.pt").resolve() == path.resolve()
+        for path in paths
     ):
         raise ValueError(
             "use a separate calibration output root to retain the source artifact"
         )
-    evaluator = _CalibrationEvaluator(data, samples, source, cfg["candidate_ks"])
-    root.mkdir(parents=True, exist_ok=True)
-    rows, best_output, cache = [], None, {}
-    best_value = -math.inf
-    source_sha256 = sha256_file(source_path)
-    baseline = tuple(score_config[key] for key in keys)
-    baseline_in_grid = all(
-        value in grid for value, grid in zip(baseline, grids, strict=True)
-    )
-    configurations = chain(
-        [baseline], (values for values in product(*grids) if values != baseline)
-    )
-    for values in tqdm(
-        configurations,
-        total=1 + math.prod(map(len, grids)) - int(baseline_in_grid),
-        desc="offline calibration",
-    ):
-        parameters = dict(zip(keys, values, strict=True))
-        output = _replay_rankings(
-            source, {**source["score_config"], **parameters}, cache
+    return paths, root, metric
+
+
+def calibrate(settings: dict) -> list[dict]:
+    """Pick the best saved validation artifact; no checkpoint or cache is loaded.
+
+    Every artifact keeps the shortlist it was retrieved with. Settings that change
+    the shortlist are compared by retrieving once per value.
+    """
+    paths, root, metric = _read_settings(settings)
+    candidates = [_load_candidate(path) for path in paths]
+    if len({candidate["checkpoint_sha256"] for candidate in candidates}) != 1:
+        raise ValueError("validation artifacts must come from one checkpoint")
+    cfg = candidates[0]["cfg"]
+    data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
+    samples = split_samples(data, "val")
+    fingerprint = split_fingerprint(data, "val")
+    rows = []
+    for index, candidate in enumerate(tqdm(candidates, desc="validation selection")):
+        _check_validation(candidate, data, samples, fingerprint)
+        result = evaluate_retrieval_output(
+            data,
+            samples,
+            candidate["source"],
+            candidate_cutoffs(candidate["cfg"]),
+            split="val",
         )
-        metrics = evaluator(output)
-        macro = fmean(row["full_map"] for row in metrics["by_case"].values())
-        row = {
-            "index": len(rows),
-            "split": "val",
-            **{key: score_config[key] for key in SELECTED_RETRIEVAL_KEYS},
-            **parameters,
-            "checkpoint_sha256": digest,
-            "validation_sha256": fingerprint,
-            "score_source_sha256": source_sha256,
-            **metrics["overall"],
-            "macro_full_map": macro,
-            "checkpoint_score": 0.5 * (metrics["overall"]["full_map"] + macro),
-            **{
-                f"{case.lower()}_{key}": value
-                for case, values in metrics["by_case"].items()
-                for key, value in values.items()
-            },
-        }
-        if not math.isfinite(row[selection_metric]):
-            raise ValueError(
-                f"calibration requires finite validation {selection_metric}"
-            )
-        if row[selection_metric] > best_value:
-            best_output, best_value = output, row[selection_metric]
+        row = _row(index, candidate, result, fingerprint)
+        if not math.isfinite(row[metric]):
+            raise ValueError(f"calibration requires finite validation {metric}")
         rows.append(row)
+    best = max(rows, key=lambda row: row[metric])
+    best_candidate = candidates[best["index"]]
+    root.mkdir(parents=True, exist_ok=True)
     write_summary(root, rows)
-    selected = _write_selection(cfg, root, rows, selection_metric=selection_metric)
+    selected = _write_selection(best_candidate, root, rows, best, metric)
+    output = best_candidate["source"]
     metadata = {
-        **best_output["provenance"],
-        **runtime_metadata(torch.device("cpu")),
+        **output["provenance"],
         "config": selected,
         "retrieval": selected["retrieval"],
-        "replay": {
-            "source": str(source_path),
-            "source_sha256": source_sha256,
-            "scope": "full_gallery",
+        "selection": {
+            "source": str(best_candidate["path"]),
+            "source_sha256": best_candidate["source_sha256"],
             "selection_split": "val",
-            "selection_metric": selection_metric,
+            "selection_metric": metric,
         },
     }
-    best_output["provenance"] = metadata
-    save_results(root / "selected/val", best_output, metadata)
-    evaluate_run(selected, data=data, samples=samples, output=best_output)
+    output["provenance"] = metadata
+    save_results(root / "selected/val", output, metadata)
+    evaluate_run(selected, data=data, samples=samples, output=output)
     print(
-        f"Selected {selection_metric}={best_value:.6f}; "
-        f"source baseline={rows[0][selection_metric]:.6f}",
+        f"Selected {metric}={best[metric]:.6f}; first artifact={rows[0][metric]:.6f}",
         flush=True,
     )
     return rows

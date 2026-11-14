@@ -7,7 +7,7 @@ import torch
 from rcr.baselines import FAFA_POOLINGS
 from rcr.common.data import load_rcr_data, split_fingerprint, split_samples
 from rcr.common.io import output_directory, sha256_file, write_json
-from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.evaluate import candidate_cutoffs, evaluate_retrieval_output
 from rcr.evaluation.provenance import BENCHMARK_FIELDS
 
 
@@ -50,7 +50,7 @@ def evaluate_run(cfg, *, data=None, samples=None, output=None, max_queries=None)
             directory / "rankings.pt", map_location="cpu", weights_only=True
         )
     result = evaluate_retrieval_output(
-        data, samples, output, cfg.get("candidate_ks", (500,)), split=cfg["split"]
+        data, samples, output, candidate_cutoffs(cfg), split=cfg["split"]
     )
     if metadata is not None:
         result["provenance"] = {

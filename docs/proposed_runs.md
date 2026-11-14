@@ -232,7 +232,7 @@ and `val/candidate_recall`: the fraction of Full Positives retained in the
 configured Coarse Top-M (recorded under `retrieval.top_m`). These validation
 diagnostics are also stored in `history.jsonl`; checkpoint selection is unchanged.
 
-## 4. Retrieve validation once, then calibrate offline
+## 4. Retrieve validation, then select and freeze it
 
 ```bash
 python tools/run.py run --config configs/proposed.yaml --split val
@@ -240,42 +240,47 @@ python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
 Use the saved `runs/proposed/config.yaml` in the first command if training
-used path or parameter overrides. Set `rankings` in `configs/calibration.yaml`
-to that run's `val/rankings.pt`. The artifact embeds its actual run configuration,
-checkpoint fingerprint and fixed matching settings; no separate model config or
-top-level `method` is needed in the calibration YAML.
+used path or parameter overrides. List the run's `val/rankings.pt` under
+`rankings` in `configs/calibration.yaml`. The artifact embeds its actual run
+configuration, checkpoint fingerprint and fixed matching settings; no separate
+model config or top-level `method` is needed in the calibration YAML.
 
-Calibration searches `coarse_beta` and `top_m`. The residual weight and pooling
-remain the trained values and are not calibration grid keys. The default
+Calibration selects among the listed validation artifacts. `coarse_beta` and
+`top_m` define the shortlist of an artifact, so another value is compared by
+retrieving validation again and listing the new artifact:
+
+```bash
+python tools/run.py run --config runs/proposed/config.yaml --split val \
+  --set retrieval.coarse_beta=1.5 output.dir=runs/proposed-beta1.5
+```
+
+All artifacts must come from one checkpoint and the complete validation split.
+The residual weight and pooling remain the trained values. The default
 `selection_metric: checkpoint_score` matches training: the mean of overall
 Full-mAP and macro-case Full-mAP over populated cases. `full_map` and
-`macro_full_map` are also supported. The exact source configuration is evaluated
-first, even outside the grid, so the selected criterion cannot regress against
-that baseline. Duplicate grid values are evaluated once; source wins ties.
-
-Grid evaluation reuses coarse order and gathered pairwise scores. Labels are
-indexed once; positive ranks use the official AP/R@K arithmetic. The selected
-result receives full official evaluation before export. `summary.csv` records
-`macro_full_map` and `checkpoint_score`; `selection.json` records the criterion,
-baseline value and improvement.
+`macro_full_map` are also supported. Every artifact receives the official
+evaluation; ties select the first listed artifact. `summary.csv` records
+`macro_full_map` and `checkpoint_score`; `selection.json` records the criterion
+and the difference to the first listed artifact.
 
 Outputs are `summary.csv`, `selection.json`, `selected.yaml` and the best
-`selected/val/{rankings.pt,run.json,metrics.json}`. Evaluation cutoffs
-`candidate_ks` are preserved for every tuple and the selected config, even when
-Top-M is smaller. CandidateRecall@K uses the complete coarse order.
+`selected/val/{rankings.pt,run.json,metrics.json}`. Evaluation cutoffs are
+`candidate_ks` together with `retrieval.top_m`, in training, `run`, `evaluate`
+and calibration alike. CandidateRecall@K uses the complete coarse order.
 
-Only `rankings.pt` and validation annotations are read. No checkpoint weights,
-backbone, images or feature caches are opened. The artifact's checkpoint
-fingerprint and embedded selection guards must agree. Validation fingerprints,
-complete query IDs, query indices and ordered gallery are checked before writes;
-partial exports and test artifacts cannot be used to select parameters.
-`selected.yaml` freezes all scoring settings and both checkpoint/validation
-fingerprints. Test retrieval checks the real checkpoint bytes against this hash.
-Matching thresholds, missing penalties and model weights remain fixed.
+Only the listed `rankings.pt` files and validation annotations are read. No
+checkpoint weights, backbone, images or feature caches are opened. Each artifact's
+checkpoint fingerprint and embedded selection guards must agree. Validation
+fingerprints, complete query IDs, query indices and ordered gallery are checked
+before writes; partial exports and test artifacts cannot be used to select
+parameters. `selected.yaml` freezes all scoring settings and both
+checkpoint/validation fingerprints. Test retrieval checks the real checkpoint
+bytes against this hash. Matching thresholds, missing penalties and model
+weights remain fixed.
 
 `retrieval.pooling` accepts `penalized`, `matched_mean` and `subject_mean`.
 The checked-in config uses `subject_mean`; omitted keys use `penalized`.
-Validation exports all three binding matrices for diagnostic replay. Deployable
+Every retrieval exports all three binding tensors for diagnostic replay. Deployable
 retrieval and calibration retain the pooling and residual weight used in training.
 Compare alternative values by training separate runs and selecting on validation.
 The checked-in residual weight `0.1` is a starting value, not a measured optimum.
@@ -339,47 +344,37 @@ record the commit, full YAML, seed, runtime and validation result.
 ## Score artifacts and CPU replay
 
 `rankings.pt` is the sole score artifact. `SCORE_SCHEMA_VERSION`,
-`score_schema_version` and `schema_version` are all **2**. Let Q be the number of
+`score_schema_version` and `schema_version` are all **3**. Let Q be the number of
 queries, G the split gallery size and M = min(requested Top-M, G-1).
 
 | Key | Type/shape | Meaning |
 | --- | --- | --- |
 | `sample_ids`, `gallery_ids` | lists of strings | Ordered public identifiers |
 | `query_indices` | int64 `[Q]` | Query image index in this ordered gallery |
-| `identity_scores`, `state_scores` | float32 `[Q,G]` each | Raw coarse branches, including state when original beta is zero |
-| `fafa_binding`, `context`, `coverage` | float32 `[Q,G]` each | Raw fine evidence for all non-self pairs |
-| `binding_penalized`, `binding_matched_mean`, `binding_subject_mean` | float32 `[Q,G]` each | FAFA reductions from the same assignment; `fafa_binding` selects one |
+| `coarse_topm` | int32 `[Q,M]` | Coarse prefix; column j of every `[Q,M]` tensor belongs to `coarse_topm[:, j]` |
+| `fafa_binding`, `context`, `coverage` | float32 `[Q,M]` each | Raw fine evidence of the shortlisted pairs |
+| `binding_penalized`, `binding_matched_mean`, `binding_subject_mean` | float32 `[Q,M]` each | FAFA reductions from the same assignment; `fafa_binding` selects one |
 | `binding_scale` | float | Recorded alpha; fixed at 1 for new training runs |
-| `state_trained` | bool | A false value forbids a positive beta during replay/calibration |
+| `state_trained` | bool | A false value forbids a positive beta at retrieval |
 | `fine_matching` | dictionary | Fixed assignment thresholds, missing penalty and duplicate policy |
-| `score_config` | dictionary | Pooling, fine mode, score weights and normalization/alignment/tie conventions |
+| `score_config` | dictionary | Pooling, fine mode, score weights and normalization/tie conventions |
 | `provenance` | dictionary | Actual run config, checkpoint/cache fingerprints, benchmark and runtime metadata |
 | `rankings`, `coarse_rankings`, `fine_rankings`, `fafa_rankings` | int32 `[Q,G-1]` each | Complete self-excluded diagnostic/final orders |
-| `coarse_topm` | int32 `[Q,M]` | Coarse prefix defining derived shortlist scores |
-| `coarse_topm_scores`, `gated_context`, `coverage_penalty`, `context_residual`, `fine_scores` | float32 `[Q,M]` each | Derived scores for inspecting the selected shortlist |
+| `coarse_topm_scores`, `gated_context`, `coverage_penalty`, `context_residual`, `fine_scores` | float32 `[Q,M]` each | Derived scores for inspecting the shortlist |
 
-Official validation retrieval records all raw branches and FAFA pooling matrices.
-There is no separate tuning payload or opt-in flag. Raw fine values are stored
-once in gallery order; derived shortlist scores keep coarse Top-M order. Raw fine
-self entries are zero sentinels. Coarse self scores and non-finite values are
-excluded from normalization by the existing `combine_scores` helper. Fine scores
-remain finite, including null matches; coarse support does not introduce a second
-fine-score formula.
-
-The direct shortlist is scored first, followed by the remaining coarse tail,
-once per query/target and in bounded `fine_batch_size` chunks. Fine scores are
-computed independently per pair in FP32, with no shortlist statistics. Stable coarse ties retain gallery order; shortlist ties
+Training validation, validation retrieval and test retrieval share one scoring
+path: coarse scores order the whole gallery, and only the shortlist is scored by
+the pairwise model, once per query/target in bounded `fine_batch_size` chunks.
+Fine scores are computed independently per pair in FP32, with no shortlist
+statistics. Coarse self scores and non-finite values are excluded from
+normalization by the existing `combine_scores` helper. Fine scores remain finite,
+including null matches. Stable coarse ties retain gallery order; shortlist ties
 retain coarse order, and fine reranking preserves the coarse tail.
 
-The seven distinct raw matrices occupy `28*Q*G` bytes, about 273 MiB at 1,799
-queries and 5,684 images. `fafa_binding` aliases the selected `binding_*` matrix,
-including after saving/loading; treat raw score matrices as immutable.
-Full-gallery collection requires `Q*(G-1)` fine pairs. The training
-validation loop and test retrieval only compute Top-M fine pairs, and record
-`score_alignment: coarse_topm`; their shortlist artifacts cannot supply offline
-calibration. Official validation records `score_alignment: gallery_ids`.
-No scoring formula, matching, architecture, training or evaluation target set
-changes with this storage policy.
+A run fine-scores `Q*M` pairs, about 0.9 million at 1,799 queries and M = 500.
+The five evidence tensors occupy `20*Q*M` bytes, about 17 MiB at that size.
+`fafa_binding` aliases the selected `binding_*` tensor, including after
+saving/loading; treat score tensors as immutable.
 
 Install the repository and CPU evaluation dependencies once. Replay then needs
 only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cache:
@@ -389,9 +384,9 @@ only `rankings.pt`, without a checkpoint, GPU, encoder libraries or feature cach
 python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
   --output-dir runs/replay-exact/val
 
-# Rebuild coarse order and choose another Top-M offline.
+# Diagnostic ablation: another pooling and residual weight on the saved shortlist.
 python -m rcr.proposed.replay runs/proposed/val/rankings.pt \
-  --output-dir runs/replayed/val --coarse-beta 0.2 --top-m 500
+  --output-dir runs/replayed/val --pooling matched_mean --context-weight 0.05
 
 # Evaluate with the same fixed candidate_ks; no image/model inference.
 python tools/run.py evaluate --config configs/proposed.yaml --split val \
@@ -399,16 +394,17 @@ python tools/run.py evaluate --config configs/proposed.yaml --split val \
 ```
 
 Omitted replay parameters reuse recorded values. The only fine scorer is
-`bounded_residual`. `--context-weight` and `--pooling` are available for diagnostic
-ablations on fixed model evidence; changing them does not retrain the reasoner
+`bounded_residual`. `--pooling` and `--context-weight` act on fixed model
+evidence: they do not retrain the reasoner, mark the output `fine_score_ablation`
 and cannot be used as a calibration source. Official retrieval verifies both
-against the training checkpoint. Replay carries source provenance into a separate
-directory, retains raw matrices for successive replays and removes stale test
-selection guards. Use calibration on the official validation export to generate
-`selected.yaml` with the trained fine scorer held fixed.
+against the training checkpoint. `--coarse-beta` and `--top-m` define the saved
+shortlist, so replay accepts only their recorded values and reports any other
+value as an error; retrieve validation again with the new value. Replay carries
+source provenance into a separate directory and removes stale test selection
+guards.
 
-Replay requires the complete version-2 raw-score contract. Missing evidence must
-be collected by running official validation retrieval again; it is never
-fabricated from a saved shortlist. Changing model weights, FDA-k, matching rules,
-detections, gallery or query text requires new retrieval. Only validation labels
-select parameters, and test labels are used solely for final evaluation.
+Replay requires the complete score-schema-3 contract; artifacts of an earlier
+schema must be retrieved again. Changing model weights, FDA-k, matching rules,
+detections, gallery, query text, coarse beta or Top-M requires new retrieval.
+Only validation labels select parameters, and test labels are used solely for
+final evaluation.

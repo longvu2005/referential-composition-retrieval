@@ -59,13 +59,11 @@ def test_multi_subject_export_retains_a_completely_missing_role(
     )
     model.fine_matching["identity_threshold"] = -1.0
     source = _rank(tiny_ranker)
-    eligible = torch.ones_like(source["coverage"], dtype=torch.bool)
-    eligible[torch.arange(len(samples)), source["query_indices"]] = False
     torch.testing.assert_close(
-        source["binding_matched_mean"][eligible], torch.ones(eligible.sum())
+        source["binding_matched_mean"], torch.ones_like(source["coverage"])
     )
     torch.testing.assert_close(
-        source["binding_subject_mean"][eligible], torch.full((eligible.sum(),), -0.05)
+        source["binding_subject_mean"], torch.full_like(source["coverage"], -0.05)
     )
     for mode in POOLING_MODES:
         direct = _rank(tiny_ranker, pooling=mode)

@@ -1,6 +1,5 @@
-# Select coarse shortlists; residual weight and pooling stay fixed from training.
-rankings: runs/proposed/val/rankings.pt
+# Select among saved validation artifacts and freeze the winner for test inference.
+rankings:
+  - runs/proposed/val/rankings.pt
 output_dir: runs/proposed-calibration
 selection_metric: checkpoint_score  # Mean of overall and macro-case Full-mAP.
-coarse_beta: [0.0, 0.4, 1.0, 1.25, 1.5, 1.8, 2.0, 2.5, 4.0]
-top_m: [100, 250, 500]

@@ -1,4 +1,4 @@
-"""Rebuild rankings from schema-2 full-gallery raw scores on CPU."""
+"""Rebuild fine rankings from saved Top-M scores on CPU."""
 
 import argparse
 import math
@@ -15,11 +15,14 @@ from rcr.proposed.ranking import (
     fine_score_components,
     rerank_topm,
 )
-from rcr.proposed.scores import FINE_SCORE_MODE, POOLING_MODES, combine_scores
+from rcr.proposed.scores import FINE_SCORE_MODE, POOLING_MODES
+
+SHORTLIST_KEYS = ("coarse_beta", "top_m")
+BINDING_KEYS = tuple(f"binding_{mode}" for mode in POOLING_MODES)
 
 
-def _validate_settings(config: dict, state_trained: bool) -> None:
-    if config.get("pooling", "penalized") not in POOLING_MODES:
+def _validate_settings(config: dict) -> None:
+    if config.get("pooling") not in POOLING_MODES:
         raise ValueError("unknown FAFA pooling")
     if type(config.get("top_m")) is not int or config["top_m"] < 1:
         raise ValueError("top_m must be a positive integer")
@@ -29,25 +32,24 @@ def _validate_settings(config: dict, state_trained: bool) -> None:
             raise ValueError(f"{key} must be finite and nonnegative")
     if config.get("fine_score_mode") != FINE_SCORE_MODE:
         raise ValueError("unknown fine_score_mode")
-    if not state_trained and config["coarse_beta"] != 0:
-        raise ValueError("checkpoint state branch is untrained; use coarse_beta=0")
 
 
-def _validate_artifact(output: dict) -> None:
+def validate_artifact(output: dict) -> None:
     if not isinstance(output, dict) or any(
         type(output.get(key)) is not int or output[key] != SCORE_SCHEMA_VERSION
         for key in ("score_schema_version", "schema_version")
     ):
         raise ValueError(
-            "offline replay requires score_schema_version=2 and schema_version=2"
+            "offline replay requires "
+            f"score_schema_version={SCORE_SCHEMA_VERSION} and "
+            f"schema_version={SCORE_SCHEMA_VERSION}"
         )
     required = {
         "sample_ids",
         "gallery_ids",
         "query_indices",
-        "identity_scores",
-        "state_scores",
         "fafa_binding",
+        *BINDING_KEYS,
         "context",
         "coverage",
         "binding_scale",
@@ -76,10 +78,6 @@ def _validate_artifact(output: dict) -> None:
         }.items()
     ):
         raise ValueError("offline replay has an incompatible score_config")
-    if config.get("score_alignment") != "gallery_ids":
-        raise ValueError(
-            "offline replay requires full-gallery raw scores; retrieve validation again"
-        )
     if type(output["state_trained"]) is not bool:
         raise ValueError("artifact must record whether the state branch is trained")
     if not isinstance(output["fine_matching"], dict) or not isinstance(
@@ -90,7 +88,7 @@ def _validate_artifact(output: dict) -> None:
         fingerprint = output["provenance"].get(f"{key}_sha256")
         if fingerprint is not None and fingerprint != digest_json(output[key]):
             raise ValueError(f"{key} order changed since retrieval")
-    _validate_settings(config, output["state_trained"])
+    _validate_settings(config)
     n, g = len(output["sample_ids"]), len(output["gallery_ids"])
     if (
         not n
@@ -99,6 +97,7 @@ def _validate_artifact(output: dict) -> None:
         or len(set(output["gallery_ids"])) != g
     ):
         raise ValueError("offline replay requires non-empty unique sample/gallery IDs")
+    m = min(config["top_m"], g - 1)
     indices = output["query_indices"]
     if (
         not isinstance(indices, torch.Tensor)
@@ -108,37 +107,23 @@ def _validate_artifact(output: dict) -> None:
         or indices.max() >= g
     ):
         raise ValueError("query_indices must identify one gallery image per query")
-    fields = (
-        "identity_scores",
-        "state_scores",
-        "fafa_binding",
-        "context",
-        "coverage",
-        *(f"binding_{mode}" for mode in POOLING_MODES if f"binding_{mode}" in output),
-    )
-    for key in fields:
+    for key in ("fafa_binding", "context", "coverage", *BINDING_KEYS):
         value = output[key]
         if (
             not isinstance(value, torch.Tensor)
-            or value.shape != (n, g)
+            or value.shape != (n, m)
             or value.dtype != torch.float32
         ):
-            raise ValueError(f"{key} must be float32 aligned with the full gallery")
+            raise ValueError(f"{key} must be float32 aligned with coarse_topm")
         if value.device.type != "cpu":
             raise ValueError("offline replay requires CPU score tensors")
-        if key in ("fafa_binding", "context", "coverage") or key.startswith("binding_"):
-            if not torch.isfinite(value).all():
-                raise ValueError(f"{key} contains NaN/Inf")
-            if value[torch.arange(n), indices.long()].count_nonzero():
-                raise ValueError("self-excluded fine scores must use the zero sentinel")
-    selected_field = f"binding_{config.get('pooling', 'penalized')}"
-    if selected_field in output and not torch.equal(
-        output["fafa_binding"], output[selected_field]
-    ):
+        if not torch.isfinite(value).all():
+            raise ValueError(f"{key} contains NaN/Inf")
+    if not torch.equal(output["fafa_binding"], output[f"binding_{config['pooling']}"]):
         raise ValueError("fafa_binding disagrees with its recorded pooling")
     for key in ("rankings", "coarse_rankings", "coarse_topm"):
         value = output[key]
-        width = min(config["top_m"], g - 1) if key == "coarse_topm" else g - 1
+        width = m if key == "coarse_topm" else g - 1
         if (
             not isinstance(value, torch.Tensor)
             or value.dtype not in (torch.int32, torch.int64)
@@ -155,102 +140,61 @@ def _validate_artifact(output: dict) -> None:
                 raise ValueError(
                     f"{key} contains self, invalid or repeated gallery indices"
                 )
-    if not torch.equal(
-        output["coarse_topm"],
-        output["coarse_rankings"][:, : min(config["top_m"], g - 1)],
-    ):
+    if not torch.equal(output["coarse_topm"], output["coarse_rankings"][:, :m]):
         raise ValueError("coarse_topm must be the prefix of coarse_rankings")
 
 
 @torch.inference_mode()
-def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
-    """Replay scores with a bounded cache of coarse order and pairwise evidence."""
-    beta = config["coarse_beta"]
-    pooling = config.get("pooling", "penalized")
-    config = {**config, "pooling": pooling}
-    if pooling == output["score_config"].get("pooling", "penalized"):
-        binding = output["fafa_binding"]
-    else:
-        field = f"binding_{pooling}"
-        if field not in output:
+def replay_rankings(
+    output: dict,
+    *,
+    context_weight: float | None = None,
+    coarse_beta: float | None = None,
+    top_m: int | None = None,
+    pooling: str | None = None,
+) -> dict:
+    """Recreate the fine and FAFA rankings of one Top-M artifact.
+
+    Pooling and context weight can be varied on the saved shortlist evidence. The
+    coarse beta and Top-M define that shortlist, so another value needs retrieval.
+    """
+    validate_artifact(output)
+    recorded = output["score_config"]
+    for key, value in (("coarse_beta", coarse_beta), ("top_m", top_m)):
+        if value is not None and value != recorded[key]:
             raise ValueError(
-                "changing pooling requires saved binding scores for that mode; "
-                "retrieve validation again with the updated scorer"
+                f"{key} changes the Top-M shortlist; retrieve with the new value"
             )
-        binding = output[field]
-    top_m = min(config["top_m"], len(output["gallery_ids"]) - 1)
-    if cache.get("source") is not output or cache.get("beta") != beta:
-        coarse_rows, orders = [], []
-        for i, query_index in enumerate(output["query_indices"].tolist()):
-            coarse = combine_scores(
-                output["identity_scores"][i],
-                output["state_scores"][i],
-                beta=beta,
-                exclude_index=query_index,
-            )
-            order = torch.argsort(coarse, descending=True, stable=True)
-            coarse_rows.append(coarse)
-            orders.append(order[order != query_index].to(torch.int32))
-        cache.clear()
-        cache.update(
-            source=output,
-            beta=beta,
-            coarse=torch.stack(coarse_rows),
-            order=torch.stack(orders),
+    config = {
+        **recorded,
+        **{
+            key: value
+            for key, value in (("pooling", pooling), ("context_weight", context_weight))
+            if value is not None
+        },
+    }
+    _validate_settings(config)
+    binding = output[f"binding_{config['pooling']}"]
+    order, top = output["coarse_rankings"], output["coarse_topm"]
+    scored = [
+        fine_score_components(
+            binding[i],
+            output["context"][i],
+            output["coverage"][i],
+            output["binding_scale"],
+            config["fine_score_mode"],
+            config["context_weight"],
         )
-    order = cache["order"]
-    if cache.get("top_m") != top_m or cache.get("pooling") != pooling:
-        top = order[:, :top_m]
-        raw = {
-            key: (binding if key == "fafa_binding" else output[key]).gather(
-                1, top.long()
-            )
-            for key in ("fafa_binding", "context", "coverage")
-        }
-        cache.update(
-            top_m=top_m,
-            pooling=pooling,
-            top=top,
-            raw=raw,
-            coarse_topm=cache["coarse"].gather(1, top.long()),
-            fafa_rankings=torch.stack(
-                [
-                    rerank_topm(o, t, b)
-                    for o, t, b in zip(order, top, raw["fafa_binding"], strict=True)
-                ]
-            ),
-        )
-        cache.pop("fine_key", None)
-    top, coarse_topm = cache["top"], cache["coarse_topm"]
-    fine_key = config["fine_score_mode"], config["context_weight"]
-    if cache.get("fine_key") != fine_key:
-        scored = [
-            fine_score_components(
-                cache["raw"]["fafa_binding"][i],
-                cache["raw"]["context"][i],
-                cache["raw"]["coverage"][i],
-                output["binding_scale"],
-                *fine_key,
-            )
-            for i in range(len(top))
+        for i in range(len(top))
+    ]
+    fine_rankings = torch.stack(
+        [
+            rerank_topm(o, t, row["fine_scores"])
+            for o, t, row in zip(order, top, scored, strict=True)
         ]
-        cache.update(
-            fine_key=fine_key,
-            scored={
-                key: torch.stack([row[key] for row in scored]) for key in scored[0]
-            },
-            fine_rankings=torch.stack(
-                [
-                    rerank_topm(o, t, row["fine_scores"])
-                    for o, t, row in zip(order, top, scored, strict=True)
-                ]
-            ),
-        )
+    )
     metadata = deepcopy(output["provenance"])
-    if any(
-        config[key] != output["score_config"].get(key, "penalized")
-        for key in ("pooling", "context_weight")
-    ):
+    if any(config[key] != recorded[key] for key in ("pooling", "context_weight")):
         metadata["fine_score_ablation"] = True
     retrieval = {
         **metadata.get("retrieval", {}),
@@ -281,41 +225,16 @@ def _replay_rankings(output: dict, config: dict, cache: dict) -> dict:
             metadata["config"].pop(key, None)
     return {
         **output,
+        **{key: torch.stack([row[key] for row in scored]) for key in scored[0]},
         "score_config": config,
         "fafa_binding": binding,
         "provenance": metadata,
-        "coarse_rankings": order,
-        "coarse_topm": top,
-        "coarse_topm_scores": coarse_topm,
-        **cache["scored"],
-        "fafa_rankings": cache["fafa_rankings"],
-        "fine_rankings": cache["fine_rankings"],
-        "rankings": cache["fine_rankings"],
+        "fafa_rankings": torch.stack(
+            [rerank_topm(o, t, b) for o, t, b in zip(order, top, binding, strict=True)]
+        ),
+        "fine_rankings": fine_rankings,
+        "rankings": fine_rankings,
     }
-
-
-@torch.inference_mode()
-def replay_rankings(
-    output: dict,
-    *,
-    context_weight: float | None = None,
-    coarse_beta: float | None = None,
-    top_m: int | None = None,
-    pooling: str | None = None,
-) -> dict:
-    """Recreate all rankings and diagnostics from the one full-gallery artifact."""
-    _validate_artifact(output)
-    config = dict(output["score_config"])
-    for key, value in (
-        ("pooling", pooling),
-        ("context_weight", context_weight),
-        ("coarse_beta", coarse_beta),
-        ("top_m", top_m),
-    ):
-        if value is not None:
-            config[key] = value
-    _validate_settings(config, output["state_trained"])
-    return _replay_rankings(output, config, {})
 
 
 def main(argv=None):
@@ -329,20 +248,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.output_dir.resolve() == args.rankings.parent.resolve():
         parser.error("use a separate output directory to retain the source artifact")
-    output = replay_rankings(
-        torch.load(args.rankings, map_location="cpu", weights_only=True),
-        context_weight=args.context_weight,
-        coarse_beta=args.coarse_beta,
-        top_m=args.top_m,
-        pooling=args.pooling,
-    )
+    try:
+        output = replay_rankings(
+            torch.load(args.rankings, map_location="cpu", weights_only=True),
+            context_weight=args.context_weight,
+            coarse_beta=args.coarse_beta,
+            top_m=args.top_m,
+            pooling=args.pooling,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     metadata = {
         **output["provenance"],
         **runtime_metadata(torch.device("cpu")),
         "replay": {
             "source": str(args.rankings),
             "source_sha256": sha256_file(args.rankings),
-            "scope": "full_gallery",
         },
     }
     output["provenance"] = metadata

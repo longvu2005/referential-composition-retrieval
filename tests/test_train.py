@@ -5,6 +5,8 @@ import json
 import pytest
 import torch
 
+from rcr.evaluation.runner import evaluate_run
+from rcr.proposed import retrieve
 from rcr.proposed import train as training
 from tests.helpers import _has_gradient, _only_loss
 
@@ -152,3 +154,25 @@ def test_training_enables_identity_crop_mining_after_warmup(
         assert row["train_identity_supplemental_crops"] == (
             row["train_identity_random_crops"] + row["train_identity_hard_crops"]
         )
+
+
+def test_training_validation_matches_run_with_the_same_parameters(
+    tiny_training_run, monkeypatch
+):
+    cfg, cache, _, _ = tiny_training_run
+    cfg["candidate_ks"] = [1]
+    checkpoint = training.train(cfg)
+    data = training.load_rcr_data(None)
+    monkeypatch.setattr(retrieve, "load_rcr_data", lambda *args: data)
+    monkeypatch.setattr(retrieve, "GalleryCache", lambda *args, **kwargs: cache)
+    monkeypatch.setattr(retrieve, "check_query_text_config", lambda *args: None)
+    monkeypatch.setattr(retrieve, "check_cache_config", lambda *args: None)
+    run = {**cfg, "checkpoint": str(checkpoint), "split": "val"}
+    retrieve.retrieve(run)
+    result = evaluate_run(run, data=data)
+    trained = json.loads(
+        (checkpoint.parent / "evaluation/epoch_001/val_metrics.json").read_text()
+    )
+    assert f"candidate_recall_{cfg['retrieval']['top_m']}" in result["overall"]
+    for key, value in result["overall"].items():
+        assert trained["overall"][key] == pytest.approx(value, abs=1e-12), key

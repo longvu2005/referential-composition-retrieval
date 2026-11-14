@@ -19,7 +19,7 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(tmp_path, spl
     run_dir = Path(proposed["output"]["dir"])
     calibration_dir = Path(calibration["output_dir"])
     assert Path(proposed["checkpoint"]) == run_dir / "best.pt"
-    assert Path(calibration["rankings"]) == run_dir / "val/rankings.pt"
+    assert calibration["rankings"] == [str(run_dir / "val/rankings.pt")]
 
     # Record real shell dispatch without loading encoders or writing run outputs.
     recorder = tmp_path / "python-recorder"

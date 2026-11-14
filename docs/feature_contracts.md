@@ -82,8 +82,8 @@ Fine scoring uses the bounded residual formula in both training and inference.
 Retrieval requires a checkpoint trained with `fine_score_mode: bounded_residual`
 and rejects earlier fine scorers. Train in a fresh output directory; compatible
 frozen caches remain reusable. Residual weight and pooling must match training.
-Offline calibration selects only coarse beta and Top-M; replay artifacts use
-score schema version 2.
+Calibration selects among saved validation artifacts, each retrieved with one
+coarse beta and Top-M; replay artifacts use score schema version 3.
 
 Historical DINO/BERT architecture checkpoints remain incompatible and are
 rejected before loading text weights. Matching feature dimensions alone do
@@ -94,7 +94,7 @@ Default outputs are `runs/proposed` and `runs/proposed-calibration`. Existing
 run configs retain their explicit paths; use those configs to read old runs.
 Keep selected configurations and checkpoint bytes intact: test selection binds
 the checkpoint SHA256 and validation fingerprint. For a new experiment, use a
-fresh output directory and calibrate its validation artifact separately.
+fresh output directory and calibrate its validation artifacts separately.
 
 ## Verification scope
 

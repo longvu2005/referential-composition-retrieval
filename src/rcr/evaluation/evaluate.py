@@ -19,6 +19,25 @@ from rcr.evaluation.metrics import (
 RECALL_KS = (1, 5, 10)
 
 
+def candidate_cutoffs(cfg: dict) -> list[int]:
+    """Candidate-recall cutoffs: the configured ks plus the retrieval shortlist."""
+    cutoffs = set(cfg.get("candidate_ks", (500,)))
+    if "top_m" in cfg.get("retrieval", {}):
+        cutoffs.add(cfg["retrieval"]["top_m"])
+    return sorted(cutoffs)
+
+
+def selection_metrics(result: dict) -> dict[str, float]:
+    """Validation criterion shared by checkpoint and shortlist selection."""
+    full_map = float(result["overall"]["full_map"])
+    macro = fmean(float(row["full_map"]) for row in result["by_case"].values())
+    return {
+        "full_map": full_map,
+        "macro_full_map": macro,
+        "checkpoint_score": 0.5 * (full_map + macro),
+    }
+
+
 def evaluate_retrieval_output(
     data: RCRData,
     samples: Sequence[dict],

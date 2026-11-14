@@ -179,5 +179,5 @@ def _rank(tiny_ranker, **overrides):
         model,
         torch.device("cpu"),
         gallery_ids=cache.image_ids,
-        **{**settings, "full_gallery_scores": True, **overrides},
+        **{**settings, **overrides},
     )

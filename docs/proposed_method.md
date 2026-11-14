@@ -334,7 +334,7 @@ temperatures. `loss.context_temperature` scales the pairwise context loss;
 `retrieval.context_weight` sets the residual bound. These are separate from the
 task weight `loss.context_weight`. Defaults are starting values, not measured
 optima. Pooling and the residual weight must match training during retrieval and
-remain fixed during offline calibration. An untrained state branch cannot enter
+remain fixed during calibration. An untrained state branch cannot enter
 training validation with a positive coarse beta.
 
 The default 20-epoch run has a short context warmup:
@@ -439,7 +439,7 @@ identifier and parameter layout stay unchanged, including the architecture-name
 alias. Retrieval requires a checkpoint trained with the bounded residual scorer;
 an older checkpoint's parameter layout alone does not establish scoring
 compatibility. See [feature contracts](feature_contracts.md).
-Offline replay requires the complete version-2 raw-score artifact.
+Offline replay requires a score-schema-3 artifact.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and coarse shortlist settings.
@@ -458,15 +458,15 @@ recorded policy and checkpoint contract without installing native FAFA.
 `model.fine_matching` defines background, selection/identity thresholds, missing penalty and
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
-Calibration selects coarse beta and Top-M; trained pooling and residual weight
-stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
+Calibration selects among validation artifacts retrieved with different coarse
+beta or Top-M; trained pooling and residual weight stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 New checkpoints save the resolved matching settings, including the actual
 background. Retrieval metadata records that effective configuration even if its
 input YAML differs. Calibration freezes `selected_background_logit` from the
 validation artifact; test rejects a checkpoint background that differs from that
 selection (legacy selections default to zero). Changing background requires new
-query encoding and fine scoring; raw-score replay cannot change it.
+query encoding and fine scoring; score replay cannot change it.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
 Subject/overall coverage, all three binding reductions, raw/gated context and
@@ -476,28 +476,29 @@ numerics, not benchmark mAP.
 Saved rankings include `fafa_rankings` in addition to coarse/fine/final rankings.
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
 order outside it; it is not the full-gallery FAFA + SetMatch baseline.
-Official validation stores `identity_scores`, `state_scores`, `fafa_binding`,
-`context` and `coverage` as float32 `[Q,G]` matrices aligned with `gallery_ids`.
-It also stores `binding_penalized`, `binding_matched_mean` and
-`binding_subject_mean` for diagnostic pooling ablations. Derived diagnostics
-retain coarse Top-M order. The evaluator reports `fafa_*` metrics with the same official protocol.
-Training validation and test still fine-score only Top-M.
+Every retrieval stores `fafa_binding`, `context` and `coverage` as float32
+`[Q,M]` tensors aligned with `coarse_topm`. It also stores `binding_penalized`,
+`binding_matched_mean` and `binding_subject_mean` for diagnostic pooling
+ablations. Derived diagnostics retain coarse Top-M order. The evaluator reports
+`fafa_*` metrics with the same official protocol. Training validation,
+validation retrieval and test retrieval fine-score only the Top-M shortlist
+through one shared path.
 
-The one `rankings.pt` artifact uses schema version **2**, with query indices,
+The one `rankings.pt` artifact uses schema version **3**, with query indices,
 recorded binding scale, fixed matching policy, scoring configuration and embedded
-run/provenance metadata. Schema-1 artifacts and checkpoints trained with previous
-fine scorers are rejected; train a fresh run using the existing frozen caches.
-Each non-self pair is fine-scored once during official validation retrieval.
-Offline calibration reads this file and validation annotations, without opening
-any checkpoint, backbone or feature cache. It searches `coarse_beta` and `top_m`,
-keeping pooling and the residual weight fixed from training. The default
-`selection_metric` averages overall and macro-case validation Full-mAP, matching
-checkpoint selection; `full_map` and `macro_full_map` are also supported.
-The exact source configuration is included first and wins equal-score ties.
-Coarse population normalization uses the complete eligible gallery; fine scoring
-has no population normalization. Coarse orders, gathered raw scores and unchanged
-branch metrics are cached. The winning configuration receives full official
-evaluation before export.
+run/provenance metadata. Artifacts of an earlier schema and checkpoints trained
+with previous fine scorers are rejected; train a fresh run using the existing
+frozen caches. Each shortlisted pair is fine-scored once per retrieval.
+Calibration reads the listed validation artifacts and validation annotations,
+without opening any checkpoint, backbone or feature cache. It selects the
+artifact with the best validation score; pooling and the residual weight stay
+fixed from training and each artifact keeps the coarse beta and Top-M it was
+retrieved with. The default `selection_metric` averages overall and macro-case
+validation Full-mAP, matching checkpoint selection; `full_map` and
+`macro_full_map` are also supported. The first listed artifact wins equal-score
+ties. Coarse population normalization uses the complete eligible gallery; fine
+scoring has no population normalization. The winning artifact receives full
+official evaluation before export.
 
 `candidate_ks` remains fixed independently of Top-M and is evaluated from the
 complete coarse order. `selected.yaml` freezes the scoring settings, checkpoint

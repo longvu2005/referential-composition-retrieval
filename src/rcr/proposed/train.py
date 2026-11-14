@@ -3,7 +3,6 @@
 import json
 import math
 from pathlib import Path
-from statistics import fmean
 
 import torch
 from tqdm import tqdm
@@ -19,7 +18,11 @@ from rcr.common.io import atomic_write_text, write_json
 from rcr.common.runtime import derived_generator, resolve_device, seed_everything
 from rcr.common.torch_io import link_checkpoint, save_torch
 from rcr.dataset.audit import negative_exclusions
-from rcr.evaluation.evaluate import evaluate_retrieval_output
+from rcr.evaluation.evaluate import (
+    candidate_cutoffs,
+    evaluate_retrieval_output,
+    selection_metrics,
+)
 from rcr.proposed.batch import build_batch
 from rcr.proposed.cache.build import (
     cache_paths,
@@ -128,21 +131,6 @@ def _gradient_norm(*modules):
     return torch.stack(squared_norms).sum().sqrt().item()
 
 
-def _selection_metrics(result):
-    full_map = float(result["overall"]["full_map"])
-    cases = [
-        float(row["full_map"])
-        for row in result["by_case"].values()
-        if row["num_queries"]
-    ]
-    macro = fmean(cases)
-    return {
-        "full_map": full_map,
-        "macro_full_map": macro,
-        "checkpoint_score": 0.5 * (full_map + macro),
-    }
-
-
 def _evaluate(
     samples,
     data,
@@ -173,13 +161,9 @@ def _evaluate(
     )
     top_m = cfg["retrieval"]["top_m"]
     result = evaluate_retrieval_output(
-        data,
-        samples,
-        rankings,
-        sorted({*cfg["candidate_ks"], top_m}),
-        split="val",
+        data, samples, rankings, candidate_cutoffs(cfg), split="val"
     )
-    selected = _selection_metrics(result)
+    selected = selection_metrics(result)
     result["overall"].update(selected)
     directory = output / "evaluation" / f"epoch_{epoch:03d}"
     write_json(

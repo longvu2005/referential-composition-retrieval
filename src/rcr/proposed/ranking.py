@@ -22,7 +22,7 @@ from rcr.proposed.scores import (
     residual_score_components,
 )
 
-SCORE_SCHEMA_VERSION = 2
+SCORE_SCHEMA_VERSION = 3
 SCORE_EPS = 1e-6
 FINE_SCORE_MODES = (FINE_SCORE_MODE,)
 if TYPE_CHECKING:
@@ -131,9 +131,7 @@ def rerank_topm(order: Tensor, top_indices: Tensor, scores: Tensor) -> Tensor:
     return torch.cat((ranked, order[len(top_indices) :]))
 
 
-def score_configuration(
-    settings: dict, binding_scale: float, *, full_gallery_scores: bool = False
-) -> dict:
+def score_configuration(settings: dict, binding_scale: float) -> dict:
     """Weights-only-safe convention shared by artifacts and run metadata."""
     return {
         **{
@@ -152,7 +150,6 @@ def score_configuration(
         "normalization_device": "cpu",
         "eps": SCORE_EPS,
         "std_unbiased": False,
-        "score_alignment": "gallery_ids" if full_gallery_scores else "coarse_topm",
         "tie_break": "stable_coarse_order_then_canonical_gallery",
     }
 
@@ -279,14 +276,13 @@ def retrieve_rankings(
     pooling: str = "penalized",
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
-    full_gallery_scores: bool = False,
     state_trained: bool = True,
 ) -> dict[str, Any]:
-    """Rank once; official validation also retains every raw gallery score.
+    """Rank the gallery once for every query.
 
-    Training validation and test only fine-score the selected Top-M. Full-gallery
-    collection scores that shortlist first, then the remaining non-self images,
-    so exporting extra evidence cannot change the direct ranking arithmetic.
+    Coarse scores order the whole gallery. Only the Top-M shortlist is scored by
+    the pairwise model and reranked; the coarse tail is unchanged. Training
+    validation, retrieval and offline replay share this one scoring path.
     """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
@@ -315,7 +311,7 @@ def retrieve_rankings(
     )
     if len(gallery_ids) < 2:
         raise ValueError("retrieval requires at least two gallery images")
-    need_state = beta != 0 or full_gallery_scores
+    need_state = beta != 0
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
     text_stats = text_cache.statistics(list(samples))
@@ -381,38 +377,23 @@ def retrieve_rankings(
             order = torch.argsort(coarse, descending=True, stable=True)
             order = order[order != query_index]
             top = order[:top_m]
-            top_device = top.to(device)
-            binding_key = f"binding_{pooling}"
-            components = {
-                key: torch.zeros(len(gallery_ids), device=device, dtype=torch.float32)
-                for key in (
-                    "context",
-                    "coverage",
-                    *(f"binding_{mode}" for mode in POOLING_MODES),
-                )
-            }
-
-            def score_targets(indices, *, query=query, components=components):
-                values = _score_target_components(
+            evidence = {
+                key: value.cpu()
+                for key, value in _score_target_components(
                     query,
                     cache,
                     model,
                     device,
-                    image_indices[indices.cpu()],
+                    image_indices[top],
                     fine_batch_size,
                     pooling,
                     context_weight,
-                )
-                for key in components:
-                    components[key][indices] = values[key]
-
-            score_targets(top_device)
+                ).items()
+            }
             raw = {
-                "binding": components[binding_key][top_device].cpu(),
-                **{
-                    key: components[key][top_device].cpu()
-                    for key in ("context", "coverage")
-                },
+                "binding": evidence[f"binding_{pooling}"],
+                "context": evidence["context"],
+                "coverage": evidence["coverage"],
             }
             scored = fine_score_components(
                 **raw,
@@ -420,37 +401,22 @@ def retrieve_rankings(
                 fine_score_mode=fine_score_mode,
                 context_weight=context_weight,
             )
-            row = {
-                **scored,
-                "query_indices": torch.tensor(query_index),
-                "coarse_rankings": order.to(torch.int32),
-                "coarse_topm": top.to(torch.int32),
-                "coarse_topm_scores": coarse[top],
-                "fafa_rankings": rerank_topm(order, top, raw["binding"]).to(
-                    torch.int32
-                ),
-                "fine_rankings": rerank_topm(order, top, scored["fine_scores"]).to(
-                    torch.int32
-                ),
-                "rankings": rerank_topm(order, top, scored["fine_scores"]).to(
-                    torch.int32
-                ),
-            }
-            if full_gallery_scores:
-                # The coarse tail excludes self and contains no scored Top-M pair.
-                score_targets(order[len(top) :].to(device))
-                row.update(identity_scores=identity, state_scores=state)
-            for field, key in (
-                ("context", "context"),
-                ("coverage", "coverage"),
-                *((f"binding_{mode}", f"binding_{mode}") for mode in POOLING_MODES),
-            ):
-                row[field] = (
-                    components[key].cpu()
-                    if full_gallery_scores
-                    else components[key][top_device].cpu()
-                )
-            rows.append(row)
+            fine = rerank_topm(order, top, scored["fine_scores"]).to(torch.int32)
+            rows.append(
+                {
+                    **scored,
+                    **evidence,
+                    "query_indices": torch.tensor(query_index),
+                    "coarse_rankings": order.to(torch.int32),
+                    "coarse_topm": top.to(torch.int32),
+                    "coarse_topm_scores": coarse[top],
+                    "fafa_rankings": rerank_topm(order, top, raw["binding"]).to(
+                        torch.int32
+                    ),
+                    "fine_rankings": fine,
+                    "rankings": fine,
+                }
+            )
     output = {
         "sample_ids": [sample["sample_id"] for sample in samples],
         "gallery_ids": gallery_ids,
@@ -460,13 +426,11 @@ def retrieve_rankings(
         "binding_scale": binding_scale,
         "state_trained": state_trained,
         "fine_matching": dict(model.fine_matching),
-        "score_config": score_configuration(
-            settings, binding_scale, full_gallery_scores=full_gallery_scores
-        ),
+        "score_config": score_configuration(settings, binding_scale),
         "provenance": {},
         **{key: torch.stack([row[key] for row in rows]) for key in rows[0]},
     }
-    # The selected binding is an alias, not another full score matrix.
+    # Alias of the selected pooling's matrix, not a separate score matrix.
     output["fafa_binding"] = output[f"binding_{pooling}"]
     return output
 
