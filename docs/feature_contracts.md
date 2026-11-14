@@ -57,7 +57,8 @@ can rely on the recorded policy without installing native FAFA.
 | `cache.supervision_cache` | `cache/train-supervision.json` (train labels only) |
 
 Names describe each cache's role; encoder models and revisions remain recorded
-in the cache metadata. The FAFA baseline reads the same `cache/detections`.
+in the cache metadata. Frozen person extraction uses `configs/person_encoder.yaml`
+in the isolated `.venv-person-encoder` environment.
 
 FAFA features bind detection identity and crop order, independently of the scene
 encoder. Cache validation checks source identities, checkpoint/revision,

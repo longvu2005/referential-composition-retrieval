@@ -1,7 +1,7 @@
 # Proposed method: experiment protocol
 
 Run every command from the repository root. Use Python 3.11 or 3.12 and keep the
-proposed (PyTorch >=2.6) and FAFA (PyTorch 2.5.1) environments separate.
+proposed (PyTorch >=2.6) and person encoder (PyTorch 2.5.1) environments separate.
 
 ## 1. Configure paths
 
@@ -16,13 +16,15 @@ data:
   fafa_image_cache: /path/to/cache/person-images
   fafa_query_cache: /path/to/cache/person-queries
 person_encoder:
-  python: .venv-fafa/bin/python
+  python: .venv-person-encoder/bin/python
+  fafa_config: configs/person_encoder.yaml
 cache:
   supervision_cache: /path/to/cache/train-supervision.json
 ```
 
-All model, optimizer, sampling, retrieval and runtime choices live in this one
-file. Command-line overrides must name an existing key.
+Model, optimizer, sampling, retrieval and runtime choices live in this file.
+The frozen FAFA source, weights and preprocessing are configured in
+`configs/person_encoder.yaml`. Command-line overrides must name an existing key.
 
 ## 2. Prepare frozen assets and caches
 
@@ -158,10 +160,10 @@ not enter the candidate set, FAFA scoring or state loss; they only keep the
 supervised contrastive objective supplied with cross-image positives.
 With `hard_negative_fraction=0.5`, after the existing sampling warmup, this same
 budget also includes hard known-ID target crops mined inside the current batch.
-Required-ID supplemental positives keep their baseline quota first; the remaining
-budget is split between hard crops and the baseline random pool, with random
+Required-ID supplemental positives keep their reserved quota first; the remaining
+budget is split between hard crops and the random pool, with random
 fallback when hard evidence is short. Unknown/multi-head crops are excluded from
-this extra supervision. Fraction zero restores baseline sampling; image-level
+this extra supervision. Fraction zero uses random sampling; image-level
 `train.sampling.hard_fraction` retains its separate meaning. Epoch history and
 W&B record `identity_hard_crops`, `identity_random_crops` (including sampled
 positives), and `identity_supplemental_crops` as counts, not query averages.
@@ -305,10 +307,10 @@ only when retrieving the separate test split.
 ## Kaggle reuse
 
 To resume a FAFA image-cache export from a Kaggle notebook, use the downloader
-from the FAFA environment with explicit notebook coordinates:
+from the person encoder environment with explicit notebook coordinates:
 
 ```bash
-.venv-fafa/bin/python download_fafa.py \
+.venv-person-encoder/bin/python download_fafa.py \
   --output cache/person-images --user OWNER --kernel NOTEBOOK --version VERSION
 ```
 
@@ -333,7 +335,7 @@ See [detection separation](detection_cache.md) for import and independent builds
 `history.jsonl` contains one compact row per epoch. Each validation directory
 contains overall and by-case metrics. Split retrieval output additionally stores
 coarse, fine, final and FAFA diagnostic rankings. The FAFA diagnostic reranks the
-same coarse Top-M with FDA binding only; it is not the standalone FAFA baseline.
+same coarse Top-M with FDA binding only.
 Checkpoints are inference/reproducibility artifacts, not resumable trainer states:
 they omit optimizer/scaler state and store only the learned text projection,
 native span policy and frozen CLIP revision.

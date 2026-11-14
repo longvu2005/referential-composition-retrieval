@@ -4,7 +4,6 @@ import json
 
 import torch
 
-from rcr.baselines import FAFA_POOLINGS
 from rcr.common.data import load_rcr_data, split_fingerprint, split_samples
 from rcr.common.io import output_directory, sha256_file, write_json
 from rcr.evaluation.evaluate import candidate_cutoffs, evaluate_retrieval_output
@@ -13,19 +12,6 @@ from rcr.evaluation.provenance import BENCHMARK_FIELDS
 
 def evaluate_run(cfg, *, data=None, samples=None, output=None, max_queries=None):
     """Evaluate in-memory or saved rankings through the same official protocol."""
-    if cfg["method"] == "fafa_pooling" and "mode" not in cfg:
-        if data is None:
-            data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
-        return {
-            mode: evaluate_run(
-                {**cfg, "mode": mode},
-                data=data,
-                samples=samples,
-                output=None if output is None else output[mode],
-                max_queries=max_queries,
-            )
-            for mode in FAFA_POOLINGS
-        }
     directory = output_directory(cfg)
     if data is None:
         data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
@@ -59,8 +45,7 @@ def evaluate_run(cfg, *, data=None, samples=None, output=None, max_queries=None)
         }
     write_json(directory / "metrics.json", result)
     print(
-        f"{cfg.get('mode', cfg['method'])}/{cfg['split']}: "
-        f"{json.dumps(result['overall'])}",
+        f"{cfg['method']}/{cfg['split']}: {json.dumps(result['overall'])}",
         flush=True,
     )
     return result

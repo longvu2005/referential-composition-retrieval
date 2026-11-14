@@ -38,7 +38,7 @@ def select_identity_observations(query_identity, target_identity, batch, setting
     """Return indices only; callers gather the original tensors for SupCon.
 
     Preserve the sampler's cross-image positive quota before allocating hard
-    crops. Random fallback uses the baseline sampler's remaining observations,
+    crops. Random fallback uses the sampler's remaining observations,
     so its per-identity/random-identity limits still apply. Full-negative images
     supply candidates, not negative identity labels: only unequal GT IDs compete.
     """

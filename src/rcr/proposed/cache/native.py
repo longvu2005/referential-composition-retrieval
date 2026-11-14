@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from rcr.baselines.fafa import text_policy
+from rcr.proposed.cache.person_encoder import text_policy
 
 NATIVE_VERSION = "fafa-multimodal-fda-v1"
 
@@ -236,7 +236,10 @@ class NativeFAFACache:
     def _read(self, group, index, key, shape):
         path = self.root / group / f"{index}.pt"
         item = torch.load(
-            path, map_location="cpu", weights_only=True, mmap=self.gallery.mmap_shards
+            str(path),
+            map_location="cpu",
+            weights_only=True,
+            mmap=self.gallery.mmap_shards,
         )
         features = item.get("features")
         if (

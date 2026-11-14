@@ -55,18 +55,13 @@ def main(argv=None):
     except (ValueError, OSError) as error:
         parser.error(str(error))
 
-    command, method = args.command, cfg.get("method")
+    command = args.command
     if command == "calibrate":
         from rcr.proposed.calibration import calibrate
 
         return calibrate(cfg)
-    if method not in ("proposed", "clip", "fafa", "fafa_pooling"):
-        parser.error("method must be proposed, clip, fafa or fafa_pooling")
-    if (
-        command in ("train", "build-cache", "prepare-supervision")
-        and method != "proposed"
-    ):
-        parser.error(f"{command} is only available for proposed")
+    if cfg.get("method") != "proposed":
+        parser.error("method must be proposed")
     if command in ("retrieve", "evaluate", "run"):
         cfg["split"] = args.split or cfg.get("split", "val")
         if cfg["split"] not in ("train", "val", "test") or (
@@ -80,13 +75,9 @@ def main(argv=None):
         except (KeyError, ValueError) as error:
             parser.error(str(error))
     if command == "prepare":
-        if method == "proposed":
-            from rcr.proposed.cache.build import run_person_worker
+        from rcr.proposed.cache.build import run_person_worker
 
-            return run_person_worker(cfg, prepare=True)
-        from rcr.baselines.prepare import prepare
-
-        return prepare(cfg)
+        return run_person_worker(cfg, prepare=True)
     if command == "build-cache":
         from rcr.proposed.cache.build import prepare_cache
 
@@ -100,21 +91,13 @@ def main(argv=None):
 
         return train(cfg)
     if command == "run":
-        if method == "proposed":
-            from rcr.proposed.runner import run_experiment
+        from rcr.proposed.runner import run_experiment
 
-            return run_experiment(cfg, Path(__file__).resolve())
-        from rcr.baselines.runner import run_experiment
-
-        return run_experiment(cfg, splits=[cfg["split"]])
+        return run_experiment(cfg, Path(__file__).resolve())
     if command == "retrieve":
-        if method == "proposed":
-            from rcr.proposed.retrieve import retrieve
+        from rcr.proposed.retrieve import retrieve
 
-            return retrieve(cfg)
-        from rcr.baselines.runner import run_retrieval
-
-        return run_retrieval(cfg)
+        return retrieve(cfg)
     if command == "evaluate":
         from rcr.evaluation.runner import evaluate_run
 

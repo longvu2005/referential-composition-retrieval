@@ -27,24 +27,14 @@ proposed = [
     "wandb>=0.18,<1",
     "ftfy>=6.1,<7",  # Official CLIP text normalization.
 ]
-clip = [
-    "torch>=2.2,<3",
-    "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
-    "torchvision>=0.17,<1",
-]
-# Official FAFA is imported from the pinned source, not a PyPI LAVIS fork.
-# Keep this extra in its own environment: its Transformers pin conflicts with proposed.
-fafa = [
+# Frozen person extraction requires the pinned official FAFA runtime.
+person-encoder = [
     "torch==2.5.1",
     "torchvision==0.20.1",
     "transformers==4.39.3",
     "clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33",
     "scipy>=1.11,<2",
     "gdown>=5.2,<7",
-    # Pinned Grounding DINO source is imported without compiling its CUDA extension.
-    "addict>=2.4,<3",
-    "yapf==0.40.1",
-    "supervision==0.22.0",
     "pandas>=2,<3",
     "omegaconf>=2.3,<3",
     "iopath>=0.1.10,<0.2",

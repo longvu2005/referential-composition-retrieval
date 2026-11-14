@@ -26,7 +26,10 @@ class SceneCache:
                 f"missing scene cache at {self.root}; run --cache-stage scene first"
             )
         index = torch.load(
-            self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
+            str(self.root / "index.pt"),
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
         )
         # Completed CLIP caches from before detection separation remain usable.
         legacy_clip = (
@@ -61,7 +64,7 @@ class SceneCache:
 
     def _load_item(self, index):
         item = torch.load(
-            self.root / "features" / f"{index}.pt",
+            str(self.root / "features" / f"{index}.pt"),
             map_location="cpu",
             weights_only=True,
             mmap=self.mmap_shards,

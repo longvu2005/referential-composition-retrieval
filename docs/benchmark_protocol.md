@@ -1,20 +1,21 @@
 # RCR benchmark protocol
 
-This describes the existing evaluator in `src/rcr/evaluation/`. Annotation files
-and metric definitions are unchanged. Every method uses the shared evaluator.
+The proposed method uses the evaluator in `src/rcr/evaluation/` for validation,
+test and diagnostic rankings.
 
 ## Query, gallery and positives
 
 Inference receives a reference image, `final_desc`, `final_change` and public
-`subjects[].subject_id` slots. CLIP uses `final_instruction` by default. Subject
+`subjects[].subject_id` slots. Subject
 slots identify references within the query; they reveal neither GT identities
-nor group cardinality. No method uses `case_type` for retrieval scoring, member
-selection or condition decomposition. FAFA uses one predicted-membership rule
-for every query and splits only independent clauses identified from text.
+nor group cardinality. Retrieval scoring, member selection and condition
+construction use public image/text inputs. `case_type` is reserved for training
+sampling and evaluation summaries. Person query extraction keeps the complete
+condition for each public Subject.
 
 GT head boxes, identity labels, seed targets and positives are annotations,
 not inference inputs. Proposed may use train annotations for sampling and
-supervised losses; CLIP and FAFA are not trained on RCR. Validation annotations
+supervised losses. Validation annotations
 support evaluation and model selection; test annotations support evaluation.
 Neither split's labels may determine retrieval scores or group cardinality.
 `case_type` remains available for train sampling, provenance and by-case metrics.
@@ -36,8 +37,8 @@ ignored by every public cache interface.
 The gallery contains **all registered images in the query's PIPA split**, in
 canonical `gallery.jsonl` order. Membership comes from `images.jsonl` paths, not
 annotated pairs. Every ranking contains each gallery image once, except the
-query image. Baseline score ties retain canonical gallery order. `leftover`
-images never enter a query's gallery.
+query image. Coarse score ties retain canonical gallery order; fine ties retain
+the coarse order within the shortlist. `leftover` images never enter a query's gallery.
 
 For gallery G(q), union of required Subject identities I(q), and annotated
 identities A(g) of image g:
@@ -77,18 +78,17 @@ positives retained in the coarse shortlist, distinct from R@K.
 
 ## Split and leakage policy
 
-Use the same final export and ordered gallery for every method. Only train may
-train model parameters. Validation selects hyperparameters/checkpoints; CLIP
-fusion must select by complete-validation Full-mAP. FAFA adapter settings are
-manually chosen on validation, then frozen. Neither baseline is fine-tuned on
-RCR. Never choose settings, checkpoints, case rules or methods from test labels,
-metrics or examples. Reporting performs no selection or inference.
+Use the same final export and ordered gallery for each experiment. Only train
+may train model parameters. Validation selects hyperparameters and checkpoints.
+The checkpoint score averages overall and macro-by-case Full-mAP. Calibration
+selects among complete validation artifacts while keeping the trained pooling
+and residual weight fixed. Test labels, metrics and examples must not determine
+any settings or checkpoint selection. Reporting performs no selection or inference.
 
-Baseline `run` defaults to validation only. CLIP test requires matching
-`tuning.json`; FAFA test requires matching `protocol.json`, covering validation,
-pretrained artifacts and adapter settings. These locks do not use test labels.
-Low-level `retrieve` remains available for fixed-weight/smoke diagnostics;
-unselected fusion and unfrozen FAFA test results are rejected in paper reports.
+`run` defaults to validation. Test requires a validation-selected configuration
+binding the checkpoint SHA256, validation fingerprint and retrieval settings.
+The test recipe reads `runs/proposed-calibration/selected.yaml`. Reports verify
+that its frozen selection agrees with the recorded test run.
 
 Version 0.1.0 currently contains:
 
@@ -98,10 +98,8 @@ Version 0.1.0 currently contains:
 | val | 1,799 | 5,684 | 1,320 | 168 | 149 | 162 |
 | test | 2,307 | 7,868 | 1,319 | 329 | 318 | 341 |
 
-Validation locks and saved rankings from an earlier export are rejected because
-their validation digest or split fingerprint no longer matches these annotations.
-Regenerate them on this export before testing. This work does not change
-annotations.
+Selections and saved rankings must match the dataset's validation digest and
+split fingerprint. Regenerate validation outputs after changing annotations.
 
 ## Reproducibility and saved-run compatibility
 
@@ -109,18 +107,18 @@ New `run.json` records include effective config, checkpoint SHA256, dataset
 version/content digest, split fingerprint, ordered sample/gallery digests,
 query/gallery/case counts, protocol/self-exclusion, Git commit/dirty state,
 Python/platform/package versions, device and elapsed time. Encoder precision,
-cache identity and truncation/fallback counts are recorded by each baseline.
-FAFA also saves its official commit and detector/selector hashes. Use a clean
-committed checkout: a dirty flag cannot reconstruct uncommitted code.
+cache identities, frozen encoder provenance and text truncation statistics are
+recorded with the run. Use a clean committed checkout: a dirty flag cannot
+reconstruct uncommitted code.
 
-Dataset/split digests describe labels for provenance only. Baseline scoring and
+Dataset/split digests describe labels for provenance only. Retrieval scoring and
 feature caches use image/text inputs and model artifacts, not positive or identity
 labels. The full-dataset digest is never used as a tuning key.
 
 Evaluation binds `metrics.json` to the exact `run.json` SHA256. Reporting checks
 that binding, split fingerprint, counts, sample order, case coverage, per-query
-aggregation and available dataset/gallery metadata across methods. Method
-checkpoints/configs/runtime may differ by design. Legacy runs need their original
+aggregation and available dataset/gallery metadata. Experiment checkpoints,
+configurations and runtimes are recorded separately. Legacy runs need their original
 split fingerprint and saved-ranking re-evaluation to attach the JSON binding;
 missing historical Git/runtime details are not invented. Results lacking an
 original split fingerprint cannot be certified by the reporter.

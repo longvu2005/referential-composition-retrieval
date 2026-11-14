@@ -8,7 +8,6 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from rcr.baselines.fafa import load_fafa, text_policy
 from rcr.common.data import load_rcr_inputs
 from rcr.common.detection import DetectionCache
 from rcr.common.io import sha256_file
@@ -28,13 +27,14 @@ from rcr.proposed.cache.native import (
     query_entries,
     subject_conditions,
 )
+from rcr.proposed.cache.person_encoder import load_fafa, text_policy
 
 
 def _ready(path, cache_id, key, shape, dtype):
     if not path.is_file():
         return False
     try:
-        item = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        item = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
     except (OSError, EOFError, RuntimeError, pickle.UnpicklingError):
         return False
     features = item.get("features") if isinstance(item, dict) else None
@@ -219,7 +219,7 @@ def _build_images(cfg, root, extractor):
     persons_index = torch.empty(total, hidden_dim, dtype=dtype)
     for i in range(len(source.image_ids)):
         item = torch.load(
-            root / ".persons" / f"{i}.pt",
+            str(root / ".persons" / f"{i}.pt"),
             map_location="cpu",
             weights_only=True,
             mmap=True,

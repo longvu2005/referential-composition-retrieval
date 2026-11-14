@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Install exactly one method/tool environment from its requirements file.
+# Install one runtime or tool environment from its requirements file.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 if [[ "$#" != 1 ]]; then
-    echo "Usage: $0 {proposed|clip|fafa|dataset|dataset-clip|evaluation|dev}" >&2
+    echo "Usage: $0 {proposed|person-encoder|dataset|dataset-clip|evaluation|dev}" >&2
     exit 1
 fi
 case "$1" in
-    proposed|clip|fafa|dataset|dataset-clip|evaluation|dev) ;;
+    proposed|person-encoder|dataset|dataset-clip|evaluation|dev) ;;
     *) echo "Unknown environment: $1" >&2; exit 1 ;;
 esac
 

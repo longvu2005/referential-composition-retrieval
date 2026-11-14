@@ -46,10 +46,9 @@ def evaluate_retrieval_output(
     *,
     split: str,
 ) -> dict:
-    """Decode any method's saved rankings and use the official RCR evaluator.
+    """Decode saved rankings and use the official RCR evaluator.
 
-    ``coarse_topm`` is optional. Baselines do not invent a coarse ranking just
-    to satisfy the proposed method's diagnostic interface.
+    Coarse shortlist diagnostics are evaluated when ``coarse_topm`` is present.
     """
     gallery_ids = output["gallery_ids"]
     sample_ids = output["sample_ids"]

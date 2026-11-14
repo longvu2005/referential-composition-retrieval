@@ -1,0 +1,2 @@
+# Install bootstrap.txt before installing the frozen person encoder runtime.
+-e .[person-encoder]

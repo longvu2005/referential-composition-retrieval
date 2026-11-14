@@ -25,8 +25,8 @@ image_encoder:
 
 # Frozen FAFA person encoder.
 person_encoder:
-  python: .venv-fafa/bin/python
-  fafa_config: configs/fafa.yaml
+  python: .venv-person-encoder/bin/python
+  fafa_config: configs/person_encoder.yaml
   batch_size: 4
 
 # Cache storage and memory budgets.

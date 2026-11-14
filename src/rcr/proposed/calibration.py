@@ -148,7 +148,7 @@ def _write_selection(
             **best,
             "metric": metric,
             "value": best[metric],
-            "baseline_value": rows[0][metric],
+            "reference_value": rows[0][metric],
             "improvement": best[metric] - rows[0][metric],
             "tie_break": "first artifact in the configured rankings order",
         },

@@ -58,7 +58,10 @@ class GalleryCache:
                 "resume build-cache before use"
             )
         index = torch.load(
-            self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
+            str(self.root / "index.pt"),
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
         )
         if index.get("layout") == "clip-scene-v1":
             raise ValueError(
@@ -257,7 +260,7 @@ class GalleryCache:
 
     def _read_feature(self, index: int, *, geometry_only: bool = False) -> dict:
         item = torch.load(
-            self.root / "features" / f"{index}.pt",
+            str(self.root / "features" / f"{index}.pt"),
             map_location="cpu",
             weights_only=True,
             mmap=geometry_only or self.mmap_shards,

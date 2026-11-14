@@ -4,13 +4,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from rcr.baselines.fafa import text_policy
 from rcr.common.config import load_config, save_config
 from rcr.common.data import load_rcr_inputs
 from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.io import sha256_file
 from rcr.common.runtime import resolve_device
 from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
+from rcr.proposed.cache.person_encoder import text_policy
 from rcr.proposed.cache.scene import SceneCache, _prepare_scene
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import check_clip_config
@@ -22,7 +22,7 @@ def load_fafa_config(cfg: dict) -> dict:
 
 
 def fafa_spec(cfg: dict) -> dict:
-    """Feature provenance independent of baseline detector/selector settings."""
+    """Frozen encoder provenance for person image and query features."""
     return {
         "source_commit": cfg["source"]["commit"],
         "checkpoint_source": cfg["checkpoint"].get("source_url"),

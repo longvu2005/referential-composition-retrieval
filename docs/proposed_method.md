@@ -30,7 +30,7 @@ z_sem = u                       # shared semantic token; no independent head
 ```
 
 Use the official pinned FAFA checkpoint and preprocessing from
-`configs/fafa.yaml`. Pool `extract_features(..., mode="image").image_embeds`,
+`configs/person_encoder.yaml`. Pool `extract_features(..., mode="image").image_embeds`,
 before native `vision_proj`; never pool projected features or multimodal outputs.
 The complete image-only trunk, including Q-Former, is frozen/eval during cache
 construction. No instruction enters this cache. `h` is cached, not learned heads.
@@ -165,8 +165,7 @@ become “the reference person”; other Subject mentions become “the other re
 person (Subject N)”. Per-crop group wording keeps the existing singular auxiliary
 agreement. It never reads case labels, GT identities or member counts. Complete
 original change text still enters the Context Reasoner. Independent crop
-composition alone does not enforce group/relation correctness. The original FAFA
-baseline and `fafa_pooling` retain their separate CPR text adapter.
+composition alone does not enforce group/relation correctness.
 
 Let `pi(i)` be the shared identity assignment or null. `retrieval.pooling`
 selects the reduction of native FDA evidence; the method remains `proposed`.
@@ -256,8 +255,8 @@ train-only alignment and require exactly one annotated head center in the crop;
 ambiguous/unknown/padded crops are excluded without changing BCE alignment.
 The label cache is extended before epoch 1; frozen features are reused.
 
-Baseline query/Full Positive observations remain outside the supplemental budget.
-Preserve the baseline sampler's additional required-ID positives first (`P`),
+Query/Full Positive observations remain outside the supplemental budget.
+Preserve the sampler's additional required-ID positives first (`P`),
 then reserve `floor(hard_negative_fraction * (max_crops - P))` slots for hard
 target crops. Hardness is the maximum FP32 cosine against unambiguous requested-ID
 query anchors with a different GT ID. Multiple Subject slots use actual IDs;
@@ -272,7 +271,7 @@ embeddings, reusing targets for any sampled crop already in candidates. Only
 selected crops outside candidates need the normal extra identity-head forward.
 SupCon, temperature, weights and its handling of anchors without positives are
 unchanged. Fraction zero (the code default) and the sampling warmup retain the
-baseline path. Identity weight zero or a zero supplemental budget skips mining.
+random sampling path. Identity weight zero or a zero supplemental budget skips mining.
 Epoch counters record hard, random (including preserved sampled positives), and
 total supplemental observations; no per-crop logging is added.
 
@@ -445,7 +444,7 @@ validation/test labels are used to build native features. Training accesses
 only train candidates; validation selects checkpoints and coarse shortlist settings.
 
 `checkpoint.max_txt_len` in the native FAFA YAML explicitly selects 128 tokens,
-including special tokens, for both the baseline and proposed extraction. The
+including special tokens, for person query extraction. The
 wrapper sets the caption word cap to at least that limit. Query manifests record
 `text_policy`; manifests/checkpoints without it retain the pinned
 32-token/50-word meaning. Changing the policy re-extracts query features only.
@@ -475,7 +474,7 @@ numerics, not benchmark mAP.
 
 Saved rankings include `fafa_rankings` in addition to coarse/fine/final rankings.
 This diagnostic sorts FDA binding within the **same Top-M** and retains coarse
-order outside it; it is not the full-gallery FAFA + SetMatch baseline.
+order outside it.
 Every retrieval stores `fafa_binding`, `context` and `coverage` as float32
 `[Q,M]` tensors aligned with `coarse_topm`. It also stores `binding_penalized`,
 `binding_matched_mean` and `binding_subject_mean` for diagnostic pooling

@@ -1,41 +1,39 @@
 # Reproduction workflows
 
 `tools/` contains individual Python commands. `scripts/` contains Bash recipes
-that run those commands in order and stop on the first failure. Both use the
-same functions under `src/rcr/`; no model logic or metrics are duplicated.
+that sequence those commands and stop on the first failure. Both call the same
+functions under `src/rcr/`.
 
-Scripts locate the repository root themselves. Direct `tools/*.py` commands
-must run from that root after an editable package install. Use the tools when
-you need a custom YAML, `--set` overrides or an individual stage.
-`tools/run.py run` only retrieves and evaluates one split. Prepare assets, build
-caches and train with their own commands; the method recipes sequence them.
-Use `--split val` or `--split test`, or set `split` in YAML. CLIP `run` computes
-all four modes; individual `retrieve`/`evaluate` commands use YAML `mode`.
+Scripts locate the repository root themselves. Run direct `tools/*.py` commands
+from that root after an editable package install. Use individual tools for a
+custom YAML, `--set` overrides or a single stage.
 
 ## Environments
 
+Use Python 3.11 or 3.12:
+
 ```bash
-PYTHON=python3.11 bash scripts/setup.bash clip
+PYTHON=python3.11 bash scripts/setup.bash proposed
+PYTHON=python3.11 bash scripts/setup.bash person-encoder
 ```
 
-Replace `clip` with `proposed`, `fafa`, `dataset`, `dataset-clip`, `evaluation` or
-`dev`. This creates `.venv-<name>` and installs the matching requirements file.
-The host needs Python 3.11/3.12 and pip 22.3+ for `pip --python`. The bootstrap
-pins preserve upstream CLIP/FAFA installation support. Dependencies are declared
-once in `pyproject.toml`; each requirements file chooses the corresponding extra.
-Install only the environments you use. A base install with `requirements.txt`
-supports deterministic annotation and JSON reports without Torch.
+Setup creates `.venv-<name>` and installs the matching requirements file. Other
+supported environments are `dataset`, `dataset-clip`, `evaluation` and `dev`.
+Dependencies are declared in `pyproject.toml`; requirements files select the
+corresponding extras. The host needs pip 22.3+ for `pip --python`. Bootstrap pins
+support the upstream packages used by the frozen person encoder.
 
-Proposed requires a separate FAFA environment only to extract FAFA person
-features. Configure `person_encoder.python` in `configs/proposed.yaml`.
-Training/retrieval from completed caches need only the proposed environment.
-Training uses pooled FAFA image features and a shared bounded residual scorer.
-Native FDA query/target tokens are read for context training after warmup and
-for validation/retrieval. The query cache must cover train before starting.
-Calibration selects among saved validation artifacts while retaining the trained
-residual weight and pooling.
-The standalone FAFA baseline also requires the shared completed detection cache;
-its `prepare` command checks this prerequisite and reports the build command.
+The proposed runtime requires PyTorch >=2.6. Frozen FAFA extraction uses PyTorch
+2.5.1 and a separate Transformers version in `.venv-person-encoder`. Configure
+`person_encoder.python` and `person_encoder.fafa_config` in
+`configs/proposed.yaml`; encoder assets are defined in
+`configs/person_encoder.yaml`. Completed caches support training and retrieval
+using only the proposed environment.
+
+A base install with `requirements.txt` supports annotation and JSON reports
+without Torch. `requirements/dataset-clip.txt` adds optional CLIP ordering for
+annotation candidates. `requirements/evaluation.txt` adds Torch to evaluate
+saved rankings without loading encoders.
 
 ## Dataset
 
@@ -43,49 +41,50 @@ its `prepare` command checks this prerequisite and reports the build command.
 bash scripts/setup.bash dataset
 bash scripts/data/prepare_review.bash
 .venv-dataset/bin/python -m labelstudio.review.app
-# After saving reviews and stopping the review UI:
+# Save reviews and stop the review UI before preparing positives.
 bash scripts/data/prepare_positives.bash
 .venv-dataset/bin/python -m labelstudio.positives.app
-# After saving positives and stopping the positive UI:
+# Save positives and stop the positive UI before finalization.
 bash scripts/data/finalize.bash --version 0.2.0
 ```
 
 Review preparation sequences `select_samples.py` and `prepare_review.py`.
 Finalization sequences positive normalization and `build_final.py`.
-Manual review and positive decisions stay between these workflows. New tasks
-are never automatically completed. See [dataset contracts](../dataset/README.md).
+Manual review and positive decisions stay between these workflows. See
+[dataset contracts](../dataset/README.md).
 
-## Methods
-
-| Workflow | `val` (default) | `test` |
-| --- | --- | --- |
-| `scripts/methods/clip.bash` | Prepare assets, run all four variants, select each fusion on val | Reuse frozen fusion weights |
-| `scripts/methods/fafa.bash` | Prepare assets, run FAFA, lock adapter protocol | Reuse the protocol lock |
-| `scripts/methods/fafa_pooling.bash` | Run both frozen FAFA pooling variants in `.venv-fafa` | Reuse its own protocol lock |
-| `scripts/methods/proposed.bash` | Prepare/build caches, train/select best.pt, retrieve val, select the validation artifact and save its results | Use `runs/proposed-calibration/selected.yaml` |
+## Proposed method
 
 ```bash
-bash scripts/methods/clip.bash val
-bash scripts/methods/fafa.bash val
 bash scripts/methods/proposed.bash val
+bash scripts/methods/proposed.bash test
 ```
 
-Each workflow defaults to its `.venv-<method>/bin/python`. Set `PYTHON` to reuse
-another matching environment, for example:
+Validation prepares assets, builds caches, trains, retrieves validation rankings
+and selects the validation artifact through `configs/calibration.yaml`. Test
+uses `runs/proposed-calibration/selected.yaml` and its frozen selection.
+
+The recipe defaults to `.venv-proposed/bin/python`. Set `PYTHON` to use another
+matching environment:
 
 ```bash
-PYTHON=/path/to/clip-env/bin/python bash scripts/methods/clip.bash test
+PYTHON=/path/to/proposed-env/bin/python bash scripts/methods/proposed.bash test
 ```
 
-Test never trains or selects parameters. Run validation first. Proposed's val
-recipe uses `configs/proposed.yaml` and `configs/calibration.yaml`; it includes
-training even if a prior checkpoint exists. For cache reuse without retraining,
-or another seed/config, call `tools/run.py` directly. Raw images and model assets
-must be available as described in the method guides.
+The validation recipe includes a fresh training run. For cache reuse with an
+existing checkpoint, another seed or a custom config, call `tools/run.py`
+directly. `run` retrieves and evaluates one split; asset preparation, cache
+construction and training have separate commands. Training uses pooled FAFA
+image features and reads native query/target tokens for context after warmup.
+The query cache must cover train before training starts.
+
+Raw images and pretrained assets must be available as described in the
+[experiment protocol](../docs/proposed_runs.md). Test uses the checkpoint,
+matching settings, pooling and residual weight selected on validation.
 
 ## Reports
 
-Use any base/method environment to export already evaluated JSON:
+Export evaluated JSON from any environment with the base package installed:
 
 ```bash
 .venv-dataset/bin/python tools/report.py --split val \
@@ -94,5 +93,5 @@ Use any base/method environment to export already evaluated JSON:
   --run proposed=runs/proposed-calibration/selected/test
 ```
 
-To evaluate saved `rankings.pt` first, use a method environment or install
-`requirements/evaluation.txt`; this needs Torch but no encoder libraries.
+See the [reporting guide](../docs/experiments.md) for table formats and saved-run
+validation.

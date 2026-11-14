@@ -1,7 +1,7 @@
 # Independent person detection cache
 
-Grounding DINO Tiny boxes are shared by Proposed, the standalone FAFA baseline,
-train-only GT head alignment, and detection diagnostics. Scene extraction never
+Grounding DINO Tiny boxes support proposed person features, train-only GT head
+alignment, and detection diagnostics. Scene extraction never
 loads the detector; FAFA extraction never loads scene features.
 
 | Config key | Default | Owns |
@@ -21,10 +21,6 @@ To reuse completed caches after a directory rename, move each entire directory
 with its index and shards intact and update the YAML paths used by that run.
 Keep checkpoint bytes and stored cache IDs unchanged. Rebuilding is not needed
 solely because a directory or the supervision JSON has a new name.
-
-The FAFA baseline's validation lock includes its detector path. After changing
-that path in `configs/fafa.yaml`, rerun FAFA validation before test to refresh
-`runs/fafa/protocol.json`; the detector cache itself remains reusable.
 
 ## Build stages independently
 
@@ -50,8 +46,8 @@ Changing scene extraction preserves detection and both FAFA caches. Changing
 query text invalidates only affected FAFA query conditions. Changing accepted
 boxes, their order, detector settings, FAFA weights or crop preprocessing
 invalidates the dependent FAFA features. No second NMS, rounding or crop cap is
-introduced. Detection stores no confidence scores; the baseline's score 1.0
-remains an eligibility sentinel. Its existing zero-person fallback is retained.
+introduced. Detection stores no confidence scores. An image with no accepted
+boxes retains an empty person set.
 Boxes that cross the image boundary retain their original coordinates; FAFA's
 PIL crop padding and the scene transform's clipping preserve crop semantics.
 
@@ -87,12 +83,6 @@ Model checkpoints bind all three image-source IDs separately, as well as encoder
 metadata. A scene change can reuse extraction caches but requires the matching
 trained model or a new training run. Train-supervision keys depend on detections
 and train GT, independently of scene/FAFA appearance features.
-
-The FAFA baseline uses `grounding_dino_cache` and `cache/detections` in
-`configs/fafa.yaml`. Build detections before its `prepare` command. After changing
-its detection-cache contract, rerun baseline validation to create a fresh test
-protocol lock. No labels, matching equations, selector thresholds or evaluator
-definitions change with this separation.
 
 Detection diagnostics require no scene or FAFA cache:
 

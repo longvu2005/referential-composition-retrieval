@@ -1,32 +1,38 @@
-# Baseline experiments and paper reports
+# Proposed experiments and paper reports
 
-Use a clean committed checkout and separate environments from [baselines](baselines.md).
-Follow the [benchmark protocol](benchmark_protocol.md). Original images, pretrained
-assets and historical run outputs are not included in the repository.
+Use a clean committed checkout and the environments described in the
+[script reference](../scripts/README.md). Follow the
+[benchmark protocol](benchmark_protocol.md) and
+[proposed experiment protocol](proposed_runs.md). Original images, pretrained
+assets and historical run outputs are not committed.
 
-## Validation first
+## Validation and selection
 
 ```bash
-.venv-clip/bin/python tools/run.py prepare --config configs/clip.yaml
-.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split val
 bash scripts/methods/proposed.bash val
-# Proposed's cache stage also prepares the detections required by FAFA.
-.venv-fafa/bin/python tools/run.py prepare --config configs/fafa.yaml
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split val
 python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
 ```
 
-CLIP selects fusion weights on Full-mAP. FAFA evaluates/locks the supplied adapter
-configuration; tune manually on val if needed. Use separate output roots for
-trials: `--set output.dir=runs/<experiment-name>`. Check hashes, fingerprints,
-query/gallery/case counts, truncation/fallback statistics and Git state before
-interpreting results. Never select methods/configs using test metrics.
+The validation recipe prepares assets, builds caches, trains, retrieves and
+calibrates. Calibration compares saved validation artifacts while retaining the
+trained residual weight and pooling. For an existing checkpoint, retrieve from
+its saved configuration and calibrate separately:
 
-For an already trained proposed run, use its saved `config.yaml` with `run`,
-then `calibrate`; the full Bash validation recipe includes a fresh training run.
+```bash
+.venv-proposed/bin/python tools/run.py run --config runs/proposed/config.yaml --split val
+.venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
+```
 
-Reporting defaults to all four CLIP variants, FAFA and Proposed. It reads only
-saved `metrics.json`/`run.json` and exports:
+Use a fresh `output.dir` for each training experiment. List its validation
+`rankings.pt` under `configs/calibration.yaml: rankings`. Check fingerprints,
+query/gallery/case counts, encoder text statistics and Git state before
+interpreting results. Validation selects parameters and checkpoints; test
+provides the final evaluation.
+
+## Tables
+
+Reporting reads the proposed method's saved `metrics.json` and `run.json`.
+It writes:
 
 ```text
 runs/reports/<val|test>/
@@ -34,62 +40,50 @@ runs/reports/<val|test>/
   by_case.csv  by_case.md  by_case.tex
 ```
 
-Overall has 8 metrics. By-case has 4 metrics for each case, with grouped LaTeX
-headers. CSV retains raw fractions in [0,1]; Markdown/LaTeX use percentages,
-2 decimals by default. An absent case is blank/—/--. Diagnostics and automatic
-best-method selection are excluded. All selected runs must validate before
-writing any table; reruns overwrite the active tables.
+Overall has eight metrics. By-case has four metrics for each case, with grouped
+LaTeX headers. CSV retains fractions in [0,1]; Markdown and LaTeX use percentages
+with two decimals by default. An absent case is blank/—/--. Diagnostic rankings
+and shortlist metrics stay in the evaluation output.
 
 ```bash
-# Use the selected validation artifact written by calibration:
 python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
-# Explicitly request a smaller table or alternative formats:
-python tools/report.py --split val --methods clip_image clip_text early_fusion late_fusion fafa
-python tools/report.py --split val --formats csv tex --decimals 3
+python tools/report.py --split val --formats csv tex --decimals 3 \
+  --run proposed=runs/proposed-calibration/selected/val
 ```
 
-`--run METHOD=DIRECTORY` takes a split result folder; `--runs-root` changes the
-default run root. Missing selected methods are errors. Do not replace a selected
-calibrated model with an unselected run.
-Calibration keeps val outputs in each experiment folder; its frozen test output
-is `runs/proposed-calibration/selected/test`, which can be passed with `--run proposed=...`.
+The default input is `runs/proposed/<split>`. `--runs-root` changes that root;
+`--run proposed=DIRECTORY` selects a specific split result folder. Pass the
+calibrated result directory when reporting the selected model. Reporting
+validates all inputs before writing tables and overwrites active exports.
 
-## Historical saved results
+## Saved-ranking evaluation
 
-Legacy metrics need a run/evaluation binding. Re-evaluate saved rankings with
-the same root/config/mode/split, without inference:
+To evaluate saved rankings without encoder inference, use the proposed or
+evaluation environment with the configuration that produced them:
 
 ```bash
-for mode in clip_image clip_text early_fusion late_fusion; do
-  .venv-clip/bin/python tools/run.py evaluate --config configs/clip.yaml --split val \
-    --set mode="$mode"
-done
-.venv-fafa/bin/python tools/run.py evaluate --config configs/fafa.yaml --split val
-.venv-proposed/bin/python tools/run.py evaluate --config configs/proposed.yaml --split val
+.venv-proposed/bin/python tools/run.py evaluate --config runs/proposed/config.yaml --split val
 python tools/report.py --split val
 ```
 
-Use `--set output.dir=...` for historical roots. Evaluation preserves old metrics
-and checks the original split fingerprint against current annotations. Missing
-original fingerprints, fixed-weight fusion without selection, partial queries
-and unfrozen FAFA test runs cannot enter paper tables. Reporting never invents
-results or historical Git/runtime metadata.
+Use `--set output.dir=...` for another result root. Evaluation checks the saved
+split fingerprint against the current annotations and binds the regenerated
+metrics to `run.json`. Complete query coverage, the original split fingerprint
+and consistent per-query metrics are required for reports.
 
 ## Frozen test
 
-Validate and lock against the current export before test; locks from an earlier
-export are rejected because their validation digest no longer matches. Test uses
-the frozen policy:
+Run validation and calibration on the current dataset export before test:
 
 ```bash
-.venv-clip/bin/python tools/run.py run --config configs/clip.yaml --split test
-.venv-fafa/bin/python tools/run.py run --config configs/fafa.yaml --split test
-.venv-proposed/bin/python tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
+bash scripts/methods/proposed.bash test
 python tools/report.py --split test --run proposed=runs/proposed-calibration/selected/test
 ```
 
-Report sample/case counts alongside such tables. CPU tests use tiny local fixtures;
-they are not pretrained validation/test experiments:
+Test verifies the selected checkpoint, validation fingerprint and retrieval
+settings. Report sample and case counts alongside the tables. CPU tests use
+small local fixtures; benchmark experiments require the raw images, pretrained
+assets and compatible feature caches:
 
 ```bash
 python -m pytest -q

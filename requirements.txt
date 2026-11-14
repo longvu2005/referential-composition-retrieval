@@ -1,2 +1,2 @@
-# Shared package only. Choose requirements/{proposed,clip,fafa}.txt for a method.
+# Shared data and reporting tools. Model dependencies are optional extras.
 -e .

@@ -1,6 +1,6 @@
 # Referential Composition Retrieval
 
-Research code and benchmark for **Referential Composition Retrieval (RCR)**.
+Proposed method and benchmark for **Referential Composition Retrieval (RCR)**.
 Each query contains a reference image, text identifying one or more Subjects,
 and a requested change. Retrieval ranks images that preserve those identities
 and satisfy the change.
@@ -71,11 +71,12 @@ See [method and equations](docs/proposed_method.md),
 ## Setup
 
 Use Python 3.11 or 3.12. Proposed requires PyTorch >=2.6 for the pinned CLIP
-checkpoint; native FAFA uses PyTorch 2.5.1. Install them in separate environments:
+checkpoint; frozen FAFA extraction uses PyTorch 2.5.1. Install the training and
+person encoder runtimes in separate environments:
 
 ```bash
 PYTHON=python3.11 bash scripts/setup.bash proposed
-PYTHON=python3.11 bash scripts/setup.bash fafa
+PYTHON=python3.11 bash scripts/setup.bash person-encoder
 ```
 
 Without `PYTHON`, setup searches for Python 3.11, then 3.12, then a compatible
@@ -89,10 +90,9 @@ with uv before setup:
 ```bash
 python3 -m pip install --no-cache-dir uv
 uv python install 3.11
-# If a previous setup failed, move that .venv-proposed/.venv-fafa aside first.
-for method in proposed fafa; do
-  uv venv --python 3.11 --seed ".venv-$method"
-  PYTHON=".venv-$method/bin/python" bash scripts/setup.bash "$method"
+for environment in proposed person-encoder; do
+  uv venv --python 3.11 --seed ".venv-$environment"
+  PYTHON=".venv-$environment/bin/python" bash scripts/setup.bash "$environment"
 done
 ```
 
@@ -112,11 +112,12 @@ data:
   fafa_image_cache: cache/person-images
   fafa_query_cache: cache/person-queries
 person_encoder:
-  python: .venv-fafa/bin/python
+  python: .venv-person-encoder/bin/python
+  fafa_config: configs/person_encoder.yaml
 ```
 
 Raw images are not committed. Prepare them using the
-[dataset guide](dataset/README.md). The separate FAFA environment is needed for
+[dataset guide](dataset/README.md). The person encoder environment is needed for
 asset preparation and person-feature extraction; completed caches support
 training and retrieval using only the proposed environment.
 
@@ -174,7 +175,7 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 
 | Group | Values |
 | --- | --- |
-| Schedule | `train.epochs=20`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
+| Schedule | `train.epochs=10`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
 | Optimizer | AdamW, `lr=1e-4`, `text_lr=1e-5`, `weight_decay=0.01`, cosine decay to `min_lr_ratio=0.1` |
 | Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.1` |
 | Fine mining | `warmup_epochs=8`, `refresh_every_epochs=2`, `pool_size=100` |
@@ -183,7 +184,7 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 | Model | `dim=384`, `identity_dim=128`, `state_dim=512`, `num_heads=6`, `mlp_ratio=2`, `geo_dim=32`, `dropout=0.1`, `fda_k=6`, `coarse_beta=0.4` |
 | Matching | `background_logit=-3.5`, `selection_threshold=0.5`, `identity_threshold=0.2`, `missing_penalty=1.1`, `duplicate_iou=0.9` |
 | Retrieval | `pooling=subject_mean`, `fine_score_mode=bounded_residual`, `context_weight=0.1`, `coarse_beta=1.16`, `top_m=500`, `candidate_ks=[500]` |
-| Validation | `evaluation.every_epochs=4` |
+| Validation | `evaluation.every_epochs=3` |
 
 With two positives and enough same-ID evidence, the sampling rows give each query 2
 positives, 2 hard and 13 random same-ID negatives, 3 hard wrong-ID negatives and 12
@@ -193,11 +194,8 @@ and Top-M define the shortlist of each retrieval run. `calibrate` selects among
 the saved validation artifacts and writes the complete configuration to
 `runs/proposed-calibration/selected.yaml`.
 
-CLIP and FAFA baselines have separate environments and recipes. See the
-[baseline guide](docs/baselines.md) and [script reference](scripts/README.md).
-
-`fafa_pooling` compares two frozen FAFA aggregation rules in one run, reusing
-FAFA's environment and feature caches; see [FAFA pooling](docs/baselines/fafa_pooling.md).
+See the [script reference](scripts/README.md) for environment setup, dataset
+workflows and report export.
 
 ## Caches and outputs
 
@@ -248,10 +246,9 @@ Test never trains or selects parameters. See the
 
 | Path | Responsibility |
 | --- | --- |
-| `configs/` | Experiment and calibration settings |
+| `configs/` | Proposed experiment, frozen person encoder and calibration settings |
 | `src/rcr/common/` | Data boundaries, configuration, I/O and runtime helpers |
 | `src/rcr/dataset/` | Dataset construction and annotation audits |
-| `src/rcr/baselines/` | CLIP and native FAFA baselines |
 | `src/rcr/proposed/cache/` | Frozen feature extraction and cache readers |
 | `src/rcr/proposed/nn/` | Model equations and learned modules |
 | `src/rcr/proposed/{train,ranking,calibration,replay}.py` | Optimization, inference and offline selection |

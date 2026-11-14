@@ -78,7 +78,7 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
 ):
     cfg, data = inputs
     source = detect_inputs(cfg, data, monkeypatch)
-    native = load_config("configs/fafa.yaml")
+    native = load_config("configs/person_encoder.yaml")
     checkpoint = tmp_path / "fake-fafa.pt"
     checkpoint.write_bytes(b"weights")
     native["checkpoint"]["path"] = str(checkpoint)

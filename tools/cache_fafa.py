@@ -18,8 +18,8 @@ def main(argv=None):
         parser.error("--force requires --prepare")
     cfg = load_config(args.config)
     if args.prepare:
-        from rcr.baselines.prepare import prepare_fafa_model
         from rcr.proposed.cache.build import load_fafa_config
+        from rcr.proposed.cache.person_encoder import prepare_fafa_model
 
         prepare_fafa_model(load_fafa_config(cfg), force=args.force)
     else:

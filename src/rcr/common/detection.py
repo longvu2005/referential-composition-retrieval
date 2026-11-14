@@ -66,7 +66,7 @@ def _cache_id(index):
 
 
 class DetectionCache:
-    """Small packed CPU index shared by Proposed, FAFA and diagnostics."""
+    """Packed CPU index for person features, supervision and diagnostics."""
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -80,7 +80,10 @@ class DetectionCache:
                 "run --cache-stage detections first"
             )
         index = torch.load(
-            self.root / "index.pt", map_location="cpu", weights_only=True, mmap=True
+            str(self.root / "index.pt"),
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
         )
         if index.get("layout") != DETECTION_LAYOUT or index.get("prompt") != "person":
             raise ValueError("unsupported detection cache layout; rebuild detections")

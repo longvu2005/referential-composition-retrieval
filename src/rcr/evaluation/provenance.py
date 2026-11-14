@@ -95,7 +95,6 @@ def runtime_metadata(device) -> dict:
         "torchvision",
         "numpy",
         "Pillow",
-        "clip",
         "transformers",
         "scipy",
         "PyYAML",
