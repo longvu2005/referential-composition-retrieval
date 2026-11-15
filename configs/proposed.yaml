@@ -141,7 +141,7 @@ evaluation:
 wandb:
   enabled: true
   project: referential-composition-retrieval
-  name: proposed-kaggle-t4
+  name: proposed
   mode: offline
   log_every_steps: 20
 
@@ -150,7 +150,7 @@ runtime:
   device: cuda
   deterministic: true           # Reproducible kernels; set false only for speed.
 
-checkpoint: runs/proposed-kaggle-t4/best.pt
+checkpoint: runs/proposed/best.pt
 
 output:
-  dir: runs/proposed-kaggle-t4
+  dir: runs/proposed
