@@ -25,14 +25,20 @@ def average_precision(ranking: Sequence[str], positive_ids: Iterable[str]) -> fl
 
     positives = _positive_set(positive_ids)
 
-    hits = 0
-    precision_sum = 0.0
-    for rank, image_id in enumerate(ranking, start=1):
-        if image_id in positives:
-            hits += 1
-            precision_sum += hits / rank
+    return average_precision_at_ranks(
+        (rank for rank, image_id in enumerate(ranking, 1) if image_id in positives),
+        len(positives),
+    )
 
-    return precision_sum / len(positives)
+
+def average_precision_at_ranks(ranks: Iterable[int], num_positives: int) -> float:
+    """Compute AP from ascending positive ranks using the full positive denominator."""
+    if num_positives < 1:
+        raise ValueError("num_positives must be positive")
+    precision_sum = 0.0
+    for hits, rank in enumerate(ranks, 1):
+        precision_sum += hits / rank
+    return precision_sum / num_positives
 
 
 def recall_at_k(ranking: Sequence[str], positive_ids: Iterable[str], k: int) -> float:

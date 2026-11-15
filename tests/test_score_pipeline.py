@@ -175,29 +175,15 @@ def test_calibration_selects_fusion_that_corrects_a_fine_ranking_error(
     saved_pipeline, tmp_path
 ):
     cfg, data, _ = saved_pipeline
+    from tests.helpers import _add_gallery_image, _fusion_example
+
     cache = retrieve.GalleryCache()
-    cache.by_id["vx"] = len(cache.image_ids)
-    cache.image_ids.append("vx")
-    for name in ("scenes", "persons", "boxes", "mask"):
-        value = getattr(cache, name)
-        setattr(cache, name, torch.cat((value, value[:1])))
-    data.images_by_id["vx"] = {"image_id": "vx", "path": "val/vx.jpg"}
-    data.gt_head_boxes_by_image["vx"] = [{"identity_id": "p1"}]
+    _add_gallery_image(cache, data, "vx", "val")
     cfg["retrieval"]["top_m"] = 3
     source = retrieve.retrieve(cfg)
-    order = torch.tensor(
-        [[source["gallery_ids"].index(i) for i in ("va", "vn", "vx")]],
-        dtype=torch.int32,
-    )
-    source["coarse_rankings"] = source["coarse_topm"] = order
-    source["rankings"] = order
-    source["coarse_topm_scores"] = torch.tensor([[2.0, 1.0, 0.0]])
-    for key in ("binding_penalized", "binding_matched_mean", "binding_subject_mean"):
-        source[key] = torch.zeros(1, 3)
-    source["fafa_binding"] = source["binding_subject_mean"]
-    source["coverage"] = torch.ones(1, 3)
-    source["context"] = torch.tensor([[5.6, 5.601, 1.6]])
+    source = _fusion_example(source, [5.6, 5.601, 1.6])
     source = replay_rankings(source, fine_coarse_weight=0)
+    order = source["coarse_rankings"]
     assert source["rankings"][0, 0] == order[0, 1]
     path = tmp_path / "controlled-val.pt"
     torch.save(source, path)
@@ -216,21 +202,15 @@ def test_calibration_selects_fusion_that_corrects_a_fine_ranking_error(
     assert selected["selected_retrieval"]["coverage_weight"] == 0.04
 
 
-@pytest.mark.parametrize(
-    "key,value",
-    [("context_weight", 0.2), ("coverage_weight", 0.2), ("pooling", "penalized")],
-)
-def test_calibration_rejects_diagnostic_changes_to_the_trained_fine_scorer(
-    saved_pipeline, tmp_path, key, value
-):
+def test_calibration_rejects_diagnostic_pooling_changes(saved_pipeline, tmp_path):
     cfg, _, _ = saved_pipeline
     source = retrieve.retrieve(cfg)
-    changed = replay_rankings(source, **{key: value})
+    changed = replay_rankings(source, pooling="penalized")
     path = tmp_path / "ablation.pt"
     torch.save(changed, path)
     root = tmp_path / "forbidden-selection"
     with pytest.raises(
-        ValueError, match="requires the trained linear coefficients and pooling"
+        ValueError, match="requires the checkpoint pooling and fine score mode"
     ):
         calibration.calibrate({"rankings": [str(path)], "output_dir": str(root)})
     assert not root.exists()

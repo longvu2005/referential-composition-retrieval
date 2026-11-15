@@ -14,6 +14,7 @@ from subprocess import DEVNULL, PIPE, Popen
 
 from rcr.common.data import split_fingerprint
 from rcr.dataset.cases import CASE_TYPES
+from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
 
 PROTOCOL = "rcr-id-full-v1"
 BENCHMARK_FIELDS = (
@@ -70,6 +71,73 @@ def benchmark_metadata(data, split, output) -> dict:
         "evaluation_protocol": PROTOCOL,
         "self_exclusion": "query_image",
         "ranking_scope": "complete_split_gallery",
+    }
+
+
+def retrieval_metadata(
+    data,
+    cfg: dict,
+    output: dict,
+    checkpoint: dict,
+    *,
+    checkpoint_sha256: str,
+    device,
+    elapsed_seconds: float,
+) -> dict:
+    """Describe rankings from training validation or a loaded checkpoint alike."""
+    settings = cfg["retrieval"]
+    train_cfg = checkpoint["config"]
+    return {
+        "method": "proposed",
+        "config": {
+            **cfg,
+            "model": {**cfg["model"], "fine_matching": output["fine_matching"]},
+        },
+        "retrieval": settings,
+        "score_schema_version": output["score_schema_version"],
+        "schema_version": output["schema_version"],
+        "score_config": output["score_config"],
+        "clip_text_stats": output.get("clip_text_stats"),
+        **{
+            key: settings[key]
+            for key in (
+                "fine_score_mode",
+                "context_weight",
+                "coverage_weight",
+                "fine_coarse_weight",
+            )
+        },
+        "checkpoint": str(cfg["checkpoint"]),
+        "checkpoint_sha256": checkpoint_sha256,
+        "validation_sha256": split_fingerprint(data, "val"),
+        **benchmark_metadata(data, cfg["split"], output),
+        **runtime_metadata(device),
+        "architecture_version": checkpoint["architecture_version"],
+        "representation": checkpoint.get("representation", "shared_person"),
+        "binding_scale": output["binding_scale"],
+        "fine_matching": output["fine_matching"],
+        "encoder_metadata": checkpoint.get("encoder_metadata"),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
+        "best_epoch": checkpoint.get("best_epoch"),
+        "best_val_full_map": checkpoint.get("best_full_map"),
+        "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
+        "best_val_checkpoint_score": checkpoint.get("best_score"),
+        **{
+            f"best_{key}": checkpoint.get(f"best_{key}")
+            for key in CALIBRATED_RETRIEVAL_KEYS
+        },
+        **{
+            key: checkpoint.get(key)
+            for key in (
+                "cache_id",
+                "scene_cache_id",
+                "detection_cache_id",
+                "native_cache",
+            )
+        },
+        "query_subset": len(output["sample_ids"]) != len(data.splits[cfg["split"]]),
+        "elapsed_seconds": elapsed_seconds,
     }
 
 

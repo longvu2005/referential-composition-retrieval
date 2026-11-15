@@ -7,16 +7,21 @@ COMPATIBLE_ARCHITECTURE_VERSIONS = (
     "clip-b32-fafa-partial-match-v2",
 )
 
-TRAINED_FINE_KEYS = (
+FIXED_FINE_KEYS = (
     "pooling",
     "fine_score_mode",
-    "context_weight",
-    "coverage_weight",
 )
 
+CALIBRATION_PARAMETERS = {
+    "coverage_weights": "coverage_weight",
+    "context_weights": "context_weight",
+    "fine_coarse_weights": "fine_coarse_weight",
+}
+CALIBRATED_RETRIEVAL_KEYS = tuple(CALIBRATION_PARAMETERS.values())
+
 SELECTED_RETRIEVAL_KEYS = (
-    *TRAINED_FINE_KEYS,
-    "fine_coarse_weight",
+    *FIXED_FINE_KEYS,
+    *CALIBRATED_RETRIEVAL_KEYS,
     "coarse_beta",
     "top_m",
 )

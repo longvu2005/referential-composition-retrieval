@@ -4,11 +4,13 @@ import json
 
 import pytest
 import torch
+import yaml
 
+from rcr.common.io import sha256_file
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import retrieve
 from rcr.proposed import train as training
-from tests.helpers import _has_gradient, _only_loss
+from tests.helpers import _add_gallery_image, _fusion_example, _has_gradient, _only_loss
 
 
 @pytest.mark.parametrize("warmup", [0, 1])
@@ -60,6 +62,9 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert saved["state_supervised_pairs"] > 0
     assert set(saved["text_encoder"]) == {"projection", "text_policy"}
     assert "optimizer" not in saved and "scaler" not in saved
+    assert "training_state" not in saved
+    assert last["training_state"]["progress"]["epoch"] == 3
+    assert last["training_state"]["progress"]["phase"] == "epoch_end"
     assert wandb_run.finished
 
 
@@ -168,7 +173,7 @@ def test_training_validation_matches_run_with_the_same_parameters(
     monkeypatch.setattr(retrieve, "GalleryCache", lambda *args, **kwargs: cache)
     monkeypatch.setattr(retrieve, "check_query_text_config", lambda *args: None)
     monkeypatch.setattr(retrieve, "check_cache_config", lambda *args: None)
-    run = {**cfg, "checkpoint": str(checkpoint), "split": "val"}
+    run = yaml.safe_load((checkpoint.parent / "selected.yaml").read_text())
     retrieve.retrieve(run)
     result = evaluate_run(run, data=data)
     trained = json.loads(
@@ -177,3 +182,73 @@ def test_training_validation_matches_run_with_the_same_parameters(
     assert f"candidate_recall_{cfg['retrieval']['top_m']}" in result["overall"]
     for key, value in result["overall"].items():
         assert trained["overall"][key] == pytest.approx(value, abs=1e-12), key
+
+
+def test_training_selects_checkpoint_after_calibration_without_feedback(
+    tiny_training_run, monkeypatch
+):
+    from rcr.evaluation.report import load_run
+
+    cfg, cache, wandb_run, _ = tiny_training_run
+    cfg["train"].update(epochs=2)
+    cfg["retrieval"]["top_m"] = 3
+    data = training.load_rcr_data(None)
+    _add_gallery_image(cache, data, "vx", "val")
+    retrieve_rankings = training.retrieve_rankings
+    calls = []
+
+    def controlled(*args, **kwargs):
+        calls.append(kwargs["fine_coarse_weight"])
+        source = retrieve_rankings(*args, **kwargs)
+        context = [5.6, 6.2, 1.6] if len(calls) == 1 else [6.2, 5.6, 1.6]
+        return _fusion_example(source, context)
+
+    monkeypatch.setattr(training, "retrieve_rankings", controlled)
+    checkpoint = training.train(cfg)
+    best = torch.load(checkpoint, weights_only=True)
+    last = torch.load(checkpoint.parent / "last.pt", weights_only=True)
+    selected = yaml.safe_load((checkpoint.parent / "selected.yaml").read_text())
+    history = [
+        json.loads(line)
+        for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
+    ]
+    assert calls == [0.15, 0.15]
+    assert [row["val_calibration_reference_score"] for row in history] == [0.5, 1.0]
+    assert [row["val_checkpoint_score"] for row in history] == [1.0, 1.0]
+    assert [row["val_fine_coarse_weight"] for row in history] == [0.25, 0.15]
+    assert best["epoch"] == best["best_epoch"] == 1
+    assert last["epoch"] == 2 and last["best_epoch"] == 1
+    assert best["validation"]["fine_coarse_weight"] == 0.25
+    assert last["validation"]["fine_coarse_weight"] == 0.15
+    assert best["best_fine_coarse_weight"] == last["best_fine_coarse_weight"] == 0.25
+    assert best["config"]["retrieval"] == cfg["retrieval"]
+    assert selected["retrieval"]["fine_coarse_weight"] == 0.25
+    assert selected["selected_retrieval"]["fine_coarse_weight"] == 0.25
+    assert selected["selected_checkpoint_sha256"] == sha256_file(checkpoint)
+    assert wandb_run.summary["best_fine_coarse_weight"] == 0.25
+    assert wandb_run.summary["best_val_checkpoint_score"] == 1.0
+    for epoch in (1, 2):
+        directory = checkpoint.parent / "evaluation" / f"epoch_{epoch:03d}"
+        assert (directory / "summary.csv").is_file()
+        assert (directory / "selection.json").is_file()
+    reported = load_run("proposed", checkpoint.parent / "selected/val", "val")
+    assert reported["metrics"]["overall"]["full_map"] == 1.0
+    metadata = json.loads((checkpoint.parent / "selected/val/run.json").read_text())
+    assert metadata["checkpoint_epoch"] == metadata["selection"]["epoch"] == 1
+    assert metadata["fine_coarse_weight"] == 0.25
+
+
+@pytest.mark.parametrize("weights", [[], [0.1, 0.1], [-0.1], [float("nan")], [True]])
+@pytest.mark.parametrize(
+    "key", ["coverage_weights", "context_weights", "fine_coarse_weights"]
+)
+def test_training_rejects_invalid_calibration_before_reading_data(
+    tiny_training_run, monkeypatch, weights, key
+):
+    cfg, _, _, _ = tiny_training_run
+    cfg["evaluation"]["calibration"][key] = weights
+    monkeypatch.setattr(
+        training, "load_rcr_data", lambda *args: pytest.fail("read training data")
+    )
+    with pytest.raises(ValueError, match=key):
+        training.train(cfg)

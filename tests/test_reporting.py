@@ -14,7 +14,7 @@ from tools.report import main
 
 def test_default_report_exports_evaluated_proposed_results(saved_pipeline, tmp_path):
     cfg, data, _ = saved_pipeline
-    cfg["output"]["dir"] = str(tmp_path / "runs" / "proposed")
+    cfg["output"]["dir"] = str(tmp_path / "runs" / "proposed" / "selected")
     output = retrieve(cfg)
     metrics = evaluate_run(cfg, data=data, output=output)
 

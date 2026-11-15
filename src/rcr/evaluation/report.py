@@ -35,7 +35,7 @@ class ReportError(ValueError):
 
 def default_runs(root: str | Path, split: str) -> dict[str, Path]:
     root = Path(root)
-    return {name: root / name / split for name in METHODS}
+    return {name: root / name / "selected" / split for name in METHODS}
 
 
 def _read(path):

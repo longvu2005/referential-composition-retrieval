@@ -17,6 +17,12 @@ from rcr.proposed.train import _make_checkpoint
 from tests.helpers import TextBackbone, TinyCache, Tokenizer, WandbRun, _sample
 
 
+def _workflow_config():
+    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text(encoding="utf-8"))
+    cfg["evaluation"]["calibration"] = {"fine_coarse_weights": [0.15, 0.10, 0.20, 0.25]}
+    return cfg
+
+
 @pytest.fixture(autouse=True)
 def _restore_determinism_switches():
     workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
@@ -97,7 +103,7 @@ def tiny_training_run(tmp_path, monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init_wandb))
 
-    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text(encoding="utf-8"))
+    cfg = _workflow_config()
     cfg["data"] = {
         "final_dir": "unused",
         "image_root": "unused",
@@ -202,7 +208,7 @@ def saved_pipeline(tmp_path, monkeypatch):
         },
         gt_head_boxes_by_image={i: [{"identity_id": "p1"}] for i in cache.image_ids},
     )
-    cfg = yaml.safe_load(Path("configs/proposed.yaml").read_text())
+    cfg = _workflow_config()
     cfg["model"].update(dim=8, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
     cfg["retrieval"].update(
         top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2

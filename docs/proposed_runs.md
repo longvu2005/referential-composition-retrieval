@@ -82,13 +82,26 @@ all training epochs, independently of context and mining warmup. The first epoch
 uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
 the base rates. Actual rates are recorded in `history.jsonl` and W&B.
 
-Periodic validation uses the same fine score and pooling as training. It selects
-`best.pt` using the final fused ranking, with `retrieval.fine_coarse_weight=0.15`
-throughout training. The coarse and state objectives remain separate from the
-fine objective. Changing `retrieval.context_weight`, `retrieval.coverage_weight`
-or `retrieval.pooling` requires a newly trained run.
+Periodic validation uses the same fine score and pooling as training. Each
+validation retrieves once and evaluates
+the 9×9×9 Cartesian product under `evaluation.calibration` on CPU:
 
-Training requires a fresh run directory. Obsolete loss/scoring configs and
+| Coefficient | YAML grid | Values |
+| --- | --- | --- |
+| Coverage `a` | `coverage_weights` | `0.04..0.12`, step `0.01` (9) |
+| Raw context `b` | `context_weights` | `0.02..0.06`, step `0.005` (9) |
+| Coarse fusion `eta` | `fine_coarse_weights` | `0.10..0.20`, step `0.0125` (9) |
+
+It selects the best of all 729 triples, then compares that calibrated score with
+previous epochs to choose `best.pt`. Training and hard mining keep the configured
+base coefficients `a=0.04`, `b=0.10`, `eta=0.15`; validation choices never feed
+back into them. The base context weight is outside the calibration grid and is
+not added to the search; there are exactly 729 candidates.
+The coarse and state objectives remain separate from the fine objective.
+Changing training coefficients or pooling is a separate training experiment.
+
+Fresh training requires a new run directory; `--resume` explicitly continues its
+full-state `last.pt`. Obsolete loss/scoring configs and
 checkpoints trained with a previous fine scorer are rejected. Frozen feature
 caches can be reused when their provenance matches. To disable global-state
 training, also set `retrieval.coarse_beta=0`.
@@ -188,13 +201,72 @@ After context warmup, the model is evaluated on the complete validation split at
 0.5 * overall Full-mAP + 0.5 * macro-case Full-mAP.
 ```
 
+This formula is maximized over the calibration grid for each evaluated epoch.
+Equal scores retain the first `(a, b, eta)` triple in configured order, then the earliest
+epoch. `evaluation/epoch_NNN/` stores `val_metrics.json`, grid `summary.csv` and
+`selection.json`. The winning checkpoint stores its own `validation` row and
+`best_coverage_weight`, `best_context_weight` and `best_fine_coarse_weight`;
+its `config` remains the effective training settings.
+Training writes `selected.yaml`, `selection.json`, the winning grid summary and
+`selected/val/{rankings.pt,run.json,metrics.json}` alongside `best.pt`. Only the
+winning epoch's full ranking artifact is retained. Every checkpoint improvement
+updates the frozen checkpoint SHA256 and validation fingerprint.
+
 Use a separate output directory for every seed or ablation:
 
 ```bash
 python tools/run.py train --config configs/proposed.yaml \
   --set train.seed=1 output.dir=runs/proposed-seed1
-python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
+python tools/run.py run --config runs/proposed-seed1/selected.yaml --split test
 ```
+
+### Resume training
+
+Continue the same run and original total epoch schedule:
+
+```bash
+python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume
+python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume runs/proposed-kaggle-t4/last.pt
+```
+
+`last.pt` is atomically replaced after initialization, every
+`checkpointing.every_steps` batches (50 by default), before validation, and at
+epoch completion. It contains model/text-projection weights, AdamW moments and
+parameter groups, AMP scaler state, Python/NumPy/Torch/CUDA RNGs, global step,
+epoch/next-batch position, the seeded batch plan, both sampler generator states,
+current hard-negative pools, partial epoch totals, state-supervision counters,
+completed history, W&B identity and calibrated best selection.
+
+Resume checks the versioned state, source implementation, numerical config,
+Python/library/device runtime, ordered train/val inputs and cache fingerprints.
+It uses the complete original run directory and its `last.pt`; `best.pt` and
+`selected.yaml` remain bound together. Keep the same output path and numerical
+experiment, including the total epoch count. Changing checkpoint cadence or
+logging transport is operational. An incompatible resume is rejected before
+rewriting run history or preparing new supervision. Legacy weights-only
+checkpoints lack information needed for resume and are rejected; loading weights
+with a new optimizer would be a different experiment.
+
+SIGINT/SIGTERM request a stop at a completed optimizer batch. A forced kill or
+exception inside a batch leaves the previous complete checkpoint intact. Resume
+repeats only work after the last saved batch, restores the actual hard pools,
+and resumes the cosine schedule and warmup/mining counters at their original
+positions. A pending validation does not repeat completed training batches.
+Its raw Top-M scores are cached against the exact `last.pt` hash so a saved
+retrieval can be reused after interruption during calibration. That transient
+file is deleted only after epoch completion has been checkpointed.
+
+Best checkpoint/selection artifacts and history are published before the final
+epoch checkpoint. Resume reconciles uncommitted history and republishes pending
+validation if a previous publication was interrupted. Completed runs are a
+no-op; a fresh launch into an existing run still requires `--resume`.
+
+Online W&B uses the saved run ID with `resume=allow`. Offline attempts keep their
+local logs; `history.jsonl` is the canonical committed epoch history. Remote W&B
+may already contain steps after the checkpoint that must be replayed. Numerical
+resume checks use CPU interruption tests; GPU kernel nondeterminism still has
+the limits described below. No automatic training retry or GPU allocation is
+enabled by the resume feature.
 
 ### Seeds and reproducibility
 
@@ -234,29 +306,44 @@ tests.
 
 W&B config also records the effective `optimizer.schedule=cosine`. The existing
 global gradient norm is accompanied by model/text-projection norms at the same
-logging interval. Validation adds only ID-mAP, Full-mAP per populated query case,
-and `val/candidate_recall`: the fraction of Full Positives retained in the
+logging interval. Validation logs calibrated Full-mAP, macro-case Full-mAP,
+checkpoint score, all three selected coefficients, the first grid triple's reference
+score, ID-mAP, Full-mAP per populated query case, and `val/candidate_recall`:
+the fraction of Full Positives retained in the
 configured Coarse Top-M (recorded under `retrieval.top_m`). These validation
-diagnostics are also stored in `history.jsonl`; checkpoint selection is unchanged.
+diagnostics are also stored in `history.jsonl`.
 
-## 4. Retrieve validation, then select and freeze it
+## 4. Inspect validation and optional offline calibration
+
+The standard training command already calibrates each scheduled validation and
+freezes the best checkpoint. Test can use `runs/proposed/selected.yaml` directly;
+no further GPU validation or CPU calibration is required. Reports read the saved
+selected validation result:
 
 ```bash
-python tools/run.py run --config configs/proposed.yaml --split val
+python tools/report.py --split val
+```
+
+The optional `calibrate` command reuses the same search and selection code for
+exported validation artifacts, including an existing checkpoint:
+
+```bash
 python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Use the saved `runs/proposed/config.yaml` in the first command if training
-used path or parameter overrides. List the run's `val/rankings.pt` under
-`rankings` in `configs/calibration.yaml`. The artifact embeds its actual run
+List exported validation `rankings.pt` files under `rankings` in
+`configs/calibration.yaml`; point them at the selected validation output of the run.
+The artifact embeds its actual run
 configuration, checkpoint fingerprint and fixed matching settings; no separate
 model config or top-level `method` is needed in the calibration YAML.
 
-Calibration compares each listed validation artifact at the configured
-`fine_coarse_weights: [0.15, 0.10, 0.20, 0.25]`. This CPU-only eta search uses
+Calibration uses the artifact's embedded `evaluation.calibration` grids unless
+the offline YAML explicitly overrides `coverage_weights`, `context_weights` or
+`fine_coarse_weights`. A missing axis without an embedded grid keeps its recorded
+coefficient. This CPU-only search uses
 saved fine evidence and `coarse_topm_scores`; it never loads model weights or
-runs inference. Omit `fine_coarse_weights` to keep each artifact's recorded eta.
-The first artifact, then the first eta in configured order, wins equal-score ties.
+runs inference.
+The first artifact, then the first `(a, b, eta)` in configured order, wins equal-score ties.
 
 `coarse_beta` and `top_m` define the shortlist. Another value requires retrieving
 validation again and listing the resulting artifact:
@@ -267,12 +354,15 @@ python tools/run.py run --config runs/proposed/config.yaml --split val \
 ```
 
 All artifacts must come from one checkpoint and the complete validation split.
-The Linear coefficients and pooling remain the trained values. The default
+Pooling and fine score mode remain the trained values. The default
 `selection_metric: checkpoint_score` matches training: the mean of overall
 Full-mAP and macro-case Full-mAP over populated cases. `full_map` and
 `macro_full_map` are also supported. Every artifact receives the official
-evaluation; ties use the configured artifact/eta order. `summary.csv` records
-`macro_full_map` and `checkpoint_score`; `selection.json` records the criterion
+evaluation for the original artifact and winner; candidate selection reuses the
+official AP sum with the fixed coarse tail. `summary.csv` records each triple,
+`full_map`, `macro_full_map`, `checkpoint_score`, per-case Full-mAP and coarse
+candidate recall. Full identity/recall/branch diagnostics are saved for the winner.
+`selection.json` records the number of candidates, criterion
 and the difference to the first listed artifact.
 
 Outputs are `summary.csv`, `selection.json`, `selected.yaml` and the best
@@ -293,10 +383,11 @@ weights remain fixed.
 `retrieval.pooling` accepts `penalized`, `matched_mean` and `subject_mean`.
 The checked-in config uses `subject_mean`; omitted keys use `penalized`.
 Every retrieval exports all three binding tensors for diagnostic replay. Deployable
-retrieval and calibration retain the trained pooling and Linear coefficients.
+retrieval and calibration retain the trained pooling and fine score mode.
 Compare alternative values by training separate runs and selecting on validation.
-The checked-in coverage/context coefficients `0.04`/`0.10` and eta `0.15` are
-starting values, not measured optima. Raw context is not activated or gated by
+The checked-in base coefficients `0.04`/`0.10`/`0.15` remain fixed during training
+and mining. Inference uses the validation-selected triple.
+Raw context is not activated or gated by
 coverage. At zero coverage its contribution can still be nonzero; identity
 matching, FDA missing penalties and coarse identity evidence remain important.
 
@@ -304,7 +395,7 @@ matching, FDA missing penalties and coarse identity evidence remain important.
 
 ```bash
 python tools/run.py run \
-  --config runs/proposed-calibration/selected.yaml \
+  --config runs/proposed/selected.yaml \
   --split test
 ```
 
@@ -312,7 +403,7 @@ The runner verifies the checkpoint hash, validation fingerprint, feature cache
 identity and encoder metadata before ranking. Test labels are used only by the
 evaluator.
 
-The selected validation result is already saved by calibration; it requires
+The selected validation result is already saved during training; it requires
 no further model inference. Prepared caches and the checkpoint are needed again
 only when retrieving the separate test split.
 
@@ -348,9 +439,9 @@ See [detection separation](detection_cache.md) for import and independent builds
 contains overall and by-case metrics. Split retrieval output additionally stores
 coarse, fine, final and FAFA diagnostic rankings. The FAFA diagnostic reranks the
 same coarse Top-M with FDA binding only.
-Checkpoints are inference/reproducibility artifacts, not resumable trainer states:
-they omit optimizer/scaler state and store only the learned text projection,
-native span policy and frozen CLIP revision.
+`best.pt` is an inference artifact. `last.pt` additionally stores the full trainer
+state for resume; both store only the learned text projection, native span policy
+and frozen CLIP revision rather than duplicate the frozen backbone.
 
 For a fair ablation, change one owned component, keep data/evaluation fixed, and
 record the commit, full YAML, seed, runtime and validation result.
@@ -410,12 +501,13 @@ python tools/run.py evaluate --config configs/proposed.yaml --split val \
 ```
 
 Omitted replay parameters reuse recorded values. The only fine scorer is
-`linear`. `--fine-coarse-weight` changes postprocessing and can be selected on
-validation. `--pooling`, `--coverage-weight` and `--context-weight` are diagnostic
-changes to the trained scorer: they mark `fine_score_ablation` and cannot be
-calibration sources. For example, `--context-weight 0` measures context-off
+`linear`. `--coverage-weight`, `--context-weight` and `--fine-coarse-weight` change
+postprocessing and can be selected on validation. `--pooling` changes mark
+`fine_score_ablation` and cannot be calibration sources.
+For example, `--context-weight 0` measures context-off
 behavior on the same checkpoint; it does not retrain a context-free model.
-Official retrieval verifies trained coefficients and pooling against the checkpoint.
+Official retrieval verifies trained pooling against the checkpoint and all three
+coefficients against a frozen selection when present.
 `--coarse-beta` and `--top-m` accept only their recorded values; retrieve again
 for another shortlist. Replay preserves provenance in a separate directory and
 removes stale selection guards.

@@ -128,6 +128,25 @@ def fine_score_components(
     )
 
 
+def normalize_fusion_scores(
+    scores: Tensor, support: Tensor, eps: float = SCORE_EPS
+) -> Tensor:
+    """Normalize one branch on the common finite coarse shortlist support."""
+    if scores.ndim != 1 or scores.shape != support.shape or support.dtype != torch.bool:
+        raise ValueError("normalization requires aligned 1D scores and boolean support")
+    result = torch.full_like(scores, -torch.inf, dtype=torch.float32)
+    if support.any():
+        values = scores[support].float()
+        if not torch.isfinite(values).all():
+            raise ValueError("fusion support contains NaN/Inf")
+        result[support] = (
+            torch.zeros_like(values)
+            if (values == values[0]).all()
+            else (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
+        )
+    return result
+
+
 def fuse_fine_coarse_scores(
     fine: Tensor, coarse: Tensor, weight: float, eps: float = SCORE_EPS
 ) -> Tensor:
@@ -147,17 +166,11 @@ def fuse_fine_coarse_scores(
     if weight == 0:
         return fine
     valid = torch.isfinite(coarse)
-    fused = torch.full_like(fine, -torch.inf)
-    if valid.any():
-
-        def normalize(values):
-            if (values == values[0]).all():
-                return torch.zeros_like(values)
-            return (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
-
-        fused[valid] = normalize(fine[valid]) + weight * normalize(coarse[valid])
-        if not torch.isfinite(fused[valid]).all():
-            raise ValueError("fine/coarse fusion overflowed float32")
+    fused = normalize_fusion_scores(
+        fine, valid, eps
+    ) + weight * normalize_fusion_scores(coarse, valid, eps)
+    if not torch.isfinite(fused[valid]).all():
+        raise ValueError("fine/coarse fusion overflowed float32")
     return fused
 
 

@@ -12,6 +12,7 @@ from rcr.common.data import RCRData, required_identity_ids, split_image_ids
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.metrics import (
     average_precision,
+    average_precision_at_ranks,
     candidate_recall_at_k,
     recall_at_k,
 )
@@ -36,6 +37,68 @@ def selection_metrics(result: dict) -> dict[str, float]:
         "macro_full_map": macro,
         "checkpoint_score": 0.5 * (full_map + macro),
     }
+
+
+class TopMSelectionEvaluator:
+    """Reuse the fixed coarse tail while scoring complete-gallery validation AP.
+
+    The source artifact and labels must first pass evaluate_retrieval_output.
+    Candidate orders permute only the existing Top-M; no positive is discarded.
+    """
+
+    def __init__(self, samples: Sequence[dict], output: dict):
+        gallery = {image: index for index, image in enumerate(output["gallery_ids"])}
+        self.samples = samples
+        self.width = output["coarse_topm"].shape[1]
+        self.tails = []
+        self.denominators = []
+        masks = []
+        for sample, top, coarse in zip(
+            samples,
+            output["coarse_topm"].tolist(),
+            output["coarse_rankings"].tolist(),
+            strict=True,
+        ):
+            positives = {gallery[image] for image in sample["positive_image_ids"]}
+            self.denominators.append(len(positives))
+            masks.append([index in positives for index in top])
+            self.tails.append(
+                [
+                    rank
+                    for rank, index in enumerate(coarse[self.width :], self.width + 1)
+                    if index in positives
+                ]
+            )
+        self.positives = torch.tensor(masks, dtype=torch.bool)
+        self.cases = {
+            case: [i for i, row in enumerate(samples) if row["case_type"] == case]
+            for case in CASE_TYPES
+        }
+
+    def evaluate(self, order: torch.Tensor) -> dict:
+        """Use the official AP summation order for each shortlist permutation."""
+        if order.shape != self.positives.shape or order.device.type != "cpu":
+            raise ValueError("selection requires CPU orders aligned with coarse_topm")
+        ranks = [[] for _ in self.samples]
+        for query, position in self.positives.gather(1, order).nonzero().tolist():
+            ranks[query].append(position + 1)
+        aps = [
+            average_precision_at_ranks([*head, *tail], denominator)
+            for head, tail, denominator in zip(
+                ranks, self.tails, self.denominators, strict=True
+            )
+        ]
+        return {
+            "overall": {"num_queries": len(aps), "full_map": fmean(aps)},
+            "by_case": {
+                case: {
+                    "num_queries": len(indices),
+                    "full_map": fmean(aps[index] for index in indices),
+                }
+                for case, indices in self.cases.items()
+                if indices
+            },
+        }
 
 
 def evaluate_retrieval_output(

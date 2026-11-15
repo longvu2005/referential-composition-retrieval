@@ -1,7 +1,6 @@
 """Atomic tensor files with a disk-space check before allocating a temporary."""
 
 import errno
-import os
 import shutil
 from pathlib import Path
 
@@ -48,20 +47,5 @@ def save_torch(value, path: Path) -> None:
         require_disk_space(path.parent, tensor_bytes(value))
         torch.save(value, temporary)
         temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def link_checkpoint(source: Path, target: Path) -> None:
-    """A best/last hard link saves a copy; replacing last preserves an older best."""
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.unlink(missing_ok=True)
-    try:
-        try:
-            os.link(source, temporary)
-        except OSError:
-            require_disk_space(target.parent, source.stat().st_size)
-            shutil.copyfile(source, temporary)
-        temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)

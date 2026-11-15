@@ -60,9 +60,11 @@ bash scripts/methods/proposed.bash val
 bash scripts/methods/proposed.bash test
 ```
 
-Validation prepares assets, builds caches, trains, retrieves validation rankings
-and selects the validation artifact through `configs/calibration.yaml`. Test
-uses `runs/proposed-calibration/selected.yaml` and its frozen selection.
+Validation prepares assets, builds caches and trains. Every scheduled validation
+calibrates all 729 `(coverage, context, fusion)` triples, then competes for
+`best.pt` by the calibrated score.
+Training saves `selected.yaml` and its selected validation results under the
+configured `output.dir`; test resolves that directory from `configs/proposed.yaml`.
 
 The recipe defaults to `.venv-proposed/bin/python`. Set `PYTHON` to use another
 matching environment:
@@ -78,10 +80,21 @@ construction and training have separate commands. Training uses pooled FAFA
 image features and reads native query/target tokens for context after warmup.
 The query cache must cover train before training starts.
 
+To continue the same run, call the training CLI directly rather than repeat
+the preparation recipe:
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume
+```
+
+This restores the versioned full state in `last.pt`; `best.pt` is for inference.
+The total epoch count remains the original schedule. See the
+[resume contract](../docs/proposed_runs.md#resume-training).
+
 Raw images and pretrained assets must be available as described in the
 [experiment protocol](../docs/proposed_runs.md). Test uses the checkpoint,
-matching settings, trained pooling/Linear coefficients and the validation-selected
-fusion weight.
+matching settings, trained pooling and the validation-selected coverage, context
+and fusion coefficients.
 
 ## Reports
 
@@ -89,9 +102,9 @@ Export evaluated JSON from any environment with the base package installed:
 
 ```bash
 .venv-dataset/bin/python tools/report.py --split val \
-  --run proposed=runs/proposed-calibration/selected/val
+  --run proposed=runs/proposed/selected/val
 .venv-dataset/bin/python tools/report.py --split test \
-  --run proposed=runs/proposed-calibration/selected/test
+  --run proposed=runs/proposed/selected/test
 ```
 
 See the [reporting guide](../docs/experiments.md) for table formats and saved-run

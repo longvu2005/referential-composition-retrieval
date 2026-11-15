@@ -10,25 +10,34 @@ assets and historical run outputs are not committed.
 
 ```bash
 bash scripts/methods/proposed.bash val
-python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
+python tools/report.py --split val
 ```
 
-The validation recipe prepares assets, builds caches, trains, retrieves and
-calibrates. Calibration compares saved validation artifacts while retaining the
-trained Linear coefficients and pooling. It searches the configured small
-`fine_coarse_weights` grid without model inference. For an existing checkpoint, retrieve from
-its saved configuration and calibrate separately:
+The validation recipe prepares assets, builds caches and trains. Each scheduled
+validation retrieves once and searches the 729 triples under
+`evaluation.calibration`: `coverage_weights`, `context_weights` and
+`fine_coarse_weights`. Search runs on CPU with pooling fixed. Checkpoints
+compete using the calibrated score. Training saves the winner's `selected.yaml`
+and complete validation result under `runs/proposed/selected/val/`.
+
+Optional offline comparison reuses the same calibration implementation:
 
 ```bash
-.venv-proposed/bin/python tools/run.py run --config runs/proposed/config.yaml --split val
 .venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
 ```
 
-Use a fresh `output.dir` for each training experiment. List its validation
-`rankings.pt` under `configs/calibration.yaml: rankings`. Check fingerprints,
+Use a fresh `output.dir` for each training experiment. The optional calibration
+YAML lists exported validation artifacts; its default source is the training
+winner's `selected/val/rankings.pt`. Check fingerprints,
 query/gallery/case counts, encoder text statistics and Git state before
 interpreting results. Validation selects parameters and checkpoints; test
 provides the final evaluation.
+
+Candidate summaries report the three coefficients, complete-gallery Full-mAP,
+macro-case Full-mAP, checkpoint score and coarse candidate recall. Calibration
+caches the fixed tail and reuses the official AP summation; the winner receives
+the full evaluator, including identity, recall and branch diagnostics. Only the
+winning triple's full rankings are retained.
 
 ## Tables
 
@@ -47,12 +56,12 @@ with two decimals by default. An absent case is blank/—/--. Diagnostic ranking
 and shortlist metrics stay in the evaluation output.
 
 ```bash
-python tools/report.py --split val --run proposed=runs/proposed-calibration/selected/val
+python tools/report.py --split val
 python tools/report.py --split val --formats csv tex --decimals 3 \
-  --run proposed=runs/proposed-calibration/selected/val
+  --run proposed=runs/proposed/selected/val
 ```
 
-The default input is `runs/proposed/<split>`. `--runs-root` changes that root;
+The default input is `runs/proposed/selected/<split>`. `--runs-root` changes that root;
 `--run proposed=DIRECTORY` selects a specific split result folder. Pass the
 calibrated result directory when reporting the selected model. Reporting
 validates all inputs before writing tables and overwrites active exports.
@@ -63,7 +72,7 @@ To evaluate saved rankings without encoder inference, use the proposed or
 evaluation environment with the configuration that produced them:
 
 ```bash
-.venv-proposed/bin/python tools/run.py evaluate --config runs/proposed/config.yaml --split val
+.venv-proposed/bin/python tools/run.py evaluate --config runs/proposed/selected.yaml --split val
 python tools/report.py --split val
 ```
 
@@ -74,11 +83,11 @@ and consistent per-query metrics are required for reports.
 
 ## Frozen test
 
-Run validation and calibration on the current dataset export before test:
+After training has selected a calibrated checkpoint on the current validation export:
 
 ```bash
 bash scripts/methods/proposed.bash test
-python tools/report.py --split test --run proposed=runs/proposed-calibration/selected/test
+python tools/report.py --split test
 ```
 
 Test verifies the selected checkpoint, validation fingerprint and retrieval

@@ -181,3 +181,36 @@ def _rank(tiny_ranker, **overrides):
         gallery_ids=cache.image_ids,
         **{**settings, **overrides},
     )
+
+
+def _add_gallery_image(cache, data, image_id, split):
+    cache.by_id[image_id] = len(cache.image_ids)
+    cache.image_ids.append(image_id)
+    for name in ("scenes", "persons", "boxes", "mask"):
+        value = getattr(cache, name)
+        setattr(cache, name, torch.cat((value, value[:1])))
+    data.images_by_id[image_id] = {
+        "image_id": image_id,
+        "path": f"{split}/{image_id}.jpg",
+    }
+    data.gt_head_boxes_by_image[image_id] = [{"identity_id": "p1"}]
+
+
+def _fusion_example(source, context):
+    """Keep a real artifact contract while controlling a three-candidate tradeoff."""
+    from rcr.proposed.replay import replay_rankings
+
+    source = dict(source)
+    order = torch.tensor(
+        [[source["gallery_ids"].index(image) for image in ("va", "vn", "vx")]],
+        dtype=torch.int32,
+    )
+    source["coarse_rankings"] = source["coarse_topm"] = order
+    source["rankings"] = order
+    source["coarse_topm_scores"] = torch.tensor([[2.0, 1.0, 0.0]])
+    for mode in ("penalized", "matched_mean", "subject_mean"):
+        source[f"binding_{mode}"] = torch.zeros(1, 3)
+    source["fafa_binding"] = source[f"binding_{source['score_config']['pooling']}"]
+    source["coverage"] = torch.ones(1, 3)
+    source["context"] = torch.tensor([context])
+    return replay_rankings(source)

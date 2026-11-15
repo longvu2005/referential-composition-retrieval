@@ -222,8 +222,9 @@ H = S_context
 ```
 
 The binding scale is fixed at 1. `a = retrieval.coverage_weight` and
-`b = retrieval.context_weight` are fixed nonnegative coefficients shared by
-training, inference and mining. The checked-in values are 0.04 and 0.10.
+`b = retrieval.context_weight` are nonnegative coefficients. Training and mining
+keep the checked-in values 0.04 and 0.10. Validation calibrates them independently
+for inference, together with the coarse fusion weight eta.
 Context is raw, without activation or coverage gating. Its direct score gradient
 is `b`; the score's partial derivative with respect to coverage is `a`.
 Coverage and FDA binding are detached, so context does not change assignment
@@ -336,16 +337,17 @@ trainable parameters.
 temperatures. `loss.context_temperature` scales the pairwise context loss;
 `retrieval.context_weight` scales raw context and `retrieval.coverage_weight`
 scales coverage. Both are separate from the task weight `loss.context_weight`.
-Defaults are starting values, not measured optima. Pooling and both Linear
-coefficients must match training and remain fixed during calibration. An untrained state branch cannot enter
+Defaults are starting values, not measured optima. Pooling and fine score mode
+must match training. Coverage/context/fusion coefficients are selected on validation
+and frozen for test. An untrained state branch cannot enter
 training validation with a positive coarse beta.
 
-The default 20-epoch run has a short context warmup:
+The default 24-epoch run has a short context warmup:
 
 | Epochs | Active objective |
 | --- | --- |
 | 1-4 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
-| 5-20 | All five terms, with fine negative mining and context rejection |
+| 5-24 | All five terms, with fine negative mining and context rejection |
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
@@ -385,8 +387,12 @@ retain coarse order and the coarse tail is unchanged. Small floating-point
 forward differences can remain between chunk sizes.
 
 Training validation also uses this final fused ranking. `best.pt` maximizes
-`0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`. Training uses a
-fixed eta; validation-only calibration may search a small eta grid afterwards.
+`0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP` after calibration
+at every scheduled validation. Each epoch retrieves once, evaluates the configured
+729 `(a, b, eta)` triples on CPU and competes using its best score. The winning
+coefficients and checkpoint
+are frozen together. Calibration never changes the training objectives or
+configured hard-mining scores.
 
 ### Context ranking objective
 
@@ -471,8 +477,8 @@ recorded policy and checkpoint contract without installing native FAFA.
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
 Calibration selects among validation artifacts retrieved with different coarse
-beta or Top-M, and searches eta on saved scores; trained pooling and Linear
-coefficients stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
+beta or Top-M, and searches `(a, b, eta)` on saved scores; trained pooling and fine
+score mode stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 New checkpoints save the resolved matching settings, including the actual
 background. Retrieval metadata records that effective configuration even if its
@@ -504,13 +510,21 @@ with previous fine scorers are rejected; train a fresh run using the existing
 frozen caches. Each shortlisted pair is fine-scored once per retrieval.
 Calibration reads the listed validation artifacts and validation annotations,
 without opening any checkpoint, backbone or feature cache. It selects the
-artifact/eta combination with the best validation score; pooling and Linear
-coefficients stay fixed and each artifact retains its coarse beta and Top-M. The default `selection_metric` averages overall and macro-case
+artifact and coefficient triple with the best validation score; pooling stays
+fixed and each artifact retains its coarse beta and Top-M. The default `selection_metric` averages overall and macro-case
 validation Full-mAP, matching checkpoint selection; `full_map` and
-`macro_full_map` are also supported. The first artifact, then the first eta in configured order, wins equal-score
+`macro_full_map` are also supported. The first artifact, then the first triple in configured order, wins equal-score
 ties. Coarse normalization uses the complete eligible gallery; fusion
 normalization uses the complete finite Top-M support. The winning artifact receives full
 official evaluation before export.
+
+The configured grids contain 9 values each: coverage `0.04..0.12` by `0.01`,
+context `0.02..0.06` by `0.005`, and eta `0.10..0.20` by `0.0125`.
+Calibration evaluates all 729 triples in coverage/context/eta order. It normalizes
+fine scores once per `(a, b)`, reuses coarse normalization, and scores sparse
+positive ranks with the complete coarse tail. AP uses the same summation and full
+positive denominator as the ordinary evaluator. The winning score must agree
+exactly with the complete evaluator before export.
 
 `candidate_ks` remains fixed independently of Top-M and is evaluated from the
 complete coarse order. `selected.yaml` freezes the scoring settings, checkpoint

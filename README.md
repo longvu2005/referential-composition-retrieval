@@ -40,13 +40,13 @@ A constant branch contributes zero. Eta zero returns raw fine scores.
 Stable ties retain coarse order and the gallery tail stays unchanged.
 Coefficients are starting values, not measured optima for the new run.
 
-The default run trains for 20 epochs. Context is disabled in epochs 1-4 while
+The current configuration trains for 20 epochs. Context is disabled in epochs 1-4 while
 grounding, identity, coarse and global state learn. From epoch 5, all objectives
-are active and train-only fine mining refreshes every two epochs. Both optimizer
+are active; train-only fine mining starts at epoch 9 and refreshes every two epochs. Both optimizer
 groups use cosine decay throughout the run. With sufficient candidate pools,
 `semantic_hard_fraction=0.3` gives five same-ID hard condition negatives per
 32-candidate query. Wrong/missing-ID hard negatives use `hard_fraction=0.1`;
-`loss.context_rejection_weight=0.2` weights their rejection objective.
+`loss.context_rejection_weight=0.5` weights their rejection objective after mining warmup.
 
 Context ranks the Linear fine score on frozen native FDA binding. Its loss uses
 `loss.context_temperature`; `loss.context_weight` weights the task in the total
@@ -59,9 +59,9 @@ Native FAFA query/target caches must cover train before training starts.
 Use a fresh training run: checkpoints trained with previous fine scorers and
 score artifacts from older schemas are rejected. Compatible frozen caches
 remain reusable. `best.pt` maximizes the mean of overall and macro-case
-validation Full-mAP **after fusion**. Calibration searches a small eta grid on
-saved validation scores, with pooling and Linear coefficients fixed. Test uses
-the frozen selection.
+validation Full-mAP **after calibration**. Each scheduled validation retrieves
+once and searches 729 coefficient combinations on CPU, with pooling fixed.
+The winning checkpoint and coefficients are frozen together for test.
 
 See [method and equations](docs/proposed_method.md),
 [feature contracts](docs/feature_contracts.md) and
@@ -122,8 +122,8 @@ training and retrieval using only the proposed environment.
 
 ## Run experiments
 
-The validation recipe prepares assets, builds or reuses caches, trains,
-retrieves validation scores, and freezes the selected validation result:
+The validation recipe prepares assets, builds or reuses caches, and trains with
+calibration at every scheduled validation:
 
 ```bash
 bash scripts/methods/proposed.bash val
@@ -136,9 +136,7 @@ For an individual stage, run from the repository root:
 .venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
 .venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml
-.venv-proposed/bin/python tools/run.py run --config runs/proposed/config.yaml --split val
-.venv-proposed/bin/python tools/run.py calibrate --config configs/calibration.yaml
-.venv-proposed/bin/python tools/run.py run --config runs/proposed-calibration/selected.yaml --split test
+.venv-proposed/bin/python tools/run.py run --config runs/proposed-kaggle-t4/selected.yaml --split test
 ```
 
 `run` retrieves and evaluates one split from prepared caches and an existing
@@ -153,14 +151,29 @@ overrides for existing keys; `--split` overrides the configured split:
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
   --set train.seed=1 output.dir=runs/proposed-seed1
-.venv-proposed/bin/python tools/run.py run --config runs/proposed-seed1/config.yaml --split val
+.venv-proposed/bin/python tools/run.py run --config runs/proposed-seed1/selected.yaml --split test
 ```
 
-Use a fresh output directory for each training run. Training refuses an existing
-run; retrieval, evaluation, calibration and reports replace their active outputs.
-When using another run, list its saved `val/rankings.pt` under
-`configs/calibration.yaml: rankings`; several validation artifacts, for example
-retrieved with different `retrieval.coarse_beta`, are compared there. W&B tracking defaults to online; set `wandb.mode=offline` or
+Use a fresh output directory for each experiment. Continue an interrupted run
+explicitly from its latest training checkpoint:
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume
+```
+
+`--resume runs/proposed-kaggle-t4/last.pt` is equivalent when that file belongs to
+`output.dir`. Keep the complete run directory, the original total epoch schedule,
+source, inputs and numerical settings. Training restores AdamW, AMP scaler,
+RNGs, batch position, sampler streams, hard pools, metrics and calibrated best
+selection. It saves `last.pt` every `checkpointing.every_steps=50` batches, before
+validation and after each completed epoch. SIGINT/SIGTERM request a save after
+the current batch; a forced kill returns to the latest durable checkpoint.
+An existing output without `--resume` is refused. Retrieval, evaluation,
+calibration and reports replace their active outputs.
+Training writes `selected.yaml` and `selected/val/` whenever the calibrated
+validation score improves. No separate retrieval or calibration is required
+before test. The optional CPU `calibrate` command can compare exported validation
+artifacts through `configs/calibration.yaml`. W&B tracking defaults to online; set `wandb.mode=offline` or
 `wandb.enabled=false` as needed.
 
 `train.seed` fixes every random choice of a training run: it seeds Python, NumPy
@@ -174,25 +187,28 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 
 | Group | Values |
 | --- | --- |
-| Schedule | `train.epochs=20`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
+| Schedule | `train.epochs=24`, `context_warmup_epochs=4`, `batch_size=32` queries, `candidates=32`, `context_batch_size=96`, AMP on, `seed=0` |
 | Optimizer | AdamW, `lr=1e-4`, `text_lr=1e-5`, `weight_decay=0.01`, cosine decay to `min_lr_ratio=0.1` |
 | Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.3` |
 | Fine mining | `warmup_epochs=4`, `refresh_every_epochs=2`, `pool_size=100` |
-| Identity crops | `max_crops=128`, `crops_per_identity=2`, `random_identities=8`, `hard_negative_fraction=0.1` |
+| Identity crops | `max_crops=128`, `crops_per_identity=2`, `random_identities=8`, `hard_negative_fraction=0.2` |
 | Loss | weights `1`/`0.1`/`1`/`1`/`1` for grounding/identity/coarse/context/state, `context_rejection_weight=0.2`, temperatures `0.1`, including `context_temperature` |
 | Model | `dim=384`, `identity_dim=128`, `state_dim=512`, `num_heads=6`, `mlp_ratio=2`, `geo_dim=32`, `dropout=0.1`, `fda_k=6`, `coarse_beta=0.4` |
 | Matching | `background_logit=-3.5`, `selection_threshold=0.5`, `identity_threshold=0.2`, `missing_penalty=1.1`, `duplicate_iou=0.9` |
 | Retrieval | `pooling=subject_mean`, `fine_score_mode=linear`, `coverage_weight=0.04`, `context_weight=0.10`, `fine_coarse_weight=0.15`, `coarse_beta=1.16`, `top_m=500`, `candidate_ks=[500]` |
-| Validation | `evaluation.every_epochs=3` |
+| Validation | `evaluation.every_epochs=2`; 9 coverage × 9 context × 9 fusion weights under `evaluation.calibration` |
 
 With two positives and enough same-ID evidence, the sampling rows give each query 2
 positives, 5 hard and 10 random same-ID negatives, 3 hard wrong-ID negatives and 12
 uniform negatives. `retrieval.coarse_beta` overrides `model.coarse_beta` at
-inference. Linear coefficients and pooling are fixed from training; coarse beta
-and Top-M define the shortlist of each retrieval run. `calibrate` evaluates
-`fine_coarse_weights: [0.15, 0.10, 0.20, 0.25]` on saved validation artifacts and
-writes the complete configuration to
-`runs/proposed-calibration/selected.yaml`.
+inference. Pooling and fine score mode are fixed from training; coarse beta
+and Top-M define the shortlist of each retrieval run. Validation selects the best
+coefficient triple for each epoch, then compares the calibrated checkpoint scores.
+The grids are coverage `a=0.04..0.12` in steps of `0.01`, context `b=0.02..0.06`
+in steps of `0.005`, and fusion `eta=0.10..0.20` in steps of `0.0125`.
+All 729 triples are evaluated in `(a, b, eta)` order. Equal scores retain the first
+triple and the earliest epoch. The selected coefficients never change training
+loss or subsequent hard-negative mining; their base values remain `0.04/0.10/0.15`.
 
 See the [script reference](scripts/README.md) for environment setup, dataset
 workflows and report export.
@@ -215,16 +231,19 @@ Cache paths follow their role: `cache/detections`, `cache/scene`,
 
 | Default path | Contents |
 | --- | --- |
-| `runs/proposed/` | Effective config, runtime, history, tokenizer, `last.pt`, `best.pt` |
-| `runs/proposed/val/` | `rankings.pt`, `run.json`, `metrics.json` |
-| `runs/proposed-calibration/` | Candidate summary, `selection.json`, `selected.yaml` |
-| `runs/proposed-calibration/selected/{val,test}/` | Selected split results |
+| `runs/proposed-kaggle-t4/` | Effective training config, history, checkpoints, `selected.yaml`, `selection.json`, winning calibration summary |
+| `runs/proposed-kaggle-t4/evaluation/epoch_NNN/` | Calibrated `val_metrics.json`, grid `summary.csv`, `selection.json` |
+| `runs/proposed-kaggle-t4/selected/{val,test}/` | Selected `rankings.pt`, `run.json`, `metrics.json` |
+| `runs/proposed-kaggle-t4-calibration/` | Optional offline artifact comparison |
 
 Every split fine-scores only the Top-M shortlist of each query and saves that
 evidence as `Q x M` tensors for offline replay. They require about `20*Q*M`
 bytes in addition to rankings; `fafa_binding` shares the selected pooling tensor.
-Checkpoints omit optimizer state and frozen backbone
-weights, so they are inference artifacts rather than resumable training states.
+`last.pt` contains full resumable training state; `best.pt` remains a compact
+inference artifact. Frozen backbone weights are not duplicated in either file.
+Legacy checkpoints without optimizer/scaler/RNG state cannot resume exactly and
+are rejected without replacement. W&B online resumes the saved run ID; offline
+attempts retain separate local logs. See [resume details](docs/proposed_runs.md#resume-training).
 See [score artifacts and CPU replay](docs/proposed_runs.md#score-artifacts-and-cpu-replay).
 
 ## Dataset
@@ -251,7 +270,7 @@ Test never trains or selects parameters. See the
 | `src/rcr/dataset/` | Dataset construction and annotation audits |
 | `src/rcr/proposed/cache/` | Frozen feature extraction and cache readers |
 | `src/rcr/proposed/nn/` | Model equations and learned modules |
-| `src/rcr/proposed/{train,ranking,calibration,replay}.py` | Optimization, inference and offline selection |
+| `src/rcr/proposed/{train,ranking,calibration,replay}.py` | Optimization, inference, shared validation calibration and CPU replay |
 | `src/rcr/evaluation/` | Metrics, provenance checks and reports |
 | `tools/`, `scripts/`, `tests/` | CLI, reproducible workflows and CPU workflow tests |
 

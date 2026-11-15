@@ -1,9 +1,12 @@
 """Plain YAML loading and explicit dotted overrides; no config inheritance."""
 
+import math
 from copy import deepcopy
 from pathlib import Path
 
 import yaml
+
+from rcr.proposed.contracts import CALIBRATION_PARAMETERS
 
 
 def load_config(path: str | Path) -> dict:
@@ -53,6 +56,39 @@ def parse_overrides(items: list[str]) -> dict:
     return overrides
 
 
+def calibration_settings(settings: dict) -> dict:
+    """Validate coefficient grids without importing model code."""
+    if not isinstance(settings, dict):
+        raise ValueError("evaluation.calibration must be a mapping")
+    if unknown := settings.keys() - CALIBRATION_PARAMETERS.keys():
+        raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
+    result = {}
+    for key in CALIBRATION_PARAMETERS:
+        weights = settings.get(key)
+        if weights is not None and (
+            not isinstance(weights, list)
+            or not weights
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                for value in weights
+            )
+            or len(set(weights)) != len(weights)
+        ):
+            raise ValueError(f"{key} must be distinct finite nonnegative weights")
+        result[key] = None if weights is None else list(weights)
+    return result
+
+
+def checkpoint_settings(settings: dict) -> dict:
+    """Validate checkpoint cadence independently of the numerical experiment."""
+    if not isinstance(settings, dict) or settings.keys() - {"every_steps"}:
+        raise ValueError("checkpointing accepts only every_steps")
+    value = settings.get("every_steps", 50)
+    if type(value) is not int or value < 1:
+        raise ValueError("checkpointing.every_steps must be a positive integer")
+    return {"every_steps": value}
+
+
 def validate_training_schedule(cfg: dict) -> None:
     """Reject no-op training, bad seeds and invalid intervals before any writes."""
     for key in ("epochs", "batch_size"):
@@ -80,6 +116,8 @@ def validate_training_schedule(cfg: dict) -> None:
     if type(minimum) not in (int, float) or not 0 <= minimum < 1:
         raise ValueError("optimizer.min_lr_ratio must be in [0, 1)")
     evaluation = cfg.get("evaluation", {})
+    checkpoint_settings(cfg.get("checkpointing", {}))
+    calibration_settings(evaluation.get("calibration", {}))
     if evaluation.get("enabled", False):
         value = evaluation["every_epochs"]
         if type(value) is not int or value < 1:

@@ -29,6 +29,14 @@ def main(argv=None):
         "calibrate",
     ):
         command = commands.add_parser(name, parents=[shared])
+        if name == "train":
+            command.add_argument(
+                "--resume",
+                nargs="?",
+                const="auto",
+                metavar="CHECKPOINT",
+                help="Resume from output.dir/last.pt or the specified checkpoint",
+            )
         if name == "build-cache":
             command.add_argument(
                 "--cache-stage",
@@ -89,7 +97,7 @@ def main(argv=None):
     if command == "train":
         from rcr.proposed.train import train
 
-        return train(cfg)
+        return train(cfg, resume=args.resume)
     if command == "run":
         from rcr.proposed.runner import run_experiment
 

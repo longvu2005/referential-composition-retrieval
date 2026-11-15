@@ -9,7 +9,7 @@ import torch
 
 from rcr.common.io import save_results, sha256_file
 from rcr.evaluation.provenance import digest_json, runtime_metadata
-from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS, TRAINED_FINE_KEYS
+from rcr.proposed.contracts import FIXED_FINE_KEYS, SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.ranking import (
     SCORE_EPS,
     SCORE_SCHEMA_VERSION,
@@ -182,8 +182,8 @@ def replay_rankings(
 ) -> dict:
     """Recreate fine, fused and FAFA rankings of one Top-M artifact.
 
-    Fusion weight is postprocessing. Pooling and Linear coefficient changes are
-    diagnostic only. Another coarse beta or Top-M requires new retrieval.
+    Linear coefficients and fusion weight are calibration parameters. Pooling
+    changes are diagnostic. Another coarse beta or Top-M requires new retrieval.
     """
     validate_artifact(output)
     recorded = output["score_config"]
@@ -227,7 +227,7 @@ def replay_rankings(
         ]
     ).to(torch.int32)
     metadata = deepcopy(output["provenance"])
-    if any(config[key] != recorded[key] for key in TRAINED_FINE_KEYS):
+    if any(config[key] != recorded[key] for key in FIXED_FINE_KEYS):
         metadata["fine_score_ablation"] = True
     retrieval = {
         **metadata.get("retrieval", {}),

@@ -27,15 +27,17 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(tmp_path, spl
     proposed = load_config(root / "configs/proposed.yaml")
     calibration = load_config(root / "configs/calibration.yaml")
     run_dir = Path(proposed["output"]["dir"])
-    calibration_dir = Path(calibration["output_dir"])
     assert Path(proposed["checkpoint"]) == run_dir / "best.pt"
-    assert calibration["rankings"] == [str(run_dir / "val/rankings.pt")]
+    assert calibration["rankings"] == [str(run_dir / "selected/val/rankings.pt")]
 
     # Record real shell dispatch without loading encoders or writing run outputs.
     recorder = tmp_path / "python-recorder"
     recorder.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        "if sys.argv[1] == '-c':\n"
+        "    exec(sys.argv[2])\n"
+        "    sys.exit(0)\n"
         "with open(os.environ['RCR_COMMAND_LOG'], 'a') as stream:\n"
         "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
     )
@@ -57,22 +59,6 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(tmp_path, spl
             "prepare",
             "build-cache",
             "train",
-            "run",
-            "calibrate",
-        ]
-        assert commands[3] == [
-            "tools/run.py",
-            "run",
-            "--config",
-            str(run_dir / "config.yaml"),
-            "--split",
-            "val",
-        ]
-        assert commands[4] == [
-            "tools/run.py",
-            "calibrate",
-            "--config",
-            "configs/calibration.yaml",
         ]
     else:
         assert commands == [
@@ -80,7 +66,7 @@ def test_proposed_workflow_uses_configured_run_and_selection_paths(tmp_path, spl
                 "tools/run.py",
                 "run",
                 "--config",
-                str(calibration_dir / "selected.yaml"),
+                str(run_dir / "selected.yaml"),
                 "--split",
                 "test",
             ]

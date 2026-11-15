@@ -10,6 +10,23 @@ from rcr.evaluation.evaluate import candidate_cutoffs, evaluate_retrieval_output
 from rcr.evaluation.provenance import BENCHMARK_FIELDS
 
 
+def save_evaluation(cfg, result, *, metadata=None):
+    """Bind computed metrics to their saved rankings without evaluating twice."""
+    directory = output_directory(cfg)
+    result = dict(result)
+    if metadata is not None:
+        result["provenance"] = {
+            "run_sha256": sha256_file(directory / "run.json"),
+            **{key: metadata[key] for key in BENCHMARK_FIELDS if key in metadata},
+        }
+    write_json(directory / "metrics.json", result)
+    print(
+        f"{cfg['method']}/{cfg['split']}: {json.dumps(result['overall'])}",
+        flush=True,
+    )
+    return result
+
+
 def evaluate_run(cfg, *, data=None, samples=None, output=None, max_queries=None):
     """Evaluate in-memory or saved rankings through the same official protocol."""
     directory = output_directory(cfg)
@@ -38,14 +55,4 @@ def evaluate_run(cfg, *, data=None, samples=None, output=None, max_queries=None)
     result = evaluate_retrieval_output(
         data, samples, output, candidate_cutoffs(cfg), split=cfg["split"]
     )
-    if metadata is not None:
-        result["provenance"] = {
-            "run_sha256": sha256_file(metadata_path),
-            **{key: metadata[key] for key in BENCHMARK_FIELDS if key in metadata},
-        }
-    write_json(directory / "metrics.json", result)
-    print(
-        f"{cfg['method']}/{cfg['split']}: {json.dumps(result['overall'])}",
-        flush=True,
-    )
-    return result
+    return save_evaluation(cfg, result, metadata=metadata)

@@ -82,22 +82,33 @@ CLIP-prefixed alias. Tensor layouts and state keys, including the fixed
 Fine scoring uses `B + a*C + b*H` in both training and inference. Retrieval
 requires a checkpoint trained with `fine_score_mode: linear` and rejects previous
 fine scorers. Train in a fresh output directory; compatible frozen caches remain
-reusable. Coverage/context coefficients and pooling must match training.
-Validation checkpoint selection uses `Z_M(fine) + eta*Z_M(coarse)`. Calibration
-may search eta on saved validation artifacts, with trained coefficients fixed;
-each artifact retains its coarse beta and Top-M. Replay uses score schema 4,
-including `coarse_topm_scores` and the fusion normalization contract.
+reusable. Pooling and fine score mode must match training. Coverage/context and
+fusion coefficients can be selected on validation; all three are frozen for test.
+Validation checkpoint selection uses `Z_M(fine) + eta*Z_M(coarse)`. Each validation
+searches all 729 configured `(a, b, eta)` triples, and checkpoints
+compete by their best calibrated score. Coarse beta and Top-M stay fixed. Replay uses score schema 4,
+including `coarse_topm_scores` and the fusion normalization contract. Coefficient
+replay is deployable; changing pooling remains a diagnostic ablation.
 
 Historical DINO/BERT architecture checkpoints remain incompatible and are
 rejected before loading text weights. Matching feature dimensions alone do
 not make them compatible. Model checkpoints still bind scene, detection and
 FAFA source identities and encoder metadata.
 
-Default outputs are `runs/proposed` and `runs/proposed-calibration`. Existing
+Training outputs live under the configured `output.dir`; its `selected.yaml` and
+`selected/val/` bind the calibrated winner to `best.pt`. Optional offline comparison
+uses `output_dir` in `configs/calibration.yaml`. Existing
 run configs retain their explicit paths; use those configs to read old runs.
 Keep selected configurations and checkpoint bytes intact: test selection binds
 the checkpoint SHA256 and validation fingerprint. For a new experiment, use a
-fresh output directory and calibrate its validation artifacts separately.
+fresh output directory; each scheduled validation calibrates before selection.
+
+`last.pt` carries versioned training state for explicit `--resume`: AdamW, AMP
+scaler, Python/NumPy/Torch/CUDA RNGs, batch plan and generator states, hard pools,
+partial epoch totals, completed history and calibration best. Resume checks the
+training implementation, numerical config, runtime and train/val/cache
+fingerprints before restoring progress. `best.pt` and older weights-only files
+remain inference-only; missing optimizer/RNG information is never fabricated.
 
 ## Verification scope
 

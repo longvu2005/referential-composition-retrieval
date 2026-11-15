@@ -80,14 +80,20 @@ positives retained in the coarse shortlist, distinct from R@K.
 
 Use the same final export and ordered gallery for each experiment. Only train
 may train model parameters. Validation selects hyperparameters and checkpoints.
-The checkpoint score averages overall and macro-by-case Full-mAP. Calibration
-selects among complete validation artifacts while keeping the trained pooling
-and Linear coefficients fixed. Fusion eta is selected on validation scores. Test labels, metrics and examples must not determine
+At every scheduled validation, calibration selects the best `(a, b, eta)` by the
+mean of overall and macro-by-case Full-mAP. Checkpoints compete using that
+calibrated score; pooling, fine score mode, matching and the coarse shortlist stay fixed.
+The 9×9×9 search changes only postprocessing coefficients. Its cached scoring
+retains all Full Positives, including those in the unchanged coarse tail, and
+uses the same AP summation as full evaluation. The winner is checked again by
+the complete evaluator before publication. Training and mining keep their base coefficients.
+Test labels, metrics and examples must not determine
 any settings or checkpoint selection. Reporting performs no selection or inference.
 
 `run` defaults to validation. Test requires a validation-selected configuration
 binding the checkpoint SHA256, validation fingerprint and retrieval settings.
-The test recipe reads `runs/proposed-calibration/selected.yaml`. Reports verify
+The test recipe reads `output.dir/selected.yaml`, written with the winning
+checkpoint during training. Reports verify
 that its frozen selection agrees with the recorded test run.
 
 Version 0.1.0 currently contains:
@@ -124,7 +130,10 @@ missing historical Git/runtime details are not invented. Results lacking an
 original split fingerprint cannot be certified by the reporter.
 
 Use a distinct `output.dir` for each scientific experiment. Training refuses a
-root containing `config.yaml`, `best.pt` or `last.pt` before loading data/models.
+root containing `config.yaml`, `best.pt` or `last.pt` unless `--resume` explicitly
+continues the compatible full-state `last.pt`. Resume restores optimizer, scaler,
+RNG, sampler/mining progress and calibrated best selection without changing
+the total schedule, splits or validation/calibration protocol.
 Retrieval, evaluation, calibration and reports replace their active outputs;
 there is no automatic archive. Publishing new rankings invalidates old metrics
 and metadata first; evaluate again after a successful retrieval.

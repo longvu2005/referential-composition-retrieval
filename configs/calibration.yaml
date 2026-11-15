@@ -1,6 +1,5 @@
-# Select among saved validation artifacts and freeze the winner for test inference.
+# Optional CPU selection from exported validation scores.
 rankings:
-  - runs/proposed/val/rankings.pt
-output_dir: runs/proposed-calibration
+  - runs/proposed-kaggle-t4/selected/val/rankings.pt
+output_dir: runs/proposed-kaggle-t4-calibration
 selection_metric: checkpoint_score  # Mean of overall and macro-case Full-mAP.
-fine_coarse_weights: [0.15, 0.10, 0.20, 0.25]

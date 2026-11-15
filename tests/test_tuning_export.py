@@ -110,7 +110,9 @@ def test_replay_matches_direct_retrieval_for_fine_score_settings(tiny_ranker, po
         replayed["coverage"], direct["coverage"], atol=2e-6, rtol=2e-5
     )
     assert replayed["score_config"]["pooling"] == pooling
-    assert replayed["provenance"]["fine_score_ablation"]
+    assert bool(replayed["provenance"].get("fine_score_ablation")) == (
+        pooling != source["score_config"]["pooling"]
+    )
     assert "fine_score_ablation" not in replay_rankings(source)["provenance"]
 
 
@@ -168,7 +170,9 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         guard.setattr(RCRModel, "score_target", forbidden)
         rows = calibration.calibrate(_settings(paths, root))
     assert opened == paths
-    assert [row["coarse_beta"] for row in rows] == [0.0, 1.5]
+    grid = cfg["evaluation"]["calibration"]["fine_coarse_weights"]
+    assert [row["coarse_beta"] for row in rows] == [0.0] * len(grid) + [1.5] * len(grid)
+    assert [row["fine_coarse_weight"] for row in rows] == grid * 2
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     best = max(rows, key=lambda row: row["checkpoint_score"])
@@ -183,7 +187,7 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
         assert selected["selected_retrieval"][key] == best[key]
     assert selected["candidate_ks"] == cfg["candidate_ks"] == [1, 2]
     assert all("candidate_recall_2" in row for row in rows)
-    source = sources[best["index"]]
+    source = sources[paths.index(Path(best["score_source"]))]
     assert torch.equal(expected["rankings"], source["rankings"])
     assert (
         selected["selected_checkpoint_sha256"]

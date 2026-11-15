@@ -17,7 +17,7 @@ from rcr.common.io import (
     sha256_file,
 )
 from rcr.common.runtime import configure_determinism, resolve_device
-from rcr.evaluation.provenance import benchmark_metadata, runtime_metadata
+from rcr.evaluation.provenance import retrieval_metadata
 from rcr.proposed.cache.build import (
     cache_paths,
     check_cache_config,
@@ -27,8 +27,8 @@ from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.contracts import (
     COMPATIBLE_ARCHITECTURE_VERSIONS,
+    FIXED_FINE_KEYS,
     SELECTED_RETRIEVAL_KEYS,
-    TRAINED_FINE_KEYS,
 )
 from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
@@ -83,9 +83,9 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     trained_settings = retrieval_settings(
         train_cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
-    if any(settings[key] != trained_settings[key] for key in TRAINED_FINE_KEYS):
+    if any(settings[key] != trained_settings[key] for key in FIXED_FINE_KEYS):
         raise ValueError(
-            "linear coefficients and pooling must match training; train a new run"
+            "fine score mode and pooling must match training; train a new run"
         )
     present = [key in cfg for key in selection_keys]
     if any(present) and not all(present):
@@ -142,7 +142,6 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     samples = split_inputs(data, cfg["split"])
     if not samples:
         raise ValueError(f"{cfg['split']}: selected query split is empty")
-    full_num_queries = len(samples)
     if max_queries is not None:
         samples = samples[:max_queries]
     cache = GalleryCache(**gallery_cache_options(cfg))
@@ -208,47 +207,15 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         description=cfg["split"],
         state_trained=not state_untrained,
     )
-    metadata = {
-        "method": "proposed",
-        "config": {
-            **cfg,
-            "model": {**cfg.get("model", {}), "fine_matching": model.fine_matching},
-            "retrieval": settings,
-        },
-        "retrieval": settings,
-        "score_schema_version": output["score_schema_version"],
-        "schema_version": output["schema_version"],
-        "score_config": output["score_config"],
-        "clip_text_stats": output.get("clip_text_stats"),
-        "fine_score_mode": settings["fine_score_mode"],
-        "context_weight": settings["context_weight"],
-        "coverage_weight": settings["coverage_weight"],
-        "fine_coarse_weight": settings["fine_coarse_weight"],
-        "checkpoint": str(checkpoint_path),
-        "checkpoint_sha256": checkpoint_sha256,
-        "validation_sha256": validation_sha256,
-        **benchmark_metadata(data, cfg["split"], output),
-        **runtime_metadata(device),
-        "architecture_version": model.architecture_version,
-        "representation": "shared_person",
-        "binding_scale": model.binding_scale.item(),
-        "fine_matching": model.fine_matching,
-        "encoder_metadata": checkpoint.get("encoder_metadata"),
-        "checkpoint_epoch": checkpoint.get("epoch"),
-        "checkpoint_seed": train_cfg.get("train", {}).get("seed"),
-        "best_epoch": checkpoint.get("best_epoch"),
-        "best_val_full_map": checkpoint.get("best_full_map"),
-        "best_val_macro_full_map": checkpoint.get("best_macro_full_map"),
-        "best_val_checkpoint_score": checkpoint.get("best_score"),
-        "cache_id": cache.cache_id,
-        "scene_cache_id": getattr(cache, "scene_cache_id", None),
-        "detection_cache_id": getattr(cache, "detection_cache_id", None),
-        "native_cache": cache.native.metadata,
-        "num_queries": len(samples),
-        "num_gallery": len(output["gallery_ids"]),
-        "query_subset": len(samples) != full_num_queries,
-        "elapsed_seconds": perf_counter() - started,
-    }
+    metadata = retrieval_metadata(
+        data,
+        {**cfg, "model": model_cfg, "retrieval": settings},
+        output,
+        checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        device=device,
+        elapsed_seconds=perf_counter() - started,
+    )
     # rankings.pt remains sufficient when copied without sibling logs/configs.
     output["provenance"] = metadata
     directory = output_directory(cfg)
