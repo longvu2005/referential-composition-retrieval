@@ -14,16 +14,18 @@ from rcr.common.data import inference_samples
 from rcr.common.runtime import evaluating
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
+    DEFAULT_COVERAGE_WEIGHT,
     FINE_SCORE_MODE,
     POOLING_MODES,
     combine_scores,
     identity_scores,
     identity_scores_batched,
-    residual_score_components,
+    linear_score_components,
 )
 
-SCORE_SCHEMA_VERSION = 3
+SCORE_SCHEMA_VERSION = 4
 SCORE_EPS = 1e-6
+DEFAULT_FINE_COARSE_WEIGHT = 0.15
 FINE_SCORE_MODES = (FINE_SCORE_MODE,)
 if TYPE_CHECKING:
     from rcr.proposed.cache.store import GalleryCache
@@ -114,15 +116,49 @@ def fine_score_components(
     binding_scale: float,
     fine_score_mode: str = FINE_SCORE_MODE,
     context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+    coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
 ) -> dict[str, Tensor]:
     """Apply the shared pairwise scorer to a shortlist in candidate order."""
     if binding.ndim != 1:
         raise ValueError("fine score components must be 1D tensors")
     if fine_score_mode != FINE_SCORE_MODE:
         raise ValueError(f"unknown fine_score_mode: {fine_score_mode!r}")
-    return residual_score_components(
-        binding, context, coverage, binding_scale, context_weight
+    return linear_score_components(
+        binding, context, coverage, binding_scale, context_weight, coverage_weight
     )
+
+
+def fuse_fine_coarse_scores(
+    fine: Tensor, coarse: Tensor, weight: float, eps: float = SCORE_EPS
+) -> Tensor:
+    """Fuse population z-scores on the same finite shortlist support.
+
+    Zero weight returns raw fine scores. For positive weights, candidates with
+    no finite coarse evidence remain last. Statistics use the complete shortlist,
+    independently of inference chunk sizes; constant branches contribute zero.
+    """
+    if fine.ndim != 1 or fine.shape != coarse.shape:
+        raise ValueError("fine and coarse scores must be matching 1D tensors")
+    if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
+        raise ValueError("fine_coarse_weight must be finite and nonnegative")
+    fine, coarse = fine.float(), coarse.float()
+    if not torch.isfinite(fine).all():
+        raise ValueError("fine scores must be finite before fusion")
+    if weight == 0:
+        return fine
+    valid = torch.isfinite(coarse)
+    fused = torch.full_like(fine, -torch.inf)
+    if valid.any():
+
+        def normalize(values):
+            if (values == values[0]).all():
+                return torch.zeros_like(values)
+            return (values - values.mean()) / values.std(unbiased=False).clamp_min(eps)
+
+        fused[valid] = normalize(fine[valid]) + weight * normalize(coarse[valid])
+        if not torch.isfinite(fused[valid]).all():
+            raise ValueError("fine/coarse fusion overflowed float32")
+    return fused
 
 
 def rerank_topm(order: Tensor, top_indices: Tensor, scores: Tensor) -> Tensor:
@@ -139,18 +175,21 @@ def score_configuration(settings: dict, binding_scale: float) -> dict:
             for key in (
                 "fine_score_mode",
                 "context_weight",
+                "coverage_weight",
+                "fine_coarse_weight",
                 "coarse_beta",
                 "top_m",
             )
         },
         "pooling": settings.get("pooling", "penalized"),
         "binding_scale": binding_scale,
-        "normalization": "none",
+        "normalization": "per_query_coarse_topm_population",
         "normalization_dtype": "float32",
         "normalization_device": "cpu",
         "eps": SCORE_EPS,
         "std_unbiased": False,
         "tie_break": "stable_coarse_order_then_canonical_gallery",
+        "nonfinite_coarse": "masked_in_fusion_when_weight_positive",
     }
 
 
@@ -164,6 +203,8 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coarse_beta",
         "fine_score_mode",
         "context_weight",
+        "coverage_weight",
+        "fine_coarse_weight",
         "pooling",
     }
     if unknown:
@@ -173,6 +214,8 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coarse_beta": default_beta,
         "fine_score_mode": FINE_SCORE_MODE,
         "context_weight": DEFAULT_CONTEXT_WEIGHT,
+        "coverage_weight": DEFAULT_COVERAGE_WEIGHT,
+        "fine_coarse_weight": DEFAULT_FINE_COARSE_WEIGHT,
         "pooling": "penalized",
         **cfg,
     }
@@ -185,8 +228,15 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
     ):
         raise ValueError("retrieval batch sizes and top_m must be positive")
     if any(
-        not math.isfinite(float(settings[key])) or settings[key] < 0
-        for key in ("coarse_beta", "context_weight")
+        type(settings[key]) not in (int, float)
+        or not math.isfinite(settings[key])
+        or settings[key] < 0
+        for key in (
+            "coarse_beta",
+            "context_weight",
+            "coverage_weight",
+            "fine_coarse_weight",
+        )
     ):
         raise ValueError("retrieval weights must be finite and nonnegative")
     if settings["fine_score_mode"] not in FINE_SCORE_MODES:
@@ -223,6 +273,7 @@ def _score_target_components(
     batch_size,
     pooling,
     context_weight=DEFAULT_CONTEXT_WEIGHT,
+    coverage_weight=DEFAULT_COVERAGE_WEIGHT,
 ):
     """Collect pairwise evidence without changing its scoring population."""
     components = {
@@ -247,6 +298,7 @@ def _score_target_components(
             return_details=True,
             pooling=pooling,
             context_weight=context_weight,
+            coverage_weight=coverage_weight,
         )
         for key, output in components.items():
             values = details[key].float()
@@ -273,6 +325,8 @@ def retrieve_rankings(
     coarse_beta: float | None = None,
     fine_score_mode: str = FINE_SCORE_MODE,
     context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+    coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
+    fine_coarse_weight: float = DEFAULT_FINE_COARSE_WEIGHT,
     pooling: str = "penalized",
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
@@ -298,6 +352,8 @@ def retrieve_rankings(
             "coarse_beta": coarse_beta,
             "fine_score_mode": fine_score_mode,
             "context_weight": context_weight,
+            "coverage_weight": coverage_weight,
+            "fine_coarse_weight": fine_coarse_weight,
             "pooling": pooling,
         },
         model.coarse_beta,
@@ -388,6 +444,7 @@ def retrieve_rankings(
                     fine_batch_size,
                     pooling,
                     context_weight,
+                    coverage_weight,
                 ).items()
             }
             raw = {
@@ -400,8 +457,12 @@ def retrieve_rankings(
                 binding_scale=binding_scale,
                 fine_score_mode=fine_score_mode,
                 context_weight=context_weight,
+                coverage_weight=coverage_weight,
             )
             fine = rerank_topm(order, top, scored["fine_scores"]).to(torch.int32)
+            fused = fuse_fine_coarse_scores(
+                scored["fine_scores"], coarse[top], fine_coarse_weight
+            )
             rows.append(
                 {
                     **scored,
@@ -414,7 +475,8 @@ def retrieve_rankings(
                         torch.int32
                     ),
                     "fine_rankings": fine,
-                    "rankings": fine,
+                    "fused_topm_scores": fused,
+                    "rankings": rerank_topm(order, top, fused).to(torch.int32),
                 }
             )
     output = {
@@ -633,6 +695,7 @@ def mine_hard_negatives(
                         settings["fine_batch_size"],
                         settings["pooling"],
                         settings["context_weight"],
+                        settings["coverage_weight"],
                     )
                     fine = fine_score_components(
                         components[f"binding_{settings['pooling']}"].cpu(),
@@ -641,8 +704,14 @@ def mine_hard_negatives(
                         model.binding_scale.item(),
                         settings["fine_score_mode"],
                         settings["context_weight"],
+                        settings["coverage_weight"],
                     )
-                    ranked = fine["fine_scores"].argsort(descending=True, stable=True)
+                    fused = fuse_fine_coarse_scores(
+                        fine["fine_scores"],
+                        scores[shortlist],
+                        settings["fine_coarse_weight"],
+                    )
+                    ranked = fused.argsort(descending=True, stable=True)
                     covered = components["coverage"].cpu() > 0
                     for name, membership in negative_groups.items():
                         keep = covered & membership[shortlist]

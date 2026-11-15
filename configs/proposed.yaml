@@ -1,3 +1,4 @@
+
 # Identity-grounded retrieval with frozen features and learned context.
 method: proposed
 split: val
@@ -57,34 +58,34 @@ model:
     selection_threshold: 0.5
     identity_threshold: 0.2
     missing_penalty: 1.1        # Magnitude of the missing-evidence penalty.
-    duplicate_iou: 0.9          # Suppress near-identical detections.
+    duplicate_iou: 0.9
 
 # Training schedule and sampling.
 train:
-  epochs: 10
+  epochs: 24
   context_warmup_epochs: 4      # Epochs before enabling the context loss.
-  batch_size: 24                # Queries per batch.
+  batch_size: 32                # Queries per batch.
   candidates: 32                # Gallery candidates per query.
-  context_batch_size: 64        # Fine pairs per checkpointed training chunk.
+  context_batch_size: 96        # Fine pairs per checkpointed training chunk.
   case_balanced: true           # P(case) proportional to sqrt(N_case).
   seed: 0                       # Every random stream of the run derives from it.
   amp: true
-  mining_batch_size: 8
+  mining_batch_size: 12
 
   # Additional crops for identity supervision.
   identity_sampling:
     max_crops: 128
     crops_per_identity: 2
     random_identities: 8
-    hard_negative_fraction: 0.1
+    hard_negative_fraction: 0.2
 
   # Positive and negative sampling.
   sampling:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
-    semantic_hard_fraction: 0.1 # Hard share inside the same-ID quota.
-    warmup_epochs: 8           # Delay hard-negative mining only.
+    semantic_hard_fraction: 0.3 # Hard share inside the same-ID quota.
+    warmup_epochs: 4           # Delay hard-negative mining only.
     refresh_every_epochs: 2
     pool_size: 100
 
@@ -114,19 +115,21 @@ retrieval:
   # matched_mean: normalize over matched evidence across Subjects.
   # subject_mean: normalize within each Subject, then average Subjects.
   pooling: subject_mean
-  fine_score_mode: bounded_residual
-  context_weight: 0.1            # Fixed residual bound, shared with training.
+  fine_score_mode: linear
+  coverage_weight: 0.04          # Coverage coefficient, shared with training.
+  context_weight: 0.10           # Raw context coefficient, shared with training.
+  fine_coarse_weight: 0.15       # Coarse contribution after Top-M normalization.
   coarse_beta: 1.16              # Weight of the global state branch.
   top_m: 500
-  fine_batch_size: 64
-  identity_batch_size: 512
-  coarse_batch_size: 512
+  fine_batch_size: 96
+  identity_batch_size: 768
+  coarse_batch_size: 768
 
 # Validation and coarse shortlist metrics.
 candidate_ks: [500]
 evaluation:
   enabled: true
-  every_epochs: 3
+  every_epochs: 2
 
 # Experiment logging.
 wandb:

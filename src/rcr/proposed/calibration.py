@@ -24,9 +24,9 @@ from rcr.evaluation.provenance import digest_json
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.contracts import SELECTED_RETRIEVAL_KEYS
 from rcr.proposed.matching import matching_settings
-from rcr.proposed.replay import validate_artifact
+from rcr.proposed.replay import replay_rankings, validate_artifact
 
-SETTINGS = {"rankings", "output_dir", "selection_metric"}
+SETTINGS = {"rankings", "output_dir", "selection_metric", "fine_coarse_weights"}
 SELECTION_METRICS = ("checkpoint_score", "full_map", "macro_full_map")
 
 
@@ -37,7 +37,7 @@ def _load_candidate(path: Path) -> dict:
     provenance = source["provenance"]
     if provenance.get("fine_score_ablation"):
         raise ValueError(
-            "calibration requires the trained residual weight and pooling; "
+            "calibration requires the trained linear coefficients and pooling; "
             "use the official validation export"
         )
     if provenance.get("split") != "val" or provenance.get("query_subset") is not False:
@@ -150,13 +150,13 @@ def _write_selection(
             "value": best[metric],
             "reference_value": rows[0][metric],
             "improvement": best[metric] - rows[0][metric],
-            "tie_break": "first artifact in the configured rankings order",
+            "tie_break": "first artifact, then first fusion weight in configured order",
         },
     )
     return selected
 
 
-def _read_settings(settings: dict) -> tuple[list[Path], Path, str]:
+def _read_settings(settings: dict) -> tuple[list[Path], Path, str, list | None]:
     if unknown := settings.keys() - SETTINGS:
         raise ValueError(f"unknown calibration settings: {', '.join(sorted(unknown))}")
     if missing := {"rankings", "output_dir"} - settings.keys():
@@ -174,6 +174,19 @@ def _read_settings(settings: dict) -> tuple[list[Path], Path, str]:
         raise ValueError(
             "selection_metric must be checkpoint_score, full_map or macro_full_map"
         )
+    weights = settings.get("fine_coarse_weights")
+    if weights is not None and (
+        not isinstance(weights, list)
+        or not weights
+        or any(
+            type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            for value in weights
+        )
+        or len(set(weights)) != len(weights)
+    ):
+        raise ValueError(
+            "fine_coarse_weights must be distinct finite nonnegative weights"
+        )
     root = Path(settings["output_dir"])
     paths = [Path(path) for path in rankings]
     if any(
@@ -184,16 +197,16 @@ def _read_settings(settings: dict) -> tuple[list[Path], Path, str]:
         raise ValueError(
             "use a separate calibration output root to retain the source artifact"
         )
-    return paths, root, metric
+    return paths, root, metric, weights
 
 
 def calibrate(settings: dict) -> list[dict]:
-    """Pick the best saved validation artifact; no checkpoint or cache is loaded.
+    """Select validation fusion weights without loading a checkpoint or cache.
 
     Every artifact keeps the shortlist it was retrieved with. Settings that change
     the shortlist are compared by retrieving once per value.
     """
-    paths, root, metric = _read_settings(settings)
+    paths, root, metric, weights = _read_settings(settings)
     candidates = [_load_candidate(path) for path in paths]
     if len({candidate["checkpoint_sha256"] for candidate in candidates}) != 1:
         raise ValueError("validation artifacts must come from one checkpoint")
@@ -202,21 +215,33 @@ def calibrate(settings: dict) -> list[dict]:
     samples = split_samples(data, "val")
     fingerprint = split_fingerprint(data, "val")
     rows = []
-    for index, candidate in enumerate(tqdm(candidates, desc="validation selection")):
+    best_candidate = None
+    best_value = -math.inf
+    for candidate in tqdm(candidates, desc="validation selection"):
         _check_validation(candidate, data, samples, fingerprint)
-        result = evaluate_retrieval_output(
-            data,
-            samples,
-            candidate["source"],
-            candidate_cutoffs(candidate["cfg"]),
-            split="val",
+        grid = (
+            weights
+            if weights is not None
+            else [candidate["source"]["score_config"]["fine_coarse_weight"]]
         )
-        row = _row(index, candidate, result, fingerprint)
-        if not math.isfinite(row[metric]):
-            raise ValueError(f"calibration requires finite validation {metric}")
-        rows.append(row)
+        for weight in grid:
+            source = replay_rankings(candidate["source"], fine_coarse_weight=weight)
+            current = {
+                **candidate,
+                "source": source,
+                "cfg": source["provenance"]["config"],
+            }
+            result = evaluate_retrieval_output(
+                data, samples, source, candidate_cutoffs(current["cfg"]), split="val"
+            )
+            row = _row(len(rows), current, result, fingerprint)
+            if not math.isfinite(row[metric]):
+                raise ValueError(f"calibration requires finite validation {metric}")
+            rows.append(row)
+            if row[metric] > best_value:
+                best_value = row[metric]
+                best_candidate = current
     best = max(rows, key=lambda row: row[metric])
-    best_candidate = candidates[best["index"]]
     root.mkdir(parents=True, exist_ok=True)
     write_summary(root, rows)
     selected = _write_selection(best_candidate, root, rows, best, metric)

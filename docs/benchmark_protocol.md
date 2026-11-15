@@ -82,7 +82,7 @@ Use the same final export and ordered gallery for each experiment. Only train
 may train model parameters. Validation selects hyperparameters and checkpoints.
 The checkpoint score averages overall and macro-by-case Full-mAP. Calibration
 selects among complete validation artifacts while keeping the trained pooling
-and residual weight fixed. Test labels, metrics and examples must not determine
+and Linear coefficients fixed. Fusion eta is selected on validation scores. Test labels, metrics and examples must not determine
 any settings or checkpoint selection. Reporting performs no selection or inference.
 
 `run` defaults to validation. Test requires a validation-selected configuration

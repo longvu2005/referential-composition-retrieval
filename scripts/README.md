@@ -80,7 +80,8 @@ The query cache must cover train before training starts.
 
 Raw images and pretrained assets must be available as described in the
 [experiment protocol](../docs/proposed_runs.md). Test uses the checkpoint,
-matching settings, pooling and residual weight selected on validation.
+matching settings, trained pooling/Linear coefficients and the validation-selected
+fusion weight.
 
 ## Reports
 

@@ -26,8 +26,9 @@ from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
+    DEFAULT_COVERAGE_WEIGHT,
     fafa_binding_scores,
-    residual_score_components,
+    linear_score_components,
 )
 
 DEFAULT_COARSE_BETA = 0.4
@@ -210,6 +211,7 @@ class RCRModel(nn.Module):
         fafa_targets: Tensor,
         pooling: str = "penalized",
         context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+        coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
     ) -> tuple[Tensor, Tensor]:
         query = self.encode_query(
             query_scene,
@@ -237,6 +239,7 @@ class RCRModel(nn.Module):
             fafa_targets=fafa_targets,
             pooling=pooling,
             context_weight=context_weight,
+            coverage_weight=coverage_weight,
         )
 
     def encode_query(
@@ -421,8 +424,9 @@ class RCRModel(nn.Module):
         return_details: bool = False,
         pooling: str = "penalized",
         context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+        coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
     ) -> Tensor | dict[str, Tensor]:
-        """Shared identity matching -> aligned evidence/context -> null-aware score.
+        """Shared identity matching -> aligned evidence/context -> linear fine score.
 
         Case labels, GT identities and GT cardinalities never enter this path.
         ``return_details`` is a diagnostic view of this very same forward pass.
@@ -444,8 +448,13 @@ class RCRModel(nn.Module):
             return_poolings=True,
         )
         binding = poolings[pooling]
-        scored = residual_score_components(
-            binding, context, matching.coverage, self.binding_scale, context_weight
+        scored = linear_score_components(
+            binding,
+            context,
+            matching.coverage,
+            self.binding_scale,
+            context_weight,
+            coverage_weight,
         )
         score = scored["fine_scores"]
         if return_details:

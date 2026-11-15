@@ -177,7 +177,7 @@ def tiny_ranker():
         identity_batch_size=2,
         coarse_batch_size=2,
         coarse_beta=0.4,
-        fine_score_mode="bounded_residual",
+        fine_score_mode="linear",
         context_weight=0.03,
     )
     return cache, model, text, samples, settings

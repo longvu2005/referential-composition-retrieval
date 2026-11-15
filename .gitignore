@@ -26,6 +26,15 @@ venv/
 .env.*
 !.env.example
 
+# Local Modal tooling
+/modal_app.py
+/tools/modal_runtime.py
+/tools/modal_sync.py
+/docs/modal.md
+/requirements/modal.txt
+/requirements/modal-gpu-constraints.txt
+/tests/test_modal_tools.py
+
 # Editors
 .vscode/
 .idea/

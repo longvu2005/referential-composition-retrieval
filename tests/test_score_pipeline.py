@@ -54,7 +54,7 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     metadata = json.loads((directory / "run.json").read_text())
     assert metadata["score_config"] == saved["score_config"]
     assert metadata["score_schema_version"] == SCORE_SCHEMA_VERSION
-    assert metadata["fine_score_mode"] == "bounded_residual"
+    assert metadata["fine_score_mode"] == "linear"
     assert metadata["context_weight"] == cfg["retrieval"]["context_weight"]
     assert metadata["checkpoint_epoch"] == 2
     assert metadata["validation_sha256"] == split_fingerprint(data, "val")
@@ -92,17 +92,27 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
         (Path(cfg["output"]["dir"]) / "val/rankings.pt").rename(paths[-1])
     root = tmp_path / "calibration"
     rows = calibration.calibrate(
-        {"rankings": [str(path) for path in paths], "output_dir": str(root)}
+        {
+            "rankings": [str(path) for path in paths],
+            "output_dir": str(root),
+            "fine_coarse_weights": [0.15, 0.0, 0.25],
+        }
     )
-    assert [row["coarse_beta"] for row in rows] == [0.0, 0.4]
+    assert [row["coarse_beta"] for row in rows] == [0.0] * 3 + [0.4] * 3
+    assert [row["fine_coarse_weight"] for row in rows] == [0.15, 0.0, 0.25] * 2
     selected = yaml.safe_load((root / "selected.yaml").read_text())
-    assert selected["retrieval"]["fine_score_mode"] == "bounded_residual"
+    assert selected["retrieval"]["fine_score_mode"] == "linear"
     assert selected["retrieval"]["context_weight"] == cfg["retrieval"]["context_weight"]
     assert selected["selected_validation_sha256"] == split_fingerprint(data, "val")
     assert len(selected["selected_checkpoint_sha256"]) == 64
     best = max(rows, key=lambda row: row["checkpoint_score"])
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     assert expected["score_config"]["coarse_beta"] == best["coarse_beta"]
+    assert (
+        selected["selected_retrieval"]["fine_coarse_weight"]
+        == best["fine_coarse_weight"]
+    )
+    assert selected["selected_retrieval"]["coverage_weight"] == 0.04
     assert json.loads((root / "selection.json").read_text())["index"] == best["index"]
     output = retrieve.retrieve(selected)
     evaluate_run(selected, data=data)
@@ -110,6 +120,8 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
 
     for key, value in (
         ("context_weight", 0.2),
+        ("coverage_weight", 0.2),
+        ("fine_coarse_weight", 0.5),
         ("coarse_beta", 3.0),
         ("top_m", 1),
     ):
@@ -159,8 +171,54 @@ def test_obsolete_checkpoint_scorer_is_rejected_before_loading_text(
         retrieve.retrieve(cfg)
 
 
+def test_calibration_selects_fusion_that_corrects_a_fine_ranking_error(
+    saved_pipeline, tmp_path
+):
+    cfg, data, _ = saved_pipeline
+    cache = retrieve.GalleryCache()
+    cache.by_id["vx"] = len(cache.image_ids)
+    cache.image_ids.append("vx")
+    for name in ("scenes", "persons", "boxes", "mask"):
+        value = getattr(cache, name)
+        setattr(cache, name, torch.cat((value, value[:1])))
+    data.images_by_id["vx"] = {"image_id": "vx", "path": "val/vx.jpg"}
+    data.gt_head_boxes_by_image["vx"] = [{"identity_id": "p1"}]
+    cfg["retrieval"]["top_m"] = 3
+    source = retrieve.retrieve(cfg)
+    order = torch.tensor(
+        [[source["gallery_ids"].index(i) for i in ("va", "vn", "vx")]],
+        dtype=torch.int32,
+    )
+    source["coarse_rankings"] = source["coarse_topm"] = order
+    source["rankings"] = order
+    source["coarse_topm_scores"] = torch.tensor([[2.0, 1.0, 0.0]])
+    for key in ("binding_penalized", "binding_matched_mean", "binding_subject_mean"):
+        source[key] = torch.zeros(1, 3)
+    source["fafa_binding"] = source["binding_subject_mean"]
+    source["coverage"] = torch.ones(1, 3)
+    source["context"] = torch.tensor([[5.6, 5.601, 1.6]])
+    source = replay_rankings(source, fine_coarse_weight=0)
+    assert source["rankings"][0, 0] == order[0, 1]
+    path = tmp_path / "controlled-val.pt"
+    torch.save(source, path)
+    root = tmp_path / "fusion-selection"
+    rows = calibration.calibrate(
+        {
+            "rankings": [str(path)],
+            "output_dir": str(root),
+            "fine_coarse_weights": [0, 0.15, 0.25],
+        }
+    )
+    assert [row["full_map"] for row in rows] == [0.5, 1.0, 1.0]
+    selected = yaml.safe_load((root / "selected.yaml").read_text())
+    assert selected["selected_retrieval"]["fine_coarse_weight"] == 0.15
+    assert selected["selected_retrieval"]["context_weight"] == 0.10
+    assert selected["selected_retrieval"]["coverage_weight"] == 0.04
+
+
 @pytest.mark.parametrize(
-    "key,value", [("context_weight", 0.2), ("pooling", "penalized")]
+    "key,value",
+    [("context_weight", 0.2), ("coverage_weight", 0.2), ("pooling", "penalized")],
 )
 def test_calibration_rejects_diagnostic_changes_to_the_trained_fine_scorer(
     saved_pipeline, tmp_path, key, value
@@ -172,7 +230,7 @@ def test_calibration_rejects_diagnostic_changes_to_the_trained_fine_scorer(
     torch.save(changed, path)
     root = tmp_path / "forbidden-selection"
     with pytest.raises(
-        ValueError, match="requires the trained residual weight and pooling"
+        ValueError, match="requires the trained linear coefficients and pooling"
     ):
         calibration.calibrate({"rankings": [str(path)], "output_dir": str(root)})
     assert not root.exists()

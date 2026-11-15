@@ -21,48 +21,47 @@ The learned RCR modules:
 3. Compute one partial, one-to-one identity assignment with a null option.
 4. Rerank the shortlist using native FAFA composition and relational context.
 
-Training and inference use the same fine ranking score:
+Training and inference share the same pairwise fine score. Validation and
+retrieval fuse that score with coarse evidence over the complete Top-M shortlist:
 
 ```text
 L = L_ground + 0.1 L_id + L_coarse + L_context + L_state
-h = tanh(context)
-S_fine = alpha * B_FAFA + beta * (coverage * h - (1 - coverage))
-S_final = S_fine
+S_fine = alpha * B_FAFA + a * coverage + b * context
+S_final = Z_M(S_fine) + eta * Z_M(S_coarse)
 ```
 
-New runs fix `alpha=1`; `beta` is `retrieval.context_weight`, shared with training.
-The residual lies in `[-beta, beta]`. Holding binding and raw context fixed,
-reducing coverage cannot increase the score. There is no shortlist-dependent
-fine normalization or final coarse fusion. Coarse scores select Top-M and order
-the remaining gallery. The checked-in beta is a starting value, not a measured
-optimum.
+`alpha=1` is fixed. `a=retrieval.coverage_weight=0.04` and
+`b=retrieval.context_weight=0.10` are fixed during training and inference.
+Context is the raw reasoner output, without activation or a coverage gate.
+`eta=retrieval.fine_coarse_weight=0.15` is the starting fusion weight.
+For positive eta, both branches use population z-scores on the same finite
+coarse support within each query's Top-M, never within inference chunks.
+A constant branch contributes zero. Eta zero returns raw fine scores.
+Stable ties retain coarse order and the gallery tail stays unchanged.
+Coefficients are starting values, not measured optima for the new run.
 
-`train.epochs` sets the total run length; `train.context_warmup_epochs` disables
-context initially while grounding, identity, coarse and state stay active.
-Both optimizer groups use cosine decay throughout the run.
-After the sampling warmup, train-only fine mining selects hard same-ID condition
-negatives and wrong/missing-ID negatives. Context learns from semantic pairs plus
-a rejection term weighted by `loss.context_rejection_weight`; the checked-in YAML
-sets `semantic_hard_fraction=0.1`, `hard_fraction=0.1` and
-`context_rejection_weight=0.2`. Omitted semantic-hard and rejection settings
-default to zero. Fine mining reads frozen FAFA query
-tokens for train; ensure the query cache covers train before starting.
+The default run trains for 20 epochs. Context is disabled in epochs 1-4 while
+grounding, identity, coarse and global state learn. From epoch 5, all objectives
+are active and train-only fine mining refreshes every two epochs. Both optimizer
+groups use cosine decay throughout the run. With sufficient candidate pools,
+`semantic_hard_fraction=0.3` gives five same-ID hard condition negatives per
+32-candidate query. Wrong/missing-ID hard negatives use `hard_fraction=0.1`;
+`loss.context_rejection_weight=0.2` weights their rejection objective.
 
-Context learns a residual on frozen native FDA binding, using the same
-`retrieval.pooling`, assignment and score coefficient as inference. Its pairwise
-loss uses `loss.context_temperature`; `loss.context_weight` weights this task
-in the total loss. Native FAFA query/target tokens are read during context
-training, so the query cache must cover train. Warmup skips these reads.
-`context_fda_error` logs the fraction of eligible pairs that FDA ranks wrong or
-tied. See the [residual objective](docs/proposed_method.md#residual-context-objective).
+Context ranks the Linear fine score on frozen native FDA binding. Its loss uses
+`loss.context_temperature`; `loss.context_weight` weights the task in the total
+loss. The coarse and state branches retain their separate objectives; fusion is
+postprocessing, also used for validation checkpoint selection and fine mining.
+Native FAFA query/target caches must cover train before training starts.
+`context_fda_error` records FDA pair errors; see the
+[context objective](docs/proposed_method.md#context-ranking-objective).
 
-Fine scoring requires a newly trained checkpoint. Previous scoring modes,
-residual-scale configs and score artifacts of an earlier schema are rejected.
-Existing frozen feature caches remain reusable when their provenance matches.
-Validation selects `best.pt` by the mean of overall and macro-case Full-mAP;
-calibration applies the same criterion by default to choose among saved
-validation artifacts (`selection_metric: full_map` selects overall-only).
-Test uses the frozen selection.
+Use a fresh training run: checkpoints trained with previous fine scorers and
+score artifacts from older schemas are rejected. Compatible frozen caches
+remain reusable. `best.pt` maximizes the mean of overall and macro-case
+validation Full-mAP **after fusion**. Calibration searches a small eta grid on
+saved validation scores, with pooling and Linear coefficients fixed. Test uses
+the frozen selection.
 
 See [method and equations](docs/proposed_method.md),
 [feature contracts](docs/feature_contracts.md) and
@@ -175,23 +174,24 @@ The checked-in `configs/proposed.yaml` sets these defaults:
 
 | Group | Values |
 | --- | --- |
-| Schedule | `train.epochs=10`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
+| Schedule | `train.epochs=20`, `context_warmup_epochs=4`, `batch_size=24` queries, `candidates=32`, AMP on, `seed=0` |
 | Optimizer | AdamW, `lr=1e-4`, `text_lr=1e-5`, `weight_decay=0.01`, cosine decay to `min_lr_ratio=0.1` |
-| Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.1` |
-| Fine mining | `warmup_epochs=8`, `refresh_every_epochs=2`, `pool_size=100` |
+| Candidate sampling | `positives_per_query=2`, `identity_fraction=0.5`, `hard_fraction=0.1`, `semantic_hard_fraction=0.3` |
+| Fine mining | `warmup_epochs=4`, `refresh_every_epochs=2`, `pool_size=100` |
 | Identity crops | `max_crops=128`, `crops_per_identity=2`, `random_identities=8`, `hard_negative_fraction=0.1` |
 | Loss | weights `1`/`0.1`/`1`/`1`/`1` for grounding/identity/coarse/context/state, `context_rejection_weight=0.2`, temperatures `0.1`, including `context_temperature` |
 | Model | `dim=384`, `identity_dim=128`, `state_dim=512`, `num_heads=6`, `mlp_ratio=2`, `geo_dim=32`, `dropout=0.1`, `fda_k=6`, `coarse_beta=0.4` |
 | Matching | `background_logit=-3.5`, `selection_threshold=0.5`, `identity_threshold=0.2`, `missing_penalty=1.1`, `duplicate_iou=0.9` |
-| Retrieval | `pooling=subject_mean`, `fine_score_mode=bounded_residual`, `context_weight=0.1`, `coarse_beta=1.16`, `top_m=500`, `candidate_ks=[500]` |
+| Retrieval | `pooling=subject_mean`, `fine_score_mode=linear`, `coverage_weight=0.04`, `context_weight=0.10`, `fine_coarse_weight=0.15`, `coarse_beta=1.16`, `top_m=500`, `candidate_ks=[500]` |
 | Validation | `evaluation.every_epochs=3` |
 
 With two positives and enough same-ID evidence, the sampling rows give each query 2
-positives, 2 hard and 13 random same-ID negatives, 3 hard wrong-ID negatives and 12
+positives, 5 hard and 10 random same-ID negatives, 3 hard wrong-ID negatives and 12
 uniform negatives. `retrieval.coarse_beta` overrides `model.coarse_beta` at
-inference. The residual weight and pooling are fixed from training; coarse beta
-and Top-M define the shortlist of each retrieval run. `calibrate` selects among
-the saved validation artifacts and writes the complete configuration to
+inference. Linear coefficients and pooling are fixed from training; coarse beta
+and Top-M define the shortlist of each retrieval run. `calibrate` evaluates
+`fine_coarse_weights: [0.15, 0.10, 0.20, 0.25]` on saved validation artifacts and
+writes the complete configuration to
 `runs/proposed-calibration/selected.yaml`.
 
 See the [script reference](scripts/README.md) for environment setup, dataset
@@ -262,7 +262,7 @@ bash scripts/setup.bash dev
 .venv-dev/bin/python -m ruff format --check src tools tests labelstudio
 ```
 
-The CPU suite covers feature-cache construction, residual scoring and coverage,
+The CPU suite covers feature-cache construction, Linear scoring, coverage and coarse fusion,
 training/backward, hard mining, retrieval, validation selection and frozen test
 inference. Shared fixtures live in `tests/conftest.py`; small cached inputs live
 in `tests/helpers.py`.

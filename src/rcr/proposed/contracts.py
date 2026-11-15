@@ -7,10 +7,16 @@ COMPATIBLE_ARCHITECTURE_VERSIONS = (
     "clip-b32-fafa-partial-match-v2",
 )
 
-SELECTED_RETRIEVAL_KEYS = (
+TRAINED_FINE_KEYS = (
     "pooling",
     "fine_score_mode",
     "context_weight",
+    "coverage_weight",
+)
+
+SELECTED_RETRIEVAL_KEYS = (
+    *TRAINED_FINE_KEYS,
+    "fine_coarse_weight",
     "coarse_beta",
     "top_m",
 )

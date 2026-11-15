@@ -11,9 +11,10 @@ from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
+    DEFAULT_COVERAGE_WEIGHT,
     fafa_binding_scores,
     identity_scores,
-    residual_score_components,
+    linear_score_components,
 )
 
 
@@ -129,6 +130,7 @@ def _context_scores(
     patch_hw,
     batch_size,
     context_score_weight=DEFAULT_CONTEXT_WEIGHT,
+    coverage_score_weight=DEFAULT_COVERAGE_WEIGHT,
 ):
     """Compute the inference score in chunks, retaining only context gradients."""
     queries, candidates = batch["positive_mask"].shape
@@ -156,8 +158,13 @@ def _context_scores(
             missing_penalty=model.fine_matching["missing_penalty"],
             pooling=pooling,
         )
-        score = residual_score_components(
-            binding, raw, matching.coverage, model.binding_scale, context_score_weight
+        score = linear_score_components(
+            binding,
+            raw,
+            matching.coverage,
+            model.binding_scale,
+            context_score_weight,
+            coverage_score_weight,
         )["fine_scores"]
         return score, matching.coverage, binding
 
@@ -186,7 +193,7 @@ def _context_scores(
 def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
     """Share of eligible (positive, negative) pairs that FDA alone ranks wrong or ties.
 
-    This is the headroom the residual context can correct. It uses the same
+    This is the headroom the context scorer can correct. It uses the same
     eligible pairs as the context ranking loss and carries no gradient.
     """
     positive = positive.bool() & valid
@@ -211,6 +218,7 @@ def compute_loss(
     context_rejection_weight: float = 0.0,
     context_temperature: float = 0.1,
     context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
+    coverage_score_weight: float = DEFAULT_COVERAGE_WEIGHT,
     context_batch_size: int = 64,
 ):
     """Use only train labels in objectives; selection/assignment stay label-free."""
@@ -357,6 +365,7 @@ def compute_loss(
             patch_hw,
             context_batch_size,
             context_score_weight,
+            coverage_score_weight,
         )
         valid = identity_positive & (coverage > 0)
         context = retrieval_loss(scores / context_temperature, positive, valid)

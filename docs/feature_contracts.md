@@ -79,12 +79,14 @@ The architecture name remains `fafa-partial-match-v2`, with its existing
 CLIP-prefixed alias. Tensor layouts and state keys, including the fixed
 `binding_log_scale`, remain unchanged.
 
-Fine scoring uses the bounded residual formula in both training and inference.
-Retrieval requires a checkpoint trained with `fine_score_mode: bounded_residual`
-and rejects earlier fine scorers. Train in a fresh output directory; compatible
-frozen caches remain reusable. Residual weight and pooling must match training.
-Calibration selects among saved validation artifacts, each retrieved with one
-coarse beta and Top-M; replay artifacts use score schema version 3.
+Fine scoring uses `B + a*C + b*H` in both training and inference. Retrieval
+requires a checkpoint trained with `fine_score_mode: linear` and rejects previous
+fine scorers. Train in a fresh output directory; compatible frozen caches remain
+reusable. Coverage/context coefficients and pooling must match training.
+Validation checkpoint selection uses `Z_M(fine) + eta*Z_M(coarse)`. Calibration
+may search eta on saved validation artifacts, with trained coefficients fixed;
+each artifact retains its coarse beta and Top-M. Replay uses score schema 4,
+including `coarse_topm_scores` and the fusion normalization contract.
 
 Historical DINO/BERT architecture checkpoints remain incompatible and are
 rejected before loading text weights. Matching feature dimensions alone do
@@ -99,8 +101,8 @@ fresh output directory and calibrate its validation artifacts separately.
 
 ## Verification scope
 
-CPU workflow tests cover cache construction, bounded residual scoring and
-coverage, training/backward, mining, retrieval, calibration, replay and frozen
+CPU workflow tests cover cache construction, Linear scoring, coverage and
+coarse fusion, training/backward, mining, retrieval, calibration, replay and frozen
 test inference. Native CLIP behavior uses tiny Transformers models without
 pretrained downloads. Shared fixtures contain synthetic cached features.
 A full GPU experiment requires raw images, pretrained assets and compatible

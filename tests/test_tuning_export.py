@@ -44,7 +44,7 @@ def test_retrieval_scores_each_shortlist_pair_once_and_stores_topm_evidence(
         output["schema_version"]
         == output["score_schema_version"]
         == SCORE_SCHEMA_VERSION
-        == 3
+        == 4
     )
     assert "score_alignment" not in output["score_config"]
     assert {"identity_scores", "state_scores", "tuning_scores"}.isdisjoint(output)
@@ -69,8 +69,8 @@ def test_retrieval_scores_each_shortlist_pair_once_and_stores_topm_evidence(
     torch.testing.assert_close(
         output["fine_scores"],
         output["binding_scale"] * binding
-        + output["score_config"]["context_weight"]
-        * (coverage * context.tanh() - (1 - coverage)),
+        + output["score_config"]["coverage_weight"] * coverage
+        + output["score_config"]["context_weight"] * context,
         rtol=0,
         atol=0,
     )
@@ -88,7 +88,12 @@ def test_retrieval_scores_each_shortlist_pair_once_and_stores_topm_evidence(
 @pytest.mark.parametrize("pooling", POOLING_MODES)
 def test_replay_matches_direct_retrieval_for_fine_score_settings(tiny_ranker, pooling):
     source = _rank(tiny_ranker)
-    parameters = dict(pooling=pooling, context_weight=0.13)
+    parameters = dict(
+        pooling=pooling,
+        context_weight=0.13,
+        coverage_weight=0.07,
+        fine_coarse_weight=0.2,
+    )
     replayed = replay_rankings(source, **parameters)
     direct = _rank(tiny_ranker, **parameters)
     for key in (
@@ -167,7 +172,13 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
     selected = yaml.safe_load((root / "selected.yaml").read_text())
     expected = torch.load(root / "selected/val/rankings.pt", weights_only=True)
     best = max(rows, key=lambda row: row["checkpoint_score"])
-    for key in ("coarse_beta", "context_weight", "top_m"):
+    for key in (
+        "coarse_beta",
+        "context_weight",
+        "coverage_weight",
+        "fine_coarse_weight",
+        "top_m",
+    ):
         assert selected["retrieval"][key] == best[key] == expected["score_config"][key]
         assert selected["selected_retrieval"][key] == best[key]
     assert selected["candidate_ks"] == cfg["candidate_ks"] == [1, 2]

@@ -32,6 +32,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert [row["context_weight"] for row in weights] == expected
     assert native_tokens == [bool(value) for value in expected]
     assert all(row["context_score_weight"] == 0.23 for row in weights)
+    assert all(row["coverage_score_weight"] == 0.04 for row in weights)
     history = [
         json.loads(line)
         for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
@@ -52,7 +53,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert checkpoint.name == "best.pt"
     assert saved["epoch"] == saved["best_epoch"] == best["epoch"]
     assert last["epoch"] == 3
-    assert saved["config"]["retrieval"]["fine_score_mode"] == "bounded_residual"
+    assert saved["config"]["retrieval"]["fine_score_mode"] == "linear"
     assert saved["config"]["retrieval"]["context_weight"] == 0.23
     assert saved["scene_cache_id"] == cache.scene_cache_id
     assert saved["detection_cache_id"] == cache.detection_cache_id

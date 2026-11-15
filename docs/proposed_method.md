@@ -217,19 +217,23 @@ a proof of correct semantic ownership.
 C_s = sum_i w_si [pi(i) is not null]       # zero for an empty query Subject
 C = mean_active_subjects C_s
 alpha = softplus(binding_log_scale)
-h = tanh(S_context)
-S_fine = alpha * B_FAFA + beta * (C * h - (1 - C))
+S_fine = alpha * B_FAFA + a * C + b * H
+H = S_context
 ```
 
-The scale is fixed at 1 for new training runs. `beta` is
-`retrieval.context_weight`, used by training, inference and mining. The raw
-reasoner scalar is unbounded, but its score contribution is bounded. At zero
-coverage the residual is exactly `-beta`, independently of the reasoner.
-For fixed binding and raw context, the derivative with respect to coverage is
-`beta * (tanh(S_context) + 1) >= 0`. This is a conditional monotonicity guarantee,
-not a claim that every partially matched image ranks below every complete one.
-Coverage is predicted matching support, not a ground-truth identity oracle.
-Detector misses and grounding mistakes can still lower positive scores.
+The binding scale is fixed at 1. `a = retrieval.coverage_weight` and
+`b = retrieval.context_weight` are fixed nonnegative coefficients shared by
+training, inference and mining. The checked-in values are 0.04 and 0.10.
+Context is raw, without activation or coverage gating. Its direct score gradient
+is `b`; the score's partial derivative with respect to coverage is `a`.
+Coverage and FDA binding are detached, so context does not change assignment
+through these terms. Coverage is predicted matching support, not identity truth.
+
+The raw context contribution is unbounded and can be nonzero at zero coverage.
+The Linear scorer does not guarantee that a complete match outranks a partial
+match. Identity matching, native FDA missing penalties and coarse identity
+scores still constrain retrieval; condition reasoning alone is not an identity
+oracle. Detector misses and grounding mistakes can lower positive scores.
 
 ## Objective and ranking
 
@@ -245,7 +249,7 @@ Each term has one explicit task:
 | `L_ground` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
 | `L_id` | Normalized person embeddings; SupCon, temperature 0.1 | Deduplicated known-ID crops from queries, Full Positive targets and extra train-only identity observations |
 | `L_coarse` | Actual raw `identity_scores`, temperature 0.1 | All-required-ID images are positives, other candidate images are negatives; both query and target need person support |
-| `L_context` | Shared bounded fine score, `loss.context_temperature` | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
+| `L_context` | Shared Linear fine score, `loss.context_temperature` | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
 | `L_global_state` | Global state cosine, temperature 0.1 | Full Positives versus same-required-ID negatives, independently of person detection coverage |
 
 After `train.sampling.warmup_epochs`, nonzero
@@ -307,7 +311,7 @@ negatives from equivalent queries. No validation/test annotation enters a train
 loss or negative pool.
 
 The context objective uses the shared `score_context()` path, with the exact
-inference matching, coverage gating and reasoner. Context queries lacking a
+inference matching, coverage and reasoner. Context queries lacking a
 supported positive/negative pair are skipped. Semantic and rejection losses each
 average pairs per eligible query, then average eligible queries independently.
 `loss.context_rejection_weight` defaults to zero for omitted old settings; the
@@ -330,10 +334,10 @@ trainable parameters.
 
 `loss` contains five task weights, one nested rejection weight and four positive
 temperatures. `loss.context_temperature` scales the pairwise context loss;
-`retrieval.context_weight` sets the residual bound. These are separate from the
-task weight `loss.context_weight`. Defaults are starting values, not measured
-optima. Pooling and the residual weight must match training during retrieval and
-remain fixed during calibration. An untrained state branch cannot enter
+`retrieval.context_weight` scales raw context and `retrieval.coverage_weight`
+scales coverage. Both are separate from the task weight `loss.context_weight`.
+Defaults are starting values, not measured optima. Pooling and both Linear
+coefficients must match training and remain fixed during calibration. An untrained state branch cannot enter
 training validation with a positive coarse beta.
 
 The default 20-epoch run has a short context warmup:
@@ -341,8 +345,7 @@ The default 20-epoch run has a short context warmup:
 | Epochs | Active objective |
 | --- | --- |
 | 1-4 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
-| 5-8 | All five terms; context uses semantic pairs only |
-| 9-20 | Fine negative mining and context rejection are also enabled |
+| 5-20 | All five terms, with fine negative mining and context rejection |
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
@@ -365,41 +368,51 @@ intermediate snapshot. History records `phase` and the effective `context_weight
 W&B records the effective weight and warmup flag per step and epoch. The saved
 configuration retains the final objective weights rather than the temporary zero.
 
-Within Top-M, the final order is the fine-score order. Coarse scores select
-candidates and order the tail; they are not fused back into the fine score.
-Fine scoring is independent of the number and distribution of other candidates.
-All derived ranking arithmetic uses CPU FP32 in inference/replay, while model
-forwards retain their configured device and chunking. Small floating-point
-forward differences can remain between batch sizes. Stable fine/FAFA ties
-retain coarse order; coarse ties retain canonical gallery order.
-`best.pt` maximizes `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`.
-
-### Residual context objective
-
-Training uses the same pairwise score as inference:
+Within Top-M, final ranking fuses fine and coarse evidence:
 
 ```text
-h(q,c) = tanh(S_context(q,c))
-s(q,c) = alpha * B_FAFA(q,c) + beta * (C(q,c) * h(q,c) - (1 - C(q,c)))
+Z_M(v) = (v - mean_M(v)) / max(std_M(v, unbiased=False), 1e-6)
+S_final = Z_M(S_fine) + eta * Z_M(S_coarse)
+```
+
+`eta = retrieval.fine_coarse_weight` starts at 0.15. For positive eta, both
+branches use exactly the same finite coarse support in the query's complete
+Top-M. Unsupported coarse candidates stay last; constant branches become zero.
+Eta zero returns raw fine scores. Fusion runs on CPU FP32 after all inference
+chunks have been collected. Fine pair scores are independent of other
+candidates; fusion statistics depend on the complete shortlist. Stable ties
+retain coarse order and the coarse tail is unchanged. Small floating-point
+forward differences can remain between chunk sizes.
+
+Training validation also uses this final fused ranking. `best.pt` maximizes
+`0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP`. Training uses a
+fixed eta; validation-only calibration may search a small eta grid afterwards.
+
+### Context ranking objective
+
+Training ranks the same pairwise fine score used before inference fusion:
+
+```text
+s(q,c) = alpha * B_FAFA(q,c) + a * C(q,c) + b * H(q,c)
 L_context = L_semantic + context_rejection_weight * L_rejection
 L_pair = softplus((s_negative - s_positive) / context_temperature)
 ```
 
-`B_FAFA` uses the same detached identity assignment, `retrieval.pooling`, FDA-k
-and missing penalty as inference. FDA is frozen; context gradients reach
-composition, evidence binding, the reasoner and shared projections. Eligibility
-masks remain unchanged: semantic pairs use identity positives with positive
-coverage; rejection pairs use Full Positives and explicitly mined wrong-ID
-negatives with positive coverage. Zero-coverage pairs cannot train the reasoner
-through a detached coverage gate. Grounding and identity retain their explicit
-supervision.
+FDA binding and coverage use the detached inference assignment, trained pooling,
+FDA-k and missing penalty. The context branch receives direct gradients without
+activation saturation. Its score gradient with respect to H is `b`; gradients
+of the temperature-scaled pairwise logits additionally include `1 / temperature`.
+Semantic pairs use Full Positives and same-required-ID negatives with positive
+coverage. Rejection pairs use Full Positives and explicitly mined wrong-ID
+negatives with positive coverage. Zero-coverage observations are excluded from
+context supervision to avoid training on missing visual evidence. Grounding and
+identity retain their explicit objectives.
 
-The residual lies in `[-beta, beta]` in both training and inference, including
-single-candidate shortlists. Context cannot compensate for an arbitrarily large
-binding gap by increasing its raw magnitude. At equal full coverage, its maximum
-pairwise correction is `2 * beta`. Choose beta by inspecting binding gaps on
-train/validation and retrain with the final value; offline changes are diagnostic
-ablations rather than deployment calibration.
+The coarse and state branches keep their separate losses. Fusion is
+postprocessing for validation/retrieval, not a loss normalized on sampled
+32-candidate training batches. Fine mining uses the same fusion formula on its
+complete screened union, whose normalization support differs from retrieval.
+Neither train mining nor its normalization reads validation/test labels.
 
 The training batch carries `fafa_query` `[B,S,Kq,D]`, `fafa_targets`
 `[B,C,Kt,L,D]` and `fafa_pooling` from independent FAFA query/image caches.
@@ -435,13 +448,13 @@ identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
 Fresh experiments train from scratch in `runs/proposed`. The architecture
 identifier and parameter layout stay unchanged, including the architecture-name
-alias. Retrieval requires a checkpoint trained with the bounded residual scorer;
+alias. Retrieval requires a checkpoint trained with the Linear scorer;
 an older checkpoint's parameter layout alone does not establish scoring
 compatibility. See [feature contracts](feature_contracts.md).
-Offline replay requires a score-schema-3 artifact.
+Offline replay requires a score-schema-4 artifact.
 All train/val/test query features are frozen, label-free preprocessing; no
 validation/test labels are used to build native features. Training accesses
-only train candidates; validation selects checkpoints and coarse shortlist settings.
+only train candidates; validation selects checkpoints, coarse shortlist settings and fusion weights.
 
 `checkpoint.max_txt_len` in the native FAFA YAML explicitly selects 128 tokens,
 including special tokens, for person query extraction. The
@@ -458,7 +471,8 @@ recorded policy and checkpoint contract without installing native FAFA.
 duplicate IoU. Settings are restored from the training checkpoint and recorded
 in retrieval metadata. Defaults are starting values, not measured optimal values.
 Calibration selects among validation artifacts retrieved with different coarse
-beta or Top-M; trained pooling and residual weight stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
+beta or Top-M, and searches eta on saved scores; trained pooling and Linear
+coefficients stay fixed. Changing `model.fine_matching` in a retrieval YAML does not override the checkpoint; use
 an explicitly retrained configuration for threshold studies.
 New checkpoints save the resolved matching settings, including the actual
 background. Retrieval metadata records that effective configuration even if its
@@ -468,8 +482,8 @@ selection (legacy selections default to zero). Changing background requires new
 query encoding and fine scoring; score replay cannot change it.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
-Subject/overall coverage, all three binding reductions, raw/gated context and
-final score from the same forward pass. Small tests verify structure and
+Subject/overall coverage, all three binding reductions, raw context, coverage bonus and
+fine score from the same forward pass. Small tests verify structure and
 numerics, not benchmark mAP.
 
 Saved rankings include `fafa_rankings` in addition to coarse/fine/final rankings.
@@ -483,20 +497,19 @@ ablations. Derived diagnostics retain coarse Top-M order. The evaluator reports
 validation retrieval and test retrieval fine-score only the Top-M shortlist
 through one shared path.
 
-The one `rankings.pt` artifact uses schema version **3**, with query indices,
+The one `rankings.pt` artifact uses schema version **4**, with query indices,
 recorded binding scale, fixed matching policy, scoring configuration and embedded
 run/provenance metadata. Artifacts of an earlier schema and checkpoints trained
 with previous fine scorers are rejected; train a fresh run using the existing
 frozen caches. Each shortlisted pair is fine-scored once per retrieval.
 Calibration reads the listed validation artifacts and validation annotations,
 without opening any checkpoint, backbone or feature cache. It selects the
-artifact with the best validation score; pooling and the residual weight stay
-fixed from training and each artifact keeps the coarse beta and Top-M it was
-retrieved with. The default `selection_metric` averages overall and macro-case
+artifact/eta combination with the best validation score; pooling and Linear
+coefficients stay fixed and each artifact retains its coarse beta and Top-M. The default `selection_metric` averages overall and macro-case
 validation Full-mAP, matching checkpoint selection; `full_map` and
-`macro_full_map` are also supported. The first listed artifact wins equal-score
-ties. Coarse population normalization uses the complete eligible gallery; fine
-scoring has no population normalization. The winning artifact receives full
+`macro_full_map` are also supported. The first artifact, then the first eta in configured order, wins equal-score
+ties. Coarse normalization uses the complete eligible gallery; fusion
+normalization uses the complete finite Top-M support. The winning artifact receives full
 official evaluation before export.
 
 `candidate_ks` remains fixed independently of Top-M and is evaluated from the

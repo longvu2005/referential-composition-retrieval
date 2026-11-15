@@ -28,6 +28,7 @@ from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.contracts import (
     COMPATIBLE_ARCHITECTURE_VERSIONS,
     SELECTED_RETRIEVAL_KEYS,
+    TRAINED_FINE_KEYS,
 )
 from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
@@ -82,11 +83,9 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     trained_settings = retrieval_settings(
         train_cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
-    if any(
-        settings[key] != trained_settings[key] for key in ("pooling", "context_weight")
-    ):
+    if any(settings[key] != trained_settings[key] for key in TRAINED_FINE_KEYS):
         raise ValueError(
-            "residual weight and pooling must match training; train a new run"
+            "linear coefficients and pooling must match training; train a new run"
         )
     present = [key in cfg for key in selection_keys]
     if any(present) and not all(present):
@@ -223,6 +222,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         "clip_text_stats": output.get("clip_text_stats"),
         "fine_score_mode": settings["fine_score_mode"],
         "context_weight": settings["context_weight"],
+        "coverage_weight": settings["coverage_weight"],
+        "fine_coarse_weight": settings["fine_coarse_weight"],
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_sha256,
         "validation_sha256": validation_sha256,

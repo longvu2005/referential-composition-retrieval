@@ -13,21 +13,24 @@ from rcr.proposed.matching import (
 
 POOLING_MODES = ("penalized", "matched_mean", "subject_mean")
 DEFAULT_CONTEXT_WEIGHT = 0.1
-FINE_SCORE_MODE = "bounded_residual"
+DEFAULT_COVERAGE_WEIGHT = 0.04
+FINE_SCORE_MODE = "linear"
 
 
-def residual_score_components(
+def linear_score_components(
     binding: Tensor,
     context: Tensor,
     coverage: Tensor,
     binding_scale: float | Tensor,
     context_weight: float = DEFAULT_CONTEXT_WEIGHT,
+    coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
 ) -> dict[str, Tensor]:
-    """Score each pair independently with a bounded, null-aware residual."""
+    """Combine native binding, coverage and raw context independently per pair."""
     if binding.shape != context.shape or binding.shape != coverage.shape:
         raise ValueError("binding, context and coverage must have matching shapes")
-    if not math.isfinite(context_weight) or context_weight < 0:
-        raise ValueError("context weight must be finite and nonnegative")
+    for name, value in (("context", context_weight), ("coverage", coverage_weight)):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} weight must be finite and nonnegative")
     scale = torch.as_tensor(binding_scale, device=binding.device).float()
     if scale.numel() != 1 or not torch.isfinite(scale).all() or (scale < 0).any():
         raise ValueError("binding scale must be finite and nonnegative")
@@ -36,16 +39,14 @@ def residual_score_components(
         raise ValueError("fine score components contain NaN/Inf")
     if ((coverage < 0) | (coverage > 1)).any():
         raise ValueError("coverage must be in [0, 1]")
-    gated = coverage * context.tanh()
-    penalty = 1 - coverage
-    residual = context_weight * (gated - penalty)
-    fine = scale * binding + residual
+    bonus = coverage_weight * coverage
+    contribution = context_weight * context
+    fine = scale * binding + bonus + contribution
     if not torch.isfinite(fine).all():
         raise ValueError("fine scores overflowed float32")
     return {
-        "gated_context": gated,
-        "coverage_penalty": context_weight * penalty,
-        "context_residual": residual,
+        "coverage_bonus": bonus,
+        "context_contribution": contribution,
         "fine_scores": fine,
     }
 

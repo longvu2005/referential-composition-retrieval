@@ -90,7 +90,7 @@ def prepare_visual_batch(
 ) -> dict[str, Tensor | dict]:
     """Load CPU visual features and labels. No model is executed here.
 
-    ``fafa_pooling`` is set only for the residual context objective. It adds the
+    ``fafa_pooling`` is set only for the context ranking objective. It adds the
     frozen native FAFA query/target tokens that objective needs and records the
     pooling used for them. Without it no native token is read.
     """

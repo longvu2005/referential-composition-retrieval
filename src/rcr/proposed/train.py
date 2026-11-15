@@ -268,7 +268,7 @@ def train(cfg: dict) -> Path:
         and int(max_negatives * sampling["hard_fraction"]) > 0
     )
     fine_mining = semantic_hard or identity_rejection
-    context_residual = cfg["loss"]["context_weight"] > 0
+    context_enabled = cfg["loss"]["context_weight"] > 0
     seed = cfg["train"]["seed"]
     deterministic = cfg["runtime"].get("deterministic", True)
     seed_everything(seed, deterministic=deterministic)
@@ -286,7 +286,7 @@ def train(cfg: dict) -> Path:
     check_cache_config(cache, cfg)
     cache.validate_gallery(data.gallery_ids)
     cache.validate_samples(inference_samples(val_samples))
-    if fine_mining or context_residual:
+    if fine_mining or context_enabled:
         # Fail before label preparation or epoch 1, not at the first refresh.
         cache.validate_samples(inference_samples(train_samples))
     check_query_text_config(cache, cfg)
@@ -451,7 +451,7 @@ def train(cfg: dict) -> Path:
         }
         # Context is skipped during warmup, so native tokens are read only afterwards.
         fafa_pooling = (
-            cfg["retrieval"]["pooling"] if context_residual and not in_warmup else None
+            cfg["retrieval"]["pooling"] if context_enabled and not in_warmup else None
         )
         # One independent stream per (seed, purpose, epoch); see derive_seed.
         generator = derived_generator(seed, "sampling", epoch)
@@ -594,6 +594,7 @@ def train(cfg: dict) -> Path:
                     cache.patch_hw,
                     context_batch_size=cfg["train"]["context_batch_size"],
                     context_score_weight=cfg["retrieval"]["context_weight"],
+                    coverage_score_weight=cfg["retrieval"]["coverage_weight"],
                     **epoch_loss,
                 )
             if not torch.isfinite(loss):

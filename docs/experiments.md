@@ -15,7 +15,8 @@ python tools/report.py --split val --run proposed=runs/proposed-calibration/sele
 
 The validation recipe prepares assets, builds caches, trains, retrieves and
 calibrates. Calibration compares saved validation artifacts while retaining the
-trained residual weight and pooling. For an existing checkpoint, retrieve from
+trained Linear coefficients and pooling. It searches the configured small
+`fine_coarse_weights` grid without model inference. For an existing checkpoint, retrieve from
 its saved configuration and calibrate separately:
 
 ```bash
