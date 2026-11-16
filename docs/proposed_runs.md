@@ -127,7 +127,7 @@ Self, all Full Positives (including unsampled ones), disputed negatives and
 duplicate candidate IDs stay excluded. GT identity remains a crop-level label
 for SupCon: a Full-negative image can still supply same-ID positive crops.
 
-After `train.sampling.warmup_epochs` (checked-in value 4), fine mining refreshes every two
+After `train.sampling.warmup_epochs` (checked-in value 8), fine mining refreshes every two
 epochs. It first takes at most `pool_size` finite coarse candidates **per enabled
 negative group** (same-ID/non-Full versus missing at least one required ID), then
 fine-scores their union with the current model in eval/inference mode. The
@@ -162,7 +162,7 @@ ablations use a fresh `output.dir` for each run:
 | No semantic hard mining or rejection | 0 | 0 |
 | Semantic hard mining only | 0.5 | 0 |
 | Identity rejection only | 0 | 0.2 |
-| Both (current YAML) | 0.3 | 0.2 |
+| Both (current YAML) | 0.3 | 0.5 |
 
 Omitted semantic-hard and rejection settings default to zero. Training optimizes
 `L_context = L_semantic + context_rejection_weight * L_rejection` using the same
@@ -225,8 +225,8 @@ python tools/run.py run --config runs/proposed-seed1/selected.yaml --split test
 Continue the same run and original total epoch schedule:
 
 ```bash
-python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume
-python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume runs/proposed-kaggle-t4/last.pt
+python tools/run.py train --config runs/proposed/config.yaml --resume
+python tools/run.py train --config runs/proposed/config.yaml --resume runs/proposed/last.pt
 ```
 
 `last.pt` is atomically replaced after initialization, every

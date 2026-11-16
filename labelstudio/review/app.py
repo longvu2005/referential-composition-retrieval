@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from rcr.common.io import image_relative_path as _image_relative_path
-from rcr.common.io import load_jsonl, write_jsonl
+from rcr.common.io import index_unique, load_jsonl, write_jsonl
 from rcr.dataset.cases import CASE_TYPES, EDITABLE_CASE_TYPES, ONE_SUBJECT_CASES
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
@@ -161,15 +161,11 @@ def validate_submission(source: dict, payload: dict) -> dict:
 class ReviewState:
     def __init__(self) -> None:
         self.rows = load_jsonl(INPUT)
-        self.rows_by_id = {row["sample_id"]: row for row in self.rows}
+        self.rows_by_id = index_unique(self.rows, "sample_id", "review_input.jsonl")
         self.index_by_id = {row["sample_id"]: i for i, row in enumerate(self.rows)}
-        if len(self.rows_by_id) != len(self.rows):
-            raise ValueError("review_input.jsonl contains duplicate sample_id")
 
         existing = load_jsonl(OUTPUT) if OUTPUT.exists() else []
-        self.reviews = {row["sample_id"]: row for row in existing}
-        if len(self.reviews) != len(existing):
-            raise ValueError("reviewed.jsonl contains duplicate sample_id")
+        self.reviews = index_unique(existing, "sample_id", "reviewed.jsonl")
         self.lock = threading.Lock()
 
     def _meta(self, index: int, row: dict) -> dict:

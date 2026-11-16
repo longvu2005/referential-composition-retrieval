@@ -55,11 +55,8 @@ def parse_selection_texts(final_desc: str, subject_ids: list[int]) -> list[str]:
     return descriptions
 
 
-def _validate_output(
-    output: dict,
-    subject_ids: list[int],
-    required_change_ids: set[int],
-) -> tuple[str, str]:
+def validate_review_output(case_type: str, output: dict) -> tuple[str, str]:
+    subject_ids = subject_ids_for_case(case_type)
     if not isinstance(output, dict):
         raise ValueError("accepted text must be a JSON object.")
     if set(output) != {"final_desc", "final_change"}:
@@ -84,15 +81,10 @@ def _validate_output(
 
     parse_selection_texts(final_desc, subject_ids)
 
-    if set(_subject_ids(final_change)) != required_change_ids:
+    if set(_subject_ids(final_change)) != set(subject_ids):
         raise ValueError(
             "final_change must mention exactly the Subjects required "
             "by the current structure."
         )
 
     return final_desc, final_change
-
-
-def validate_review_output(case_type: str, output: dict) -> tuple[str, str]:
-    subject_ids = subject_ids_for_case(case_type)
-    return _validate_output(output, subject_ids, set(subject_ids))

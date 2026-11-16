@@ -37,10 +37,11 @@ def _ready(path, cache_id, key, shape, dtype):
         item = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
     except (OSError, EOFError, RuntimeError, pickle.UnpicklingError):
         return False
-    features = item.get("features") if isinstance(item, dict) else None
+    if not isinstance(item, dict):
+        return False
+    features = item.get("features")
     return (
-        isinstance(item, dict)
-        and item.get("cache_id") == cache_id
+        item.get("cache_id") == cache_id
         and item.get("key") == key
         and isinstance(features, torch.Tensor)
         and features.shape == shape
@@ -83,7 +84,7 @@ class _Extractor:
     """One lazy model load shared by both stages in the isolated FAFA process."""
 
     def __init__(self, cfg, source, data):
-        self.cfg, self.source, self.data = cfg, source, data
+        self.source, self.data = source, data
         self.batch_size = cfg["person_encoder"]["batch_size"]
         if type(self.batch_size) is not int or self.batch_size < 1:
             raise ValueError("person_encoder.batch_size must be positive")
@@ -120,12 +121,6 @@ class _Extractor:
             if image.size != item["image_size"]:
                 raise ValueError("raw image dimensions differ from detection cache")
             boxes = item["boxes_pixel"]
-            if (
-                boxes.shape != (count, 4)
-                or not torch.isfinite(boxes).all()
-                or (boxes[:, 2:] <= boxes[:, :2]).any()
-            ):
-                raise ValueError("invalid cached person boxes")
             for start in range(0, count, self.batch_size):
                 pixels = torch.stack(
                     [
@@ -274,8 +269,7 @@ def _build_queries(root, extractor):
     previous = _query_index(root, signature)
     same_policy = previous is not None and cached_text_policy(previous) == policy
     if (
-        previous is not None
-        and same_policy
+        same_policy
         and not (root / ".building").exists()
         and previous["queries"] == entries
     ):

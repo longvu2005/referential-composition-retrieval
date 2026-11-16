@@ -55,9 +55,8 @@ PIL crop padding and the scene transform's clipping preserve crop semantics.
 
 Detection extraction, supervision and diagnostics use the independent pixel-box
 cache only. Existing `person-detections-v1` indexes and native unfinished builds
-remain reusable. Scene-to-detection migration is no longer part of the runtime
-API; convert historical unified caches with their original code revision or
-build a fresh detection cache before using this pipeline.
+remain reusable. Unified caches require conversion with their original code
+revision or a fresh detection build before using this pipeline.
 
 A completed unified CLIP scene cache remains usable as `data.scene_cache`; its
 geometry is ignored by the scene reader. Legacy DINO scene features cannot

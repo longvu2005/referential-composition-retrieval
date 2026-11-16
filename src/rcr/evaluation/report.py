@@ -217,42 +217,6 @@ def load_run(name: str, directory: str | Path, split: str) -> dict:
     }
 
 
-def validate_runs(runs: list[dict]) -> None:
-    if not runs:
-        raise ReportError("no runs selected")
-    if len({run["name"] for run in runs}) != len(runs):
-        raise ReportError("duplicate method results")
-    first = runs[0]
-    for other in runs[1:]:
-        for key in ("split_sha256", "num_queries", "num_gallery"):
-            if first["run"][key] != other["run"][key]:
-                raise ReportError(
-                    f"incompatible {key}: {first['name']} vs {other['name']}"
-                )
-        for key in ("sample_ids", "case_counts"):
-            if first[key] != other[key]:
-                raise ReportError(
-                    f"incompatible {key}: {first['name']} vs {other['name']}"
-                )
-    # The split digest binds queries, labels and gallery. Optional provenance
-    # fields must agree wherever they are recorded.
-    for key in (
-        "dataset_version",
-        "dataset_sha256",
-        "gallery_ids_sha256",
-        "evaluation_protocol",
-        "self_exclusion",
-        "ranking_scope",
-    ):
-        values = {
-            json.dumps(run["run"][key], sort_keys=True)
-            for run in runs
-            if run["run"].get(key) is not None
-        }
-        if len(values) > 1:
-            raise ReportError(f"incompatible {key} across selected runs")
-
-
 def table_rows(runs, *, by_case=False):
     if not by_case:
         headers = ["Method", *(label for _, label, _ in OVERALL_METRICS)]
@@ -367,6 +331,8 @@ def generate_report(
         raise ReportError("decimals must be an integer from 0 to 10")
     if not formats or set(formats) - {"csv", "md", "tex"}:
         raise ReportError("formats must be csv, md and/or tex")
+    if not run_directories:
+        raise ReportError("no runs selected")
     missing = [
         str(Path(directory) / filename)
         for directory in run_directories.values()
@@ -378,7 +344,6 @@ def generate_report(
     runs = [
         load_run(name, directory, split) for name, directory in run_directories.items()
     ]
-    validate_runs(runs)
     # Render everything before touching output, including on incompatible runs.
     rendered = {}
     for name, by_case in (("overall", False), ("by_case", True)):

@@ -74,8 +74,7 @@ every derived sample, copy `pairs[*].split` using the ordered key
 
 Working files are provenance records, not the public benchmark interface.
 Selection, review and positive files all use the canonical `sample_id`.
-The old automatic rewrite step, prompt and duplicate text projections have been
-removed. Accepted text goes directly from selection to the review catalog;
+Accepted text goes directly from selection to the review catalog;
 completed human decisions remain separate.
 
 ### Final data
@@ -252,7 +251,7 @@ human-review and Positive Expansion phases.
 
 ## Reproducibility rules
 
-* Keep the canonical source export unchanged after this migration.
+* Keep the canonical source export unchanged.
 * Active selection, review and positive snapshots are retained.
 * Existing samples use accepted final text directly.
 * Human corrections are stored separately from prepared review tasks.

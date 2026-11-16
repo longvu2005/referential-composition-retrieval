@@ -115,7 +115,7 @@ dataset/data/work/positives/positive_set_input.jsonl
 ```
 
 Re-running review preparation refreshes the review catalog by `sample_id`.
-Positive preparation preserves migrated candidate order and checks that reviewed
+Positive preparation preserves candidate order and checks that reviewed
 text and Subject identities still match existing tasks; inspect positive labels
 before applying any changed review. Completion state is
 stored separately in `reviewed.jsonl` and `positive_sets.jsonl`. This allows old

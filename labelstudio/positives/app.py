@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from rcr.common.io import image_relative_path as _image_relative_path
-from rcr.common.io import load_jsonl, write_jsonl
+from rcr.common.io import index_unique, load_jsonl, write_jsonl
 from rcr.dataset.cases import CASE_TYPES
 from rcr.dataset.positives import validate_positive_set as validate_submission
 
@@ -72,10 +72,10 @@ def build_task_payload(
 class PositiveState:
     def __init__(self) -> None:
         self.rows = load_jsonl(INPUT)
-        self.rows_by_id = {row["sample_id"]: row for row in self.rows}
+        self.rows_by_id = index_unique(
+            self.rows, "sample_id", "positive_set_input.jsonl"
+        )
         self.index_by_id = {row["sample_id"]: i for i, row in enumerate(self.rows)}
-        if len(self.rows_by_id) != len(self.rows):
-            raise ValueError("positive_set_input.jsonl contains duplicate sample_id")
 
         # Validate catalog structure once; task rendering uses these same rows.
         for row in self.rows:
@@ -96,14 +96,9 @@ class PositiveState:
                 )
 
         existing = load_jsonl(OUTPUT) if OUTPUT.exists() else []
-        if len({row["sample_id"] for row in existing}) != len(existing):
-            raise ValueError("positive_sets.jsonl contains duplicate sample_id")
+        saved = index_unique(existing, "sample_id", "positive_sets.jsonl")
 
-        unknown = [
-            row["sample_id"]
-            for row in existing
-            if row["sample_id"] not in self.rows_by_id
-        ]
+        unknown = [sample_id for sample_id in saved if sample_id not in self.rows_by_id]
         if unknown:
             raise ValueError(
                 "positive_sets.jsonl contains IDs outside positive_set_input.jsonl: "
@@ -111,10 +106,8 @@ class PositiveState:
             )
 
         self.positives = {
-            row["sample_id"]: validate_submission(
-                self.rows_by_id[row["sample_id"]], row
-            )
-            for row in existing
+            sample_id: validate_submission(self.rows_by_id[sample_id], row)
+            for sample_id, row in saved.items()
         }
         self.lock = threading.Lock()
 

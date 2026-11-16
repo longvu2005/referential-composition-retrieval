@@ -46,11 +46,8 @@ def validate_positive_set(source: dict, payload: dict) -> dict:
 def normalize_positive_sets(catalog: list[dict], decisions: list[dict]) -> list[dict]:
     """Validate all decisions before returning them in catalog/candidate order."""
 
-    try:
-        sources = index_unique(catalog, "sample_id", "catalog")
-        saved = index_unique(decisions, "sample_id", "decisions")
-    except ValueError as error:
-        raise ValueError("duplicate sample_id in catalog or decisions") from error
+    sources = index_unique(catalog, "sample_id", "catalog")
+    saved = index_unique(decisions, "sample_id", "decisions")
     unknown = set(saved) - set(sources)
     if unknown:
         raise ValueError(f"positive decision outside catalog: {min(unknown)}")

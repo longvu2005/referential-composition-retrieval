@@ -19,7 +19,6 @@ from rcr.proposed.ranking import (
 )
 from rcr.proposed.scores import FINE_SCORE_MODE, POOLING_MODES
 
-SHORTLIST_KEYS = ("coarse_beta", "top_m")
 BINDING_KEYS = tuple(f"binding_{mode}" for mode in POOLING_MODES)
 
 

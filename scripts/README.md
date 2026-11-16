@@ -17,6 +17,25 @@ PYTHON=python3.11 bash scripts/setup.bash proposed
 PYTHON=python3.11 bash scripts/setup.bash person-encoder
 ```
 
+Without `PYTHON`, setup searches for Python 3.11, then 3.12, then a compatible
+`python3`. It checks the interpreter before creating an environment and isolates
+installation from notebook startup hooks and `PYTHONPATH`.
+
+On a Kaggle image with only Python 3.13, install Python 3.11 and seed pip with uv:
+
+```bash
+python3 -m pip install --no-cache-dir uv
+uv python install 3.11
+for environment in proposed person-encoder; do
+  uv venv --python 3.11 --seed ".venv-$environment"
+  PYTHON=".venv-$environment/bin/python" bash scripts/setup.bash "$environment"
+done
+```
+
+Rerun setup after an interrupted install; `bin/python` alone does not establish
+that dependencies are complete. Move an environment with an incompatible Python
+version aside before setup. Caches and runs are stored separately.
+
 Setup creates `.venv-<name>` and installs the matching requirements file. Other
 supported environments are `dataset`, `dataset-clip`, `evaluation` and `dev`.
 Dependencies are declared in `pyproject.toml`; requirements files select the
@@ -84,7 +103,7 @@ To continue the same run, call the training CLI directly rather than repeat
 the preparation recipe:
 
 ```bash
-.venv-proposed/bin/python tools/run.py train --config runs/proposed-kaggle-t4/config.yaml --resume
+.venv-proposed/bin/python tools/run.py train --config runs/proposed/config.yaml --resume
 ```
 
 This restores the versioned full state in `last.pt`; `best.pt` is for inference.

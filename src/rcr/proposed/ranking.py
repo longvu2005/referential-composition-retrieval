@@ -26,7 +26,6 @@ from rcr.proposed.scores import (
 SCORE_SCHEMA_VERSION = 4
 SCORE_EPS = 1e-6
 DEFAULT_FINE_COARSE_WEIGHT = 0.15
-FINE_SCORE_MODES = (FINE_SCORE_MODE,)
 if TYPE_CHECKING:
     from rcr.proposed.cache.store import GalleryCache
     from rcr.proposed.nn.encoders import QueryTextCache
@@ -252,16 +251,11 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         )
     ):
         raise ValueError("retrieval weights must be finite and nonnegative")
-    if settings["fine_score_mode"] not in FINE_SCORE_MODES:
+    if settings["fine_score_mode"] != FINE_SCORE_MODE:
         raise ValueError(f"unknown fine_score_mode: {settings['fine_score_mode']!r}")
     if settings["pooling"] not in POOLING_MODES:
         raise ValueError(f"unknown FAFA pooling: {settings['pooling']!r}")
     return settings
-
-
-def uses_state(cfg: dict, default_beta: float) -> bool:
-    settings = retrieval_settings(cfg, default_beta)
-    return settings["coarse_beta"] != 0
 
 
 def _gallery_scope(cache, gallery_ids, samples, label):
@@ -568,7 +562,7 @@ def mine_hard_negatives(
     subject_groups = {}
     for sample in samples:
         subject_groups.setdefault(len(sample["subjects"]), []).append(sample)
-    need_state = uses_state(settings, model.coarse_beta)
+    need_state = settings["coarse_beta"] != 0
     pools = {}
 
     with evaluating(model, text_encoder):

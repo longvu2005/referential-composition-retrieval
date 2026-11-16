@@ -124,8 +124,8 @@ def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples, progress)
         evaluation=cfg.get("evaluation", {"enabled": False}),
         cache={
             "id": cache.cache_id,
-            "scene_id": getattr(cache, "scene_cache_id", None),
-            "detection_id": getattr(cache, "detection_cache_id", None),
+            "scene_id": cache.scene_cache_id,
+            "detection_id": cache.detection_cache_id,
             "patch_hw": list(cache.patch_hw),
             "scene_dim": cache.scene_dim,
             "person_dim": cache.person_dim,
@@ -254,8 +254,8 @@ def _make_checkpoint(
         "global_dim": model.global_dim,
         "encoder_metadata": cache.encoder_metadata,
         "cache_id": cache.cache_id,
-        "scene_cache_id": getattr(cache, "scene_cache_id", None),
-        "detection_cache_id": getattr(cache, "detection_cache_id", None),
+        "scene_cache_id": cache.scene_cache_id,
+        "detection_cache_id": cache.detection_cache_id,
         "native_cache": cache.native.metadata,
         "architecture_version": model.architecture_version,
         "representation": "shared_person",
@@ -385,8 +385,7 @@ def _train(cfg, output, resumed):
     )
     identity_settings = cfg["train"]["identity_sampling"]
     use_extra_identities = (
-        identity_settings["max_crops"] > 0
-        and cfg["loss"].get("identity_weight", 0.1) != 0
+        identity_settings["max_crops"] > 0 and cfg["loss"]["identity_weight"] != 0
     )
     supervision.prepare(
         train_samples,
@@ -632,15 +631,15 @@ def _train(cfg, output, resumed):
                         "pools": progress.hard_pools,
                     },
                 )
+            batches = training_batches(
+                train_samples,
+                cfg["train"]["batch_size"],
+                generator,
+                case_balanced=cfg["train"].get("case_balanced", True),
+            )
             if resuming_epoch:
-                planned = training_batches(
-                    train_samples,
-                    cfg["train"]["batch_size"],
-                    generator,
-                    case_balanced=cfg["train"].get("case_balanced", True),
-                )
                 if progress.batches != [
-                    [row["sample_id"] for row in batch] for batch in planned
+                    [row["sample_id"] for row in batch] for batch in batches
                 ]:
                     raise ValueError(
                         "resume batch plan differs from the seeded training order"
@@ -651,12 +650,6 @@ def _train(cfg, output, resumed):
                 generator.set_state(progress.sampling_rng)
                 identity_generator.set_state(progress.identity_rng)
             else:
-                batches = training_batches(
-                    train_samples,
-                    cfg["train"]["batch_size"],
-                    generator,
-                    case_balanced=cfg["train"].get("case_balanced", True),
-                )
                 progress.batches = [
                     [row["sample_id"] for row in batch] for batch in batches
                 ]

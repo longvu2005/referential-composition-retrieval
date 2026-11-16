@@ -216,30 +216,6 @@ def _identity_positive_set(sample, images_by_identity):
     return set.intersection(*pools) - {sample["query_image_id"]}
 
 
-def identity_positive_ids(
-    sample: dict,
-    gallery_ids: Sequence[str],
-    identities_by_image: Mapping[str, set[str]],
-) -> list[str]:
-    """Gallery images containing every identity required by the query.
-
-    Identity positives ignore the requested change/relation. Subject grouping
-    and ordering are therefore irrelevant for this diagnostic target set.
-    """
-
-    required_ids = set(required_identity_ids(sample))
-    if not required_ids:
-        raise ValueError(f"{sample['sample_id']}: no required identities")
-
-    query_id = sample["query_image_id"]
-    return [
-        image_id
-        for image_id in gallery_ids
-        if image_id != query_id
-        and required_ids <= identities_by_image.get(image_id, set())
-    ]
-
-
 def _mean(rows: Sequence[dict], key: str) -> float:
     return fmean(row[key] for row in rows)
 

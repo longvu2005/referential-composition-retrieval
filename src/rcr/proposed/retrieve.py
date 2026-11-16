@@ -40,7 +40,6 @@ from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
     retrieval_settings,
     retrieve_rankings,
-    uses_state,
 )
 from rcr.proposed.scores import FINE_SCORE_MODE
 
@@ -125,9 +124,7 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         train_cfg.get("loss", {}).get("state_weight", 1.0) == 0
         or checkpoint.get("state_supervised_pairs", 1) == 0
     )
-    if state_untrained and uses_state(
-        settings, model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
-    ):
+    if state_untrained and settings["coarse_beta"] != 0:
         raise ValueError(
             "checkpoint state branch is untrained; use retrieval.coarse_beta=0"
         )
@@ -162,7 +159,7 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     if "cache_id" in checkpoint and cache.cache_id != checkpoint["cache_id"]:
         raise ValueError("retrieval cache differs from the training cache")
     for key in ("scene_cache_id", "detection_cache_id"):
-        if checkpoint.get(key) != getattr(cache, key, None):
+        if checkpoint.get(key) != getattr(cache, key):
             raise ValueError(f"retrieval {key} differs from training")
     if cache.global_dim != checkpoint.get("global_dim"):
         raise ValueError("retrieval CLIP global dimensions differ from training")

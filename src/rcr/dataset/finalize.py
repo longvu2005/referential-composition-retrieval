@@ -65,9 +65,7 @@ def build_final_dataset(
 
     index_lines = list(index_lines)
     index_ids = indexed_image_ids(index_lines)
-    gallery_by_id = {x["image_id"]: x for x in gallery_images}
-    if len(gallery_by_id) != len(gallery_images):
-        raise ValueError("gallery_images contains duplicate image_id")
+    gallery_by_id = index_unique(gallery_images, "image_id", "gallery_images")
     if set(gallery_by_id) != set(index_ids):
         raise ValueError("gallery_images must match the complete indexed gallery")
 

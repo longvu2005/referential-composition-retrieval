@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 
+from rcr.common.io import index_unique
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
 
@@ -36,31 +37,19 @@ def _index_metadata(index_lines: Iterable[str], keep_ids: set[str] | None = None
 def merge_handoff_catalog(
     existing: Iterable[dict], prepared: Iterable[dict]
 ) -> list[dict]:
-    existing = list(existing)
-    prepared = list(prepared)
-    existing_ids = [x["sample_id"] for x in existing]
-    prepared_ids = [x["sample_id"] for x in prepared]
-
-    if len(existing_ids) != len(set(existing_ids)):
-        raise ValueError("existing handoff catalog contains duplicate sample_id")
-    if len(prepared_ids) != len(set(prepared_ids)):
-        raise ValueError("prepared handoff rows contain duplicate sample_id")
-
-    fresh = {x["sample_id"]: x for x in prepared}
-    merged = [fresh.get(x["sample_id"], x) for x in existing]
-    old_ids = set(existing_ids)
-    merged += [x for x in prepared if x["sample_id"] not in old_ids]
-    return merged
+    existing = index_unique(existing, "sample_id", "existing handoff catalog")
+    prepared = index_unique(prepared, "sample_id", "prepared handoff rows")
+    return [prepared.get(key, row) for key, row in existing.items()] + [
+        row for key, row in prepared.items() if key not in existing
+    ]
 
 
 def prepare_review_inputs(selected: list[dict]) -> list[dict]:
     """Attach image/identity context directly to accepted Stage 2 text."""
-    sample_ids = [row["sample_id"] for row in selected]
-    if len(set(sample_ids)) != len(sample_ids):
-        raise ValueError("selected contains duplicate sample_id")
+    selected_by_id = index_unique(selected, "sample_id", "selected")
     outputs = []
 
-    for source in selected:
+    for source in selected_by_id.values():
         sample_id = source["sample_id"]
         final_desc, final_change = validate_review_output(
             source["case_type"],
@@ -119,12 +108,8 @@ def prepare_positive_set_inputs(
     index_lines: Iterable[str],
     candidate_ranker: CandidateRanker | None = None,
 ) -> list[dict]:
-    selected_by_id = {x["sample_id"]: x for x in selected}
-    if len(selected_by_id) != len(selected):
-        raise ValueError("selected contains duplicate sample_id")
-    image_by_id = {x["image_id"]: x for x in gallery_images}
-    if len(image_by_id) != len(gallery_images):
-        raise ValueError("gallery_images contains duplicate image_id")
+    selected_by_id = index_unique(selected, "sample_id", "selected")
+    image_by_id = index_unique(gallery_images, "image_id", "gallery_images")
 
     boxes_by_image, images_by_identity = _index_metadata(index_lines)
     indexed_ids = set(boxes_by_image)
