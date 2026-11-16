@@ -130,7 +130,7 @@ candidate_ks: [500]
 
 evaluation:
   enabled: true
-  every_epochs: 6
+  every_epochs: 2
 
   calibration:
     coverage_weights: [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
@@ -142,7 +142,7 @@ wandb:
   enabled: true
   project: referential-composition-retrieval
   name: proposed
-  mode: offline
+  mode: online
   log_every_steps: 20
 
 # Runtime and checkpoints.

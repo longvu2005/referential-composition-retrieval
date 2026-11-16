@@ -1,5 +1,5 @@
 # Optional CPU selection from exported validation scores.
 rankings:
-  - runs/proposed-kaggle-t4/selected/val/rankings.pt
-output_dir: runs/proposed-kaggle-t4-calibration
+  - runs/proposed/selected/val/rankings.pt
+output_dir: runs/proposed-calibration
 selection_metric: checkpoint_score  # Mean of overall and macro-case Full-mAP.
