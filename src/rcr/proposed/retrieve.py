@@ -30,13 +30,14 @@ from rcr.proposed.contracts import (
     FIXED_FINE_KEYS,
     SELECTED_RETRIEVAL_KEYS,
 )
+from rcr.proposed.factory import create_model, validate_checkpoint_model
 from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
     check_clip_config,
     load_text_encoder_state,
     load_text_modules,
 )
-from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
+from rcr.proposed.nn.model import DEFAULT_COARSE_BETA
 from rcr.proposed.ranking import (
     retrieval_settings,
     retrieve_rankings,
@@ -66,6 +67,7 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     if cfg.get("selected_checkpoint_sha256", checkpoint_sha256) != checkpoint_sha256:
         raise ValueError("checkpoint changed since val selection; rerun the sweep")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    validate_checkpoint_model(cfg, checkpoint)
     train_cfg = checkpoint["config"]
     if train_cfg.get("retrieval", {}).get("fine_score_mode") != FINE_SCORE_MODE:
         raise ValueError("checkpoint uses an obsolete fine scorer; train a new run")
@@ -183,8 +185,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     load_text_encoder_state(text_encoder, tokenizer, checkpoint["text_encoder"])
 
     max_subjects = checkpoint["model"]["composition.role.weight"].shape[0]
-    model = RCRModel.from_config(
-        model_cfg,
+    model = create_model(
+        {**train_cfg, "model": model_cfg},
         input_dim=checkpoint.get("input_dim", dim),
         global_dim=checkpoint["global_dim"],
         person_input_dim=checkpoint["person_input_dim"],

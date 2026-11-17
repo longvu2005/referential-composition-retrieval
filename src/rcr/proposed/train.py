@@ -39,6 +39,11 @@ from rcr.proposed.calibration import (
     write_calibration,
 )
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
+from rcr.proposed.factory import (
+    create_model,
+    model_metadata,
+    validate_checkpoint_model,
+)
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.matching import matching_settings
@@ -241,6 +246,7 @@ def _make_checkpoint(
     return {
         "epoch": epoch,
         "model": model.state_dict(),
+        "model_metadata": model_metadata(cfg),
         "text_encoder": text_encoder_state(text_encoder, tokenizer),
         "text_model_revision": getattr(
             text_encoder.backbone.config, "_commit_hash", None
@@ -330,6 +336,8 @@ def train(cfg: dict, *, resume: str | Path | None = None) -> Path:
 
 
 def _train(cfg, output, resumed):
+    if resumed is not None:
+        validate_checkpoint_model(cfg, resumed)
     warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
     sampling = cfg["train"]["sampling"]
     max_negatives = cfg["train"]["candidates"] - 1
@@ -426,8 +434,8 @@ def _train(cfg, output, resumed):
     text_cache.prepare([*train_samples, *val_samples])
     cfg = {**cfg, "clip_text_stats": dict(text_cache.stats)}
     print(f"CLIP text policy (77 tokens): {text_cache.stats}", flush=True)
-    model = RCRModel.from_config(
-        model_cfg,
+    model: RCRModel = create_model(
+        cfg,
         input_dim=scene_dim,
         global_dim=cache.global_dim,
         person_input_dim=person_dim,

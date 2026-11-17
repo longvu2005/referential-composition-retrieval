@@ -383,8 +383,8 @@ class RCRModel(nn.Module):
             return values.masked_fill(~matched[..., None], 0).reshape(b, s * k, width)
 
         aligned_boxes = align(boxes)
-        evidence = self.grounding.binding(
-            self.visual_proj(scene),
+        evidence = self.bind_target_evidence(
+            scene,
             align(semantic),
             aligned_boxes,
             query.reference,
@@ -410,6 +410,27 @@ class RCRModel(nn.Module):
             matched_mask=matched.flatten(1),
         ).float()
         return context, matching
+
+    def bind_target_evidence(
+        self,
+        scene: Tensor,
+        persons: Tensor,
+        boxes: Tensor,
+        reference: Tensor,
+        patch_hw: tuple[int, int],
+        reference_mask: Tensor | None = None,
+        reference_key_bias: Tensor | None = None,
+    ) -> Tensor:
+        """Bind aligned target evidence; experiments may replace this operation."""
+        return self.grounding.binding(
+            self.visual_proj(scene),
+            persons,
+            boxes,
+            reference,
+            patch_hw,
+            reference_mask,
+            reference_key_bias,
+        )
 
     def score_target(
         self,

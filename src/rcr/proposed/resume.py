@@ -19,6 +19,7 @@ from rcr.common.data import split_fingerprint
 from rcr.common.io import atomic_write_text, sha256_file
 from rcr.evaluation.provenance import digest_json
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
+from rcr.proposed.factory import source_fingerprints
 
 RESUME_VERSION = 1
 
@@ -113,6 +114,11 @@ def resume_signature(cfg, data, cache, device, amp) -> dict:
     return {
         "config": config,
         "source_sha256": digest_json(files),
+        **(
+            {"source_packages_sha256": source_fingerprints(cfg)}
+            if cfg.get("source_packages")
+            else {}
+        ),
         "inputs": {
             "train": split_fingerprint(data, "train"),
             "val": split_fingerprint(data, "val"),
