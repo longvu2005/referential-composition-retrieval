@@ -16,6 +16,7 @@ from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
     FINE_SCORE_MODE,
+    MINING_CONTEXT_WEIGHT,
     POOLING_MODES,
     combine_scores,
     identity_scores,
@@ -526,12 +527,14 @@ def mine_hard_negatives(
     """Mine train-only coarse or fine-ranked semantic/identity negative pools.
 
     Coarse filters each requested group to ``pool_size`` images. Fine scores use
-    the shared retrieval arithmetic over their union, never per inference chunk
-    or separately per negative group. Labels classify pools outside the scorer.
+    binding, coverage and coarse fusion over their union, with zero context
+    weight. Labels classify pools outside the scorer; normalization is shared
+    across groups and inference chunks.
     """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
     settings = retrieval_settings(retrieval, model.coarse_beta)
+    settings["context_weight"] = MINING_CONTEXT_WEIGHT
     if type(pool_size) is not int or pool_size < 1:
         raise ValueError("mining pool_size must be a positive integer")
     if type(query_batch_size) is not int or query_batch_size < 1:

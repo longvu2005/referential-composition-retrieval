@@ -14,6 +14,7 @@ from rcr.proposed.matching import (
 POOLING_MODES = ("penalized", "matched_mean", "subject_mean")
 DEFAULT_CONTEXT_WEIGHT = 0.1
 DEFAULT_COVERAGE_WEIGHT = 0.04
+MINING_CONTEXT_WEIGHT = 0.0
 FINE_SCORE_MODE = "linear"
 
 

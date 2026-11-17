@@ -1,4 +1,3 @@
-
 # Identity-grounded retrieval with frozen features and learned context.
 method: proposed
 split: val
@@ -22,7 +21,7 @@ detector:
 image_encoder:
   model: openai/clip-vit-base-patch32
   revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
-  scene_size: [224, 224]        # Letterboxed input; rebuild cache if changed.
+  scene_size: [224, 224]        # Letterboxed input.
 
 # Frozen FAFA person encoder.
 person_encoder:
@@ -33,21 +32,21 @@ person_encoder:
 # Cache storage and memory budgets.
 cache:
   storage_dtype: float16
-  lru_mib: 1024                 # Scene cache.
-  native_lru_mib: 256           # FAFA cache.
+  lru_mib: 1024
+  native_lru_mib: 256
   supervision_cache: cache/train-supervision.json
   mmap_shards: false
-  text_lru_mib: 256             # Frozen CLIP text features.
+  text_lru_mib: 256
 
 # Trainable model architecture.
 model:
   text_model: openai/clip-vit-base-patch32
-  dim: 384                      # Shared feature dimension.
+  dim: 384
   dropout: 0.1
   identity_dim: 128
-  fda_k: 6                      # Top-K FAFA token similarities.
+  fda_k: 6
   state_dim: 512
-  coarse_beta: 0.4              # Default state fusion weight.
+  coarse_beta: 0.4              # Fallback when retrieval.coarse_beta is omitted.
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
@@ -57,18 +56,18 @@ model:
     background_logit: -3.5
     selection_threshold: 0.5
     identity_threshold: 0.2
-    missing_penalty: 1.1        # Magnitude of the missing-evidence penalty.
-    duplicate_iou: 0.9          # Suppress near-identical detections.
+    missing_penalty: 1.1
+    duplicate_iou: 0.9
 
-# Training schedule and sampling — Kaggle T4.
+# Training schedule and memory budgets.
 train:
   epochs: 20
-  context_warmup_epochs: 4      # Epochs before enabling the context loss.
-  batch_size: 24                # Queries per batch.
-  candidates: 32                # Gallery candidates per query.
-  context_batch_size: 64        # Fine pairs per checkpointed training chunk.
-  case_balanced: true           # P(case) proportional to sqrt(N_case).
-  seed: 0                       # Every random stream of the run derives from it.
+  context_warmup_epochs: 4      # Context starts at epoch 5.
+  batch_size: 24
+  candidates: 32
+  context_batch_size: 64
+  case_balanced: true
+  seed: 0
   amp: true
   mining_batch_size: 8
 
@@ -84,19 +83,20 @@ train:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
-    semantic_hard_fraction: 0.3 # Hard share inside the same-ID quota.
-    warmup_epochs: 8           # Delay hard-negative mining only.
+    semantic_hard_fraction: 0.3
+    warmup_epochs: 8            # Hard mining and rejection start at epoch 9.
     refresh_every_epochs: 2
     pool_size: 100
 
-# Optimization of the trainable projections and reasoning modules.
+# Optimization of trainable projections and reasoning modules.
 optimizer:
   lr: 0.0001
-  text_lr: 1.0e-05              # Learned text projection.
-  min_lr_ratio: 0.1             # Final/base LR ratio for cosine decay.
+  text_lr: 0.00001
+  min_lr_ratio: 0.1
   weight_decay: 0.01
 
-# Training objectives.
+# Semantic logits: b*H/tau.
+# Rejection logits: (B + a*C + b*H)/tau.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
@@ -109,17 +109,16 @@ loss:
   state_weight: 1.0
   state_temperature: 0.1
 
-# Retrieval scoring and inference batch sizes.
+# Training/base scoring coefficients and inference batch sizes.
+# Mining uses a local context_weight=0.0 override.
+# Validation selects coverage, context and fine/coarse fusion coefficients.
 retrieval:
-  # penalized: include unmatched members in the mean.
-  # matched_mean: normalize over matched evidence across Subjects.
-  # subject_mean: normalize within each Subject, then average Subjects.
   pooling: subject_mean
   fine_score_mode: linear
-  coverage_weight: 0.04          # Training/base coverage coefficient.
-  context_weight: 0.10           # Training/base raw context coefficient.
-  fine_coarse_weight: 0.15       # Coarse contribution after Top-M normalization.
-  coarse_beta: 1.16              # Weight of the global state branch.
+  coverage_weight: 0.04
+  context_weight: 0.10
+  fine_coarse_weight: 0.15
+  coarse_beta: 1.16
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
@@ -132,10 +131,39 @@ evaluation:
   enabled: true
   every_epochs: 2
 
+  # Cartesian product: 8 coverage × 12 context × 6 fusion = 576.
   calibration:
-    coverage_weights: [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
-    context_weights: [0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06]
-    fine_coarse_weights: [0.10, 0.1125, 0.125, 0.1375, 0.15, 0.1625, 0.175, 0.1875, 0.20]
+    coverage_weights:
+      - 0.0
+      - 0.02
+      - 0.04
+      - 0.06
+      - 0.08
+      - 0.09
+      - 0.12
+      - 0.16
+
+    context_weights:
+      - 0.0
+      - 0.005
+      - 0.01
+      - 0.0125
+      - 0.015
+      - 0.0175
+      - 0.02
+      - 0.03
+      - 0.04
+      - 0.06
+      - 0.10
+      - 0.20
+
+    fine_coarse_weights:
+      - 0.10
+      - 0.125
+      - 0.1375
+      - 0.15
+      - 0.175
+      - 0.20
 
 # Experiment logging.
 wandb:
@@ -148,9 +176,9 @@ wandb:
 # Runtime and checkpoints.
 runtime:
   device: cuda
-  deterministic: true           # Reproducible kernels; set false only for speed.
+  deterministic: true
 
-checkpoint: runs/proposed/best.pt
+checkpoint: runs/proposed-next/best.pt
 
 output:
-  dir: runs/proposed
+  dir: runs/proposed-next

@@ -25,8 +25,10 @@ S_final = Z_M(S_fine) + eta * Z_M(S_coarse)
 For positive `eta`, `Z_M` uses population statistics on the same finite coarse
 Top-M support. Constant branches contribute zero; `eta=0` returns raw fine scores.
 
-`alpha=1` is fixed. Training and hard-negative mining retain the configured base
-coefficients. Each scheduled validation retrieves once and searches all 729
+`alpha=1` is fixed. Semantic context loss ranks `b * context`; identity rejection
+ranks the complete fine score, both with `loss.context_temperature`. Hard mining
+uses binding, coverage and coarse fusion with context weight fixed at zero.
+Each scheduled validation retrieves once and searches all 729
 `(a, b, eta)` triples on CPU. `best.pt` maximizes the mean of overall and macro-case
 validation Full-mAP after calibration. Test freezes the winning checkpoint and
 coefficients together. Stable ties retain coarse order; the gallery tail is unchanged.

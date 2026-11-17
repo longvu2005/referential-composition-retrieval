@@ -129,10 +129,8 @@ def _context_scores(
     batch,
     patch_hw,
     batch_size,
-    context_score_weight=DEFAULT_CONTEXT_WEIGHT,
-    coverage_score_weight=DEFAULT_COVERAGE_WEIGHT,
 ):
-    """Compute the inference score in chunks, retaining only context gradients."""
+    """Collect raw context, coverage and frozen binding in training chunks."""
     queries, candidates = batch["positive_mask"].shape
     pairs = queries * candidates
     names = [
@@ -158,17 +156,9 @@ def _context_scores(
             missing_penalty=model.fine_matching["missing_penalty"],
             pooling=pooling,
         )
-        score = linear_score_components(
-            binding,
-            raw,
-            matching.coverage,
-            model.binding_scale,
-            context_score_weight,
-            coverage_score_weight,
-        )["fine_scores"]
-        return score, matching.coverage, binding
+        return raw, matching.coverage, binding
 
-    scores, coverage, binding = [], [], []
+    context, coverage, binding = [], [], []
     for start in range(0, pairs, batch_size):
         stop = min(start + batch_size, pairs)
         indices = torch.arange(start, stop, device=query.reference.device) // candidates
@@ -179,12 +169,12 @@ def _context_scores(
             )
         else:
             values, covered, offset = score_pairs(*inputs)
-        scores.append(values)
+        context.append(values)
         coverage.append(covered)
         binding.append(offset)
     shape = (queries, candidates)
     return (
-        torch.cat(scores).view(shape),
+        torch.cat(context).view(shape),
         torch.cat(coverage).view(shape),
         torch.cat(binding).view(shape),
     )
@@ -358,18 +348,22 @@ def compute_loss(
         )
 
     if context_weight:
-        scores, coverage, binding = _context_scores(
-            model,
-            query,
-            batch,
-            patch_hw,
-            context_batch_size,
+        raw_context, coverage, binding = _context_scores(
+            model, query, batch, patch_hw, context_batch_size
+        )
+        scores = linear_score_components(
+            binding,
+            raw_context,
+            coverage,
+            model.binding_scale,
             context_score_weight,
             coverage_score_weight,
         )
         valid = identity_positive & (coverage > 0)
-        context = retrieval_loss(scores / context_temperature, positive, valid)
-        semantic = context
+        semantic = retrieval_loss(
+            scores["context_contribution"] / context_temperature, positive, valid
+        )
+        context = semantic
         fda_error = _fda_pair_error(binding, positive, valid)
         context_active = (
             ((positive & valid).any(1) & (~positive & valid).any(1)).float().mean()
@@ -380,7 +374,7 @@ def compute_loss(
                 raise ValueError("rejection negatives must lack required identities")
             rejection_valid = (positive | hard) & (coverage > 0)
             rejection = retrieval_loss(
-                scores / context_temperature, positive, rejection_valid
+                scores["fine_scores"] / context_temperature, positive, rejection_valid
             )
             rejection_active = (
                 ((positive & rejection_valid).any(1) & (hard & rejection_valid).any(1))

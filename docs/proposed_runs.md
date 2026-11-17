@@ -61,11 +61,12 @@ python tools/run.py train --config configs/proposed.yaml
 ```
 
 Training has separate grounding, crop-identity, coarse-identity, conditional
-context and global-state objectives. Context ranks the shared score
-`alpha * B_FAFA + a * coverage + b * context`, using fixed
-`a = retrieval.coverage_weight`, `b = retrieval.context_weight` and
-`loss.context_temperature`. FDA binding and
-the binding scale are frozen. Pairwise
+context and global-state objectives. Semantic context loss ranks `b * context`;
+identity rejection ranks `B_FAFA + a * coverage + b * context`. Both divide
+their logits by `loss.context_temperature`, using fixed
+`a = retrieval.coverage_weight` and `b = retrieval.context_weight`.
+With `b=0.1` and temperature `0.1`, semantic logits are raw context.
+FDA binding and the binding scale are frozen. Pairwise
 losses weight eligible queries equally; see the exact objectives in
 [proposed_method.md](proposed_method.md#objective-and-ranking).
 The run starts with grounding/identity/coarse/state, then enables context after
@@ -82,7 +83,7 @@ all training epochs, independently of context and mining warmup. The first epoch
 uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
 the base rates. Actual rates are recorded in `history.jsonl` and W&B.
 
-Periodic validation uses the same fine score and pooling as training. Each
+Periodic validation uses the complete fine score and trained pooling. Each
 validation retrieves once and evaluates
 the 9×9×9 Cartesian product under `evaluation.calibration` on CPU:
 
@@ -93,9 +94,9 @@ the 9×9×9 Cartesian product under `evaluation.calibration` on CPU:
 | Coarse fusion `eta` | `fine_coarse_weights` | `0.10..0.20`, step `0.0125` (9) |
 
 It selects the best of all 729 triples, then compares that calibrated score with
-previous epochs to choose `best.pt`. Training and hard mining keep the configured
-base coefficients `a=0.04`, `b=0.10`, `eta=0.15`; validation choices never feed
-back into them. The base context weight is outside the calibration grid and is
+previous epochs to choose `best.pt`. Training keeps base `a=0.04`, `b=0.10`;
+mining uses `a=0.04`, `b=0`, `eta=0.15`. Validation choices never feed
+back into them. The training context weight is outside the calibration grid and is
 not added to the search; there are exactly 729 candidates.
 The coarse and state objectives remain separate from the fine objective.
 Changing training coefficients or pooling is a separate training experiment.
@@ -131,8 +132,9 @@ After `train.sampling.warmup_epochs` (checked-in value 8), fine mining refreshes
 epochs. It first takes at most `pool_size` finite coarse candidates **per enabled
 negative group** (same-ID/non-Full versus missing at least one required ID), then
 fine-scores their union with the current model in eval/inference mode. The
-shared Linear scorer computes each pair independently. Mining then uses
-`Z_union(fine) + eta * Z_union(coarse)` on the complete screened union, using
+shared Linear scorer computes `B_FAFA + 0.04 * coverage` per pair, with the
+context coefficient fixed at zero. Mining then uses
+`Z_union(fine) + 0.15 * Z_union(coarse)` on the complete screened union, using
 the same finite-support and stable-tie rules as retrieval. Its normalization
 population is that union, not the inference Top-M, and is recorded in metadata.
 Zero-coverage images do not enter fine hard pools.
@@ -165,8 +167,9 @@ ablations use a fresh `output.dir` for each run:
 | Both (current YAML) | 0.3 | 0.5 |
 
 Omitted semantic-hard and rejection settings default to zero. Training optimizes
-`L_context = L_semantic + context_rejection_weight * L_rejection` using the same
-Linear fine score. Only mined wrong-ID candidates enter rejection,
+`loss.context_weight * (L_semantic + context_rejection_weight * L_rejection)`.
+Semantic ranks `b * context`; rejection ranks the complete Linear fine score.
+Only mined wrong-ID candidates enter rejection,
 and only when both the positive and negative retain predicted coverage. Each
 component averages valid pairs per query and valid queries separately; empty
 components return differentiable zero. Inference scores and checkpoint selection
@@ -176,8 +179,9 @@ The identity loss can additionally read up to
 `train.identity_sampling.max_crops` detector-aligned train crops. These crops do
 not enter the candidate set, FAFA scoring or state loss; they only keep the
 supervised contrastive objective supplied with cross-image positives.
-With `hard_negative_fraction=0.5`, after the existing sampling warmup, this same
-budget also includes hard known-ID target crops mined inside the current batch.
+With nonzero `hard_negative_fraction` (checked-in value `0.2`), this same budget
+also includes hard known-ID target crops mined inside the current batch after
+sampling warmup.
 Required-ID supplemental positives keep their reserved quota first; the remaining
 budget is split between hard crops and the random pool, with random
 fallback when hard evidence is short. Unknown/multi-head crops are excluded from
@@ -385,8 +389,8 @@ The checked-in config uses `subject_mean`; omitted keys use `penalized`.
 Every retrieval exports all three binding tensors for diagnostic replay. Deployable
 retrieval and calibration retain the trained pooling and fine score mode.
 Compare alternative values by training separate runs and selecting on validation.
-The checked-in base coefficients `0.04`/`0.10`/`0.15` remain fixed during training
-and mining. Inference uses the validation-selected triple.
+Training keeps base coverage/context coefficients `0.04`/`0.10`. Mining uses
+`0.04`/`0`/`0.15`; inference uses the validation-selected triple.
 Raw context is not activated or gated by
 coverage. At zero coverage its contribution can still be nonzero; identity
 matching, FDA missing penalties and coarse identity evidence remain important.

@@ -62,17 +62,17 @@ def test_rejection_adds_wrong_id_gradient_without_changing_other_targets(
     model, batch = objective_batch
     batch["hard_identity_negative_mask"][0, 2] = True
     settings = _only_loss("context")
-    old, old_parts = compute_loss(model, batch, (2, 2), **settings)
-    old_grad = torch.autograd.grad(old, batch["target_persons"])[0]
-    new, parts = compute_loss(
+    semantic_only, semantic_parts = compute_loss(model, batch, (2, 2), **settings)
+    semantic_grad = torch.autograd.grad(semantic_only, batch["target_persons"])[0]
+    total, parts = compute_loss(
         model, batch, (2, 2), **{**settings, "context_rejection_weight": 0.2}
     )
-    new.backward()
-    torch.testing.assert_close(parts["context_semantic"], old_parts["context"])
+    total.backward()
+    torch.testing.assert_close(parts["context_semantic"], semantic_parts["context"])
     torch.testing.assert_close(
-        new.detach(), old.detach() + 0.2 * parts["context_rejection"]
+        total.detach(), semantic_only.detach() + 0.2 * parts["context_rejection"]
     )
-    assert old_grad[0, 2].count_nonzero() == 0
+    assert semantic_grad[0, 2].count_nonzero() == 0
     assert batch["target_persons"].grad[0, 2].abs().sum() > 0
     assert parts["context_rejection_active_fraction"] == 1
     assert all(p.grad is None for p in model.identity_head.parameters())
@@ -105,11 +105,13 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
 
     def fine(query, scene, *args, **kwargs):
         assert not model.training and not text.training and not torch.is_grad_enabled()
+        assert kwargs["context_weight"] == 0
         ids = scene[:, 0, 0].long()
         scored.extend(ids.tolist())
         values = torch.tensor([9, 9, 0.1, 0.7, 0.8, 0.3])[ids]
         return {
-            "context": torch.tensor([0, 0, -3, 5, 20, 1]).float()[ids],
+            "context": context_sign
+            * torch.tensor([0, 0, -3000, 5000, 20000, 1000])[ids],
             "coverage": (ids != 4).float(),
             **{f"binding_{mode}": values for mode in ranking.POOLING_MODES},
         }
@@ -131,12 +133,18 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
     scored_sizes = []
     score_components = ranking.fine_score_components
 
-    def observe_scores(binding, *args, **kwargs):
+    def observe_scores(binding, context, coverage, *args, **kwargs):
         scored_sizes.append(len(binding))
-        return score_components(binding, *args, **kwargs)
+        result = score_components(binding, context, coverage, *args, **kwargs)
+        torch.testing.assert_close(
+            result["fine_scores"], binding + 0.04 * coverage, rtol=0, atol=0
+        )
+        assert result["context_contribution"].count_nonzero() == 0
+        return result
 
     monkeypatch.setattr(ranking, "fine_score_components", observe_scores)
     for batch_size in (1, 4):
+        context_sign = 1.0 if batch_size == 1 else -1.0
         results.append(
             ranking.mine_hard_negatives(
                 samples,
@@ -145,7 +153,12 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
                 text,
                 model,
                 torch.device("cpu"),
-                retrieval={**settings, "coarse_beta": 0, "fine_batch_size": batch_size},
+                retrieval={
+                    **settings,
+                    "coarse_beta": 0,
+                    "fine_batch_size": batch_size,
+                    "context_weight": 0.1 if batch_size == 1 else 10000.0,
+                },
                 query_batch_size=1 if batch_size == 1 else 2,
                 **options,
             )
@@ -253,9 +266,16 @@ def test_train_runs_mining_and_validation_after_warmup(
         assert "val_checkpoint_score" in row
     mined = json.loads((checkpoint.parent / "hard_negatives.json").read_text())
     assert mined["epoch"] == 3 and mined["mining"] == "coarse_then_fine"
+    assert mined["retrieval"]["context_weight"] == 0
+    assert mined["retrieval"]["coverage_weight"] == cfg["retrieval"]["coverage_weight"]
+    assert (
+        mined["retrieval"]["fine_coarse_weight"]
+        == cfg["retrieval"]["fine_coarse_weight"]
+    )
     saved = torch.load(checkpoint, weights_only=True)
     assert saved["config"]["method"] == "proposed"
     assert saved["config"]["loss"]["context_rejection_weight"] == rejection_weight
+    assert saved["config"]["retrieval"]["context_weight"] == 0.1
     assert wandb.finished
 
 
@@ -278,13 +298,15 @@ def _encode(model, batch):
     )
 
 
-def test_training_score_and_loss_equal_inference_formula(objective_batch):
+@pytest.mark.parametrize("weight,temperature", [(0.1, 0.1), (0.2, 0.15), (0.0, 0.1)])
+def test_context_loss_uses_scaled_context_and_full_score_for_rejection(
+    objective_batch, weight, temperature
+):
     model, batch = objective_batch
+    batch["fafa_targets"][:, 0].neg_()
+    batch["hard_identity_negative_mask"][0, 2] = True
     query = _encode(model, batch)
-    weight, temperature = 0.2, 0.15
-    scores, coverage, binding = _context_scores(
-        model, query, batch, (2, 2), 64, weight, 0.07
-    )
+    raw_context, coverage, binding = _context_scores(model, query, batch, (2, 2), 64)
     details = model.score_target(
         query.repeat_candidates(3),
         batch["target_scene"].flatten(0, 1),
@@ -298,14 +320,16 @@ def test_training_score_and_loss_equal_inference_formula(objective_batch):
         coverage_weight=0.07,
         return_details=True,
     )
-    expected = (
-        model.binding_scale * binding
-        + 0.07 * coverage
-        + weight * details["context"].view_as(scores)
+    torch.testing.assert_close(
+        raw_context.flatten(), details["context"], rtol=0, atol=0
     )
-    torch.testing.assert_close(scores, expected, rtol=0, atol=0)
-    torch.testing.assert_close(scores.flatten(), details["score"], rtol=0, atol=0)
-    settings = {**_only_loss("context"), "context_temperature": temperature}
+    full_score = model.binding_scale * binding + 0.07 * coverage + weight * raw_context
+    torch.testing.assert_close(full_score.flatten(), details["score"], rtol=0, atol=0)
+    settings = {
+        **_only_loss("context"),
+        "context_temperature": temperature,
+        "context_rejection_weight": 0.5,
+    }
     total, parts = training.compute_loss(
         model,
         batch,
@@ -315,9 +339,18 @@ def test_training_score_and_loss_equal_inference_formula(objective_batch):
         coverage_score_weight=0.07,
     )
     valid = batch["identity_positive_mask"] & (coverage > 0)
-    torch.testing.assert_close(
-        total, retrieval_loss(expected / temperature, batch["positive_mask"], valid)
+    semantic = retrieval_loss(
+        weight * raw_context / temperature, batch["positive_mask"], valid
     )
+    rejection_valid = (
+        batch["positive_mask"] | batch["hard_identity_negative_mask"]
+    ) & (coverage > 0)
+    rejection = retrieval_loss(
+        full_score / temperature, batch["positive_mask"], rejection_valid
+    )
+    torch.testing.assert_close(parts["context_semantic"], semantic)
+    torch.testing.assert_close(parts["context_rejection"], rejection)
+    torch.testing.assert_close(total, semantic + 0.5 * rejection)
     assert not binding.requires_grad
     assert parts["context_fda_error"].item() == 1
 

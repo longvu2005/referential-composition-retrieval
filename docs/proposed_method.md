@@ -222,8 +222,9 @@ H = S_context
 ```
 
 The binding scale is fixed at 1. `a = retrieval.coverage_weight` and
-`b = retrieval.context_weight` are nonnegative coefficients. Training and mining
-keep the checked-in values 0.04 and 0.10. Validation calibrates them independently
+`b = retrieval.context_weight` are nonnegative coefficients. Training uses the
+checked-in values 0.04 and 0.10; mining uses the same coverage coefficient with
+context weight fixed at zero. Validation calibrates them independently
 for inference, together with the coarse fusion weight eta.
 Context is raw, without activation or coverage gating. Its direct score gradient
 is `b`; the score's partial derivative with respect to coverage is `a`.
@@ -240,7 +241,11 @@ oracle. Detector misses and grounding mistakes can lower positive scores.
 
 ```text
 L = L_ground + 0.1 L_id + L_coarse + L_context + L_global_state
-L_context = L_semantic + context_rejection_weight * L_rejection
+F_train = B_FAFA + a_train * C + b_train * H
+L_context = loss.context_weight * (
+    Rank_sem(b_train * H / context_temperature)
+    + context_rejection_weight * Rank_rej(F_train / context_temperature)
+)
 ```
 
 Each term has one explicit task:
@@ -250,7 +255,8 @@ Each term has one explicit task:
 | `L_ground` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
 | `L_id` | Normalized person embeddings; SupCon, temperature 0.1 | Deduplicated known-ID crops from queries, Full Positive targets and extra train-only identity observations |
 | `L_coarse` | Actual raw `identity_scores`, temperature 0.1 | All-required-ID images are positives, other candidate images are negatives; both query and target need person support |
-| `L_context` | Shared Linear fine score, `loss.context_temperature` | Semantic: Full Positives versus same-required-ID negatives. Rejection: Full Positives versus mined wrong/missing-ID negatives. Both ends need nonzero predicted coverage |
+| `L_context` semantic | `b_train * H`, temperature `loss.context_temperature` | Full Positives versus same-required-ID negatives; both ends need nonzero predicted coverage |
+| `L_context` rejection | `F_train`, temperature `loss.context_temperature` | Full Positives versus mined wrong/missing-ID negatives; both ends need nonzero predicted coverage |
 | `L_global_state` | Global state cosine, temperature 0.1 | Full Positives versus same-required-ID negatives, independently of person detection coverage |
 
 After `train.sampling.warmup_epochs`, nonzero
@@ -312,11 +318,16 @@ negatives from equivalent queries. No validation/test annotation enters a train
 loss or negative pool.
 
 The context objective uses the shared `score_context()` path, with the exact
-inference matching, coverage and reasoner. Context queries lacking a
-supported positive/negative pair are skipped. Semantic and rejection losses each
+inference matching, coverage and reasoner. Semantic ranking requires H to
+distinguish conditions directly; detached binding and coverage offsets enter
+only rejection ranking. Both use the context contribution `b_train * H`, with
+`b_train=0.1` and `context_temperature=0.1`, so the semantic logits are equivalent
+to raw H. The multiplier `b_train / context_temperature` is retained for other
+configurations. Context queries lacking a supported positive/negative pair are
+skipped. Semantic and rejection losses each
 average pairs per eligible query, then average eligible queries independently.
 `loss.context_rejection_weight` defaults to zero for omitted old settings; the
-current YAML uses `0.2`. This weight is nested under `loss.context_weight`, not a
+current YAML uses `0.5`. This weight is nested under `loss.context_weight`, not a
 sixth standalone objective or the inference context coefficient. Rejection is
 disabled until the sampling warmup ends. A mined image whose predicted coverage
 becomes zero is excluded again in the current training forward. No extra model
@@ -327,9 +338,12 @@ detections fail. Crop identity and coarse supervision
 train the identity head; context gradients train composition, evidence binding,
 reasoner and shared projections without differentiating through matching.
 
-Frozen native FDA binding enters the context ranking score without autograd.
-The batch carries query/target native FAFA tokens only when context is active.
-Pooled FAFA person features remain inputs to learned identity/semantic modules.
+Frozen native FDA binding enters rejection ranking without autograd. The batch
+carries `fafa_query` `[B,S,Kq,D]`, `fafa_targets` `[B,C,Kt,L,D]` and `fafa_pooling`
+only when context is active. The query cache must cover train; this is checked
+before epoch 1. History and W&B record `context_fda_error`, the share of eligible
+semantic pairs that FDA alone ranks wrong or tied. Pooled FAFA person features
+remain inputs to learned identity/semantic modules.
 `binding_log_scale` is fixed rather than optimized; the optimizer includes only
 trainable parameters.
 
@@ -342,12 +356,13 @@ must match training. Coverage/context/fusion coefficients are selected on valida
 and frozen for test. An untrained state branch cannot enter
 training validation with a positive coarse beta.
 
-The default 24-epoch run has a short context warmup:
+The default 20-epoch run separates context and mining warmup:
 
 | Epochs | Active objective |
 | --- | --- |
 | 1-4 | `L_ground + 0.1 L_id + L_coarse + L_global_state` |
-| 5-24 | All five terms, with fine negative mining and context rejection |
+| 5-8 | All five tasks, with semantic context ranking |
+| 9-20 | All five tasks, with fine negative mining and context rejection |
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
@@ -394,39 +409,15 @@ coefficients and checkpoint
 are frozen together. Calibration never changes the training objectives or
 configured hard-mining scores.
 
-### Context ranking objective
-
-Training ranks the same pairwise fine score used before inference fusion:
-
-```text
-s(q,c) = alpha * B_FAFA(q,c) + a * C(q,c) + b * H(q,c)
-L_context = L_semantic + context_rejection_weight * L_rejection
-L_pair = softplus((s_negative - s_positive) / context_temperature)
-```
-
-FDA binding and coverage use the detached inference assignment, trained pooling,
-FDA-k and missing penalty. The context branch receives direct gradients without
-activation saturation. Its score gradient with respect to H is `b`; gradients
-of the temperature-scaled pairwise logits additionally include `1 / temperature`.
-Semantic pairs use Full Positives and same-required-ID negatives with positive
-coverage. Rejection pairs use Full Positives and explicitly mined wrong-ID
-negatives with positive coverage. Zero-coverage observations are excluded from
-context supervision to avoid training on missing visual evidence. Grounding and
-identity retain their explicit objectives.
-
 The coarse and state branches keep their separate losses. Fusion is
 postprocessing for validation/retrieval, not a loss normalized on sampled
-32-candidate training batches. Fine mining uses the same fusion formula on its
-complete screened union, whose normalization support differs from retrieval.
+32-candidate training batches. Fine mining uses
+`F_mine = B_FAFA + 0.04 * C` and
+`S_mine = Z_union(F_mine) + 0.15 * Z_union(S_coarse)` on the complete screened
+union, before filtering zero-coverage candidates from each pool. Semantic pools
+contain all-required-ID nonpositives; rejection pools lack at least one required
+identity. Self, known Full Positives and exclusions never enter the union.
 Neither train mining nor its normalization reads validation/test labels.
-
-The training batch carries `fafa_query` `[B,S,Kq,D]`, `fafa_targets`
-`[B,C,Kt,L,D]` and `fafa_pooling` from independent FAFA query/image caches.
-The query cache must cover train; this is checked before epoch 1. Warmup skips
-native-token batch reads and context computation. History and W&B record
-`context_fda_error`, the share of eligible positive/negative pairs that FDA alone
-ranks wrong or tied. Matching, sampling, auxiliary losses and checkpoint selection
-retain their existing supervision boundaries.
 
 ## Configuration and checkpoints
 

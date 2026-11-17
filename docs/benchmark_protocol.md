@@ -86,7 +86,8 @@ calibrated score; pooling, fine score mode, matching and the coarse shortlist st
 The 9×9×9 search changes only postprocessing coefficients. Its cached scoring
 retains all Full Positives, including those in the unchanged coarse tail, and
 uses the same AP summation as full evaluation. The winner is checked again by
-the complete evaluator before publication. Training and mining keep their base coefficients.
+the complete evaluator before publication. Training keeps its base coefficients;
+mining fixes the context coefficient at zero. Calibration changes neither.
 Test labels, metrics and examples must not determine
 any settings or checkpoint selection. Reporting performs no selection or inference.
 

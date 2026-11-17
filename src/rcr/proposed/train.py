@@ -77,6 +77,7 @@ from rcr.proposed.sampling import (
     sampling_settings,
     training_batches,
 )
+from rcr.proposed.scores import MINING_CONTEXT_WEIGHT
 from rcr.proposed.supervision import TrainSupervision
 
 
@@ -626,7 +627,10 @@ def _train(cfg, output, resumed):
                             if fine_mining
                             else "split_gallery_population"
                         ),
-                        "retrieval": cfg["retrieval"],
+                        "retrieval": {
+                            **cfg["retrieval"],
+                            "context_weight": MINING_CONTEXT_WEIGHT,
+                        },
                         "screen_pool_size": sampling["pool_size"],
                         "pools": progress.hard_pools,
                     },
