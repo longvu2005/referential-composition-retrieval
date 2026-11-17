@@ -1,8 +1,5 @@
-# Identity-grounded retrieval with frozen features and learned context.
 method: proposed
 split: val
-
-# Dataset and cached features.
 data:
   final_dir: dataset/data/final
   image_root: dataset/data/raw/images
@@ -10,26 +7,20 @@ data:
   fafa_image_cache: cache/person-images
   fafa_query_cache: cache/person-queries
   scene_cache: cache/scene
-
-# Person detection.
 detector:
   model: IDEA-Research/grounding-dino-tiny
   threshold: 0.3
   text_threshold: 0.25
-
-# Frozen CLIP image encoder.
 image_encoder:
   model: openai/clip-vit-base-patch32
   revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
-  scene_size: [224, 224]        # Letterboxed input.
-
-# Frozen FAFA person encoder.
+  scene_size:
+  - 224
+  - 224
 person_encoder:
   python: .venv-person-encoder/bin/python
   fafa_config: configs/person_encoder.yaml
   batch_size: 4
-
-# Cache storage and memory budgets.
 cache:
   storage_dtype: float16
   lru_mib: 1024
@@ -37,8 +28,6 @@ cache:
   supervision_cache: cache/train-supervision.json
   mmap_shards: false
   text_lru_mib: 256
-
-# Trainable model architecture.
 model:
   text_model: openai/clip-vit-base-patch32
   dim: 384
@@ -46,23 +35,19 @@ model:
   identity_dim: 128
   fda_k: 6
   state_dim: 512
-  coarse_beta: 0.4              # Fallback when retrieval.coarse_beta is omitted.
+  coarse_beta: 0.4
   num_heads: 6
   mlp_ratio: 2
   geo_dim: 32
-
-  # Subject selection and partial identity matching.
   fine_matching:
     background_logit: -3.5
     selection_threshold: 0.5
     identity_threshold: 0.2
     missing_penalty: 1.1
     duplicate_iou: 0.9
-
-# Training schedule and memory budgets.
 train:
   epochs: 20
-  context_warmup_epochs: 4      # Context starts at epoch 5.
+  context_warmup_epochs: 4
   batch_size: 24
   candidates: 32
   context_batch_size: 64
@@ -70,33 +55,24 @@ train:
   seed: 0
   amp: true
   mining_batch_size: 8
-
-  # Additional crops for identity supervision.
   identity_sampling:
     max_crops: 128
     crops_per_identity: 2
     random_identities: 8
     hard_negative_fraction: 0.2
-
-  # Positive and negative sampling.
   sampling:
     positives_per_query: 2
     identity_fraction: 0.5
     hard_fraction: 0.1
     semantic_hard_fraction: 0.3
-    warmup_epochs: 8            # Hard mining and rejection start at epoch 9.
+    warmup_epochs: 8
     refresh_every_epochs: 2
     pool_size: 100
-
-# Optimization of trainable projections and reasoning modules.
 optimizer:
   lr: 0.0001
-  text_lr: 0.00001
+  text_lr: 1.0e-05
   min_lr_ratio: 0.1
   weight_decay: 0.01
-
-# Semantic logits: b*H/tau.
-# Rejection logits: (B + a*C + b*H)/tau.
 loss:
   grounding_weight: 1.0
   identity_weight: 0.1
@@ -105,80 +81,64 @@ loss:
   coarse_temperature: 0.1
   context_weight: 1.0
   context_temperature: 0.1
-  context_rejection_weight: 0.5
+  context_rejection_weight: 0.2
   state_weight: 1.0
   state_temperature: 0.1
-
-# Training/base scoring coefficients and inference batch sizes.
-# Mining uses a local context_weight=0.0 override.
-# Validation selects coverage, context and fine/coarse fusion coefficients.
 retrieval:
   pooling: subject_mean
   fine_score_mode: linear
   coverage_weight: 0.04
-  context_weight: 0.10
+  context_weight: 0.1
   fine_coarse_weight: 0.15
   coarse_beta: 1.16
   top_m: 500
   fine_batch_size: 64
   identity_batch_size: 512
   coarse_batch_size: 512
-
-# Validation and coarse shortlist metrics.
-candidate_ks: [500]
-
+candidate_ks:
+- 500
 evaluation:
   enabled: true
   every_epochs: 2
-
-  # Cartesian product: 8 coverage × 12 context × 6 fusion = 576.
   calibration:
     coverage_weights:
-      - 0.0
-      - 0.02
-      - 0.04
-      - 0.06
-      - 0.08
-      - 0.09
-      - 0.12
-      - 0.16
-
+    - 0.0
+    - 0.02
+    - 0.04
+    - 0.06
+    - 0.08
+    - 0.09
+    - 0.12
+    - 0.16
     context_weights:
-      - 0.0
-      - 0.005
-      - 0.01
-      - 0.0125
-      - 0.015
-      - 0.0175
-      - 0.02
-      - 0.03
-      - 0.04
-      - 0.06
-      - 0.10
-      - 0.20
-
+    - 0.0
+    - 0.005
+    - 0.01
+    - 0.0125
+    - 0.015
+    - 0.0175
+    - 0.02
+    - 0.03
+    - 0.04
+    - 0.06
+    - 0.1
+    - 0.2
     fine_coarse_weights:
-      - 0.10
-      - 0.125
-      - 0.1375
-      - 0.15
-      - 0.175
-      - 0.20
-
-# Experiment logging.
+    - 0.1
+    - 0.125
+    - 0.1375
+    - 0.15
+    - 0.175
+    - 0.2
 wandb:
   enabled: true
   project: referential-composition-retrieval
   name: proposed
   mode: online
   log_every_steps: 20
-
-# Runtime and checkpoints.
 runtime:
   device: cuda
   deterministic: true
-
-checkpoint: runs/proposed-next/best.pt
-
+checkpoint: runs/proposed/best.pt
 output:
-  dir: runs/proposed-next
+  dir: runs/proposed

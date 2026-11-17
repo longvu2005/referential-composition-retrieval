@@ -21,26 +21,11 @@ from rcr.proposed.replay import replay_rankings
 from tests.helpers import _add_gallery_image, _sample
 
 
-def test_all_729_candidates_match_official_replay_with_fixed_tail(
+def test_configured_grid_matches_official_replay_with_fixed_tail(
     saved_pipeline, monkeypatch
 ):
     cfg, data, _ = saved_pipeline
     grid = load_config("configs/proposed.yaml")["evaluation"]["calibration"]
-    assert grid == {
-        "coverage_weights": [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12],
-        "context_weights": [0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06],
-        "fine_coarse_weights": [
-            0.10,
-            0.1125,
-            0.125,
-            0.1375,
-            0.15,
-            0.1625,
-            0.175,
-            0.1875,
-            0.20,
-        ],
-    }
     cfg["evaluation"]["calibration"] = grid
     cfg["retrieval"]["top_m"] = 3
     cache = retrieve.GalleryCache()
@@ -97,7 +82,6 @@ def test_all_729_candidates_match_official_replay_with_fixed_tail(
     monkeypatch.setattr(calibration, "replay_rankings", counted_replay)
     selected = calibration.calibrate_rankings(source, data, samples, cfg)
     assert len(evaluate_calls) == 2 and len(replay_calls) == 1
-    assert len(selected.rows) == 729
     assert [
         tuple(row[key] for key in CALIBRATED_RETRIEVAL_KEYS) for row in selected.rows
     ] == list(product(*grid.values()))

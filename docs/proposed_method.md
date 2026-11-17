@@ -404,7 +404,7 @@ forward differences can remain between chunk sizes.
 Training validation also uses this final fused ranking. `best.pt` maximizes
 `0.5 * overall val Full-mAP + 0.5 * macro-case val Full-mAP` after calibration
 at every scheduled validation. Each epoch retrieves once, evaluates the configured
-729 `(a, b, eta)` triples on CPU and competes using its best score. The winning
+`(a, b, eta)` triples on CPU and competes using its best score. The winning
 coefficients and checkpoint
 are frozen together. Calibration never changes the training objectives or
 configured hard-mining scores.
@@ -509,9 +509,8 @@ ties. Coarse normalization uses the complete eligible gallery; fusion
 normalization uses the complete finite Top-M support. The winning artifact receives full
 official evaluation before export.
 
-The configured grids contain 9 values each: coverage `0.04..0.12` by `0.01`,
-context `0.02..0.06` by `0.005`, and eta `0.10..0.20` by `0.0125`.
-Calibration evaluates all 729 triples in coverage/context/eta order. It normalizes
+`evaluation.calibration` defines the three coefficient grids. Calibration
+evaluates their complete Cartesian product in coverage/context/eta order. It normalizes
 fine scores once per `(a, b)`, reuses coarse normalization, and scores sparse
 positive ranks with the complete coarse tail. AP uses the same summation and full
 positive denominator as the ordinary evaluator. The winning score must agree

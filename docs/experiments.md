@@ -14,11 +14,11 @@ python tools/report.py --split val
 ```
 
 The validation recipe prepares assets, builds caches and trains. Each scheduled
-validation retrieves once and searches the 729 triples under
+validation retrieves once and searches all configured triples under
 `evaluation.calibration`: `coverage_weights`, `context_weights` and
 `fine_coarse_weights`. Search runs on CPU with pooling fixed. Checkpoints
 compete using the calibrated score. Training saves the winner's `selected.yaml`
-and complete validation result under `runs/proposed/selected/val/`.
+and complete validation result under `<output.dir>/selected/val/`.
 
 Optional offline comparison reuses the same calibration implementation:
 

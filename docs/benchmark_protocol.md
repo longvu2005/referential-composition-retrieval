@@ -83,7 +83,7 @@ may train model parameters. Validation selects hyperparameters and checkpoints.
 At every scheduled validation, calibration selects the best `(a, b, eta)` by the
 mean of overall and macro-by-case Full-mAP. Checkpoints compete using that
 calibrated score; pooling, fine score mode, matching and the coarse shortlist stay fixed.
-The 9×9×9 search changes only postprocessing coefficients. Its cached scoring
+The Cartesian search changes only postprocessing coefficients. Its cached scoring
 retains all Full Positives, including those in the unchanged coarse tail, and
 uses the same AP summation as full evaluation. The winner is checked again by
 the complete evaluator before publication. Training keeps its base coefficients;

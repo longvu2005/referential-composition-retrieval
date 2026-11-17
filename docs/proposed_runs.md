@@ -85,19 +85,19 @@ the base rates. Actual rates are recorded in `history.jsonl` and W&B.
 
 Periodic validation uses the complete fine score and trained pooling. Each
 validation retrieves once and evaluates
-the 9×9×9 Cartesian product under `evaluation.calibration` on CPU:
+the Cartesian product under `evaluation.calibration` on CPU:
 
-| Coefficient | YAML grid | Values |
-| --- | --- | --- |
-| Coverage `a` | `coverage_weights` | `0.04..0.12`, step `0.01` (9) |
-| Raw context `b` | `context_weights` | `0.02..0.06`, step `0.005` (9) |
-| Coarse fusion `eta` | `fine_coarse_weights` | `0.10..0.20`, step `0.0125` (9) |
+| Coefficient | YAML grid |
+| --- | --- |
+| Coverage `a` | `coverage_weights` |
+| Raw context `b` | `context_weights` |
+| Coarse fusion `eta` | `fine_coarse_weights` |
 
-It selects the best of all 729 triples, then compares that calibrated score with
+It selects the best of all configured triples, then compares that calibrated score with
 previous epochs to choose `best.pt`. Training keeps base `a=0.04`, `b=0.10`;
 mining uses `a=0.04`, `b=0`, `eta=0.15`. Validation choices never feed
-back into them. The training context weight is outside the calibration grid and is
-not added to the search; there are exactly 729 candidates.
+back into them. The search uses only the listed grid values; base coefficients
+are not added implicitly.
 The coarse and state objectives remain separate from the fine objective.
 Changing training coefficients or pooling is a separate training experiment.
 

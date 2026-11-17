@@ -28,7 +28,7 @@ Top-M support. Constant branches contribute zero; `eta=0` returns raw fine score
 `alpha=1` is fixed. Semantic context loss ranks `b * context`; identity rejection
 ranks the complete fine score, both with `loss.context_temperature`. Hard mining
 uses binding, coverage and coarse fusion with context weight fixed at zero.
-Each scheduled validation retrieves once and searches all 729
+Each scheduled validation retrieves once and searches all configured
 `(a, b, eta)` triples on CPU. `best.pt` maximizes the mean of overall and macro-case
 validation Full-mAP after calibration. Test freezes the winning checkpoint and
 coefficients together. Stable ties retain coarse order; the gallery tail is unchanged.

@@ -79,13 +79,14 @@ The architecture name remains `fafa-partial-match-v2`, with its existing
 CLIP-prefixed alias. Tensor layouts and state keys, including the fixed
 `binding_log_scale`, remain unchanged.
 
-Fine scoring uses `B + a*C + b*H` in both training and inference. Retrieval
+Retrieval and identity rejection use `B + a*C + b*H`; semantic context loss
+ranks `b*H`. Hard mining fixes the H coefficient at zero. Retrieval
 requires a checkpoint trained with `fine_score_mode: linear` and rejects previous
 fine scorers. Train in a fresh output directory; compatible frozen caches remain
 reusable. Pooling and fine score mode must match training. Coverage/context and
 fusion coefficients can be selected on validation; all three are frozen for test.
 Validation checkpoint selection uses `Z_M(fine) + eta*Z_M(coarse)`. Each validation
-searches all 729 configured `(a, b, eta)` triples, and checkpoints
+searches all configured `(a, b, eta)` triples, and checkpoints
 compete by their best calibrated score. Coarse beta and Top-M stay fixed. Replay uses score schema 4,
 including `coarse_topm_scores` and the fusion normalization contract. Coefficient
 replay is deployable; changing pooling remains a diagnostic ablation.
