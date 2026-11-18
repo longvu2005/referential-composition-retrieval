@@ -9,7 +9,7 @@ from rcr.common.io import index_unique
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
 
-CandidateRanker = Callable[[str, list[tuple[str, str]]], list[str]]
+CandidateRanker = Callable[[tuple[str, str], str, list[tuple[str, str]]], list[str]]
 
 
 def _index_metadata(index_lines: Iterable[str]):
@@ -179,6 +179,7 @@ def prepare_positive_set_inputs(
         non_seed = sorted(candidate_ids - {seed_id})
         if candidate_ranker is not None:
             ranked = candidate_ranker(
+                (query_id, image_by_id[query_id]["url"]),
                 review["final_change"],
                 [(x, image_by_id[x]["url"]) for x in non_seed],
             )

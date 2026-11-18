@@ -235,7 +235,8 @@ def test_positive_candidates_cover_exact_split_identity_matches(split):
 
 
 def test_reranker_only_sees_non_seed_split_candidates():
-    def ranker(text, candidates):
+    def ranker(reference_image, text, candidates):
+        assert reference_image == ("1_1", "/images/train/1_1.jpg")
         assert text == _handoff_inputs()[1][0]["final_change"]
         assert candidates == [
             ("1_3", "/images/train/1_3.jpg"),
@@ -270,7 +271,8 @@ def test_positive_handoff_rejects_duplicate_reviews():
 def test_reranker_cannot_reintroduce_leftover_candidates():
     with pytest.raises(ValueError, match="every non-seed candidate exactly once"):
         prepare_positive_set_inputs(
-            *_handoff_inputs(), candidate_ranker=lambda text, candidates: ["1_3", "1_7"]
+            *_handoff_inputs(),
+            candidate_ranker=lambda reference, text, candidates: ["1_3", "1_7"],
         )
 
 
@@ -419,7 +421,7 @@ def test_openai_weights_use_quickgelu(clip_rerank, monkeypatch):
             get_tokenizer=lambda name: "tokenizer",
         ),
     )
-    ranker = clip_rerank.ClipChangeRanker()
+    ranker = clip_rerank.ClipCandidateRanker()
     assert calls == [("ViT-B-32", {"pretrained": "openai", "force_quick_gelu": True})]
     assert ranker._cached_features == {}
 
@@ -434,12 +436,12 @@ def test_image_features_are_read_once_and_keep_requested_order(
     original_load = np.load
     loaded = []
 
-    def load(path):
+    def load(path, **kwargs):
         loaded.append(path)
-        return original_load(path)
+        return original_load(path, **kwargs)
 
     monkeypatch.setattr(clip_rerank.np, "load", load)
-    ranker = clip_rerank.ClipChangeRanker.__new__(clip_rerank.ClipChangeRanker)
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
     ranker._cached_features = {}
     candidates = [("a", "/images/train/a.jpg"), ("b", "/images/train/b.jpg")]
     np.testing.assert_array_equal(ranker._image_features(candidates), np.eye(2))
@@ -449,20 +451,115 @@ def test_image_features_are_read_once_and_keep_requested_order(
     assert len(loaded) == 2
 
 
-def test_clip_ranks_by_normalized_text_score_and_breaks_ties_by_id(
+def test_clip_ranks_by_max_of_independent_image_and_text_cosines(
     clip_rerank, monkeypatch
 ):
-    ranker = clip_rerank.ClipChangeRanker.__new__(clip_rerank.ClipChangeRanker)
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
     ranker.device = "cpu"
-    ranker.model = SimpleNamespace(encode_text=lambda text: torch.tensor([[3.0, 4.0]]))
-    ranker.tokenizer = lambda text: torch.zeros(1, 1, dtype=torch.long)
+    ranker.model = SimpleNamespace(
+        encode_text=lambda text: torch.tensor([[0.0, 4.0, 0.0]])
+    )
+    text_inputs = []
+
+    def tokenize(text):
+        text_inputs.append(text)
+        return torch.zeros(1, 1, dtype=torch.long)
+
+    ranker.tokenizer = tokenize
+    reference = ("query", "/images/query.jpg")
+    candidates = [("a", "a"), ("b", "b"), ("c", "c")]
+
+    def image_features(images):
+        assert images == [reference, *candidates]
+        return np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.8, 0.0, 0.6],
+                [0.0, 0.9, np.sqrt(0.19)],
+                [0.7, 0.7, np.sqrt(0.02)],
+            ],
+            dtype=np.float32,
+        )
+
+    monkeypatch.setattr(ranker, "_image_features", image_features)
+    image_scores, text_scores = ranker._similarities(
+        reference, "the condition", candidates
+    )
+    np.testing.assert_allclose(image_scores, [0.8, 0.0, 0.7])
+    np.testing.assert_allclose(text_scores, [0.0, 0.9, 0.7])
+    assert ranker(reference, "the condition", candidates) == ["b", "a", "c"]
+    assert text_inputs == [["the condition"], ["the condition"]]
+
+
+@pytest.mark.parametrize(
+    ("image_scores", "text_scores", "expected"),
+    [
+        ([0.4, 0.8, 0.8], [0.8, 0.2, 0.1], ["a", "b", "c"]),
+        ([-0.2, -0.8, -0.4], [-0.9, -0.6, -0.3], ["b", "c", "a"]),
+    ],
+)
+def test_clip_max_keeps_raw_negative_scores_and_deterministic_ties(
+    clip_rerank, monkeypatch, image_scores, text_scores, expected
+):
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
     monkeypatch.setattr(
         ranker,
-        "_image_features",
-        lambda candidates: np.array([[0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]),
+        "_similarities",
+        lambda *args: (np.array(image_scores), np.array(text_scores)),
     )
-    assert ranker("the condition", [("c", "c"), ("b", "b"), ("a", "a")]) == [
-        "a",
-        "c",
-        "b",
-    ]
+    assert ranker(("q", "q"), "text", [("b", "b"), ("a", "a"), ("c", "c")]) == expected
+
+
+def test_clip_empty_candidates_need_no_image_or_text_encoding(clip_rerank):
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
+    assert ranker(("q", "missing.jpg"), "text", []) == []
+
+
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), -float("inf")])
+def test_clip_max_rejects_non_finite_scores(clip_rerank, monkeypatch, bad_score):
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
+    monkeypatch.setattr(
+        ranker, "_similarities", lambda *args: (np.array([bad_score]), np.array([0.5]))
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        ranker(("q", "q"), "text", [("a", "a")])
+
+
+@pytest.mark.parametrize("interrupted_write", [False, True])
+def test_clip_recovers_an_incomplete_image_cache_and_publishes_atomically(
+    clip_rerank, monkeypatch, tmp_path, interrupted_write
+):
+    from PIL import Image
+
+    image_root = tmp_path / "images"
+    (image_root / "train").mkdir(parents=True)
+    Image.new("RGB", (4, 4)).save(image_root / "train/a.png")
+    cache_root = tmp_path / "cache"
+    (cache_root / "train").mkdir(parents=True)
+    cache_path = cache_root / "train/a.npy"
+    cache_path.write_bytes(b"incomplete previous cache")
+    monkeypatch.setattr(clip_rerank, "IMAGE_ROOT", image_root)
+    monkeypatch.setattr(clip_rerank, "CACHE_ROOT", cache_root)
+    ranker = clip_rerank.ClipCandidateRanker.__new__(clip_rerank.ClipCandidateRanker)
+    ranker._cached_features = {}
+    ranker.device = "cpu"
+    ranker.preprocess = lambda image: torch.zeros(3, 4, 4)
+    ranker.model = SimpleNamespace(
+        encode_image=lambda images: torch.tensor([[3.0, 4.0]])
+    )
+    images = [("a", "/images/train/a.png")]
+    if interrupted_write:
+        with monkeypatch.context() as failed_write:
+
+            def fail_save(handle, feature):
+                handle.write(b"unfinished new cache")
+                raise RuntimeError("injected write failure")
+
+            failed_write.setattr(clip_rerank.np, "save", fail_save)
+            with pytest.raises(RuntimeError, match="injected write failure"):
+                ranker._image_features(images)
+        assert cache_path.read_bytes() == b"incomplete previous cache"
+        assert not cache_path.with_suffix(".npy.tmp").exists()
+    np.testing.assert_allclose(ranker._image_features(images), [[0.6, 0.8]])
+    np.testing.assert_allclose(np.load(cache_path), [0.6, 0.8])
+    assert not cache_path.with_suffix(".npy.tmp").exists()

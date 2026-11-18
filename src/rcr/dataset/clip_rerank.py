@@ -1,4 +1,4 @@
-"""CLIP reranking for Full Positive candidate ordering."""
+"""Order Full Positive candidates by independent image and text similarities."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ IMAGE_ROOT = Path("dataset/data/raw/images")
 CACHE_ROOT = Path("cache/features/clip_vit_b32_openai_quickgelu")
 MODEL_NAME = "ViT-B-32"
 PRETRAINED = "openai"
+RERANK_POLICY = "max_image_text_cosine"
 BATCH_SIZE = 64
 
 
@@ -26,8 +27,8 @@ def _device() -> str:
     return "cpu"
 
 
-class ClipChangeRanker:
-    """Rank candidate images by CLIP similarity to ``final_change``."""
+class ClipCandidateRanker:
+    """Rank by max(cosine(reference, candidate), cosine(change, candidate))."""
 
     def __init__(self) -> None:
         self.device = _device()
@@ -42,25 +43,40 @@ class ClipChangeRanker:
 
     def __call__(
         self,
+        reference_image: tuple[str, str],
         change: str,
         candidates: list[tuple[str, str]],
     ) -> list[str]:
         if not candidates:
             return []
 
-        image_features = self._image_features(candidates)
+        image_scores, text_scores = self._similarities(
+            reference_image, change, candidates
+        )
+        if not np.isfinite(image_scores).all() or not np.isfinite(text_scores).all():
+            raise ValueError("CLIP reranking produced non-finite similarities")
+        scores = np.maximum(image_scores, text_scores)
+        ranked = sorted(
+            zip(candidates, scores, strict=True),
+            key=lambda item: (-float(item[1]), item[0][0]),
+        )
+        return [candidate[0] for candidate, _ in ranked]
+
+    def _similarities(
+        self,
+        reference_image: tuple[str, str],
+        change: str,
+        candidates: list[tuple[str, str]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        features = self._image_features([reference_image, *candidates])
+        reference_feature, image_features = features[0], features[1:]
         text = self.tokenizer([change]).to(self.device)
         with torch.inference_mode():
             text_features = self.model.encode_text(text)
             text_features /= text_features.norm(dim=-1, keepdim=True)
         text_feature = text_features[0].float().cpu().numpy()
 
-        scores = image_features @ text_feature
-        ranked = sorted(
-            zip(candidates, scores, strict=True),
-            key=lambda item: (-float(item[1]), item[0][0]),
-        )
-        return [candidate[0] for candidate, _ in ranked]
+        return image_features @ reference_feature, image_features @ text_feature
 
     def _image_features(self, candidates: list[tuple[str, str]]) -> np.ndarray:
         features: dict[str, np.ndarray] = {}
@@ -72,9 +88,14 @@ class ClipChangeRanker:
             if cache_path in self._cached_features:
                 features[image_id] = self._cached_features[cache_path]
             elif cache_path.exists():
-                feature = np.load(cache_path)
-                self._cached_features[cache_path] = feature
-                features[image_id] = feature
+                try:
+                    feature = np.load(cache_path, allow_pickle=False)
+                except (EOFError, ValueError):
+                    # An interrupted earlier write can leave an incomplete .npy.
+                    missing.append((image_id, url, cache_path))
+                else:
+                    self._cached_features[cache_path] = feature
+                    features[image_id] = feature
             else:
                 missing.append((image_id, url, cache_path))
 
@@ -98,7 +119,13 @@ class ClipChangeRanker:
                 strict=True,
             ):
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.save(cache_path, feature)
+                temporary = cache_path.with_suffix(".npy.tmp")
+                try:
+                    with temporary.open("wb") as handle:
+                        np.save(handle, feature)
+                    temporary.replace(cache_path)
+                finally:
+                    temporary.unlink(missing_ok=True)
                 self._cached_features[cache_path] = feature
                 features[image_id] = feature
 

@@ -25,7 +25,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--clip-rerank",
         action="store_true",
-        help="rank only NEW positive tasks with CLIP; keep existing tasks unchanged",
+        help=(
+            "rank NEW tasks by max(query-image cosine, change-text cosine) "
+            "with CLIP; keep existing tasks unchanged"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -56,9 +59,9 @@ def main(argv=None) -> None:
         gallery_images = build_indexed_gallery(index_lines, IMAGE_ROOT)
         ranker = None
         if args.clip_rerank:
-            from rcr.dataset.clip_rerank import ClipChangeRanker
+            from rcr.dataset.clip_rerank import ClipCandidateRanker
 
-            ranker = ClipChangeRanker()
+            ranker = ClipCandidateRanker()
         prepared = prepare_positive_set_inputs(
             selected=selected,
             reviewed=new_reviews,
