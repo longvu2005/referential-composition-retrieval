@@ -337,10 +337,13 @@ def _training_config(cfg):
         raise ValueError("loss.state_weight=0 requires retrieval.coarse_beta=0")
     warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
     if warmup_epochs and not any(
-        value
-        for key, value in cfg["loss"].items()
-        if key.endswith("weight")
-        and key not in ("context_weight", "context_rejection_weight")
+        cfg["loss"][key]
+        for key in (
+            "grounding_weight",
+            "identity_weight",
+            "coarse_weight",
+            "state_weight",
+        )
     ):
         raise ValueError(
             "context warmup requires a non-context loss; "
@@ -428,11 +431,15 @@ def _train(cfg, output, resumed):
     use_extra_identities = (
         identity_settings["max_crops"] > 0 and cfg["loss"]["identity_weight"] != 0
     )
+    grounding_owner = bool(
+        cfg["loss"]["grounding_weight"] and cfg["loss"]["grounding_owner_weight"]
+    )
     supervision.prepare(
         train_samples,
         all_train=use_extra_identities,
         supplemental=use_extra_identities
         and identity_settings["hard_negative_fraction"] > 0,
+        query_supplemental=grounding_owner,
     )
     identity_sampler = (
         IdentityCropSampler(supervision, identity_settings)
@@ -691,6 +698,7 @@ def _train(cfg, output, resumed):
                 (
                     "loss",
                     "grounding",
+                    "grounding_owner",
                     "identity",
                     "coarse",
                     "context",
@@ -791,6 +799,7 @@ def _train(cfg, output, resumed):
                     hard_identity_image_ids=sampled.hard_identity_ids,
                     text_cache=text_cache,
                     fafa_pooling=fafa_pooling,
+                    include_grounding_owner=grounding_owner,
                 )
                 if state_pairs_epoch is not None:
                     positives = (

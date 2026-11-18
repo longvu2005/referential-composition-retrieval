@@ -13,9 +13,12 @@ final dataset -> frozen feature caches -> train -> retrieve -> evaluate
 
 Frozen CLIP ViT-B/32 encodes scenes and text; frozen FAFA encodes person crops.
 The learned RCR modules ground Subject descriptions, compose the requested
-change, and reason over target evidence. Coarse retrieval uses identity and
-global state scores. Fine retrieval uses a partial one-to-one identity assignment
-with null matches, then reranks only the coarse Top-M:
+change, and reason over target evidence. Grounding combines balanced BCE with
+Subject cross-entropy for confidently aligned reference crops in multi-Subject
+queries. The training config sets `loss.grounding_owner_weight=0.25`.
+Coarse retrieval uses identity and global state scores. Fine retrieval uses a
+partial one-to-one identity assignment with null matches, then reranks only the
+coarse Top-M:
 
 ```text
 S_fine = alpha * B_FAFA + a * coverage + b * context

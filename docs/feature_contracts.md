@@ -75,9 +75,10 @@ reuse it. Renaming defaults does not move or rebuild local artifacts.
 
 ## Checkpoint compatibility
 
-The architecture name remains `fafa-partial-match-v2`, with its existing
-CLIP-prefixed alias. Tensor layouts and state keys, including the fixed
-`binding_log_scale`, remain unchanged.
+The architecture name is `fafa-partial-match-v2`, with its CLIP-prefixed alias.
+When `model.slot_query` is enabled, the state dictionary includes `slot_gate`.
+Ownership cross-entropy trains the existing grounding logits. Its weight is
+part of the numerical training configuration stored in checkpoints.
 
 Retrieval and identity rejection use `B + a*C + b*H`; semantic context loss
 ranks `b*H`. Hard mining fixes the H coefficient at zero. Retrieval

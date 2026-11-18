@@ -118,7 +118,7 @@ class TinyCache:
         }
 
     def native_queries(self, samples, max_people):
-        return torch.ones(len(samples), 1, max_people, 5)
+        return torch.ones(len(samples), len(samples[0]["subjects"]), max_people, 5)
 
     def native_targets(self, indices, max_people):
         return torch.ones(len(indices), max_people, 3, 5)

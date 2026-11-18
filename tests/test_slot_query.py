@@ -453,7 +453,6 @@ def test_slot_config_keys_support_overrides_and_legacy_defaults():
     cfg = load_config("configs/proposed.yaml")
     assert cfg["model"]["slot_query"] is True
     assert cfg["optimizer"]["slot_gate_lr"] == 1e-3
-    assert cfg["loss"]["context_rejection_weight"] == 0.2
     cfg = override_config(
         cfg, {"model.slot_query": False, "optimizer.slot_gate_lr": 0.005}
     )

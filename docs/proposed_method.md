@@ -75,9 +75,9 @@ m_si = a_i * selected_i * [owner_i = s]
 Softmax is over Subject/background, not people: a Subject can select any number
 of members. No case label or GT member count enters scoring. Subject IDs are
 roles in query text. There is no forced top-1 fallback. An empty Subject remains
-missing. Fine decisions/weights are detached; raw logits retain masked BCE
-supervision. The exclusive distribution conditions the independent odds on at
-most one owner; it is not assumed to be a calibrated correctness probability.
+missing. Fine decisions and weights are detached. The raw logits receive
+balanced BCE and a crop-level ownership loss during training. Selection
+confidence `a_i` measures foreground probability summed across all Subjects.
 The current experiment uses `background_logit=-3.5`; missing fields in older
 configs/checkpoints resolve to zero. This constant only enters fine selection,
 never the raw grounding BCE logits or coarse sigmoid identity scores. The same
@@ -265,6 +265,7 @@ oracle. Detector misses and grounding mistakes can lower positive scores.
 
 ```text
 L = L_ground + 0.1 L_id + L_coarse + L_context + L_global_state
+L_ground = loss.grounding_weight * (L_BCE + grounding_owner_weight * L_owner)
 F_train = B_FAFA + a_train * C + b_train * H
 L_context = loss.context_weight * (
     Rank_sem(b_train * H / context_temperature)
@@ -276,7 +277,8 @@ Each term has one explicit task:
 
 | Term | Score/target | Eligible observations |
 | --- | --- | --- |
-| `L_ground` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
+| `L_BCE` | Subject membership logits; balanced BCE | Known query crops, active Subjects with at least one aligned foreground person |
+| `L_owner` | Per-crop cross-entropy over active Subject logits | Multi-Subject train queries; aligned crops with one annotated head center and one annotated owner |
 | `L_id` | Normalized person embeddings; SupCon, temperature 0.1 | Deduplicated known-ID crops from queries, Full Positive targets and extra train-only identity observations |
 | `L_coarse` | Actual raw `identity_scores`, temperature 0.1 | All-required-ID images are positives, other candidate images are negatives; both query and target need person support |
 | `L_context` semantic | `b_train * H`, temperature `loss.context_temperature` | Full Positives versus same-required-ID negatives; both ends need nonzero predicted coverage |
@@ -325,12 +327,20 @@ The pairwise logistic objective follows [RankNet](https://www.microsoft.com/en-u
 crop identity retains [SupCon](https://arxiv.org/abs/2004.11362). These are ranking
 surrogates, not a claim that sampled training loss equals full-gallery mAP.
 
-Grounding averages foreground and background BCE separately within each Subject,
-then averages active Subjects per query and valid queries. Unknown IDs/padding
-are excluded. A Subject with no aligned foreground crop remains unsupervised.
-This avoids weighting a single requested person below a crowd of background
-crops. Selection and partial assignment remain predicted and detached; no
-teacher-forced membership, identities or group cardinalities enter model scoring.
+Grounding BCE averages foreground and background terms separately within each
+Subject, then averages supervised Subjects per query and valid queries. BCE
+supervises known, unpadded crops for Subjects with at least one aligned foreground
+crop. This balances a requested person against the crowd of background crops.
+
+Ownership cross-entropy uses the same raw logits and the conservative
+head-to-crop IDs also used for supplemental identity supervision. For each
+eligible crop the label is its unique annotated Subject. All active Subjects
+compete in the softmax, including Subjects whose members lack aligned crops.
+The loss averages eligible crops per query and then eligible queries. It starts
+in epoch 1. The YAML sets `loss.grounding_owner_weight=0.25`; omitting the key
+defaults it to zero. Head alignment is prepared from train annotations before
+epoch 1 and cached in the existing supervision JSON. Model scoring uses
+predicted, detached membership and assignment.
 
 The same `identity_positive_mask`, derived only from train annotations, serves
 three different targets. A same-ID wrong-state image is a **coarse positive**,
@@ -350,9 +360,8 @@ to raw H. The multiplier `b_train / context_temperature` is retained for other
 configurations. Context queries lacking a supported positive/negative pair are
 skipped. Semantic and rejection losses each
 average pairs per eligible query, then average eligible queries independently.
-`loss.context_rejection_weight` defaults to zero for omitted old settings; the
-current YAML uses `0.2`. This weight is nested under `loss.context_weight`, not a
-sixth standalone objective or the inference context coefficient. Rejection is
+`loss.context_rejection_weight` defaults to zero when omitted. The current YAML
+uses `0.5`, nested under `loss.context_weight`. Rejection is
 disabled until the sampling warmup ends. A mined image whose predicted coverage
 becomes zero is excluded again in the current training forward. No extra model
 forward or classifier is added. `context_active_fraction` retains its semantic
@@ -371,8 +380,8 @@ remain inputs to learned identity/semantic modules.
 `binding_log_scale` is fixed rather than optimized; the optimizer includes only
 trainable parameters.
 
-`loss` contains five task weights, one nested rejection weight and four positive
-temperatures. `loss.context_temperature` scales the pairwise context loss;
+`loss` contains five task weights, nested ownership and rejection weights, and
+four positive temperatures. `loss.context_temperature` scales the pairwise context loss;
 `retrieval.context_weight` scales raw context and `retrieval.coverage_weight`
 scales coverage. Both are separate from the task weight `loss.context_weight`.
 Defaults are starting values, not measured optima. Pooling and fine score mode

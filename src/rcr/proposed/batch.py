@@ -87,6 +87,7 @@ def prepare_visual_batch(
     identity_sampling=None,
     hard_identity_image_ids=None,
     fafa_pooling: str | None = None,
+    include_grounding_owner: bool = False,
 ) -> dict[str, Tensor | dict]:
     """Load CPU visual features and labels. No model is executed here.
 
@@ -109,8 +110,9 @@ def prepare_visual_batch(
         raise ValueError(
             "training candidates must be unique, exclude self and have width >= 2"
         )
+    query_image_ids = [row["query_image_id"] for row in samples]
     query_indices = torch.tensor(
-        [cache.by_id[row["query_image_id"]] for row in samples]
+        [cache.by_id[image_id] for image_id in query_image_ids]
     )
     target_indices = torch.tensor(
         [cache.by_id[image_id] for row in candidate_image_ids for image_id in row]
@@ -120,9 +122,7 @@ def prepare_visual_batch(
     t_scene, t_people, t_boxes, t_mask = target
 
     positives = [set(row["positive_image_ids"]) for row in samples]
-    q_ids = supervision.load_ids(
-        [row["query_image_id"] for row in samples], q_people.shape[1]
-    )
+    q_ids = supervision.load_ids(query_image_ids, q_people.shape[1])
     t_ids = [[None] * t_people.shape[1] for _ in range(len(target_indices))]
     positive_slots = [
         (n * candidates_per_query + j, image_id)
@@ -169,7 +169,7 @@ def prepare_visual_batch(
     if mining:
         image_ids = list(
             dict.fromkeys(
-                [row["query_image_id"] for row in samples]
+                query_image_ids
                 + [image_id for row in candidate_image_ids for image_id in row]
                 + [image_id for image_id, _, _ in identity_crops]
             )
@@ -305,6 +305,14 @@ def prepare_visual_batch(
         ),
         "positive_mask": positive_mask,
     }
+    if include_grounding_owner and grounding_targets.shape[1] > 1:
+        conservative_ids = supervision.load_ids(
+            query_image_ids, q_people.shape[1], supplemental=True
+        )
+        batch["grounding_owner_mask"] = torch.tensor(
+            [[identity is not None for identity in row] for row in conservative_ids],
+            dtype=torch.bool,
+        )
     batch["identity_positive_mask"] = torch.tensor(
         [
             [image_id in eligible for image_id in image_ids]
@@ -363,6 +371,7 @@ def build_batch(
     hard_identity_image_ids=None,
     text_cache: QueryTextCache | None = None,
     fafa_pooling: str | None = None,
+    include_grounding_owner: bool = False,
 ) -> dict[str, Tensor | dict]:
     text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
@@ -375,6 +384,7 @@ def build_batch(
         identity_sampling=identity_sampling,
         hard_identity_image_ids=hard_identity_image_ids,
         fafa_pooling=fafa_pooling,
+        include_grounding_owner=include_grounding_owner,
     )
     visual = {
         key: value.to(device) if isinstance(value, Tensor) else value

@@ -65,7 +65,7 @@ def align_identities(item, heads):
 
 
 def supplemental_identities(item, heads, labels):
-    """Conservative crop IDs for extra SupCon evidence; leave BCE alignment intact."""
+    """Keep canonical crop IDs only where exactly one annotated head is present."""
     persons = item["boxes_pixel"]
     if not len(persons) or not heads:
         return [None] * len(persons)
@@ -164,22 +164,30 @@ class TrainSupervision:
                 )
         return (self._supplemental_ids if supplemental else self._ids)[image_id]
 
-    def prepare(self, samples, *, all_train=False, supplemental=False):
-        """Align required images once; optionally index the full train gallery."""
-        required = set()
+    def prepare(
+        self, samples, *, all_train=False, supplemental=False, query_supplemental=False
+    ):
+        """Prepare canonical IDs and conservative labels for requested images."""
+        required, supplemental_images = set(), set()
         for sample in samples:
-            required.add(sample["query_image_id"])
+            image_id = sample["query_image_id"]
+            required.add(image_id)
             required.update(sample["positive_image_ids"])
+            if query_supplemental and len(sample["subjects"]) > 1:
+                supplemental_images.add(image_id)
         if not required <= self.heads.keys():
             raise ValueError("train supervision cannot prepare non-train images")
         if all_train:
             required = set(self.heads)
+        if supplemental:
+            supplemental_images = required
         missing = [
             i
             for i in self.heads
             if i in required
             and (
-                i not in self._ids or (supplemental and i not in self._supplemental_ids)
+                i not in self._ids
+                or (i in supplemental_images and i not in self._supplemental_ids)
             )
         ]
         self._prepared = False
@@ -190,7 +198,9 @@ class TrainSupervision:
         )
         try:
             for image_id in tqdm(missing, desc="prepare train supervision"):
-                self._load_image_ids(image_id, supplemental=supplemental)
+                self._load_image_ids(
+                    image_id, supplemental=image_id in supplemental_images
+                )
         finally:
             self.save()
         self._prepared = True
@@ -248,5 +258,9 @@ def prepare_train_supervision(cfg):
         split_samples(data, "train"),
         all_train=use_extra,
         supplemental=use_extra and settings["hard_negative_fraction"] > 0,
+        query_supplemental=bool(
+            cfg["loss"].get("grounding_weight", 1.0)
+            and cfg["loss"].get("grounding_owner_weight", 0.0)
+        ),
     )
     return supervision.cache_file

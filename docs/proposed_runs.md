@@ -60,28 +60,32 @@ caches remain reusable. Checkpoint scoring compatibility is described in the
 python tools/run.py train --config configs/proposed.yaml
 ```
 
-The checked-in configuration enables `model.slot_query=true` and
+The checked-in configuration uses `loss.grounding_owner_weight=0.25` and
+`loss.context_rejection_weight=0.5`. Ownership cross-entropy trains from
+epoch 1 on reference crops with a single annotated head center and a unique
+Subject owner. The existing train supervision cache supplies these crop IDs.
+History records the unweighted component as `train_grounding_owner`, and W&B
+logs it under `train/grounding_owner` and `epoch/grounding_owner`.
+
+For a paired ownership baseline, use the same source, dataset, seed and model
+settings with the ownership weight set to zero:
+
+```bash
+python tools/run.py train --config configs/proposed.yaml --set loss.grounding_owner_weight=0.0 output.dir=runs/proposed-bce-rho05
+```
+
+The checked-in configuration also enables `model.slot_query=true` and
 `optimizer.slot_gate_lr=1e-3`. Target evidence attention then uses the composed
 Subject/person slot `r` with scalar gamma (`slot_gate`, initialized to zero):
 `mixed = p + gamma * r`, `q = mixed * norm(p) / max(norm(mixed), 1e-6)` per token
 in FP32. Unmatched/masked slots are zeroed, and zero person tokens give zero
-queries. Only query direction changes; scene keys/values and the person residual
-are retained. Query grounding is unchanged. Omitted flags in code/older
-checkpoints default to false.
-
-Run the slot-query experiment with rejection weight rho = 0.5:
+queries. Omitted flags in code/older checkpoints default to false. A separate
+slot-query ablation sets the following flag on the same training setup:
 
 ```bash
-python tools/run.py train --config configs/proposed.yaml --set loss.context_rejection_weight=0.5 output.dir=runs/proposed-slotq-rho05
+python tools/run.py train --config configs/proposed.yaml --set model.slot_query=false output.dir=runs/proposed-no-slot-query
 ```
 
-For a paired baseline on the same revision, seed and runtime:
-
-```bash
-python tools/run.py train --config configs/proposed.yaml --set loss.context_rejection_weight=0.5 model.slot_query=false output.dir=runs/proposed-base-rho05
-```
-
-These overrides leave the checked-in `loss.context_rejection_weight=0.2` intact.
 The gate adds no initialization RNG draws. With the flag off, no gate parameter
 or optimizer group is registered and older state dictionaries load strictly.
 Retrieval restores the flag from the checkpoint; calibration preserves that
@@ -206,9 +210,9 @@ ablations use a fresh `output.dir` for each run:
 | Ablation | `train.sampling.semantic_hard_fraction` | `loss.context_rejection_weight` |
 | --- | ---: | ---: |
 | No semantic hard mining or rejection | 0 | 0 |
-| Semantic hard mining only | 0.5 | 0 |
-| Identity rejection only | 0 | 0.2 |
-| Both (current YAML) | 0.3 | 0.2 |
+| Semantic hard mining only | 0.3 | 0 |
+| Identity rejection only | 0 | 0.5 |
+| Both (current YAML) | 0.3 | 0.5 |
 
 Omitted semantic-hard and rejection settings default to zero. Training optimizes
 `loss.context_weight * (L_semantic + context_rejection_weight * L_rejection)`.
