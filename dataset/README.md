@@ -181,13 +181,11 @@ does not install OpenCLIP or other model libraries.
 
 The finalization launcher checks and normalizes positive-list ordering. Stop
 the positive UI before running it because normalization may rewrite
-`positive_sets.jsonl`. The checked-in `final/manifest.json` is version `0.1.0`;
-the builder currently defaults to `0.2.0`, so this explicit command produces
-a new version after successful finalization. Complete the outstanding review and
+`positive_sets.jsonl`. The builder defaults to version `0.1.0`. Complete the outstanding review and
 positive decisions before a full export; use `--allow-partial` while labeling:
 
 ```bash
-bash scripts/data/finalize.bash --version 0.2.0
+bash scripts/data/finalize.bash --version 0.1.0
 ```
 
 The write operation preserves each positive set, including the seed, and orders

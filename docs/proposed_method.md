@@ -206,6 +206,30 @@ a learned null token with no scene/geometry update. Other target person crops
 never enter the reasoner. Scene remains available through each matched person's
 spatially biased attention, including context outside crops.
 
+`model.slot_query` optionally supplies the composed Subject/person tail
+`r_si = reference[:, offset:]` to this target-evidence `person_attn` query.
+Its order is the same as the aligned target person tokens `p_si`. Unmatched and
+masked slots are zeroed before mixing. In the existing FP32 attention region:
+
+```text
+mixed_si = p_si + gamma * r_si
+q_si = mixed_si * (norm(p_si) / max(norm(mixed_si), 1e-6))
+```
+
+Norms are per token over the feature dimension. Zero person tokens produce zero
+queries; at the zero-initialized gate the context output equals the baseline
+exactly. This preserves person-query magnitude while allowing its direction to
+depend on the Subject and condition. Only the attention query changes: scene
+keys/values and the original person residual are retained. Slot gradients reach
+composition. Query-side `SubjectGrounding` receives no slots, so `encode_query`
+is independent of the flag and gate.
+
+The sole additional learned parameter is scalar `slot_gate` (gamma), initialized
+with `torch.zeros` without consuming RNG. It is registered only when the flag is
+true. The code default is false; the experiment YAML enables it. Group 2 of AdamW
+contains only this scalar, with `optimizer.slot_gate_lr=1e-3` and zero weight
+decay. Model/text groups retain indices 0/1 and all groups share cosine decay.
+
 Directed pair geometry uses `(dx, dy, log width ratio, log height ratio, IoU)` of
 matched boxes. Null/unselected pairs have neutral geometry. Two rounds of the
 same self-attention layer let member interactions reach CLS. There is no
@@ -327,7 +351,7 @@ configurations. Context queries lacking a supported positive/negative pair are
 skipped. Semantic and rejection losses each
 average pairs per eligible query, then average eligible queries independently.
 `loss.context_rejection_weight` defaults to zero for omitted old settings; the
-current YAML uses `0.5`. This weight is nested under `loss.context_weight`, not a
+current YAML uses `0.2`. This weight is nested under `loss.context_weight`, not a
 sixth standalone objective or the inference context coefficient. Rejection is
 disabled until the sampling warmup ends. A mined image whose predicted coverage
 becomes zero is excluded again in the current training forward. No extra model
@@ -366,7 +390,8 @@ The default 20-epoch run separates context and mining warmup:
 
 Selection and assignment are detached, so unreliable initial grounding/identity
 cannot be corrected through context gradients. Warmup first supervises those
-components without running composition or fine matching/reasoning. Afterwards,
+components without running composition or fine matching/reasoning in the loss
+forward. Afterwards,
 the base tasks remain active to constrain their shared projections while context
 learns. The optimizer, its state and learning rates are retained across phases;
 there is no parameter freezing or teacher forcing added at the boundary.
@@ -384,6 +409,20 @@ is unchanged. `last.pt` is still saved every epoch; during warmup it is an
 intermediate snapshot. History records `phase` and the effective `context_weight`;
 W&B records the effective weight and warmup flag per step and epoch. The saved
 configuration retains the final objective weights rather than the temporary zero.
+
+When slot queries are enabled, a separate `no_grad`/eval diagnostic runs once per
+epoch, including warmup, on the first train query and its first Full Positive in
+sorted image-ID order. It restores model/text training modes and every global
+Python, NumPy, CPU/CUDA RNG state; sampling/mining generators are never used.
+History records `slot_gate`, `slot_attn_kl` and `slot_energy_ratio`; W&B uses the
+same names under `epoch/`. KL is `KL(A_real || A_replace)` averaged over matched,
+unmasked slots and heads, replacing `r` with `p` at the same gamma and with the
+same query normalization. The energy diagnostic averages
+`norm(gamma * W_Q r) / max(norm(W_Q p), 1e-6)` over those slots, using the existing
+query projection without its bias. Both metrics are zero when no slot matches.
+The ordinary forward keeps `need_weights=False`; only diagnostics request
+attention weights. `slot_gate_lr` also records the scalar's effective epoch rate.
+These keys are omitted when the flag is false.
 
 Within Top-M, final ranking fuses fine and coarse evidence:
 
@@ -444,8 +483,10 @@ Build format-7 FAFA caches once in the new independent paths. Their crop-source
 identity and preprocessing are part of the provenance contract.
 DINO/BERT architecture checkpoints are rejected before loading text weights.
 Fresh experiments train from scratch in `runs/proposed`. The architecture
-identifier and parameter layout stay unchanged, including the architecture-name
-alias. Retrieval requires a checkpoint trained with the Linear scorer;
+identifier stays unchanged, including the architecture-name alias. With
+`slot_query=false`, the parameter layout is unchanged and legacy weights load
+strictly. Enabled checkpoints additionally contain `slot_gate`. Retrieval requires
+a checkpoint trained with the Linear scorer;
 an older checkpoint's parameter layout alone does not establish scoring
 compatibility. See [feature contracts](feature_contracts.md).
 Offline replay requires a score-schema-4 artifact.
@@ -477,6 +518,12 @@ input YAML differs. Calibration freezes `selected_background_logit` from the
 validation artifact; test rejects a checkpoint background that differs from that
 selection (legacy selections default to zero). Changing background requires new
 query encoding and fine scoring; score replay cannot change it.
+
+`model.slot_query` is also checkpoint-authoritative, with a false fallback for
+older checkpoints. Retrieval exports the effective flag in provenance and
+offline calibration carries it into `selected.yaml`. A retrieval YAML cannot
+enable or disable it. Resume signatures include the effective flag and
+`optimizer.slot_gate_lr`, preserving the optimizer's group count and rates.
 
 `score_target(..., return_details=True)` exposes matching indices, membership,
 Subject/overall coverage, all three binding reductions, raw context, coverage bonus and

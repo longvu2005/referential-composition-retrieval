@@ -74,6 +74,7 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     model_cfg = {
         **train_cfg["model"],
         "fine_matching": matching_settings(train_cfg["model"].get("fine_matching")),
+        "slot_query": train_cfg["model"].get("slot_query", False),
     }
     background = model_cfg["fine_matching"]["background_logit"]
     settings = retrieval_settings(

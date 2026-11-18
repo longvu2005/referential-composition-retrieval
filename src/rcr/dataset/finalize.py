@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
+from pathlib import PurePosixPath
 
 from rcr.common.data import subject_identity_ids
 from rcr.common.io import index_unique
@@ -103,6 +104,28 @@ def build_final_dataset(
         query_id = source["query_image_id"]
         target_id = source["target_image_id"]
 
+        if pair_splits is None:
+            split = source["split"].upper()
+            if split not in PAIR_SPLITS:
+                raise ValueError(f"{sample_id}: invalid split {split!r}")
+        else:
+            key = (query_id, target_id)
+            try:
+                split = pair_splits[key]
+            except KeyError as exc:
+                raise ValueError(
+                    f"{sample_id}: pair is missing from pair_data "
+                    f"({query_id!r}, {target_id!r})"
+                ) from exc
+        image_split = split.lower()
+        if not {query_id, target_id} <= gallery_ids or any(
+            PurePosixPath(gallery_by_id[image_id]["path"]).parts[0] != image_split
+            for image_id in (query_id, target_id)
+        ):
+            raise ValueError(
+                f"{sample_id}: query and seed target must belong to {image_split}"
+            )
+
         if not positive_ids or len(positive_ids) != len(set(positive_ids)):
             raise ValueError(
                 f"{sample_id}: positive_image_ids must be non-empty and unique"
@@ -136,6 +159,13 @@ def build_final_dataset(
                 or not required_ids <= identities_by_image[positive_id]
             ):
                 raise ValueError(f"{sample_id}: invalid positive {positive_id}")
+            if (
+                PurePosixPath(gallery_by_id[positive_id]["path"]).parts[0]
+                != image_split
+            ):
+                raise ValueError(
+                    f"{sample_id}: positive {positive_id} must belong to {image_split}"
+                )
 
         samples.append(
             {
@@ -150,20 +180,7 @@ def build_final_dataset(
                 "final_instruction": f"{final_desc}; {final_change}.",
             }
         )
-        if pair_splits is None:
-            split = source["split"].upper()
-            if split not in PAIR_SPLITS:
-                raise ValueError(f"{sample_id}: invalid split {split!r}")
-        else:
-            key = (query_id, target_id)
-            try:
-                split = pair_splits[key]
-            except KeyError as exc:
-                raise ValueError(
-                    f"{sample_id}: pair is missing from pair_data "
-                    f"({query_id!r}, {target_id!r})"
-                ) from exc
-        splits[split.lower()].append(sample_id)
+        splits[image_split].append(sample_id)
 
     return {
         "samples": samples,

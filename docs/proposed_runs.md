@@ -60,6 +60,34 @@ caches remain reusable. Checkpoint scoring compatibility is described in the
 python tools/run.py train --config configs/proposed.yaml
 ```
 
+The checked-in configuration enables `model.slot_query=true` and
+`optimizer.slot_gate_lr=1e-3`. Target evidence attention then uses the composed
+Subject/person slot `r` with scalar gamma (`slot_gate`, initialized to zero):
+`mixed = p + gamma * r`, `q = mixed * norm(p) / max(norm(mixed), 1e-6)` per token
+in FP32. Unmatched/masked slots are zeroed, and zero person tokens give zero
+queries. Only query direction changes; scene keys/values and the person residual
+are retained. Query grounding is unchanged. Omitted flags in code/older
+checkpoints default to false.
+
+Run the slot-query experiment with rejection weight rho = 0.5:
+
+```bash
+python tools/run.py train --config configs/proposed.yaml --set loss.context_rejection_weight=0.5 output.dir=runs/proposed-slotq-rho05
+```
+
+For a paired baseline on the same revision, seed and runtime:
+
+```bash
+python tools/run.py train --config configs/proposed.yaml --set loss.context_rejection_weight=0.5 model.slot_query=false output.dir=runs/proposed-base-rho05
+```
+
+These overrides leave the checked-in `loss.context_rejection_weight=0.2` intact.
+The gate adds no initialization RNG draws. With the flag off, no gate parameter
+or optimizer group is registered and older state dictionaries load strictly.
+Retrieval restores the flag from the checkpoint; calibration preserves that
+effective configuration from validation provenance. Resume retains the flag and
+gate learning rate through its numerical-configuration signature.
+
 Training has separate grounding, crop-identity, coarse-identity, conditional
 context and global-state objectives. Semantic context loss ranks `b * context`;
 identity rejection ranks `B_FAFA + a * coverage + b * context`. Both divide
@@ -72,16 +100,32 @@ losses weight eligible queries equally; see the exact objectives in
 The run starts with grounding/identity/coarse/state, then enables context after
 the configured warmup. `train.epochs` is the total, including warmup;
 `train.context_warmup_epochs` controls only context loss and must be smaller than
-that total. Composition and fine context scoring are skipped during warmup. The
+that total. Composition and fine context scoring are skipped in the warmup loss
+forward. The
 same optimizer continues, and the base objectives stay active afterwards.
 Set `train.context_warmup_epochs=0` for a joint-training ablation or a one-epoch
 smoke test. When context loss is disabled, all epochs use the remaining objectives.
 
-Both optimizer groups use epoch-wise cosine decay from their configured base
+All optimizer groups use epoch-wise cosine decay from their configured base
 rates to `optimizer.min_lr_ratio` times those rates (default `0.1`). Decay spans
 all training epochs, independently of context and mining warmup. The first epoch
 uses the base rates; the final epoch uses the floor. A one-epoch smoke test uses
 the base rates. Actual rates are recorded in `history.jsonl` and W&B.
+Group 0 contains the model parameters except gamma, group 1 the text projection,
+and optional group 2 only gamma, with `slot_gate_lr` and zero weight decay.
+`slot_gate_lr` logs its actual decayed rate when enabled.
+
+Once per epoch, including warmup, separate eval/`no_grad` diagnostics use the
+first train query and its first Full Positive in sorted image-ID order. History
+logs `slot_gate`, `slot_attn_kl` and `slot_energy_ratio`; W&B records them under
+`epoch/`. KL compares per-head attention with real slots against slots replaced
+by `p`, using the same gamma, normalized queries and scene evidence, averaged over
+matched, unmasked slots and heads. The energy ratio is the mean
+`norm(gamma * W_Q r) / max(norm(W_Q p), 1e-6)` over those slots, without projection
+bias. Empty matched support gives zero for both metrics. All diagnostic keys are
+omitted when the flag is off. This path restores training modes and global RNG
+states and never uses the training sampler or hard-pool generators. The loss
+forward continues to request no attention weights.
 
 Periodic validation uses the complete fine score and trained pooling. Each
 validation retrieves once and evaluates
@@ -164,7 +208,7 @@ ablations use a fresh `output.dir` for each run:
 | No semantic hard mining or rejection | 0 | 0 |
 | Semantic hard mining only | 0.5 | 0 |
 | Identity rejection only | 0 | 0.2 |
-| Both (current YAML) | 0.3 | 0.5 |
+| Both (current YAML) | 0.3 | 0.2 |
 
 Omitted semantic-hard and rejection settings default to zero. Training optimizes
 `loss.context_weight * (L_semantic + context_rejection_weight * L_rejection)`.

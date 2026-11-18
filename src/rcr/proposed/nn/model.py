@@ -127,6 +127,7 @@ class RCRModel(nn.Module):
         dropout: float = 0.0,
         fine_matching: dict | None = None,
         fda_k: int = 6,
+        slot_query: bool = False,
     ) -> None:
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
@@ -140,6 +141,9 @@ class RCRModel(nn.Module):
         if type(fda_k) is not int or fda_k < 1:
             raise ValueError("fda_k must be a positive integer")
         self.fda_k = fda_k
+        if type(slot_query) is not bool:
+            raise ValueError("slot_query must be a boolean")
+        self.slot_query = slot_query
         # Scene tokens have their own context projection; globals stay in CLIP space.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
@@ -169,6 +173,8 @@ class RCRModel(nn.Module):
         self.target_builder = TargetPersonBuilder(dim)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
         self.null_person = nn.Parameter(torch.zeros(dim))
+        if self.slot_query:
+            self.slot_gate = nn.Parameter(torch.zeros(()))
 
     @property
     def binding_scale(self) -> Tensor:
@@ -383,6 +389,12 @@ class RCRModel(nn.Module):
             return values.masked_fill(~matched[..., None], 0).reshape(b, s * k, width)
 
         aligned_boxes = align(boxes)
+        offset = query.reference.shape[1] - s * k
+        slot_inputs = {}
+        if self.slot_query:
+            valid = matched.flatten(1) & query.mask[:, offset:]
+            slots = query.reference[:, offset:].masked_fill(~valid[..., None], 0)
+            slot_inputs = {"person_slots": slots, "slot_gate": self.slot_gate}
         evidence = self.grounding.binding(
             self.visual_proj(scene),
             align(semantic),
@@ -391,6 +403,7 @@ class RCRModel(nn.Module):
             patch_hw,
             query.mask,
             query.prior,
+            **slot_inputs,
         )
         # Null/unselected persons cannot acquire substitute evidence from scene.
         evidence = evidence.masked_fill(~matched.flatten(1)[..., None], 0)
@@ -398,7 +411,6 @@ class RCRModel(nn.Module):
         target = torch.where(
             matched.flatten(1)[..., None], target, self.null_person[None, None]
         )
-        offset = query.reference.shape[1] - s * k
         context = self.reasoner(
             query.reference,
             target,

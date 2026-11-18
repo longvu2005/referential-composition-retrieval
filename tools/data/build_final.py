@@ -24,7 +24,7 @@ PARTIAL_OUTPUT = Path("dataset/data/final_partial")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="0.2.0")
+    parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
 

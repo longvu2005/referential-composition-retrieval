@@ -39,6 +39,7 @@ from rcr.proposed.calibration import (
     write_calibration,
 )
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
+from rcr.proposed.diagnostics import slot_query_diagnostics
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.matching import matching_settings
@@ -170,6 +171,29 @@ def _gradient_norm(*modules):
     return torch.stack(squared_norms).sum().sqrt().item()
 
 
+def build_optimizer(model, text_encoder, config):
+    """Keep model/text groups ordered and give the optional scalar its own rate."""
+    slot_gate = model.slot_gate if model.slot_query else None
+    groups = [
+        {
+            "params": [
+                p for p in model.parameters() if p.requires_grad and p is not slot_gate
+            ],
+            "lr": config["lr"],
+        },
+        {"params": text_encoder.proj.parameters(), "lr": config["text_lr"]},
+    ]
+    if slot_gate is not None:
+        groups.append(
+            {
+                "params": [slot_gate],
+                "lr": config.get("slot_gate_lr", 1e-3),
+                "weight_decay": 0.0,
+            }
+        )
+    return torch.optim.AdamW(groups, weight_decay=config["weight_decay"])
+
+
 def _evaluate(
     samples,
     data,
@@ -247,7 +271,11 @@ def _make_checkpoint(
         ),
         "config": {
             **cfg,
-            "model": {**cfg["model"], "fine_matching": dict(model.fine_matching)},
+            "model": {
+                **cfg["model"],
+                "fine_matching": dict(model.fine_matching),
+                "slot_query": model.slot_query,
+            },
         },
         "dim": dim,
         "input_dim": scene_dim,
@@ -279,6 +307,11 @@ def _training_config(cfg):
         "model": {
             **cfg["model"],
             "fine_matching": matching_settings(cfg["model"].get("fine_matching")),
+            "slot_query": cfg["model"].get("slot_query", False),
+        },
+        "optimizer": {
+            **cfg["optimizer"],
+            "slot_gate_lr": cfg["optimizer"].get("slot_gate_lr", 1e-3),
         },
         "train": {
             **cfg["train"],
@@ -293,6 +326,13 @@ def _training_config(cfg):
             cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
         ),
     }
+    slot_gate_lr = cfg["optimizer"]["slot_gate_lr"]
+    if (
+        type(slot_gate_lr) not in (int, float)
+        or not math.isfinite(slot_gate_lr)
+        or slot_gate_lr <= 0
+    ):
+        raise ValueError("optimizer.slot_gate_lr must be finite and positive")
     if not cfg["loss"]["state_weight"] and cfg["retrieval"]["coarse_beta"] != 0:
         raise ValueError("loss.state_weight=0 requires retrieval.coarse_beta=0")
     warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
@@ -433,19 +473,7 @@ def _train(cfg, output, resumed):
         person_input_dim=person_dim,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": [p for p in model.parameters() if p.requires_grad],
-                "lr": cfg["optimizer"]["lr"],
-            },
-            {
-                "params": text_encoder.proj.parameters(),
-                "lr": cfg["optimizer"]["text_lr"],
-            },
-        ],
-        weight_decay=cfg["optimizer"]["weight_decay"],
-    )
+    optimizer = build_optimizer(model, text_encoder, cfg["optimizer"])
     base_lrs = [group["lr"] for group in optimizer.param_groups]
     min_lr_ratio = cfg["optimizer"].get("min_lr_ratio", 0.1)
     if hasattr(getattr(torch, "amp", None), "GradScaler"):
@@ -555,7 +583,7 @@ def _train(cfg, output, resumed):
             if not resuming_epoch:
                 progress.epoch, progress.phase, progress.next_batch = epoch, "train", 0
                 progress.state_pairs_epoch = 0
-            # Apply one cosine factor to both groups without resetting AdamW state.
+            # Apply one cosine factor to every group without resetting AdamW state.
             epoch_fraction = (epoch - 1) / max(1, epochs - 1)
             lr_factor = (
                 min_lr_ratio
@@ -826,6 +854,11 @@ def _train(cfg, output, resumed):
                             "train/text_gradient_norm": text_gradient_norm,
                             "train/model_lr": optimizer.param_groups[0]["lr"],
                             "train/text_lr": optimizer.param_groups[1]["lr"],
+                            **(
+                                {"train/slot_gate_lr": optimizer.param_groups[2]["lr"]}
+                                if model.slot_query
+                                else {}
+                            ),
                             "train/context_weight": epoch_loss["context_weight"],
                             "train/context_rejection_weight": epoch_loss[
                                 "context_rejection_weight"
@@ -871,6 +904,12 @@ def _train(cfg, output, resumed):
                 **{f"train_{name}": value for name, value in candidate_totals.items()},
             }
             optimizer.zero_grad(set_to_none=True)
+            slot_metrics = slot_query_diagnostics(
+                model, text_encoder, cache, text_cache, train_samples, device
+            )
+            epoch_log.update(slot_metrics)
+            if model.slot_query:
+                epoch_log["slot_gate_lr"] = optimizer.param_groups[2]["lr"]
             is_best = False
             validation = None
             should_evaluate = (
@@ -986,6 +1025,12 @@ def _train(cfg, output, resumed):
                     "epoch/warmup": in_warmup,
                     "epoch/model_lr": epoch_log["model_lr"],
                     "epoch/text_lr": epoch_log["text_lr"],
+                    **{f"epoch/{name}": value for name, value in slot_metrics.items()},
+                    **(
+                        {"epoch/slot_gate_lr": epoch_log["slot_gate_lr"]}
+                        if model.slot_query
+                        else {}
+                    ),
                     **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
                     **{f"epoch/{name}": value for name, value in crop_totals.items()},
                     **{

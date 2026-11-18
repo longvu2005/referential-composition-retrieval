@@ -172,3 +172,18 @@ bash scripts/setup.bash dev
 The CPU suite uses small fixtures without pretrained downloads. It covers
 training/backward, interrupted resume, cache contracts, hard mining, retrieval,
 calibration and frozen test selection.
+
+Tests are grouped by research component:
+
+| Suite | Coverage |
+| --- | --- |
+| [test_dataset.py](tests/test_dataset.py) | Data loading, annotation handoff, positive ordering and finalization |
+| [test_features.py](tests/test_features.py) | CLIP/FAFA features, person encoders, detections and caches |
+| [test_training.py](tests/test_training.py) | Objectives, gradients, mining, checkpoints and resume |
+| [test_retrieval.py](tests/test_retrieval.py) | Scoring, pooling, calibration, replay and frozen selection |
+| [test_evaluation.py](tests/test_evaluation.py) | Metrics, report integrity and result export |
+| [test_workflows.py](tests/test_workflows.py) | CLI and shell workflow dispatch |
+
+Run one component with `python -m pytest tests/test_training.py -q`. Add new
+checks to the matching suite; keep shared fixtures in `tests/conftest.py` and
+small test doubles in `tests/helpers.py`.

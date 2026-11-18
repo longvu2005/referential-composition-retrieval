@@ -32,6 +32,7 @@ model:
   text_model: openai/clip-vit-base-patch32
   dim: 384
   dropout: 0.1
+  slot_query: true
   identity_dim: 128
   fda_k: 6
   state_dim: 512
@@ -71,6 +72,7 @@ train:
 optimizer:
   lr: 0.0001
   text_lr: 1.0e-05
+  slot_gate_lr: 1.0e-3
   min_lr_ratio: 0.1
   weight_decay: 0.01
 loss:
@@ -81,7 +83,7 @@ loss:
   coarse_temperature: 0.1
   context_weight: 1.0
   context_temperature: 0.1
-  context_rejection_weight: 0.2
+  context_rejection_weight: 0.5
   state_weight: 1.0
   state_temperature: 0.1
 retrieval:

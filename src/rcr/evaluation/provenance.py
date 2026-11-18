@@ -91,7 +91,11 @@ def retrieval_metadata(
         "method": "proposed",
         "config": {
             **cfg,
-            "model": {**cfg["model"], "fine_matching": output["fine_matching"]},
+            "model": {
+                **cfg["model"],
+                "fine_matching": output["fine_matching"],
+                "slot_query": train_cfg["model"].get("slot_query", False),
+            },
         },
         "retrieval": settings,
         "score_schema_version": output["score_schema_version"],

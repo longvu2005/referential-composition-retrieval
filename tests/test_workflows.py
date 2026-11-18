@@ -1,4 +1,4 @@
-"""CPU workflow tests for workflows."""
+"""CLI and shell dispatch for benchmark workflows."""
 
 import json
 import os
@@ -10,6 +10,8 @@ import pytest
 
 from rcr.common.config import load_config
 from tools.run import main
+
+# Command-line validation and shell dispatch.
 
 
 def test_cli_rejects_unsupported_method_before_preparation(tmp_path, capsys):

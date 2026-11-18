@@ -215,6 +215,9 @@ def save_selection(
         key: selected["retrieval"][key] for key in SELECTED_RETRIEVAL_KEYS
     }
     selected["model"]["fine_matching"] = matching_settings(output["fine_matching"])
+    selected["model"]["slot_query"] = provenance["config"]["model"].get(
+        "slot_query", False
+    )
     selected["selected_background_logit"] = selected["model"]["fine_matching"][
         "background_logit"
     ]

@@ -55,8 +55,8 @@ Add `--clip-rerank` to rank only newly reviewed tasks with CLIP. Existing tasks
 are never reranked. With no new task, CLIP is not loaded. Stop this UI before
 running the finalization command because that launcher validates and may
 rewrite the saved positive decisions. For example,
-`bash scripts/data/finalize.bash --version 0.2.0` builds a new export after
-the checked-in version `0.1.0`; this command also requires a working local
+`bash scripts/data/finalize.bash --version 0.1.0` refreshes the export while
+keeping version `0.1.0`; this command also requires a working local
 image tree.
 
 Run:
@@ -79,6 +79,12 @@ http://127.0.0.1:8091
 
 Each task shows a sticky Query and reviewed instruction beside a vertical list of
 identity-compatible target candidates. Subject boxes are read-only visual metadata.
+Candidates cover all identity-compatible images in the query's train/val/test
+image split, excluding the query itself. Split membership comes from gallery image
+paths; leftover images and images from other splits are excluded before reranking.
+The seed must belong to the same split as the query.
+Finalization validates the query and seed against the authoritative pair split
+and rejects any positive outside that split.
 The seed target is first, permanently selected, and cannot be removed. For every
 other candidate, only the selection rail on the right changes its Full Positive
 state; clicking the image opens it for inspection without changing the label.

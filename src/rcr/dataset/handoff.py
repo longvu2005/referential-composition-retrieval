@@ -2,7 +2,9 @@
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from pathlib import PurePosixPath
 
+from rcr.common.data import SPLIT_NAMES
 from rcr.common.io import index_unique
 from rcr.dataset.review import normalize_review_assignment
 from rcr.dataset.text import validate_review_output
@@ -10,16 +12,13 @@ from rcr.dataset.text import validate_review_output
 CandidateRanker = Callable[[str, list[tuple[str, str]]], list[str]]
 
 
-def _index_metadata(index_lines: Iterable[str], keep_ids: set[str] | None = None):
+def _index_metadata(index_lines: Iterable[str]):
     boxes_by_image = defaultdict(list)
     images_by_identity = defaultdict(set)
 
     for line in index_lines:
         album, photo, x, y, w, h, identity_id, _ = line.split()
         image_id = f"{album}_{photo}"
-        if keep_ids is not None and image_id not in keep_ids:
-            continue
-
         boxes_by_image[image_id].append(
             {
                 "identity_id": identity_id,
@@ -108,8 +107,18 @@ def prepare_positive_set_inputs(
     index_lines: Iterable[str],
     candidate_ranker: CandidateRanker | None = None,
 ) -> list[dict]:
+    """Build all identity-compatible candidates within each query's image split."""
     selected_by_id = index_unique(selected, "sample_id", "selected")
+    reviewed_by_id = index_unique(reviewed, "sample_id", "reviewed")
     image_by_id = index_unique(gallery_images, "image_id", "gallery_images")
+    split_by_image = {
+        image_id: PurePosixPath(image["path"]).parts[0]
+        for image_id, image in image_by_id.items()
+    }
+    images_by_split = {split: set() for split in SPLIT_NAMES}
+    for image_id, split in split_by_image.items():
+        if split in images_by_split:
+            images_by_split[split].add(image_id)
 
     boxes_by_image, images_by_identity = _index_metadata(index_lines)
     indexed_ids = set(boxes_by_image)
@@ -118,10 +127,23 @@ def prepare_positive_set_inputs(
         raise ValueError(f"indexed image {min(missing)} is missing from gallery_images")
 
     outputs = []
-    for review in reviewed:
+    for review in reviewed_by_id.values():
         sample_id = review["sample_id"]
         source = selected_by_id[sample_id]
         query_id, seed_id = source["query_image_id"], source["target_image_id"]
+        if query_id not in image_by_id or seed_id not in image_by_id:
+            raise ValueError(
+                f"{sample_id}: query and seed target must be registered gallery images"
+            )
+        query_split = split_by_image[query_id]
+        if query_split not in images_by_split:
+            raise ValueError(
+                f"{sample_id}: query must belong to a train, val or test image split"
+            )
+        if split_by_image[seed_id] != query_split:
+            raise ValueError(
+                f"{sample_id}: seed target must belong to the same split as the query"
+            )
         case_type = review.get("case_type", source["case_type"])
         case_type, subjects = normalize_review_assignment(
             sample_id, case_type, review.get("subjects")
@@ -147,7 +169,7 @@ def prepare_positive_set_inputs(
                     "must appear in both query and seed target"
                 )
 
-        candidate_ids = set.intersection(
+        candidate_ids = images_by_split[query_split].intersection(
             *(images_by_identity[x] for x in subject_by_identity)
         )
         candidate_ids.discard(query_id)

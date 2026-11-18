@@ -12,7 +12,7 @@ from PIL import Image
 from rcr.common.io import image_relative_path as _image_relative_path
 
 IMAGE_ROOT = Path("dataset/data/raw/images")
-CACHE_ROOT = Path("cache/features/clip_vit_b32_openai")
+CACHE_ROOT = Path("cache/features/clip_vit_b32_openai_quickgelu")
 MODEL_NAME = "ViT-B-32"
 PRETRAINED = "openai"
 BATCH_SIZE = 64
@@ -34,9 +34,11 @@ class ClipChangeRanker:
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             MODEL_NAME,
             pretrained=PRETRAINED,
+            force_quick_gelu=True,
         )
         self.model = self.model.to(self.device).eval()
         self.tokenizer = open_clip.get_tokenizer(MODEL_NAME)
+        self._cached_features: dict[Path, np.ndarray] = {}
 
     def __call__(
         self,
@@ -67,8 +69,12 @@ class ClipChangeRanker:
         for image_id, url in candidates:
             relative = _image_relative_path(url)
             cache_path = (CACHE_ROOT / relative).with_suffix(".npy")
-            if cache_path.exists():
-                features[image_id] = np.load(cache_path)
+            if cache_path in self._cached_features:
+                features[image_id] = self._cached_features[cache_path]
+            elif cache_path.exists():
+                feature = np.load(cache_path)
+                self._cached_features[cache_path] = feature
+                features[image_id] = feature
             else:
                 missing.append((image_id, url, cache_path))
 
@@ -93,6 +99,7 @@ class ClipChangeRanker:
             ):
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 np.save(cache_path, feature)
+                self._cached_features[cache_path] = feature
                 features[image_id] = feature
 
         return np.stack([features[image_id] for image_id, _ in candidates])
