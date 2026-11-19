@@ -406,15 +406,11 @@ def _train(cfg, output, resumed):
     use_extra_identities = (
         identity_settings["max_crops"] > 0 and cfg["loss"]["identity_weight"] != 0
     )
-    grounding_owner = bool(
-        cfg["loss"]["grounding_weight"] and cfg["loss"]["grounding_owner_weight"]
-    )
     supervision.prepare(
         train_samples,
         all_train=use_extra_identities,
         supplemental=use_extra_identities
         and identity_settings["hard_negative_fraction"] > 0,
-        query_supplemental=grounding_owner,
         include_direction_swaps=context_enabled
         and bool(cfg["loss"]["context_swap_weight"]),
     )
@@ -685,7 +681,6 @@ def _train(cfg, output, resumed):
                 (
                     "loss",
                     "grounding",
-                    "grounding_owner",
                     "identity",
                     "coarse",
                     "context",
@@ -788,7 +783,6 @@ def _train(cfg, output, resumed):
                     hard_identity_image_ids=sampled.hard_identity_ids,
                     text_cache=text_cache,
                     fafa_pooling=fafa_pooling,
-                    include_grounding_owner=grounding_owner,
                     include_direction_swaps=bool(
                         epoch_loss["context_weight"]
                         and epoch_loss["context_swap_weight"]

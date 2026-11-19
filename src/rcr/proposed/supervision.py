@@ -220,7 +220,6 @@ class TrainSupervision:
         *,
         all_train=False,
         supplemental=False,
-        query_supplemental=False,
         include_direction_swaps=False,
     ):
         """Prepare canonical IDs and conservative labels for requested images."""
@@ -229,8 +228,6 @@ class TrainSupervision:
             image_id = sample["query_image_id"]
             required.add(image_id)
             required.update(sample["positive_image_ids"])
-            if query_supplemental and len(sample["subjects"]) > 1:
-                supplemental_images.add(image_id)
         if not required <= self.heads.keys():
             raise ValueError("train supervision cannot prepare non-train images")
         self.direction_swaps = (
@@ -327,10 +324,6 @@ def prepare_train_supervision(cfg):
         include_direction_swaps=bool(
             cfg["loss"].get("context_weight", 1.0)
             and cfg["loss"].get("context_swap_weight", 0.0)
-        ),
-        query_supplemental=bool(
-            cfg["loss"].get("grounding_weight", 1.0)
-            and cfg["loss"].get("grounding_owner_weight", 0.0)
         ),
     )
     return supervision.cache_file

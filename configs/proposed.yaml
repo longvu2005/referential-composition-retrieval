@@ -49,7 +49,7 @@ train:
   epochs: 20
   context_warmup_epochs: 4
   batch_size: 24
-  candidates: 32
+  candidates: 64
   context_batch_size: 64
   case_balanced: true
   seed: 0
@@ -62,12 +62,12 @@ train:
     hard_negative_fraction: 0.2
   sampling:
     positives_per_query: 2
-    identity_fraction: 0.5
-    hard_fraction: 0.1
-    semantic_hard_fraction: 0.3
-    warmup_epochs: 8
-    refresh_every_epochs: 2
-    pool_size: 100
+    identity_fraction: 0.45
+    hard_fraction: 0.10
+    semantic_hard_fraction: 0.50
+    warmup_epochs: 6
+    refresh_every_epochs: 4
+    pool_size: 64
 optimizer:
   lr: 0.0001
   text_lr: 1.0e-05
@@ -75,7 +75,6 @@ optimizer:
   weight_decay: 0.01
 loss:
   grounding_weight: 1.0
-  grounding_owner_weight: 0.25
   identity_weight: 0.1
   identity_temperature: 0.1
   coarse_weight: 1.0

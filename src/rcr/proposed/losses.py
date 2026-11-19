@@ -22,7 +22,6 @@ def loss_settings(config: dict) -> dict:
     """Resolve one objective; reject stale keys and invalid weights before training."""
     defaults = {
         "grounding_weight": 1.0,
-        "grounding_owner_weight": 0.0,
         "identity_weight": 0.1,
         "coarse_weight": 1.0,
         "context_weight": 1.0,
@@ -51,12 +50,7 @@ def loss_settings(config: dict) -> dict:
         value
         for key, value in settings.items()
         if key.endswith("weight")
-        and key
-        not in (
-            "grounding_owner_weight",
-            "context_rejection_weight",
-            "context_swap_weight",
-        )
+        and key not in ("context_rejection_weight", "context_swap_weight")
     ):
         raise ValueError("at least one loss weight must be positive")
     return settings
@@ -80,26 +74,6 @@ def grounding_loss(logits: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
     valid_subject = mask.any(-1)
     per_query = subject.sum(-1) / valid_subject.sum(-1).clamp_min(1)
     return per_query.sum() / valid_subject.any(-1).sum().clamp_min(1)
-
-
-def grounding_owner_loss(
-    logits: Tensor, targets: Tensor, crop_mask: Tensor, subject_mask: Tensor | None
-) -> Tensor:
-    """Classify conservative foreground crops over active Subjects per query."""
-    if subject_mask is None:
-        subject_mask = torch.ones(
-            logits.shape[:2], dtype=torch.bool, device=logits.device
-        )
-    active = subject_mask[:, :, None].bool()
-    members = targets.bool() & active
-    eligible = crop_mask & (members.sum(1) == 1) & (active.sum(1) >= 2)
-    scores = logits.float().masked_fill(~eligible[:, None], 0)
-    scores = scores.masked_fill(eligible[:, None] & ~active, -torch.inf)
-    owner = members.long().argmax(1)
-    loss = F.cross_entropy(scores, owner, reduction="none").masked_fill(~eligible, 0)
-    counts = eligible.sum(1)
-    per_query = loss.sum(1) / counts.clamp_min(1)
-    return per_query.sum() / (counts > 0).sum().clamp_min(1)
 
 
 def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
@@ -278,7 +252,6 @@ def compute_loss(
     identity_temperature: float,
     coarse_temperature: float,
     state_temperature: float,
-    grounding_owner_weight: float = 0.0,
     context_rejection_weight: float = 0.0,
     context_swap_weight: float = 0.0,
     context_temperature: float = 0.1,
@@ -330,7 +303,7 @@ def compute_loss(
         raise ValueError("every Full Positive must also be an identity positive")
     batch_size = len(positive)
     zero = query_identity.new_zeros(())
-    ground, owner, identity, coarse, context, state = [zero] * 6
+    ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = swap = zero
     context_active = rejection_active = swap_active = fda_error = zero.detach()
     hard_count = random_count = 0
@@ -348,11 +321,6 @@ def compute_loss(
         if subjects is not None:
             mask = mask & subjects[:, :, None]
         ground = grounding_loss(logits, targets, mask)
-        if grounding_owner_weight and logits.shape[1] > 1:
-            owner = grounding_owner_loss(
-                logits, targets, known & batch["grounding_owner_mask"], subjects
-            )
-            ground = ground + grounding_owner_weight * owner
 
     if identity_weight:
         query_keep, target_keep = (
@@ -487,7 +455,6 @@ def compute_loss(
     )
     return total, {
         "grounding": ground.detach(),
-        "grounding_owner": owner.detach(),
         "identity": identity.detach(),
         "coarse": coarse.detach(),
         "context": context.detach(),

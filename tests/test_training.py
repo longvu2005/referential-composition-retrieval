@@ -40,13 +40,11 @@ from tools.run import main
 # Objectives, warmup, validation and checkpoint selection.
 
 
-@pytest.mark.parametrize("warmup,owner_weight", [(0, 0.0), (1, 0.0), (1, 0.25)])
+@pytest.mark.parametrize("warmup", [0, 1])
 def test_training_warmup_and_validation_selected_checkpoint(
-    tiny_training_run, monkeypatch, warmup, owner_weight
+    tiny_training_run, monkeypatch, warmup
 ):
     cfg, cache, wandb_run, _ = tiny_training_run
-    assert cfg["loss"]["grounding_owner_weight"] == 0
-    cfg["loss"]["grounding_owner_weight"] = owner_weight
     cfg["train"].update(epochs=3, context_warmup_epochs=warmup)
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["retrieval"]["context_weight"] = 0.23
@@ -69,9 +67,6 @@ def test_training_warmup_and_validation_selected_checkpoint(
     def observe(model, batch, *args, **settings):
         weights.append(settings)
         native_tokens.append("fafa_targets" in batch)
-        assert ("grounding_owner_mask" in batch) == bool(owner_weight)
-        if owner_weight:
-            assert batch["grounding_owner_mask"].tolist() == [[True]]
         assert batch["grounding_targets"].flatten().tolist() == [1.0, 0.0]
         return compute(model, batch, *args, **settings)
 
@@ -82,7 +77,6 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert native_tokens == [bool(value) for value in expected]
     assert all(row["context_score_weight"] == 0.23 for row in weights)
     assert all(row["coverage_score_weight"] == 0.04 for row in weights)
-    assert all(row["grounding_owner_weight"] == owner_weight for row in weights)
     assert [row["context_swap_weight"] for row in weights] == [
         0.25 * value for value in expected
     ]
@@ -94,9 +88,6 @@ def test_training_warmup_and_validation_selected_checkpoint(
         "warmup" if value == 0 else "joint" for value in expected
     ]
     assert all("train_context_fda_error" in row for row in history)
-    assert all(
-        (row["train_grounding_owner"] > 0) == bool(owner_weight) for row in history
-    )
     assert all("val_checkpoint_score" not in row for row in history[:warmup])
     best = max(
         (row for row in history if "val_checkpoint_score" in row),
@@ -111,7 +102,6 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["epoch"] == 3
     assert saved["config"]["retrieval"]["fine_score_mode"] == "linear"
     assert saved["config"]["retrieval"]["context_weight"] == 0.23
-    assert saved["config"]["loss"]["grounding_owner_weight"] == owner_weight
     assert saved["scene_cache_id"] == cache.scene_cache_id
     assert saved["detection_cache_id"] == cache.detection_cache_id
     assert saved["state_supervised_pairs"] > 0
@@ -122,38 +112,8 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["training_state"]["progress"]["phase"] == "epoch_end"
     cache_path = Path(cfg["cache"]["supervision_cache"])
     supplemental = json.loads(cache_path.read_text())["supplemental_identities"]
-    assert set(supplemental) == ({"q"} if owner_weight else set())
-    assert any(
-        row.get("train/grounding_owner", 0) > 0 for row in wandb_run.logs
-    ) == bool(owner_weight)
+    assert supplemental == {}
     assert wandb_run.finished
-
-
-def test_grounding_owner_averages_only_supervised_queries_and_crops():
-    logits = torch.zeros(3, 3, 4)
-    logits[:, 2] = torch.nan
-    logits[0, 1, 0] = 2.0
-    logits[0, :2, 1:] = torch.nan
-    logits.requires_grad_()
-    targets = torch.tensor(
-        [
-            [[1, 0, 1, 1], [0, 0, 1, 0], [0, 0, 0, 0]],
-            [[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 0]],
-            [[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-        ],
-    )
-    crops = torch.tensor(
-        [[True, True, True, False], [True, True, False, False], [True] * 4]
-    )
-    subjects = torch.tensor([[True, True, False]] * 2 + [[True, False, False]])
-    loss = losses.grounding_owner_loss(logits, targets, crops, subjects)
-    expected = (torch.logaddexp(torch.tensor(2.0), torch.tensor(0.0)) + np.log(2)) / 2
-    torch.testing.assert_close(loss, expected)
-    loss.backward()
-    assert logits.grad[0, 0, 0] < 0 < logits.grad[0, 1, 0]
-    assert logits.grad[0, :, 1:].count_nonzero() == 0
-    assert logits.grad[:, 2].count_nonzero() == 0
-    assert logits.grad[2].count_nonzero() == 0
 
 
 @pytest.mark.parametrize(
