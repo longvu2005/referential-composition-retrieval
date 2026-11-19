@@ -49,7 +49,7 @@ train:
   epochs: 20
   context_warmup_epochs: 4
   batch_size: 24
-  candidates: 64
+  candidates: 32
   context_batch_size: 64
   case_balanced: true
   seed: 0
