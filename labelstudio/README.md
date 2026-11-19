@@ -52,7 +52,7 @@ bash scripts/data/prepare_positives.bash
 For optional CLIP ordering, install `requirements/dataset-clip.txt` and set
 `PYTHON=.venv-dataset-clip/bin/python` on the preparation workflow.
 Add `--clip-rerank` to rank only newly reviewed tasks by the maximum of two
-independent CLIP cosine scores: query-image/candidate-image and
+independent CLIP cosine scores: seed-target-image/candidate-image and
 `final_change`-text/candidate-image. The seed remains first. Existing tasks
 are never reranked. With no new task, CLIP is not loaded. Stop this UI before
 running the finalization command because that launcher validates and may

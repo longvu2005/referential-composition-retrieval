@@ -26,7 +26,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--clip-rerank",
         action="store_true",
         help=(
-            "rank NEW tasks by max(query-image cosine, change-text cosine) "
+            "rank NEW tasks by max(seed-target-image cosine, change-text cosine) "
             "with CLIP; keep existing tasks unchanged"
         ),
     )

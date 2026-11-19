@@ -28,7 +28,7 @@ def _device() -> str:
 
 
 class ClipCandidateRanker:
-    """Rank by max(cosine(reference, candidate), cosine(change, candidate))."""
+    """Rank by max(cosine(seed target, candidate), cosine(change, candidate))."""
 
     def __init__(self) -> None:
         self.device = _device()

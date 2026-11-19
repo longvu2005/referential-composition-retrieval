@@ -234,17 +234,20 @@ def test_positive_candidates_cover_exact_split_identity_matches(split):
         } == {(1, "7"), (2, "8")}
 
 
-def test_reranker_only_sees_non_seed_split_candidates():
+@pytest.mark.parametrize("split", ["train", "val", "test"])
+def test_reranker_uses_seed_target_and_only_non_seed_split_candidates(split):
     def ranker(reference_image, text, candidates):
-        assert reference_image == ("1_1", "/images/train/1_1.jpg")
-        assert text == _handoff_inputs()[1][0]["final_change"]
+        assert reference_image == ("1_2", f"/images/{split}/1_2.jpg")
+        assert text == _handoff_inputs(split)[1][0]["final_change"]
         assert candidates == [
-            ("1_3", "/images/train/1_3.jpg"),
-            ("1_8", "/images/train/1_8.jpg"),
+            ("1_3", f"/images/{split}/1_3.jpg"),
+            ("1_8", f"/images/{split}/1_8.jpg"),
         ]
         return ["1_8", "1_3"]
 
-    task = prepare_positive_set_inputs(*_handoff_inputs(), candidate_ranker=ranker)[0]
+    task = prepare_positive_set_inputs(
+        *_handoff_inputs(split), candidate_ranker=ranker
+    )[0]
     assert [c["image_id"] for c in task["candidates"]] == ["1_2", "1_8", "1_3"]
 
 
@@ -466,7 +469,7 @@ def test_clip_ranks_by_max_of_independent_image_and_text_cosines(
         return torch.zeros(1, 1, dtype=torch.long)
 
     ranker.tokenizer = tokenize
-    reference = ("query", "/images/query.jpg")
+    reference = ("target", "/images/target.jpg")
     candidates = [("a", "a"), ("b", "b"), ("c", "c")]
 
     def image_features(images):

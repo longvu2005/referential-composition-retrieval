@@ -179,7 +179,7 @@ def prepare_positive_set_inputs(
         non_seed = sorted(candidate_ids - {seed_id})
         if candidate_ranker is not None:
             ranked = candidate_ranker(
-                (query_id, image_by_id[query_id]["url"]),
+                (seed_id, image_by_id[seed_id]["url"]),
                 review["final_change"],
                 [(x, image_by_id[x]["url"]) for x in non_seed],
             )

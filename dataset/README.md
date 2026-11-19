@@ -173,13 +173,14 @@ bash scripts/setup.bash dataset-clip
 PYTHON=.venv-dataset-clip/bin/python bash scripts/data/prepare_positives.bash --clip-rerank
 ```
 
-CLIP computes two independent cosine similarities for each candidate: query
+CLIP computes two independent cosine similarities for each candidate: seed target
 image to candidate image, and reviewed `final_change` text to candidate image.
 Non-seed candidates are sorted by the larger of these two scores, descending;
 ties use image-ID order. Scores use L2-normalized CLIP embeddings without
 temperature scaling, softmax, weighted addition or embedding fusion. The seed
-stays first and is not scored. Existing image features remain reusable because
-the image encoder and preprocessing are unchanged.
+stays first and serves as the image reference for ranking the other candidates.
+Existing image features remain reusable because the image encoder and
+preprocessing are unchanged.
 
 Without this flag, new non-seed candidates use deterministic image-ID order.
 Existing tasks and their candidate order are preserved in either mode. CLIP is
