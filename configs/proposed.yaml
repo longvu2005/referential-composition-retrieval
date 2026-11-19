@@ -75,7 +75,7 @@ optimizer:
   weight_decay: 0.01
 loss:
   grounding_weight: 1.0
-  grounding_owner_weight: 0.0
+  grounding_owner_weight: 0.25
   identity_weight: 0.1
   identity_temperature: 0.1
   coarse_weight: 1.0
