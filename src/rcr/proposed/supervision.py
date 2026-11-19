@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -84,6 +85,54 @@ def supplemental_identities(item, heads, labels):
     ]
 
 
+_HORIZONTAL_RELATION = re.compile(
+    r"\bSubject (\d+) (?:is (?:now )?"
+    r"(?:(?:standing|sitting|seated|crouching|lying down|walking|leaning down) )?)?"
+    r"(?:(?:directly|immediately|two spots|two positions) )?"
+    r"(?:to|on) the (left|right) of Subject (\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def verified_direction_swaps(samples, heads):
+    """Reverse explicit left/right only on Full Positives with verified head order."""
+    swaps = {}
+    for sample in samples:
+        subjects = sample["subjects"]
+        if len(subjects) != 2 or any(len(s["identity_ids"]) != 1 for s in subjects):
+            continue
+        roles = {str(s["subject_id"]): str(s["identity_ids"][0]) for s in subjects}
+        if len(set(roles.values())) != 2:
+            continue
+        change = sample["final_change"]
+        matches = list(_HORIZONTAL_RELATION.finditer(change))
+        if len(matches) != 1:
+            continue
+        match = matches[0]
+        first, side, second = match.groups()
+        if first == second or first not in roles or second not in roles:
+            continue
+        left, right = (roles[first], roles[second])
+        if side.lower() == "right":
+            left, right = right, left
+        verified = set()
+        for image_id in sample["positive_image_ids"]:
+            centers = defaultdict(list)
+            for head in heads[image_id]:
+                centers[str(head["identity_id"])].append(head["x"] + head["width"] / 2)
+            a, b = centers[left], centers[right]
+            if len(a) == len(b) == 1 and a[0] < b[0]:
+                verified.add(image_id)
+        if verified:
+            opposite = "right" if side.lower() == "left" else "left"
+            start, end = match.span(2)
+            swaps[sample["sample_id"]] = (
+                change[:start] + opposite + change[end:],
+                verified,
+            )
+    return swaps
+
+
 class TrainSupervision:
     """Train-only alignment, optionally reused across runs with identical inputs."""
 
@@ -91,6 +140,7 @@ class TrainSupervision:
         self.cache = cache
         allowed = split_image_ids(data, "train")
         self.heads = {i: data.gt_head_boxes_by_image.get(i, []) for i in allowed}
+        self.direction_swaps = {}
         self._ids = {}
         self._supplemental_ids = {}
         self._saved_count = (0, 0)
@@ -165,7 +215,13 @@ class TrainSupervision:
         return (self._supplemental_ids if supplemental else self._ids)[image_id]
 
     def prepare(
-        self, samples, *, all_train=False, supplemental=False, query_supplemental=False
+        self,
+        samples,
+        *,
+        all_train=False,
+        supplemental=False,
+        query_supplemental=False,
+        include_direction_swaps=False,
     ):
         """Prepare canonical IDs and conservative labels for requested images."""
         required, supplemental_images = set(), set()
@@ -177,6 +233,16 @@ class TrainSupervision:
                 supplemental_images.add(image_id)
         if not required <= self.heads.keys():
             raise ValueError("train supervision cannot prepare non-train images")
+        self.direction_swaps = (
+            verified_direction_swaps(samples, self.heads)
+            if include_direction_swaps
+            else {}
+        )
+        for sample in samples:
+            swap = self.direction_swaps.get(sample["sample_id"])
+            if swap is not None:
+                supplemental_images.add(sample["query_image_id"])
+                supplemental_images.update(swap[1])
         if all_train:
             required = set(self.heads)
         if supplemental:
@@ -258,6 +324,10 @@ def prepare_train_supervision(cfg):
         split_samples(data, "train"),
         all_train=use_extra,
         supplemental=use_extra and settings["hard_negative_fraction"] > 0,
+        include_direction_swaps=bool(
+            cfg["loss"].get("context_weight", 1.0)
+            and cfg["loss"].get("context_swap_weight", 0.0)
+        ),
         query_supplemental=bool(
             cfg["loss"].get("grounding_weight", 1.0)
             and cfg["loss"].get("grounding_owner_weight", 0.0)

@@ -39,7 +39,6 @@ from rcr.proposed.calibration import (
     write_calibration,
 )
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
-from rcr.proposed.diagnostics import slot_query_diagnostics
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.matching import matching_settings
@@ -172,25 +171,14 @@ def _gradient_norm(*modules):
 
 
 def build_optimizer(model, text_encoder, config):
-    """Keep model/text groups ordered and give the optional scalar its own rate."""
-    slot_gate = model.slot_gate if model.slot_query else None
+    """Keep distinct model and text-projection learning rates."""
     groups = [
         {
-            "params": [
-                p for p in model.parameters() if p.requires_grad and p is not slot_gate
-            ],
+            "params": [p for p in model.parameters() if p.requires_grad],
             "lr": config["lr"],
         },
         {"params": text_encoder.proj.parameters(), "lr": config["text_lr"]},
     ]
-    if slot_gate is not None:
-        groups.append(
-            {
-                "params": [slot_gate],
-                "lr": config.get("slot_gate_lr", 1e-3),
-                "weight_decay": 0.0,
-            }
-        )
     return torch.optim.AdamW(groups, weight_decay=config["weight_decay"])
 
 
@@ -274,7 +262,6 @@ def _make_checkpoint(
             "model": {
                 **cfg["model"],
                 "fine_matching": dict(model.fine_matching),
-                "slot_query": model.slot_query,
             },
         },
         "dim": dim,
@@ -307,11 +294,6 @@ def _training_config(cfg):
         "model": {
             **cfg["model"],
             "fine_matching": matching_settings(cfg["model"].get("fine_matching")),
-            "slot_query": cfg["model"].get("slot_query", False),
-        },
-        "optimizer": {
-            **cfg["optimizer"],
-            "slot_gate_lr": cfg["optimizer"].get("slot_gate_lr", 1e-3),
         },
         "train": {
             **cfg["train"],
@@ -326,13 +308,6 @@ def _training_config(cfg):
             cfg["retrieval"], cfg["model"].get("coarse_beta", DEFAULT_COARSE_BETA)
         ),
     }
-    slot_gate_lr = cfg["optimizer"]["slot_gate_lr"]
-    if (
-        type(slot_gate_lr) not in (int, float)
-        or not math.isfinite(slot_gate_lr)
-        or slot_gate_lr <= 0
-    ):
-        raise ValueError("optimizer.slot_gate_lr must be finite and positive")
     if not cfg["loss"]["state_weight"] and cfg["retrieval"]["coarse_beta"] != 0:
         raise ValueError("loss.state_weight=0 requires retrieval.coarse_beta=0")
     warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
@@ -440,7 +415,14 @@ def _train(cfg, output, resumed):
         supplemental=use_extra_identities
         and identity_settings["hard_negative_fraction"] > 0,
         query_supplemental=grounding_owner,
+        include_direction_swaps=context_enabled
+        and bool(cfg["loss"]["context_swap_weight"]),
     )
+    if context_enabled and cfg["loss"]["context_swap_weight"]:
+        print(
+            f"Verified swaps: {len(supervision.direction_swaps)} train queries",
+            flush=True,
+        )
     identity_sampler = (
         IdentityCropSampler(supervision, identity_settings)
         if use_extra_identities
@@ -603,6 +585,11 @@ def _train(cfg, output, resumed):
             epoch_loss = {
                 **cfg["loss"],
                 "context_weight": 0.0 if in_warmup else cfg["loss"]["context_weight"],
+                "context_swap_weight": (
+                    cfg["loss"]["context_swap_weight"]
+                    if context_enabled and not in_warmup
+                    else 0.0
+                ),
                 "context_rejection_weight": (
                     cfg["loss"]["context_rejection_weight"]
                     if identity_rejection and epoch - 1 >= sampling["warmup_epochs"]
@@ -704,10 +691,12 @@ def _train(cfg, output, resumed):
                     "context",
                     "context_semantic",
                     "context_rejection",
+                    "context_swap",
                     "context_fda_error",
                     "state",
                     "context_active_fraction",
                     "context_rejection_active_fraction",
+                    "context_swap_active_fraction",
                 ),
                 0.0,
             )
@@ -800,6 +789,10 @@ def _train(cfg, output, resumed):
                     text_cache=text_cache,
                     fafa_pooling=fafa_pooling,
                     include_grounding_owner=grounding_owner,
+                    include_direction_swaps=bool(
+                        epoch_loss["context_weight"]
+                        and epoch_loss["context_swap_weight"]
+                    ),
                 )
                 if state_pairs_epoch is not None:
                     positives = (
@@ -863,14 +856,12 @@ def _train(cfg, output, resumed):
                             "train/text_gradient_norm": text_gradient_norm,
                             "train/model_lr": optimizer.param_groups[0]["lr"],
                             "train/text_lr": optimizer.param_groups[1]["lr"],
-                            **(
-                                {"train/slot_gate_lr": optimizer.param_groups[2]["lr"]}
-                                if model.slot_query
-                                else {}
-                            ),
                             "train/context_weight": epoch_loss["context_weight"],
                             "train/context_rejection_weight": epoch_loss[
                                 "context_rejection_weight"
+                            ],
+                            "train/context_swap_weight": epoch_loss[
+                                "context_swap_weight"
                             ],
                             "train/warmup": in_warmup,
                         }
@@ -903,6 +894,7 @@ def _train(cfg, output, resumed):
                 "phase": phase,
                 "context_weight": epoch_loss["context_weight"],
                 "context_rejection_weight": epoch_loss["context_rejection_weight"],
+                "context_swap_weight": epoch_loss["context_swap_weight"],
                 "model_lr": optimizer.param_groups[0]["lr"],
                 "text_lr": optimizer.param_groups[1]["lr"],
                 **{
@@ -913,12 +905,6 @@ def _train(cfg, output, resumed):
                 **{f"train_{name}": value for name, value in candidate_totals.items()},
             }
             optimizer.zero_grad(set_to_none=True)
-            slot_metrics = slot_query_diagnostics(
-                model, text_encoder, cache, text_cache, train_samples, device
-            )
-            epoch_log.update(slot_metrics)
-            if model.slot_query:
-                epoch_log["slot_gate_lr"] = optimizer.param_groups[2]["lr"]
             is_best = False
             validation = None
             should_evaluate = (
@@ -1031,15 +1017,10 @@ def _train(cfg, output, resumed):
                     "epoch/context_rejection_weight": epoch_loss[
                         "context_rejection_weight"
                     ],
+                    "epoch/context_swap_weight": epoch_loss["context_swap_weight"],
                     "epoch/warmup": in_warmup,
                     "epoch/model_lr": epoch_log["model_lr"],
                     "epoch/text_lr": epoch_log["text_lr"],
-                    **{f"epoch/{name}": value for name, value in slot_metrics.items()},
-                    **(
-                        {"epoch/slot_gate_lr": epoch_log["slot_gate_lr"]}
-                        if model.slot_query
-                        else {}
-                    ),
                     **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
                     **{f"epoch/{name}": value for name, value in crop_totals.items()},
                     **{

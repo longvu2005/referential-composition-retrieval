@@ -1,96 +1,55 @@
-# Independent person detection cache
+# Feature caches
 
-Grounding DINO Tiny boxes support proposed person features, train-only GT head
-alignment, and detection diagnostics. Scene extraction never
-loads the detector; FAFA extraction never loads scene features.
+Feature extraction produces independent caches shared by training and retrieval.
+Set their paths in [configs/proposed.yaml](../configs/proposed.yaml).
 
-| Config key | Default | Owns |
-| --- | --- | --- |
-| `data.detection_cache` | `cache/detections` | Ordered pixel boxes and original image sizes |
-| `data.scene_cache` | `cache/scene` | CLIP patches and native global vectors |
-| `data.fafa_image_cache` | `cache/person-images` | Packed person means and projected target tokens |
-| `data.fafa_query_cache` | `cache/person-queries` | Content-addressed multimodal query features |
-| `cache.supervision_cache` | `cache/train-supervision.json` | Train-only head alignment; separate from visual evidence |
+| Config key | Contents |
+| --- | --- |
+| `data.detection_cache` | Ordered person boxes and image sizes |
+| `data.scene_cache` | Scene and global image features |
+| `data.fafa_image_cache` | Person features and native target tokens |
+| `data.fafa_query_cache` | Text-conditioned query features |
+| `cache.supervision_cache` | Separate train annotation alignment |
 
-All four feature-cache roots must be distinct, including after resolving symlinks and parent
-paths. Set `data.image_root` to the actual image directory before extraction.
-Commands below run from the repository root after installing the environments.
-
-Cache paths name their role rather than a particular encoder or experiment.
-To reuse completed caches after a directory rename, move each entire directory
-with its index and shards intact and update the YAML paths used by that run.
-Keep checkpoint bytes and stored cache IDs unchanged. Rebuilding is not needed
-solely because a directory or the supervision JSON has a new name.
+The four feature directories must be distinct. Configure the raw image path and
+person encoder environment before extraction.
 
 ## Build stages independently
 
+Build all missing stages:
+
 ```bash
-# Grounding DINO Tiny only; requires the Proposed environment, not FAFA.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage detections
-
-# CLIP only; no detection cache or FAFA environment is required for this stage.
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage scene
-
-# Prepare FAFA assets, then extract from the shared pixel boxes.
 .venv-proposed/bin/python tools/run.py prepare --config configs/proposed.yaml
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-image
-.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage fafa-query
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml
 ```
 
-The first two commands can run in either order. FAFA needs completed detections;
-it does not need a scene cache. Running `build-cache` without a stage builds all
-missing stages. Re-run an interrupted stage with the same settings to resume.
-Completed caches can be mounted read-only for training and retrieval.
+Use `--cache-stage` to build an individual stage:
 
-Changing scene extraction preserves detection and both FAFA caches. Changing
-query text invalidates only affected FAFA query conditions. Changing accepted
-boxes, their order, detector settings, FAFA weights or crop preprocessing
-invalidates the dependent FAFA features. No second NMS, rounding or crop cap is
-introduced. Detection stores no confidence scores. An image with no accepted
-boxes retains an empty person set.
-Boxes that cross the image boundary retain their original coordinates; FAFA's
-PIL crop padding and the scene transform's clipping preserve crop semantics.
+| Stage | Dependency |
+| --- | --- |
+| `detections` | Raw images and detector |
+| `scene` | Raw images and scene encoder |
+| `fafa-image` | Detections, raw images and FAFA assets |
+| `fafa-query` | Detections, reference images, query text and FAFA assets |
+| `fafa` | Both FAFA stages |
+
+Detection and scene extraction can run independently. Re-run an interrupted
+stage with the same settings to continue construction.
+
+## Reuse and invalidation
+
+Compatible completed caches can be reused across runs or mounted read-only.
+Keep each cache's index and shards together when moving it, then update the
+configured path.
+
+Query text changes affect query features. Scene encoder changes affect scene
+features. Changes to detections or person preprocessing affect dependent person
+features. Readers validate stored identities and provenance before reuse.
+Visual extraction and train annotation alignment remain separate.
 
 ## Supported detection inputs
 
-Detection extraction, supervision and diagnostics use the independent pixel-box
-cache only. Existing `person-detections-v1` indexes and native unfinished builds
-remain reusable. Unified caches require conversion with their original code
-revision or a fresh detection build before using this pipeline.
-
-A completed unified CLIP scene cache remains usable as `data.scene_cache`; its
-geometry is ignored by the scene reader. Legacy DINO scene features cannot
-replace CLIP features. Old FAFA formats 4–6 must be rebuilt once for the separated
-crop contract.
-
-## Shared consumers and provenance
-
-The detection index contains pixel boxes, image sizes, packed offsets, ordered
-image IDs, the fixed `person` prompt and detector configuration. Its content ID
-covers all of these fields and survives relocation. Readers verify that ID;
-training labels and image/text features are absent. Image IDs refer to immutable
-benchmark images; changing source pixels requires fresh affected caches.
-
-FAFA format 7 binds this detection ID, native model/source/preprocessing,
-checkpoint hash and extraction precision. It stores no scene dimensions, CLIP
-checkpoint, or scene UUID. At training time `GalleryCache` joins the FAFA index,
-detections and scene patches by canonical image order. Pixel boxes are mapped to
-the scene's letterbox coordinates only at this join. The native CLIP global
-vector is loaded independently of patch tokens.
-
-Model checkpoints bind all three image-source IDs separately, as well as encoder
-metadata. A scene change can reuse extraction caches but requires the matching
-trained model or a new training run. Train-supervision keys depend on detections
-and train GT, independently of scene/FAFA appearance features.
-
-Detection diagnostics require no scene or FAFA cache:
-
-```bash
-.venv-proposed/bin/python tools/data/audit.py \
-  --detection-cache cache/detections \
-  --image-root /path/to/images --output runs/detection_audit.json
-```
-
-`prepare-supervision --config configs/proposed.yaml` also needs only the shared
-detection cache and train annotations. Detection auditing accepts only
-`--detection-cache`; it never needs raw images or scene dimensions for alignment.
+The pipeline uses the independent pixel-box detection cache. Older combined
+formats may require conversion with their original implementation or rebuilding.
+Checkpoint and feature compatibility are described in the
+[feature contracts](feature_contracts.md).

@@ -1,122 +1,43 @@
-# Proposed: frozen feature and checkpoint contracts
+# Feature and checkpoint contracts
 
-The proposed method uses frozen CLIP image/text encoders and a separate frozen
-FAFA person encoder. These contracts describe the current implementation;
-run commands live in [proposed_runs.md](proposed_runs.md).
+The proposed method uses frozen visual and text features with learned retrieval
+modules. Configuration and cache metadata identify the encoders and preprocessing
+used by each run.
 
-## CLIP image and text features
+## Encoder features
 
-Both encoders use `openai/clip-vit-base-patch32`, pinned to revision
-`3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`.
+| Source | Features |
+| --- | --- |
+| CLIP image encoder | Scene patches and global image embeddings |
+| CLIP text encoder | Token and global text embeddings |
+| FAFA image encoder | Pooled person features and native target tokens |
+| FAFA multimodal encoder | Text-conditioned query person features |
 
-| Feature | Shape per image/text | Use |
-| --- | --- | --- |
-| Scene patches | `49 x 768` (7 x 7 grid) | Learned context projection to width 384 |
-| Projected image CLS | `512` | Global state; never replaced by a patch mean |
-| Projected text tokens | Up to `77 x 512` | Learned context projection to width 384 |
-| Projected text EOT | `512` | Global state |
-
-Scene inputs are complete images letterboxed to 224 x 224 with bicubic resize,
-then CLIP rescaling/normalization. There is no center crop. Detector pixel boxes
-are mapped using the same letterbox geometry when caches are joined.
-Frozen native projections stay frozen; the additional context projections learn.
-The 512-D state image/text adapters start as identity maps with zero bias, so
-their initial cosine is native CLIP cosine. State supervision then adapts them.
-
-CLIP keeps its native vocabulary and 77 positions, including BOS/EOS. Character
-offsets locate complete Subject mentions for role injection after the frozen
-text backbone. No special vocabulary entries are added. Truncation preserves
-EOS and records statistics; losing every complete mention of a required Subject
-raises an error. Training saves `clip_text_stats` in its effective configuration;
-retrieval saves query-scoped statistics in `rankings.pt` and `run.json`.
-
-## FAFA person features and text policy
-
-The image cache stores mean-pooled image-only Q-Former hidden states before
-`vision_proj`, plus projected native target tokens. Query features come from
-the separate text-conditioned multimodal path. The model's learned person
-projection consumes the pooled hidden states; native FDA consumes the native
-query and target representations. See [method equations](proposed_method.md).
-
-Native FAFA keeps its separate `checkpoint.max_txt_len: 128` policy, including
-special tokens, and a caption word cap at least as large. Manifests record the
-policy; older manifests/checkpoints without it retain the pinned 32-token,
-50-word meaning. A policy change re-extracts query features only. Interrupted
-builds must resume with their original policy or use a separate directory.
-Train/retrieve validate the native YAML when available; cache-only machines
-can rely on the recorded policy without installing native FAFA.
+Scene geometry and person boxes must use compatible image transforms. CLIP and
+FAFA keep their own text policies, recorded with the extracted features.
+Encoder assets are defined in
+[configs/person_encoder.yaml](../configs/person_encoder.yaml); experiment
+settings are in [configs/proposed.yaml](../configs/proposed.yaml).
 
 ## Independent caches
 
-| Config key | Default path |
-| --- | --- |
-| `data.detection_cache` | `cache/detections` |
-| `data.scene_cache` | `cache/scene` |
-| `data.fafa_image_cache` | `cache/person-images` |
-| `data.fafa_query_cache` | `cache/person-queries` |
-| `cache.supervision_cache` | `cache/train-supervision.json` (train labels only) |
+Detection, scene, person-image and person-query caches have distinct directories
+and identities. Readers check image order, encoder provenance, preprocessing and
+feature compatibility before joining them.
 
-Names describe each cache's role; encoder models and revisions remain recorded
-in the cache metadata. Frozen person extraction uses `configs/person_encoder.yaml`
-in the isolated `.venv-person-encoder` environment.
+Visual caches contain label-free features. Train annotation alignment is stored
+separately and used for supervised learning. Completed compatible caches support
+training and retrieval without loading the native FAFA model.
 
-FAFA features bind detection identity and crop order, independently of the scene
-encoder. Cache validation checks source identities, checkpoint/revision,
-preprocessing and separate feature widths. Completed unified CLIP scene caches
-remain readable as scene inputs. Historical boxes require conversion with their
-original code revision or a fresh detection build; the current runtime has no
-scene-to-detection import command. Legacy scene-bound FAFA caches require
-rebuilding in the format-7 independent directories. See the
-[detection cache guide](detection_cache.md).
-
-Cache indices carry their own identities; changing the root in YAML does not
-modify the stored identity. Point the YAML at an existing compatible cache to
-reuse it. Renaming defaults does not move or rebuild local artifacts.
+See the [cache guide](detection_cache.md) for construction and reuse.
 
 ## Checkpoint compatibility
 
-The architecture name is `fafa-partial-match-v2`, with its CLIP-prefixed alias.
-When `model.slot_query` is enabled, the state dictionary includes `slot_gate`.
-Ownership cross-entropy trains the existing grounding logits. Its weight is
-part of the numerical training configuration stored in checkpoints.
+Checkpoints bind the model architecture, effective settings, encoder metadata
+and source cache identities. Retrieval restores the trained matching and pooling
+settings. Validation-selected scoring coefficients are frozen for test together
+with the checkpoint and validation fingerprints.
 
-Retrieval and identity rejection use `B + a*C + b*H`; semantic context loss
-ranks `b*H`. Hard mining fixes the H coefficient at zero. Retrieval
-requires a checkpoint trained with `fine_score_mode: linear` and rejects previous
-fine scorers. Train in a fresh output directory; compatible frozen caches remain
-reusable. Pooling and fine score mode must match training. Coverage/context and
-fusion coefficients can be selected on validation; all three are frozen for test.
-Validation checkpoint selection uses `Z_M(fine) + eta*Z_M(coarse)`. Each validation
-searches all configured `(a, b, eta)` triples, and checkpoints
-compete by their best calibrated score. Coarse beta and Top-M stay fixed. Replay uses score schema 4,
-including `coarse_topm_scores` and the fusion normalization contract. Coefficient
-replay is deployable; changing pooling remains a diagnostic ablation.
-
-Historical DINO/BERT architecture checkpoints remain incompatible and are
-rejected before loading text weights. Matching feature dimensions alone do
-not make them compatible. Model checkpoints still bind scene, detection and
-FAFA source identities and encoder metadata.
-
-Training outputs live under the configured `output.dir`; its `selected.yaml` and
-`selected/val/` bind the calibrated winner to `best.pt`. Optional offline comparison
-uses `output_dir` in `configs/calibration.yaml`. Existing
-run configs retain their explicit paths; use those configs to read old runs.
-Keep selected configurations and checkpoint bytes intact: test selection binds
-the checkpoint SHA256 and validation fingerprint. For a new experiment, use a
-fresh output directory; each scheduled validation calibrates before selection.
-
-`last.pt` carries versioned training state for explicit `--resume`: AdamW, AMP
-scaler, Python/NumPy/Torch/CUDA RNGs, batch plan and generator states, hard pools,
-partial epoch totals, completed history and calibration best. Resume checks the
-training implementation, numerical config, runtime and train/val/cache
-fingerprints before restoring progress. `best.pt` and older weights-only files
-remain inference-only; missing optimizer/RNG information is never fabricated.
-
-## Verification scope
-
-CPU workflow tests cover cache construction, Linear scoring, coverage and
-coarse fusion, training/backward, mining, retrieval, calibration, replay and frozen
-test inference. Native CLIP behavior uses tiny Transformers models without
-pretrained downloads. Shared fixtures contain synthetic cached features.
-A full GPU experiment requires raw images, pretrained assets and compatible
-caches; CPU checks do not establish benchmark mAP.
+Architecture or feature changes may require a fresh training run. Resume requires
+the compatible full training state in `last.pt`; `best.pt` is for inference.
+See the [run guide](proposed_runs.md) for both workflows.

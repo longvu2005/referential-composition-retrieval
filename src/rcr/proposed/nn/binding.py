@@ -4,18 +4,6 @@ import torch
 from torch import Tensor, nn
 
 
-def person_attention_query(
-    persons: Tensor, person_slots: Tensor, slot_gate: Tensor
-) -> Tensor:
-    """Rotate each FP32 person query toward its slot, preserving its norm."""
-    persons = persons.float()
-    mixed = persons + slot_gate.float() * person_slots.float()
-    scale = persons.norm(dim=-1, keepdim=True) / mixed.norm(
-        dim=-1, keepdim=True
-    ).clamp_min(1e-6)
-    return mixed * scale
-
-
 class EvidenceBinding(nn.Module):
     """Bind reference-conditioned scene evidence to person candidates."""
 
@@ -63,8 +51,6 @@ class EvidenceBinding(nn.Module):
         patch_hw: tuple[int, int],
         reference_mask: Tensor | None = None,
         reference_key_bias: Tensor | None = None,
-        person_slots: Tensor | None = None,
-        slot_gate: Tensor | None = None,
     ) -> Tensor:
         """scene [B,P,D], persons [B,K,D], boxes [B,K,4], reference [B,L,D]."""
 
@@ -97,11 +83,8 @@ class EvidenceBinding(nn.Module):
 
         # Geometry offsets can overflow FP16 attention; compute this region in FP32.
         with torch.autocast(persons.device.type, enabled=False):
-            query = persons.float()
-            if person_slots is not None and slot_gate is not None:
-                query = person_attention_query(query, person_slots, slot_gate)
             update, _ = self.person_attn(
-                query,
+                persons.float(),
                 scene.float(),
                 scene.float(),
                 attn_mask=self._geo_bias(boxes, patch_hw),

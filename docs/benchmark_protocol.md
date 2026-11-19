@@ -1,140 +1,58 @@
 # RCR benchmark protocol
 
-The proposed method uses the evaluator in `src/rcr/evaluation/` for validation,
-test and diagnostic rankings.
+Training, retrieval and reporting use the evaluator in `src/rcr/evaluation/`.
 
 ## Query, gallery and positives
 
-Inference receives a reference image, `final_desc`, `final_change` and public
-`subjects[].subject_id` slots. Subject
-slots identify references within the query; they reveal neither GT identities
-nor group cardinality. Retrieval scoring, member selection and condition
-construction use public image/text inputs. `case_type` is reserved for training
-sampling and evaluation summaries. Person query extraction keeps the complete
-condition for each public Subject.
+Inference uses the reference image, Subject descriptions, requested change and
+public Subject slots. Ground truth identities, head annotations, positives and
+case labels provide supervision or evaluation metadata.
 
-GT head boxes, identity labels, seed targets and positives are annotations,
-not inference inputs. Proposed may use train annotations for sampling and
-supervised losses. Validation annotations
-support evaluation and model selection; test annotations support evaluation.
-Neither split's labels may determine retrieval scores or group cardinality.
-`case_type` remains available for train sampling, provenance and by-case metrics.
+Each query searches all registered images in its original PIPA split, excluding
+the reference image and leftover images. Rankings contain every eligible image
+exactly once. Gallery order resolves coarse ties; coarse order resolves fine
+shortlist ties.
 
-The code enforces this boundary with `inference_sample()` and `RCRInputs`:
-Subject objects contain only `subject_id`, and annotation fields are absent.
-`load_rcr_inputs()` supports feature extraction without head annotations.
-`load_rcr_data()` is the annotated interface for training, evaluation and
-experiment bookkeeping. Dataset fingerprints and validation locks stay in that
-bookkeeping layer; scorers do not receive them as feature inputs.
-
-New visual cache shards contain no GT identities. `GalleryCache.load()` returns
-only scene features, person features, predicted boxes and a person mask.
-`TrainSupervision` aligns train heads with existing detections in memory, refuses
-non-train images, and supplies labels only to batch/loss construction. Detection
-diagnostics align GT separately for the requested split. Old cache labels are
-ignored by every public cache interface.
-
-The gallery contains **all registered images in the query's PIPA split**, in
-canonical `gallery.jsonl` order. Membership comes from `images.jsonl` paths, not
-annotated pairs. Every ranking contains each gallery image once, except the
-query image. Coarse score ties retain canonical gallery order; fine ties retain
-the coarse order within the shortlist. `leftover` images never enter a query's gallery.
-
-For gallery G(q), union of required Subject identities I(q), and annotated
-identities A(g) of image g:
-
-\[
-P_{ID}(q)=\{g\in G(q)\setminus\{q\}:I(q)\subseteq A(g)\}.
-\]
-
-ID positives require **all** identities; extra identities are allowed. They
-ignore condition, Subject order and grouping. Full positives are reviewed
-`positive_image_ids` intersected with G(q) in memory by the loader. Stored
-annotations are not edited. All Full positives must be ID positives. Empty
-positive sets and incomplete/duplicate/self-inclusive rankings fail evaluation.
+**ID positives** contain every required identity, regardless of the requested
+change. **Full positives** are the reviewed images satisfying the complete
+query, intersected with the eligible gallery. Full positives must also be
+ID positives.
 
 ## Metrics and paper tables
 
-For positive set P, ranked relevance y_j and H_j=sum(y_1..y_j):
-
-\[
-AP(q)=\frac{1}{|P|}\sum_{j=1}^{|r|}y_j\frac{H_j}{j},\qquad
-R@K(q)=\mathbf{1}[P\cap r_{1:K}\ne\varnothing].
-\]
-
-The existing R@K is **query-level success**, not the fraction of recovered
-positives. mAP/R@K are arithmetic means over queries. By-case means use only
-that case. Overall is query weighted, not the unweighted mean of case means.
+Average precision uses the complete ranking and positive set. mAP averages AP
+over queries. R@K measures whether a query retrieves at least one positive in
+its first K results. CandidateRecall measures the fraction of Full positives
+retained in the coarse shortlist.
 
 | Table | Metrics |
 | --- | --- |
 | Overall | ID-mAP, ID-R@1/5/10, Full-mAP, Full-R@1/5/10 |
-| By-case | ID-mAP, ID-R@1, Full-mAP, Full-R@1 for each case |
+| By-case | ID-mAP, ID-R@1, Full-mAP, Full-R@1 |
 
-Case order is INDIVIDUAL, GROUP, DUAL, RELATIONAL. An absent case is blank/—/--,
-never a measured zero. Coarse/fine and CandidateRecall are Proposed diagnostics
-and excluded from these tables. CandidateRecall@K is the fraction of Full
-positives retained in the coarse shortlist, distinct from R@K.
+Overall metrics weight queries equally. By-case metrics cover INDIVIDUAL, GROUP,
+DUAL and RELATIONAL; absent cases are left blank.
 
 ## Split and leakage policy
 
-Use the same final export and ordered gallery for each experiment. Only train
-may train model parameters. Validation selects hyperparameters and checkpoints.
-At every scheduled validation, calibration selects the best `(a, b, eta)` by the
-mean of overall and macro-by-case Full-mAP. Checkpoints compete using that
-calibrated score; pooling, fine score mode, matching and the coarse shortlist stay fixed.
-The Cartesian search changes only postprocessing coefficients. Its cached scoring
-retains all Full Positives, including those in the unchanged coarse tail, and
-uses the same AP summation as full evaluation. The winner is checked again by
-the complete evaluator before publication. Training keeps its base coefficients;
-mining fixes the context coefficient at zero. Calibration changes neither.
-Test labels, metrics and examples must not determine
-any settings or checkpoint selection. Reporting performs no selection or inference.
+Train annotations supervise learning and sampling. Validation selects checkpoints
+and retrieval coefficients. Test provides the final evaluation with the selected
+model and settings frozen.
 
-`run` defaults to validation. Test requires a validation-selected configuration
-binding the checkpoint SHA256, validation fingerprint and retrieval settings.
-The test recipe reads `output.dir/selected.yaml`, written with the winning
-checkpoint during training. Reports verify
-that its frozen selection agrees with the recorded test run.
+Scheduled validation calibrates the configured coverage, context and fusion
+coefficients. The default checkpoint score averages overall Full-mAP and
+macro-case Full-mAP. Calibration keeps the trained matching, pooling and coarse
+shortlist fixed. Offline comparison may also select among saved validation
+shortlists. `selected.yaml` binds the winning settings to the checkpoint and
+validation fingerprints.
 
-Version 0.1.0 currently contains:
+## Reproducibility and saved runs
 
-| Split | Queries | Gallery | INDIVIDUAL | GROUP | DUAL | RELATIONAL |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 4,893 | 17,000 | 3,590 | 444 | 395 | 464 |
-| val | 1,799 | 5,684 | 1,320 | 168 | 149 | 162 |
-| test | 2,307 | 7,868 | 1,319 | 329 | 318 | 341 |
+Use the same final export and ordered gallery when comparing experiments.
+Record the source revision, effective configuration, seed, runtime, checkpoint
+and cache identities. Dataset counts and version come from `manifest.json`.
 
-Selections and saved rankings must match the dataset's validation digest and
-split fingerprint. Regenerate validation outputs after changing annotations.
-
-## Reproducibility and saved-run compatibility
-
-New `run.json` records include effective config, checkpoint SHA256, dataset
-version/content digest, split fingerprint, ordered sample/gallery digests,
-query/gallery/case counts, protocol/self-exclusion, Git commit/dirty state,
-Python/platform/package versions, device and elapsed time. Encoder precision,
-cache identities, frozen encoder provenance and text truncation statistics are
-recorded with the run. Use a clean committed checkout: a dirty flag cannot
-reconstruct uncommitted code.
-
-Dataset/split digests describe labels for provenance only. Retrieval scoring and
-feature caches use image/text inputs and model artifacts, not positive or identity
-labels. The full-dataset digest is never used as a tuning key.
-
-Evaluation binds `metrics.json` to the exact `run.json` SHA256. Reporting checks
-that binding, split fingerprint, counts, sample order, case coverage, per-query
-aggregation and available dataset/gallery metadata. Experiment checkpoints,
-configurations and runtimes are recorded separately. Legacy runs need their original
-split fingerprint and saved-ranking re-evaluation to attach the JSON binding;
-missing historical Git/runtime details are not invented. Results lacking an
-original split fingerprint cannot be certified by the reporter.
-
-Use a distinct `output.dir` for each scientific experiment. Training refuses a
-root containing `config.yaml`, `best.pt` or `last.pt` unless `--resume` explicitly
-continues the compatible full-state `last.pt`. Resume restores optimizer, scaler,
-RNG, sampler/mining progress and calibrated best selection without changing
-the total schedule, splits or validation/calibration protocol.
-Retrieval, evaluation, calibration and reports replace their active outputs;
-there is no automatic archive. Publishing new rankings invalidates old metrics
-and metadata first; evaluate again after a successful retrieval.
+Saved results include `rankings.pt`, `run.json` and `metrics.json`. Evaluation
+checks dataset and split consistency; reporting verifies the saved metric and
+run metadata binding. Re-evaluate after changing annotations or rankings.
+Use separate output directories for separate experiments.

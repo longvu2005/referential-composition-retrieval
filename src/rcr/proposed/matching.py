@@ -214,13 +214,13 @@ def partial_identity_matching(
     return PersonMatching(indices, weights, active, subject_coverage, coverage)
 
 
-def gather_matched(values: Tensor, matching: PersonMatching) -> Tensor:
+def gather_matched(values: Tensor, indices: Tensor) -> Tensor:
     """Gather [B,Kt,D] into [B,Kq,D], with exact zero for null rows."""
-    b, q = matching.indices.shape
+    b, q = indices.shape
     if values.shape[1] == 0:
         # Keep a zero autograd connection for batches with no target people.
         return values.sum(1, keepdim=True).expand(b, q, values.shape[-1]) * 0
     result = values.gather(
-        1, matching.indices.clamp_min(0)[..., None].expand(-1, -1, values.shape[-1])
+        1, indices.clamp_min(0)[..., None].expand(-1, -1, values.shape[-1])
     )
-    return result.masked_fill(~matching.matched[..., None], 0)
+    return result.masked_fill((indices < 0)[..., None], 0)

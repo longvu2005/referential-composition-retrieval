@@ -19,6 +19,7 @@ from rcr.proposed import train as training
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
 from rcr.proposed.matching import PersonMatching
 from rcr.proposed.nn.model import RCRModel
+from rcr.proposed.nn.reasoning import FineReasoner
 from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
 from rcr.proposed.scores import POOLING_MODES, pool_fafa_scores
@@ -284,6 +285,46 @@ def test_multi_subject_export_retains_a_completely_missing_role(
         replayed = replay_rankings(source, pooling=mode)
         assert torch.equal(direct["rankings"], replayed["rankings"])
         torch.testing.assert_close(direct["fafa_binding"], replayed["fafa_binding"])
+
+
+def test_ordered_pair_scoring_preserves_missing_subject_weights():
+    dim = 4
+    reasoner = FineReasoner(dim, 2, 2, 0)
+    subjects = torch.ones(1, 3, dtype=torch.bool)
+    condition, weights = reasoner.encode_condition(
+        torch.zeros(1, 3, dim), None, torch.eye(3, dtype=torch.bool)[None], subjects
+    )
+    assert condition.shape == (1, 6, dim)
+    torch.testing.assert_close(weights.sum(1), torch.ones(1))
+    reasoner.subject_score = torch.nn.Linear(2 * dim + 4, 1)
+    reasoner.pair_score = torch.nn.Linear(4 * dim + 5, 1, bias=False)
+    with torch.no_grad():
+        reasoner.subject_score.weight.zero_()
+        reasoner.subject_score.bias.fill_(1)
+        reasoner.pair_score.weight.zero_()
+        reasoner.pair_score.weight[0, 3 * dim] = 1
+
+    weights = torch.tensor([[0.25, 0, 0, 0.75, 0, 0]])
+    boxes = torch.tensor([[[0, 0, 0.25, 1], [0.5, 0, 0.75, 1], [0.75, 0, 1, 1]]])
+    membership = torch.eye(3)[None]
+    evidence = torch.zeros(1, 3, dim)
+    scene = torch.zeros(1, 4, dim)
+    full = reasoner(condition, weights, evidence, boxes, membership, scene, (2, 2))
+    reverse = reasoner(
+        condition, weights, evidence, boxes[:, [1, 0, 2]], membership, scene, (2, 2)
+    )
+    membership[:, 1] = 0
+    missing = reasoner(condition, weights, evidence, boxes, membership, scene, (2, 2))
+    torch.testing.assert_close(
+        torch.cat((full, reverse, missing)),
+        torch.tensor(
+            [
+                0.625,
+                -0.125,
+                0.25,
+            ]
+        ),
+    )
 
 
 # Configured calibration grid and frozen coefficients.
@@ -900,19 +941,23 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
         )
 
 
-def test_obsolete_checkpoint_scorer_is_rejected_before_loading_text(
-    saved_pipeline, monkeypatch
+@pytest.mark.parametrize("obsolete", ["scorer", "architecture"])
+def test_obsolete_checkpoint_is_rejected_before_loading_text(
+    saved_pipeline, monkeypatch, obsolete
 ):
     cfg, _, _ = saved_pipeline
     checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
-    checkpoint["config"]["retrieval"]["fine_score_mode"] = "context_zscore"
+    if obsolete == "scorer":
+        checkpoint["config"]["retrieval"]["fine_score_mode"] = "context_zscore"
+    else:
+        checkpoint["architecture_version"] = "older-architecture"
     torch.save(checkpoint, cfg["checkpoint"])
     monkeypatch.setattr(
         retrieve,
         "load_text_modules",
         lambda *a, **k: pytest.fail("loaded obsolete model"),
     )
-    with pytest.raises(ValueError, match="obsolete fine scorer"):
+    with pytest.raises(ValueError, match=obsolete):
         retrieve.retrieve(cfg)
 
 

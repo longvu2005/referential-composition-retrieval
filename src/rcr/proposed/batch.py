@@ -3,7 +3,7 @@
 import torch
 from torch import Tensor, nn
 
-from rcr.common.data import inference_samples, required_identity_ids
+from rcr.common.data import inference_sample, inference_samples, required_identity_ids
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 from rcr.proposed.scores import POOLING_MODES
@@ -356,6 +356,66 @@ def prepare_visual_batch(
     return batch
 
 
+def _swap_batch(
+    samples, candidates, supervision, visual, text_cache, text_encoder, device
+):
+    """Pick at most one eligible Full Positive per query and encode its edited text."""
+    positions, variants, query_roles, target_roles = [], [], [], []
+    query_width = visual["query_persons"].shape[1]
+    target_width = visual["target_persons"].shape[2]
+    for row, (sample, images) in enumerate(zip(samples, candidates, strict=True)):
+        edit = supervision.direction_swaps.get(sample["sample_id"])
+        if edit is None:
+            continue
+        change, verified = edit
+        possible = [
+            (col, image) for col, image in enumerate(images) if image in verified
+        ]
+        if not possible:
+            continue
+        subjects = sample["subjects"]
+        query_ids = supervision.load_ids(
+            [sample["query_image_id"]], query_width, supplemental=True
+        )
+        query_mask = build_supervision(query_ids, [subjects])[0][0].bool()
+        if not query_mask.any(1).all():
+            continue
+        ids = supervision.load_ids(
+            [image for _, image in possible], target_width, supplemental=True
+        )
+        masks = build_supervision(ids, [subjects] * len(ids))[0].bool()
+        for (col, _), mask in zip(possible, masks, strict=True):
+            if mask.any(1).all():
+                positions.append((row, col))
+                variant = inference_sample(sample)
+                variant["final_change"] = change
+                variant.pop("final_instruction", None)
+                variants.append(variant)
+                query_roles.append(query_mask)
+                target_roles.append(mask)
+                break
+    if not positions:
+        return None
+
+    tokens = text_cache.batch(variants)
+    change, mask, _ = text_encoder(
+        tokens["change_ids"].to(device), tokens["change_mask"].to(device)
+    )
+    return {
+        "positions": torch.tensor(positions, device=device),
+        "query_roles": torch.stack(query_roles).to(device),
+        "target_roles": torch.stack(target_roles).to(device),
+        "text": {
+            "change": change,
+            "change_mask": mask,
+            **{
+                key: tokens[key].to(device)
+                for key in ("subject_pos", "subject_token_mask", "subject_ids")
+            },
+        },
+    }
+
+
 def build_batch(
     samples: list[dict],
     candidate_image_ids: list[list[str]],
@@ -372,6 +432,7 @@ def build_batch(
     text_cache: QueryTextCache | None = None,
     fafa_pooling: str | None = None,
     include_grounding_owner: bool = False,
+    include_direction_swaps: bool = False,
 ) -> dict[str, Tensor | dict]:
     text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
@@ -391,4 +452,16 @@ def build_batch(
         for key, value in visual.items()
     }
     text = encode_tokenized_text(text_cache.batch(samples), text_encoder, device)
+    if include_direction_swaps:
+        swap = _swap_batch(
+            samples,
+            candidate_image_ids,
+            supervision,
+            visual,
+            text_cache,
+            text_encoder,
+            device,
+        )
+        if swap is not None:
+            visual["direction_swap"] = swap
     return {**visual, **text}

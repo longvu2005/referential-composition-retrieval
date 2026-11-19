@@ -20,10 +20,14 @@ from rcr.common.io import sha256_file
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve
 from rcr.proposed import train as training
+from rcr.proposed.batch import build_batch
 from rcr.proposed.losses import _context_scores, compute_loss, retrieval_loss
+from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.resume import capture_rng, restore_rng, training_lock
 from rcr.proposed.sampling import CandidateIndex, sample_candidates
+from rcr.proposed.supervision import TrainSupervision
 from tests.helpers import (
+    TextBackbone,
     Tokenizer,
     _add_gallery_image,
     _fusion_example,
@@ -36,11 +40,13 @@ from tools.run import main
 # Objectives, warmup, validation and checkpoint selection.
 
 
-@pytest.mark.parametrize("warmup", [0, 1])
+@pytest.mark.parametrize("warmup,owner_weight", [(0, 0.0), (1, 0.0), (1, 0.25)])
 def test_training_warmup_and_validation_selected_checkpoint(
-    tiny_training_run, monkeypatch, warmup
+    tiny_training_run, monkeypatch, warmup, owner_weight
 ):
     cfg, cache, wandb_run, _ = tiny_training_run
+    assert cfg["loss"]["grounding_owner_weight"] == 0
+    cfg["loss"]["grounding_owner_weight"] = owner_weight
     cfg["train"].update(epochs=3, context_warmup_epochs=warmup)
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["retrieval"]["context_weight"] = 0.23
@@ -63,7 +69,9 @@ def test_training_warmup_and_validation_selected_checkpoint(
     def observe(model, batch, *args, **settings):
         weights.append(settings)
         native_tokens.append("fafa_targets" in batch)
-        assert batch["grounding_owner_mask"].tolist() == [[True]]
+        assert ("grounding_owner_mask" in batch) == bool(owner_weight)
+        if owner_weight:
+            assert batch["grounding_owner_mask"].tolist() == [[True]]
         assert batch["grounding_targets"].flatten().tolist() == [1.0, 0.0]
         return compute(model, batch, *args, **settings)
 
@@ -74,7 +82,10 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert native_tokens == [bool(value) for value in expected]
     assert all(row["context_score_weight"] == 0.23 for row in weights)
     assert all(row["coverage_score_weight"] == 0.04 for row in weights)
-    assert all(row["grounding_owner_weight"] == 0.25 for row in weights)
+    assert all(row["grounding_owner_weight"] == owner_weight for row in weights)
+    assert [row["context_swap_weight"] for row in weights] == [
+        0.25 * value for value in expected
+    ]
     history = [
         json.loads(line)
         for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()
@@ -83,7 +94,9 @@ def test_training_warmup_and_validation_selected_checkpoint(
         "warmup" if value == 0 else "joint" for value in expected
     ]
     assert all("train_context_fda_error" in row for row in history)
-    assert all(row["train_grounding_owner"] > 0 for row in history)
+    assert all(
+        (row["train_grounding_owner"] > 0) == bool(owner_weight) for row in history
+    )
     assert all("val_checkpoint_score" not in row for row in history[:warmup])
     best = max(
         (row for row in history if "val_checkpoint_score" in row),
@@ -98,7 +111,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["epoch"] == 3
     assert saved["config"]["retrieval"]["fine_score_mode"] == "linear"
     assert saved["config"]["retrieval"]["context_weight"] == 0.23
-    assert saved["config"]["loss"]["grounding_owner_weight"] == 0.25
+    assert saved["config"]["loss"]["grounding_owner_weight"] == owner_weight
     assert saved["scene_cache_id"] == cache.scene_cache_id
     assert saved["detection_cache_id"] == cache.detection_cache_id
     assert saved["state_supervised_pairs"] > 0
@@ -108,8 +121,11 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["training_state"]["progress"]["epoch"] == 3
     assert last["training_state"]["progress"]["phase"] == "epoch_end"
     cache_path = Path(cfg["cache"]["supervision_cache"])
-    assert set(json.loads(cache_path.read_text())["supplemental_identities"]) == {"q"}
-    assert any(row.get("train/grounding_owner", 0) > 0 for row in wandb_run.logs)
+    supplemental = json.loads(cache_path.read_text())["supplemental_identities"]
+    assert set(supplemental) == ({"q"} if owner_weight else set())
+    assert any(
+        row.get("train/grounding_owner", 0) > 0 for row in wandb_run.logs
+    ) == bool(owner_weight)
     assert wandb_run.finished
 
 
@@ -189,6 +205,100 @@ def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
         optimizer.step()
     assert losses[-1] < losses[0]
     assert model.binding_scale.item() == 1.0
+
+
+def test_verified_swap_trains_context_on_the_same_assignment(
+    tiny_training_run, monkeypatch
+):
+    _, cache, _, _ = tiny_training_run
+    data = training.load_rcr_data()
+    sample = data.samples_by_id["train"]
+    sample["subjects"].append({"subject_id": 2, "identity_ids": ["p2"]})
+    sample["final_desc"] = (
+        "Identify Subject 1 as the person on the left and Subject 2 as the other person"
+    )
+    sample["final_change"] = (
+        "then retrieve images where Subject 1 is to the left of Subject 2"
+    )
+    sample["positive_image_ids"] = ["a", "n"]
+    cache.boxes = torch.tensor([[0.0, 0.0, 0.45, 1.0], [0.55, 0, 1.0, 1.0]]).expand(
+        6, 2, 4
+    )
+    cache.mask = torch.ones(6, 2, dtype=torch.bool)
+    cache.persons = cache.persons[:2, 0].expand(6, -1, -1)
+    for name, order in (("q", ("p1", "p2")), ("a", ("p1", "p2")), ("n", ("p2", "p1"))):
+        data.gt_head_boxes_by_image[name] = [
+            {"identity_id": identity, "x": x, "y": 0.25, "width": 0.1, "height": 0.1}
+            for identity, x in zip(order, (0.15, 0.7), strict=True)
+        ]
+    supervision = TrainSupervision(data, cache)
+    supervision.prepare([sample], include_direction_swaps=True)
+    assert supervision.direction_swaps["train"] == (
+        sample["final_change"].replace("left", "right"),
+        {"a"},
+    )
+
+    class DirectionTokenizer(Tokenizer):
+        def __call__(self, texts, **kwargs):
+            tokens = super().__call__(texts, **kwargs)
+            for text, ids, offsets in zip(
+                texts, tokens["input_ids"], tokens["offset_mapping"], strict=True
+            ):
+                for i, (start, end) in enumerate(offsets):
+                    if text[start:end] == "right":
+                        ids[i] = 3
+            return tokens
+
+    text_encoder = TextEncoder(TextBackbone(), dim=8)
+    batch = build_batch(
+        [sample],
+        [["n", "a"]],
+        cache,
+        DirectionTokenizer(),
+        text_encoder,
+        "cpu",
+        supervision=supervision,
+        identity_image_ids=[{"a", "n"}],
+        fafa_pooling="subject_mean",
+        include_direction_swaps=True,
+    )
+    assert batch["direction_swap"]["positions"].tolist() == [[0, 1]]
+    model = training.RCRModel(dim=8, identity_dim=6, num_heads=2)
+    monkeypatch.setattr(
+        model.grounding,
+        "forward",
+        lambda scene, *args: scene.new_tensor([[[5, -5], [-5, 5]]]).expand(
+            len(scene), -1, -1
+        ),
+    )
+    seen = []
+    score = model.score_aligned_context
+
+    def observe(query, scene, persons, boxes, indices, patch_hw):
+        result = score(query, scene, persons, boxes, indices, patch_hw)
+        seen.append((indices.detach().clone(), result.detach()))
+        return result
+
+    monkeypatch.setattr(model, "score_aligned_context", observe)
+    settings = {**_only_loss("context"), "context_swap_weight": 0.25}
+    loss, parts = compute_loss(model, batch, (2, 2), context_batch_size=1, **settings)
+    assert parts["context_swap_active_fraction"] == 1
+    assert len(seen) == 3
+    torch.testing.assert_close(seen[1][0], seen[2][0])
+    torch.testing.assert_close(
+        parts["context_swap"],
+        torch.nn.functional.softplus(seen[2][1] - seen[1][1]).mean(),
+    )
+    loss.backward()
+    assert _has_gradient(model.reasoner.pair_score)
+    assert _has_gradient(text_encoder.proj)
+    assert not _has_gradient(model.identity_head)
+
+    batch["direction_swap"]["target_roles"] = batch["direction_swap"][
+        "target_roles"
+    ].flip(1)
+    _, parts = compute_loss(model, batch, (2, 2), **settings)
+    assert parts["context_swap"] == parts["context_swap_active_fraction"] == 0
 
 
 def test_training_enables_identity_crop_mining_after_warmup(
@@ -622,7 +732,7 @@ def test_context_loss_uses_scaled_context_and_full_score_for_rejection(
     batch["fafa_targets"][:, 0].neg_()
     batch["hard_identity_negative_mask"][0, 2] = True
     query = _encode(model, batch)
-    raw_context, coverage, binding = _context_scores(model, query, batch, (2, 2), 64)
+    raw_context, coverage, binding, _ = _context_scores(model, query, batch, (2, 2), 64)
     details = model.score_target(
         query.repeat_candidates(3),
         batch["target_scene"].flatten(0, 1),
@@ -1102,6 +1212,7 @@ from pytest import MonkeyPatch
 from tests import conftest
 from tests.test_training import _configure
 from rcr.proposed import train as training
+from rcr.proposed.batch import build_batch
 
 phase, directory, base = sys.argv[1:]
 directory = Path(directory)

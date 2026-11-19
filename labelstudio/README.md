@@ -1,131 +1,50 @@
-# Human annotation UIs
+# Annotation UIs
 
-This directory contains two repo-local, file-backed annotation interfaces:
-
-- `review/` for accepted text and Subject review;
-- `positives/` for Full Positive selection.
-
-Neither interface requires Label Studio. Canonical data remains under
-`dataset/data/work/`, and both UIs write canonical JSONL directly.
-
-Install `requirements/dataset.txt` with `bash scripts/setup.bash dataset` first.
-These UIs need neither model weights nor model libraries.
+Two local, file-backed interfaces support text/Subject review and Full Positive
+selection. Both use canonical JSONL files under `dataset/data/work/`.
+Install the dataset environment with `bash scripts/setup.bash dataset`.
 
 ## Text and Subject review
 
-Prepare or refresh the cumulative review catalog:
+Prepare tasks and launch the interface:
 
 ```bash
 bash scripts/data/prepare_review.bash
-```
-
-Run:
-
-```bash
 .venv-dataset/bin/python -m labelstudio.review.app
 ```
 
-Open:
-
-```text
-http://127.0.0.1:8090
-```
-
-The UI writes completed samples to:
-
-```text
-dataset/data/work/review/reviewed.jsonl
-```
-
-The left navigator keeps `All`, `Pending`, and `Reviewed` tasks available. Reviewed
-tasks remain reopenable. Subject boxes are fixed metadata: they can be selected for
-Subject assignment but cannot be moved, resized, created, or deleted.
+Open <http://127.0.0.1:8090>. Review the text and Subject assignments, then save
+completed tasks. Subject boxes are fixed metadata. Saved tasks remain available
+for later edits.
 
 ## Full Positive selection
 
-Prepare or refresh the cumulative positive catalog after text/Subject review:
+After text review, prepare candidates and launch the interface:
 
 ```bash
 bash scripts/data/prepare_positives.bash
-```
-
-For optional CLIP ordering, install `requirements/dataset-clip.txt` and set
-`PYTHON=.venv-dataset-clip/bin/python` on the preparation workflow.
-Add `--clip-rerank` to rank only newly reviewed tasks by the maximum of two
-independent CLIP cosine scores: seed-target-image/candidate-image and
-`final_change`-text/candidate-image. The seed remains first. Existing tasks
-are never reranked. With no new task, CLIP is not loaded. Stop this UI before
-running the finalization command because that launcher validates and may
-rewrite the saved positive decisions. For example,
-`bash scripts/data/finalize.bash --version 0.1.0` refreshes the export while
-keeping version `0.1.0`; this command also requires a working local
-image tree.
-
-Run:
-
-```bash
 .venv-dataset/bin/python -m labelstudio.positives.app
 ```
 
-For a separate catalog from `tools/data/audit.py --review-queue`, pass
-`--input runs/full_positive_review.jsonl --output runs/full_positive_reviewed.jsonl`.
-Optional `--image-root` selects the raw image tree. Existing selections are
-prefilled from the audit catalog; decisions are written only when saved. Keep
-these files separate from canonical work files until review is reconciled.
+Open <http://127.0.0.1:8091>. Select images that satisfy the complete query.
+Candidates are identity-compatible images in the query's split. The original
+seed target stays selected. Save the task to persist decisions; completed tasks
+can be reopened.
 
-Open:
+Optional `--clip-rerank` during preparation orders new tasks using CLIP. See the
+[dataset guide](../dataset/README.md) for environment setup and finalization.
 
-```text
-http://127.0.0.1:8091
-```
+## Saved data
 
-Each task shows a sticky Query and reviewed instruction beside a vertical list of
-identity-compatible target candidates. Subject boxes are read-only visual metadata.
-Candidates cover all identity-compatible images in the query's train/val/test
-image split, excluding the query itself. Split membership comes from gallery image
-paths; leftover images and images from other splits are excluded before reranking.
-The seed must belong to the same split as the query.
-Finalization validates the query and seed against the authoritative pair split
-and rejects any positive outside that split.
-The seed target is first, permanently selected, and cannot be removed. For every
-other candidate, only the selection rail on the right changes its Full Positive
-state; clicking the image opens it for inspection without changing the label.
+| Interface | Task catalog | Decisions |
+| --- | --- | --- |
+| Review | `review/review_input.jsonl` | `review/reviewed.jsonl` |
+| Positives | `positives/positive_set_input.jsonl` | `positives/positive_sets.jsonl` |
 
-Use `Save` to persist the current task or `Save & Next Pending` to continue through
-unfinished tasks. `Cmd/Ctrl + Enter` also saves and advances. Completed tasks remain
-reopenable and editable.
+Paths are relative to `dataset/data/work/`. Preparation refreshes task catalogs
+while retaining completed decisions. Review edits may require rechecking affected
+positive labels. Stop the relevant UI before refreshing or finalizing files.
 
-The UI writes directly to:
-
-```text
-dataset/data/work/positives/positive_sets.jsonl
-```
-
-Each canonical record remains:
-
-```json
-{
-  "sample_id": "train__query_id__target_id",
-  "positive_image_ids": ["seed_image_id", "additional_positive_id"]
-}
-```
-
-Positive image IDs are stored in canonical candidate order, so repeated saves are
-deterministic.
-
-## Incremental behavior
-
-Both handoff inputs are cumulative task catalogs:
-
-```text
-dataset/data/work/review/review_input.jsonl
-dataset/data/work/positives/positive_set_input.jsonl
-```
-
-Re-running review preparation refreshes the review catalog by `sample_id`.
-Positive preparation preserves candidate order and checks that reviewed
-text and Subject identities still match existing tasks; inspect positive labels
-before applying any changed review. Completion state is
-stored separately in `reviewed.jsonl` and `positive_sets.jsonl`. This allows old
-completed tasks to remain visible without re-running model work or creating a
-second annotation format.
+For a separate review queue, the positive UI accepts `--input`, `--output` and
+`--image-root`. Keep audit outputs separate until reviewed decisions are
+reconciled with canonical data. See the [audit guide](../docs/full_positive_audit.md).

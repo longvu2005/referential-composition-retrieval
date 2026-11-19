@@ -1,11 +1,6 @@
 """Checkpoint names and validation selection fields; no model runtime imports."""
 
-ARCHITECTURE_VERSION = "fafa-partial-match-v2"
-# Checkpoint parameter layouts shared by these architecture identifiers.
-COMPATIBLE_ARCHITECTURE_VERSIONS = (
-    ARCHITECTURE_VERSION,
-    "clip-b32-fafa-partial-match-v2",
-)
+ARCHITECTURE_VERSION = "fafa-subject-reasoner-v3"
 
 FIXED_FINE_KEYS = (
     "pooling",

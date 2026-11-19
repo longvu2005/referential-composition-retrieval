@@ -27,6 +27,7 @@ def loss_settings(config: dict) -> dict:
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_rejection_weight": 0.0,
+        "context_swap_weight": 0.0,
         "context_temperature": 0.1,
         "state_weight": 1.0,
         "identity_temperature": 0.1,
@@ -50,7 +51,12 @@ def loss_settings(config: dict) -> dict:
         value
         for key, value in settings.items()
         if key.endswith("weight")
-        and key not in ("grounding_owner_weight", "context_rejection_weight")
+        and key
+        not in (
+            "grounding_owner_weight",
+            "context_rejection_weight",
+            "context_swap_weight",
+        )
     ):
         raise ValueError("at least one loss weight must be positive")
     return settings
@@ -178,28 +184,73 @@ def _context_scores(
             missing_penalty=model.fine_matching["missing_penalty"],
             pooling=pooling,
         )
-        return raw, matching.coverage, binding
+        return raw, matching.coverage, binding, matching.indices
 
-    context, coverage, binding = [], [], []
+    context, coverage, binding, assignments = [], [], [], []
     for start in range(0, pairs, batch_size):
         stop = min(start + batch_size, pairs)
         indices = torch.arange(start, stop, device=query.reference.device) // candidates
         inputs = (indices, *(value[start:stop] for value in targets))
         if pairs > batch_size and torch.is_grad_enabled():
-            values, covered, offset = checkpoint(
+            values, covered, offset, assignment = checkpoint(
                 score_pairs, *inputs, use_reentrant=False
             )
         else:
-            values, covered, offset = score_pairs(*inputs)
+            values, covered, offset, assignment = score_pairs(*inputs)
         context.append(values)
         coverage.append(covered)
         binding.append(offset)
+        assignments.append(assignment)
     shape = (queries, candidates)
     return (
         torch.cat(context).view(shape),
         torch.cat(coverage).view(shape),
         torch.cat(binding).view(shape),
+        torch.cat(assignments).unflatten(0, shape),
     )
+
+
+def _swap_loss(model, query, batch, patch_hw, context, assignments):
+    """Rank a verified edited condition below the original on the same assignment."""
+    pair = batch.get("direction_swap")
+    zero = context.sum() * 0
+    if pair is None:
+        return zero, zero.detach()
+
+    rows, cols = pair["positions"].unbind(1)
+    indices = assignments[rows, cols]
+    assigned_role = pair["target_roles"].gather(
+        2, indices.clamp_min(0)[:, None].expand_as(pair["query_roles"])
+    )
+    correct = (
+        (query.membership[rows] > 0)
+        & (indices >= 0)[:, None]
+        & pair["query_roles"]
+        & assigned_role
+    )
+    valid = correct.any(2).all(1)
+    if not valid.any():
+        return zero, zero.detach()
+
+    rows, cols, indices = rows[valid], cols[valid], indices[valid]
+    alternative = model.recondition_query(
+        query.index_select(rows),
+        batch["query_persons"][rows],
+        batch["query_person_mask"][rows],
+        **{key: value[valid] for key, value in pair["text"].items()},
+    )
+    persons = batch["target_persons"][rows, cols]
+    boxes = batch["target_boxes"][rows, cols]
+    padding = ~batch["target_mask"][rows, cols, :, None]
+    wrong = model.score_aligned_context(
+        alternative,
+        batch["target_scene"][rows, cols],
+        model.encode_semantic(persons.masked_fill(padding, 0)),
+        boxes.masked_fill(padding, 0),
+        indices,
+        patch_hw,
+    )
+    return F.softplus(wrong - context[rows, cols]).mean(), valid.sum() / len(context)
 
 
 def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
@@ -229,6 +280,7 @@ def compute_loss(
     state_temperature: float,
     grounding_owner_weight: float = 0.0,
     context_rejection_weight: float = 0.0,
+    context_swap_weight: float = 0.0,
     context_temperature: float = 0.1,
     context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
     coverage_score_weight: float = DEFAULT_COVERAGE_WEIGHT,
@@ -279,8 +331,8 @@ def compute_loss(
     batch_size = len(positive)
     zero = query_identity.new_zeros(())
     ground, owner, identity, coarse, context, state = [zero] * 6
-    semantic = rejection = zero
-    context_active = rejection_active = fda_error = zero.detach()
+    semantic = rejection = swap = zero
+    context_active = rejection_active = swap_active = fda_error = zero.detach()
     hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
@@ -377,7 +429,7 @@ def compute_loss(
         )
 
     if context_weight:
-        raw_context, coverage, binding = _context_scores(
+        raw_context, coverage, binding, assignments = _context_scores(
             model, query, batch, patch_hw, context_batch_size
         )
         scores = linear_score_components(
@@ -412,6 +464,12 @@ def compute_loss(
             )
             context = semantic + context_rejection_weight * rejection
 
+        if context_swap_weight:
+            swap, swap_active = _swap_loss(
+                model, query, batch, patch_hw, raw_context, assignments
+            )
+            context = context + context_swap_weight * swap
+
     if state_weight:
         text_state = model.encode_text_state(batch["change_global"])
         image_state = model.encode_image_state(batch["target_global"])
@@ -435,10 +493,12 @@ def compute_loss(
         "context": context.detach(),
         "context_semantic": semantic.detach(),
         "context_rejection": rejection.detach(),
+        "context_swap": swap.detach(),
         "context_fda_error": fda_error,
         "state": state.detach(),
         "context_active_fraction": context_active.detach(),
         "context_rejection_active_fraction": rejection_active.detach(),
+        "context_swap_active_fraction": swap_active.detach(),
         "identity_hard_crops": hard_count,
         "identity_random_crops": random_count,
         "identity_supplemental_crops": hard_count + random_count,

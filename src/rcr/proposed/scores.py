@@ -234,7 +234,7 @@ def fafa_binding_scores(
         # Gather first: unused/padded detections (even NaN/Inf) cannot enter FDA.
         flat = targets.detach().flatten(2)
         aligned = (
-            gather_matched(flat, matching)
+            gather_matched(flat, matching.indices)
             .float()
             .reshape(targets.shape[0], query.shape[2], length, dim)
         )

@@ -1,7 +1,7 @@
 """RCR person identity/semantics over frozen, reference-free feature caches."""
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 import torch
 import torch.nn.functional as F
@@ -23,7 +23,7 @@ from rcr.proposed.nn.composition import (
 )
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
-from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
+from rcr.proposed.nn.reasoning import FineReasoner
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
@@ -43,6 +43,8 @@ class QueryEncoding:
     reference: Tensor
     mask: Tensor
     prior: Tensor
+    condition: Tensor
+    condition_weights: Tensor
     fafa: Tensor | None
     membership: Tensor
     subjects: Tensor
@@ -127,7 +129,6 @@ class RCRModel(nn.Module):
         dropout: float = 0.0,
         fine_matching: dict | None = None,
         fda_k: int = 6,
-        slot_query: bool = False,
     ) -> None:
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
@@ -141,9 +142,6 @@ class RCRModel(nn.Module):
         if type(fda_k) is not int or fda_k < 1:
             raise ValueError("fda_k must be a positive integer")
         self.fda_k = fda_k
-        if type(slot_query) is not bool:
-            raise ValueError("slot_query must be a boolean")
-        self.slot_query = slot_query
         # Scene tokens have their own context projection; globals stay in CLIP space.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
@@ -170,11 +168,7 @@ class RCRModel(nn.Module):
             mlp_ratio,
             dropout,
         )
-        self.target_builder = TargetPersonBuilder(dim)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
-        self.null_person = nn.Parameter(torch.zeros(dim))
-        if self.slot_query:
-            self.slot_gate = nn.Parameter(torch.zeros(()))
 
     @property
     def binding_scale(self) -> Tensor:
@@ -299,7 +293,35 @@ class RCRModel(nn.Module):
             selection_threshold=self.fine_matching["selection_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )
-        # Detached membership prevents context from hiding difficult members.
+        return QueryEncoding(
+            logits,
+            identity,
+            *self._encode_condition(
+                semantic,
+                membership,
+                subjects,
+                change,
+                subject_pos,
+                change_mask,
+                subject_token_mask,
+                subject_ids,
+            ),
+            None if fafa_query is None else fafa_query.detach(),
+            membership,
+            subjects,
+        )
+
+    def _encode_condition(
+        self,
+        semantic,
+        membership,
+        subjects,
+        change,
+        subject_pos,
+        change_mask,
+        subject_token_mask,
+        subject_ids,
+    ):
         member_logits = torch.logit(membership.clamp(1e-6, 1 - 1e-6)).masked_fill(
             membership == 0, -torch.inf
         )
@@ -315,15 +337,49 @@ class RCRModel(nn.Module):
         )
         mask = composed_query_mask(change, member_logits, change_mask, subjects)
         prior = reference_key_bias(change, member_logits, change_mask, subjects)
-        return QueryEncoding(
-            logits,
-            identity,
-            reference,
-            mask,
-            prior,
-            None if fafa_query is None else fafa_query.detach(),
-            membership,
-            subjects,
+        mentions = subject_token_mask
+        if mentions is None:
+            positions = torch.arange(change.shape[1], device=change.device)
+            mentions = subject_pos[..., None] == positions
+        readouts, weights = self.reasoner.encode_condition(
+            reference[:, 1 : 1 + change.shape[1]], change_mask, mentions, subjects
+        )
+        return reference, mask, prior, readouts, weights
+
+    def recondition_query(
+        self,
+        query,
+        query_persons,
+        person_mask,
+        *,
+        change,
+        subject_pos,
+        change_mask,
+        subject_token_mask,
+        subject_ids,
+    ):
+        """Read new conditions using the original grounding and identity features."""
+        semantic = self.encode_semantic(
+            query_persons.masked_fill(~person_mask[..., None], 0)
+        )
+        reference, mask, prior, readouts, weights = self._encode_condition(
+            semantic,
+            query.membership,
+            query.subjects,
+            change,
+            subject_pos,
+            change_mask,
+            subject_token_mask,
+            subject_ids,
+        )
+        return replace(
+            query,
+            reference=reference,
+            mask=mask,
+            prior=prior,
+            condition=readouts,
+            condition_weights=weights,
+            fafa=None,
         )
 
     def encode_grounded_identity(
@@ -378,50 +434,33 @@ class RCRModel(nn.Module):
             identity_threshold=self.fine_matching["identity_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )
-        b, s, k = matching.membership.shape
-        selected = matching.membership > 0
-        matched = selected & matching.matched[:, None]
+        return self.score_aligned_context(
+            query, scene, semantic, boxes, matching.indices, patch_hw
+        ), matching
 
-        def align(values):
-            width = values.shape[-1]
-            values = gather_matched(values, matching)
-            values = values[:, None].expand(-1, s, -1, -1)
-            return values.masked_fill(~matched[..., None], 0).reshape(b, s * k, width)
-
-        aligned_boxes = align(boxes)
-        offset = query.reference.shape[1] - s * k
-        slot_inputs = {}
-        if self.slot_query:
-            valid = matched.flatten(1) & query.mask[:, offset:]
-            slots = query.reference[:, offset:].masked_fill(~valid[..., None], 0)
-            slot_inputs = {"person_slots": slots, "slot_gate": self.slot_gate}
+    def score_aligned_context(self, query, scene, semantic, boxes, indices, patch_hw):
+        """Score a condition on a fixed person assignment."""
+        matched = indices >= 0
+        boxes = gather_matched(boxes, indices)
+        scene = self.visual_proj(scene)
         evidence = self.grounding.binding(
-            self.visual_proj(scene),
-            align(semantic),
-            aligned_boxes,
+            scene,
+            gather_matched(semantic, indices),
+            boxes,
             query.reference,
             patch_hw,
             query.mask,
             query.prior,
-            **slot_inputs,
+        ).masked_fill(~matched[..., None], 0)
+        return self.reasoner(
+            query.condition,
+            query.condition_weights,
+            evidence,
+            boxes,
+            query.membership.masked_fill(~matched[:, None], 0),
+            scene,
+            patch_hw,
         )
-        # Null/unselected persons cannot acquire substitute evidence from scene.
-        evidence = evidence.masked_fill(~matched.flatten(1)[..., None], 0)
-        target = self.target_builder(evidence, aligned_boxes)
-        target = torch.where(
-            matched.flatten(1)[..., None], target, self.null_person[None, None]
-        )
-        context = self.reasoner(
-            query.reference,
-            target,
-            selected.flatten(1),
-            query.mask,
-            query.prior,
-            aligned_offset=offset,
-            aligned_boxes=aligned_boxes,
-            matched_mask=matched.flatten(1),
-        ).float()
-        return context, matching
 
     def score_target(
         self,

@@ -26,7 +26,7 @@ from rcr.proposed.cache.build import (
 from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.contracts import (
-    COMPATIBLE_ARCHITECTURE_VERSIONS,
+    ARCHITECTURE_VERSION,
     FIXED_FINE_KEYS,
     SELECTED_RETRIEVAL_KEYS,
 )
@@ -74,7 +74,6 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     model_cfg = {
         **train_cfg["model"],
         "fine_matching": matching_settings(train_cfg["model"].get("fine_matching")),
-        "slot_query": train_cfg["model"].get("slot_query", False),
     }
     background = model_cfg["fine_matching"]["background_logit"]
     settings = retrieval_settings(
@@ -109,10 +108,9 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         )
     if selected is not None and cfg.get("selected_background_logit", 0.0) != background:
         raise ValueError("background changed since val selection; rerun val retrieval")
-    if checkpoint.get("architecture_version") not in COMPATIBLE_ARCHITECTURE_VERSIONS:
+    if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
         raise ValueError(
-            "checkpoint architecture is incompatible; rebuild CLIP scene/FAFA caches "
-            "and train CLIP ViT-B/32 in a new output directory"
+            "checkpoint architecture is incompatible; train in a new output directory"
         )
     check_clip_config(train_cfg)
     check_clip_config(cfg)
