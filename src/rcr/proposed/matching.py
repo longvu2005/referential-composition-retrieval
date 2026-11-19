@@ -37,6 +37,31 @@ def matching_settings(config: dict | None = None) -> dict[str, float]:
     return settings
 
 
+def _unique_boxes(coords, valid, threshold, priority=None):
+    """Stable greedy suppression, batched on the assignment's CPU workspace."""
+    coords = np.where(valid[..., None], coords, 0)
+    widths = np.maximum(coords[..., 2:] - coords[..., :2], 0)
+    area = widths.prod(-1)
+    priority = area if priority is None else priority
+    order = np.argsort(-np.where(valid, priority, -np.inf), axis=1, kind="stable")
+    boxes = np.take_along_axis(coords, order[..., None], axis=1)
+    area = np.take_along_axis(area, order, axis=1)
+    keep = np.take_along_axis(valid, order, axis=1).copy()
+    low = np.maximum(boxes[:, :, None, :2], boxes[:, None, :, :2])
+    high = np.minimum(boxes[:, :, None, 2:], boxes[:, None, :, 2:])
+    intersection = np.maximum(high - low, 0).prod(-1)
+    union = area[:, :, None] + area[:, None, :] - intersection
+    duplicate = intersection / np.maximum(union, 1e-12) > threshold
+    # Fixed-size slices avoid one GPU synchronization per image and kept box.
+    for index in range(coords.shape[1]):
+        keep[:, index + 1 :] &= ~(
+            keep[:, index, None] & duplicate[:, index, index + 1 :]
+        )
+    result = np.empty_like(keep)
+    np.put_along_axis(result, order, keep, axis=1)
+    return result
+
+
 @torch.no_grad()
 def unique_box_mask(
     boxes: Tensor | None,
@@ -51,31 +76,21 @@ def unique_box_mask(
     ties keep the first detection. This is an IoU heuristic, not an identity
     oracle: overlapping people should only be suppressed at a high threshold.
     """
-    if boxes is None or threshold == 1 or boxes.shape[1] == 0:
+    if boxes is None or threshold == 1 or not mask.numel():
         return mask.bool().clone()
     if boxes.shape != (*mask.shape, 4):
         raise ValueError("boxes must have shape [B,K,4] matching the person mask")
-    coords = boxes.detach().float()
-    valid = mask.detach().bool().clone()
-    widths = (coords[..., 2:] - coords[..., :2]).clamp_min(0)
-    area = widths.prod(-1)
-    priorities = area if priority is None else priority.detach().float()
-    for n in range(len(coords)):
-        candidates = valid[n].nonzero(as_tuple=True)[0]
-        order = candidates[
-            torch.argsort(priorities[n, candidates], descending=True, stable=True)
-        ]
-        while order.numel():
-            first, rest = order[0], order[1:]
-            low = torch.maximum(coords[n, first, :2], coords[n, rest, :2])
-            high = torch.minimum(coords[n, first, 2:], coords[n, rest, 2:])
-            intersection = (high - low).clamp_min(0).prod(-1)
-            union = area[n, first] + area[n, rest] - intersection
-            iou = intersection / union.clamp_min(1e-12)
-            duplicate = iou > threshold
-            valid[n, rest[duplicate]] = False
-            order = rest[~duplicate]
-    return valid
+    values = [boxes.detach().float(), mask[..., None].float()]
+    if priority is not None:
+        values.append(priority.detach()[..., None].float())
+    packed = torch.cat(values, dim=-1).cpu().numpy()
+    keep = _unique_boxes(
+        packed[..., :4],
+        packed[..., 4].astype(bool),
+        threshold,
+        packed[..., 5] if priority is not None else None,
+    )
+    return torch.from_numpy(keep).to(mask.device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -171,7 +186,6 @@ def partial_identity_matching(
         if target_mask is None
         else target_mask.bool()
     )
-    valid = unique_box_mask(target_boxes, valid, threshold=duplicate_iou)
     if q and t:
         # Mask before normalization/einsum: NaN/Inf padding is not valid evidence.
         query = (
@@ -181,10 +195,23 @@ def partial_identity_matching(
         similarity = torch.einsum(
             "bqd,btd->bqt", F.normalize(query, dim=-1), F.normalize(target, dim=-1)
         )
-        similarity_cpu = similarity.cpu().float().numpy()
-        priority_cpu = importance.cpu().numpy()
-        selected_cpu = (confidence > 0).cpu().numpy()
-        valid_cpu = valid.cpu().numpy()
+        # Assignment and box suppression share one device-to-host transfer.
+        parts = [similarity.float().flatten(1), importance, confidence, valid.float()]
+        deduplicate = target_boxes is not None and duplicate_iou != 1
+        if deduplicate:
+            parts.append(target_boxes.detach().float().flatten(1))
+        packed = torch.cat(parts, dim=1).cpu().numpy()
+        boundaries = np.cumsum([q * t, q, q, t])
+        similarity_cpu, priority_cpu, confidence_cpu, valid_cpu, boxes_cpu = np.split(
+            packed, boundaries, axis=1
+        )
+        similarity_cpu = similarity_cpu.reshape(b, q, t)
+        selected_cpu = confidence_cpu > 0
+        valid_cpu = valid_cpu.astype(bool)
+        if deduplicate:
+            valid_cpu = _unique_boxes(
+                boxes_cpu.reshape(b, t, 4), valid_cpu, duplicate_iou
+            )
         assigned = np.full((b, q), -1, dtype=np.int64)
         for n in range(b):
             rows = np.flatnonzero(selected_cpu[n])
@@ -204,7 +231,7 @@ def partial_identity_matching(
             )
             real = column < len(columns)
             assigned[n, rows[row[real]]] = columns[column[real]]
-        indices = torch.as_tensor(assigned, device=membership.device)
+        indices = torch.from_numpy(assigned).to(membership.device, non_blocking=True)
     matched = indices >= 0
     subject_coverage = (per_subject * matched[:, None]).sum(-1).clamp(0, 1)
     coverage = subject_coverage.masked_fill(~active, 0).sum(-1) / active.sum(

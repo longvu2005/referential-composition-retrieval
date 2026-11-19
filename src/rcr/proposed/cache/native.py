@@ -17,6 +17,17 @@ from rcr.proposed.cache.person_encoder import text_policy
 NATIVE_VERSION = "fafa-multimodal-fda-v1"
 
 
+class NativeTargetBatch:
+    """Read only the current training chunk, before padding and GPU transfer."""
+
+    def __init__(self, cache, image_indices: Tensor):
+        self.cache = cache
+        self.image_indices = image_indices
+
+    def load(self, rows: Tensor, max_people: int) -> Tensor:
+        return self.cache.native_targets(self.image_indices[rows], max_people)
+
+
 def subject_conditions(sample: dict) -> list[str]:
     """Anchor the complete condition to each public Subject, without splitting.
 

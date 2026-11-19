@@ -18,6 +18,8 @@ and experiment:
 
 Model, loss, sampling, retrieval and runtime settings are defined in the same
 file. `--set key=value` overrides existing configuration keys.
+See [GPU performance](gpu_performance.md) for chunking, gallery/text cache budgets
+and a CUDA profiling command.
 
 ## Prepare assets and caches
 

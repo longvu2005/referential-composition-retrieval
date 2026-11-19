@@ -19,7 +19,6 @@ from rcr.proposed.scores import (
     MINING_CONTEXT_WEIGHT,
     POOLING_MODES,
     combine_scores,
-    identity_scores,
     identity_scores_batched,
     linear_score_components,
 )
@@ -70,15 +69,22 @@ def _coarse_scores_chunked(
 ) -> Tensor:
     """Score the entire gallery with bounded accelerator working memory."""
 
+    single = query_identity.ndim == 2
+    if single:
+        query_identity, logits, query_mask = (
+            value[None] for value in (query_identity, logits, query_mask)
+        )
     num_images = sum(len(identity) for identity, _ in gallery_batches)
-    scores = query_identity.new_empty(num_images)
+    scores = query_identity.new_empty(len(query_identity), num_images)
     offset = 0
     for identity_cpu, mask_cpu in gallery_batches:
         for start in range(0, len(identity_cpu), batch_size):
             stop = min(start + batch_size, len(identity_cpu))
-            identity = identity_cpu[start:stop].to(query_identity.device)
-            mask = mask_cpu[start:stop].to(query_identity.device)
-            scores[offset + start : offset + stop] = identity_scores(
+            identity = identity_cpu[start:stop].to(
+                query_identity.device, non_blocking=True
+            )
+            mask = mask_cpu[start:stop].to(query_identity.device, non_blocking=True)
+            scores[:, offset + start : offset + stop] = identity_scores_batched(
                 query_identity,
                 logits,
                 identity,
@@ -87,7 +93,7 @@ def _coarse_scores_chunked(
             )
             del identity, mask
         offset += len(identity_cpu)
-    return scores
+    return scores[0] if single else scores
 
 
 def _encode_gallery_state(
@@ -107,6 +113,26 @@ def _encode_gallery_state(
         )
         state[start:stop] = model.encode_image_state(chunk).cpu()
     return state
+
+
+def _cache_gallery_on_device(batches, state, device, budget_mib):
+    """Keep small projected galleries resident within an explicit VRAM budget."""
+    if device.type != "cuda" or not budget_mib:
+        return batches, state
+    tensors = [value for batch in batches for value in batch]
+    if state is not None:
+        tensors.append(state)
+    size = sum(value.numel() * value.element_size() for value in tensors)
+    free, _ = torch.cuda.mem_get_info(device)
+    # Leave room for fine scoring and the CUDA allocator's working buffers.
+    if size > min(budget_mib * 1024**2, free // 2):
+        return batches, state
+    resident = [
+        tuple(value.to(device, non_blocking=True) for value in batch)
+        for batch in batches
+    ]
+    state = None if state is None else state.to(device, non_blocking=True)
+    return resident, state
 
 
 def fine_score_components(
@@ -219,6 +245,8 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coverage_weight",
         "fine_coarse_weight",
         "pooling",
+        "query_batch_size",
+        "gpu_cache_mib",
     }
     if unknown:
         raise ValueError(f"unknown retrieval settings: {', '.join(sorted(unknown))}")
@@ -230,16 +258,26 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "coverage_weight": DEFAULT_COVERAGE_WEIGHT,
         "fine_coarse_weight": DEFAULT_FINE_COARSE_WEIGHT,
         "pooling": "penalized",
+        "query_batch_size": 1,
+        "gpu_cache_mib": 512,
         **cfg,
     }
     if settings["coarse_beta"] is None:
         settings["coarse_beta"] = default_beta
-    sizes = ("top_m", "fine_batch_size", "identity_batch_size", "coarse_batch_size")
+    sizes = (
+        "top_m",
+        "fine_batch_size",
+        "identity_batch_size",
+        "coarse_batch_size",
+        "query_batch_size",
+    )
     if any(
         key in settings and (type(settings[key]) is not int or settings[key] < 1)
         for key in sizes
     ):
         raise ValueError("retrieval batch sizes and top_m must be positive")
+    if type(settings["gpu_cache_mib"]) is not int or settings["gpu_cache_mib"] < 0:
+        raise ValueError("retrieval.gpu_cache_mib must be a nonnegative integer")
     if any(
         type(settings[key]) not in (int, float)
         or not math.isfinite(settings[key])
@@ -282,6 +320,8 @@ def _score_target_components(
     pooling,
     context_weight=DEFAULT_CONTEXT_WEIGHT,
     coverage_weight=DEFAULT_COVERAGE_WEIGHT,
+    *,
+    compute_context=True,
 ):
     """Collect pairwise evidence without changing its scoring population."""
     components = {
@@ -297,21 +337,25 @@ def _score_target_components(
         scene, persons, boxes, mask = cache.load(targets)
         details = model.score_target(
             query.repeat_candidates(len(targets)),
-            scene.to(device),
-            persons.to(device),
-            boxes.to(device),
+            scene.to(device, non_blocking=True),
+            persons.to(device, non_blocking=True),
+            boxes.to(device, non_blocking=True),
             cache.patch_hw,
-            mask.to(device),
-            fafa_targets=cache.native_targets(targets, persons.shape[1]).to(device),
+            mask.to(device, non_blocking=True),
+            fafa_targets=cache.native_targets(targets, persons.shape[1]).to(
+                device, non_blocking=True
+            ),
             return_details=True,
             pooling=pooling,
             context_weight=context_weight,
             coverage_weight=coverage_weight,
+            compute_context=compute_context,
         )
+        finite = torch.stack([torch.isfinite(details[key]).all() for key in components])
+        if not finite.all():
+            raise ValueError("fine score components contain NaN/Inf")
         for key, output in components.items():
             values = details[key].float()
-            if not torch.isfinite(values).all():
-                raise ValueError("fine score components contain NaN/Inf")
             output[start : start + len(targets)] = values
     return components
 
@@ -339,6 +383,8 @@ def retrieve_rankings(
     description: str = "retrieve",
     text_cache: QueryTextCache | None = None,
     state_trained: bool = True,
+    query_batch_size: int = 1,
+    gpu_cache_mib: int = 512,
 ) -> dict[str, Any]:
     """Rank the gallery once for every query.
 
@@ -363,6 +409,8 @@ def retrieve_rankings(
             "coverage_weight": coverage_weight,
             "fine_coarse_weight": fine_coarse_weight,
             "pooling": pooling,
+            "query_batch_size": query_batch_size,
+            "gpu_cache_mib": gpu_cache_mib,
         },
         model.coarse_beta,
     )
@@ -379,7 +427,7 @@ def retrieve_rankings(
     text_cache = text_cache if text_cache is not None else QueryTextCache(tokenizer)
     text_cache.prepare(list(samples))
     text_stats = text_cache.statistics(list(samples))
-    rows = []
+    rows = [None] * len(samples)
     with evaluating(model, text_encoder):
         gallery_batches = _encode_gallery_identity(
             cache, model, device, identity_batch_size, image_indices
@@ -391,30 +439,46 @@ def retrieve_rankings(
             if need_state
             else None
         )
-        for sample in tqdm(samples, desc=description):
-            query_index = gallery_by_id[sample["query_image_id"]]
-            text = encode_query_text(
-                [sample], tokenizer, text_encoder, device, text_cache=text_cache
+        gallery_batches, gallery_state = _cache_gallery_on_device(
+            gallery_batches, gallery_state, device, gpu_cache_mib
+        )
+        subject_groups = {}
+        for index, sample in enumerate(samples):
+            subject_groups.setdefault(len(sample["subjects"]), []).append(
+                (index, sample)
             )
-            query_idx = torch.tensor([cache.by_id[sample["query_image_id"]]])
+        batches = [
+            group[start : start + query_batch_size]
+            for group in subject_groups.values()
+            for start in range(0, len(group), query_batch_size)
+        ]
+        progress = tqdm(total=len(samples), desc=description)
+        for batch in batches:
+            batch_samples = [sample for _, sample in batch]
+            text = encode_query_text(
+                batch_samples, tokenizer, text_encoder, device, text_cache=text_cache
+            )
+            query_idx = torch.tensor(
+                [cache.by_id[sample["query_image_id"]] for sample in batch_samples]
+            )
             q_scene, q_persons, q_boxes, q_mask = cache.load(query_idx)
-            q_mask = q_mask.to(device)
-            query = model.encode_query(
-                q_scene.to(device),
-                q_persons.to(device),
-                q_boxes.to(device),
+            q_mask = q_mask.to(device, non_blocking=True)
+            queries = model.encode_query(
+                q_scene.to(device, non_blocking=True),
+                q_persons.to(device, non_blocking=True),
+                q_boxes.to(device, non_blocking=True),
                 patch_hw=cache.patch_hw,
                 query_person_mask=q_mask,
-                fafa_query=cache.native_queries([sample], q_persons.shape[1]).to(
-                    device
+                fafa_query=cache.native_queries(batch_samples, q_persons.shape[1]).to(
+                    device, non_blocking=True
                 ),
                 **{key: value for key, value in text.items() if key != "change_global"},
             )
             identity = (
                 _coarse_scores_chunked(
-                    query.identity[0],
-                    query.logits[0],
-                    q_mask[0],
+                    queries.identity,
+                    queries.logits,
+                    q_mask,
                     gallery_batches,
                     coarse_batch_size,
                 )
@@ -423,56 +487,64 @@ def retrieve_rankings(
             )
             state = None
             if need_state:
-                query_state = model.encode_text_state(text["change_global"])[0]
+                query_state = model.encode_text_state(text["change_global"])
                 state = (
                     torch.cat(
                         [
-                            gallery_state[start : start + coarse_batch_size].to(device)
-                            @ query_state
+                            query_state
+                            @ gallery_state[start : start + coarse_batch_size]
+                            .to(device, non_blocking=True)
+                            .T
                             for start in range(0, len(gallery_ids), coarse_batch_size)
-                        ]
+                        ],
+                        dim=1,
                     )
                     .float()
                     .cpu()
                 )
-            coarse = combine_scores(
-                identity, state, beta=beta, exclude_index=query_index
-            )
-            order = torch.argsort(coarse, descending=True, stable=True)
-            order = order[order != query_index]
-            top = order[:top_m]
-            evidence = {
-                key: value.cpu()
-                for key, value in _score_target_components(
-                    query,
-                    cache,
-                    model,
-                    device,
-                    image_indices[top],
-                    fine_batch_size,
-                    pooling,
-                    context_weight,
-                    coverage_weight,
-                ).items()
-            }
-            raw = {
-                "binding": evidence[f"binding_{pooling}"],
-                "context": evidence["context"],
-                "coverage": evidence["coverage"],
-            }
-            scored = fine_score_components(
-                **raw,
-                binding_scale=binding_scale,
-                fine_score_mode=fine_score_mode,
-                context_weight=context_weight,
-                coverage_weight=coverage_weight,
-            )
-            fine = rerank_topm(order, top, scored["fine_scores"]).to(torch.int32)
-            fused = fuse_fine_coarse_scores(
-                scored["fine_scores"], coarse[top], fine_coarse_weight
-            )
-            rows.append(
-                {
+            for n, (sample_index, sample) in enumerate(batch):
+                query = queries.select(n)
+                query_index = gallery_by_id[sample["query_image_id"]]
+                coarse = combine_scores(
+                    identity[n],
+                    None if state is None else state[n],
+                    beta=beta,
+                    exclude_index=query_index,
+                )
+                order = torch.argsort(coarse, descending=True, stable=True)
+                order = order[order != query_index]
+                top = order[:top_m]
+                evidence = {
+                    key: value.cpu()
+                    for key, value in _score_target_components(
+                        query,
+                        cache,
+                        model,
+                        device,
+                        image_indices[top],
+                        fine_batch_size,
+                        pooling,
+                        context_weight,
+                        coverage_weight,
+                    ).items()
+                }
+                raw = {
+                    "binding": evidence[f"binding_{pooling}"],
+                    "context": evidence["context"],
+                    "coverage": evidence["coverage"],
+                }
+                scored = fine_score_components(
+                    **raw,
+                    binding_scale=binding_scale,
+                    fine_score_mode=fine_score_mode,
+                    context_weight=context_weight,
+                    coverage_weight=coverage_weight,
+                )
+                fine = rerank_topm(order, top, scored["fine_scores"]).to(torch.int32)
+                fused = fuse_fine_coarse_scores(
+                    scored["fine_scores"], coarse[top], fine_coarse_weight
+                )
+                rows[sample_index] = {
                     **scored,
                     **evidence,
                     "query_indices": torch.tensor(query_index),
@@ -486,7 +558,8 @@ def retrieve_rankings(
                     "fused_topm_scores": fused,
                     "rankings": rerank_topm(order, top, fused).to(torch.int32),
                 }
-            )
+            progress.update(len(batch))
+        progress.close()
     output = {
         "sample_ids": [sample["sample_id"] for sample in samples],
         "gallery_ids": gallery_ids,
@@ -586,6 +659,9 @@ def mine_hard_negatives(
             )
             if need_state
             else None
+        )
+        gallery_identity, gallery_state = _cache_gallery_on_device(
+            gallery_identity, gallery_state, device, settings["gpu_cache_mib"]
         )
         progress = tqdm(total=len(samples), desc="mine train negatives")
         for sample_group in subject_groups.values():
@@ -706,6 +782,7 @@ def mine_hard_negatives(
                         settings["pooling"],
                         settings["context_weight"],
                         settings["coverage_weight"],
+                        compute_context=False,
                     )
                     fine = fine_score_components(
                         components[f"binding_{settings['pooling']}"].cpu(),

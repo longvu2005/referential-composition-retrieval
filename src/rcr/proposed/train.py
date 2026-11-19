@@ -783,6 +783,7 @@ def _train(cfg, output, resumed):
                     hard_identity_image_ids=sampled.hard_identity_ids,
                     text_cache=text_cache,
                     fafa_pooling=fafa_pooling,
+                    defer_native_targets=device.type == "cuda",
                     include_direction_swaps=bool(
                         epoch_loss["context_weight"]
                         and epoch_loss["context_swap_weight"]
@@ -825,14 +826,19 @@ def _train(cfg, output, resumed):
                 scaler.step(optimizer)
                 scaler.update()
 
-                values = {
-                    "loss": float(loss.detach()),
-                    **{
-                        key: float(value)
-                        for key, value in parts.items()
-                        if key not in crop_totals
-                    },
-                }
+                metrics = {"loss": loss.detach()}
+                metrics.update(
+                    (key, value)
+                    for key, value in parts.items()
+                    if key not in crop_totals
+                )
+                values = dict(
+                    zip(
+                        metrics,
+                        torch.stack(list(metrics.values())).cpu().tolist(),
+                        strict=True,
+                    )
+                )
                 for key in crop_totals:
                     crop_totals[key] += int(parts[key])
                 for name, value in values.items():

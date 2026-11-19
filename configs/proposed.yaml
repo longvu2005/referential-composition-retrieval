@@ -27,7 +27,7 @@ cache:
   native_lru_mib: 256
   supervision_cache: cache/train-supervision.json
   mmap_shards: false
-  text_lru_mib: 256
+  text_lru_mib: 768
 model:
   text_model: openai/clip-vit-base-patch32
   dim: 384
@@ -96,6 +96,8 @@ retrieval:
   fine_batch_size: 64
   identity_batch_size: 512
   coarse_batch_size: 512
+  query_batch_size: 8
+  gpu_cache_mib: 512
 candidate_ks:
 - 500
 evaluation:

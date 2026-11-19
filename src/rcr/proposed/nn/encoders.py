@@ -246,7 +246,6 @@ def encode_tokenized_text(
     tokens: dict[str, Tensor], text_encoder: nn.Module, device: torch.device | str
 ) -> dict[str, Tensor]:
     """Return context tokens and the separate native CLIP global text embedding."""
-    tokens = {key: value.to(device, non_blocking=True) for key, value in tokens.items()}
     b, subjects = tokens["subject_ids"].shape
     selections, selection_mask, _ = text_encoder(
         tokens["selection_ids"], tokens["selection_mask"]
@@ -261,7 +260,7 @@ def encode_tokenized_text(
         "change_global": change_global,
         "change_mask": change_mask,
         **{
-            key: tokens[key]
+            key: tokens[key].to(device, non_blocking=True)
             for key in ("subject_pos", "subject_token_mask", "subject_ids")
         },
     }
@@ -334,18 +333,29 @@ class TextEncoder(nn.Module):
 
         if input_ids.shape[1] > CLIP_CONTEXT_LENGTH:
             raise ValueError("CLIP text exceeds its 77-token position limit")
+        device = self.proj.weight.device
         if self._hidden_limit:
             tokens = self._cached_backbone(input_ids, attention_mask)
         else:
             with torch.no_grad():
-                tokens = self._backbone_tokens(input_ids, attention_mask)
+                tokens = self._backbone_tokens(
+                    input_ids.to(device, non_blocking=True),
+                    attention_mask.to(device, non_blocking=True),
+                )
         # CLIP's eos_token_id=2 convention pools the highest token ID in each row.
         if self.backbone.config.eos_token_id == 2:
             eot = input_ids.int().argmax(-1)
         else:
             eot = (input_ids == self.backbone.config.eos_token_id).int().argmax(-1)
-        pooled = tokens[torch.arange(len(tokens), device=tokens.device), eot]
-        return self.proj(tokens), attention_mask.bool(), pooled.float()
+        pooled = tokens[
+            torch.arange(len(tokens), device=tokens.device),
+            eot.to(device, non_blocking=True),
+        ]
+        return (
+            self.proj(tokens),
+            attention_mask.to(device, non_blocking=True).bool(),
+            pooled.float(),
+        )
 
     def _backbone_tokens(self, input_ids, attention_mask):
         hidden = self.backbone(
@@ -357,10 +367,13 @@ class TextEncoder(nn.Module):
     def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
         # Right padding does not change CLIP's causal token states. Canonicalize
         # that common case while retaining complete rows for left/irregular masks.
-        precision = _autocast_dtype(input_ids.device.type)
+        device = self.proj.weight.device
+        precision = _autocast_dtype(device.type)
         backbone_dtype = next(self.backbone.parameters()).dtype
-        id_rows = input_ids.detach().cpu().tolist()
-        mask_rows = attention_mask.detach().cpu().tolist()
+        input_ids = input_ids.detach().cpu()
+        attention_mask = attention_mask.detach().cpu()
+        id_rows = input_ids.tolist()
+        mask_rows = attention_mask.tolist()
         keys = []
         for ids, mask in zip(id_rows, mask_rows, strict=True):
             length = sum(bool(value) for value in mask)
@@ -369,7 +382,7 @@ class TextEncoder(nn.Module):
                 ids, mask = ids[:length], mask[:length]
             keys.append(
                 (
-                    str(input_ids.device),
+                    str(device),
                     backbone_dtype,
                     precision,
                     tuple(ids),
@@ -384,10 +397,11 @@ class TextEncoder(nn.Module):
             else:
                 missing.setdefault(key, n)
         if missing:
-            indices = torch.tensor(list(missing.values()), device=input_ids.device)
+            indices = torch.tensor(list(missing.values()))
             # Separate AMP/FP32 keys keep validation features at their own precision.
             hidden = self._backbone_tokens(
-                input_ids[indices], attention_mask[indices]
+                input_ids[indices].to(device, non_blocking=True),
+                attention_mask[indices].to(device, non_blocking=True),
             ).cpu()
             for key, row in zip(missing, hidden, strict=True):
                 value = row[: len(key[-2])].clone()
@@ -411,7 +425,7 @@ class TextEncoder(nn.Module):
             row = value.new_zeros(length, value.shape[-1])
             row[: value.shape[0]] = value
             rows.append(row)
-        return torch.stack(rows).to(input_ids.device)
+        return torch.stack(rows).to(device, non_blocking=True)
 
 
 class IdentityHead(nn.Module):

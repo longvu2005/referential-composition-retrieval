@@ -7,13 +7,14 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
+from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
     fafa_binding_scores,
-    identity_scores,
+    identity_scores_paired,
     linear_score_components,
 )
 
@@ -93,12 +94,10 @@ def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
     )
     counts = positive.sum(1)
     valid = counts > 0
-    if not valid.any():
-        return identity.sum() * 0
     per_anchor = -(
         log_probability.masked_fill(~positive, 0).sum(1) / counts.clamp_min(1)
     )
-    return per_anchor[valid].mean()
+    return per_anchor.masked_fill(~valid, 0).sum() / valid.sum().clamp_min(1)
 
 
 def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None = None):
@@ -131,8 +130,11 @@ def _context_scores(
     batch,
     patch_hw,
     batch_size,
+    *,
+    eligible=None,
+    target_identity=None,
 ):
-    """Collect raw context, coverage and frozen binding in training chunks."""
+    """Score eligible pairs; transfer native features only for the current chunk."""
     queries, candidates = batch["positive_mask"].shape
     pairs = queries * candidates
     names = [
@@ -140,47 +142,103 @@ def _context_scores(
         "target_persons",
         "target_boxes",
         "target_mask",
-        "fafa_targets",
     ]
     targets = tuple(batch[name].flatten(0, 1) for name in names)
+    native = batch["fafa_targets"]
+    if isinstance(native, Tensor):
+        native = native.flatten(0, 1)
     pooling = batch["fafa_pooling"]
+    device = query.reference.device
+    if eligible is None:
+        positions_cpu = torch.arange(pairs)
+    else:
+        positions_cpu = eligible.detach().cpu().flatten().nonzero().flatten()
+    positions = positions_cpu.to(device, non_blocking=True)
+    masks_cpu = batch["target_mask"].detach().flatten(0, 1).cpu()
+    last_column = (
+        torch.where(masks_cpu, torch.arange(masks_cpu.shape[1]), -1).amax(1) + 1
+        if masks_cpu.shape[1]
+        else torch.zeros(pairs, dtype=torch.long)
+    )
+    identity = (
+        None if target_identity is None else target_identity.detach().flatten(0, 1)
+    )
 
-    def score_pairs(indices, scene, persons, boxes, mask, fafa_targets):
+    def score_pairs(indices, scene, persons, boxes, mask, assignment):
         selected = query.index_select(indices)
-        raw, matching = model.score_context(
-            selected, scene, persons, boxes, patch_hw, mask
+        padding = ~mask[..., None]
+        semantic = model.encode_semantic(persons.masked_fill(padding, 0))
+        return model.score_aligned_context(
+            selected,
+            scene,
+            semantic,
+            boxes.masked_fill(padding, 0),
+            assignment,
+            patch_hw,
         )
-        binding = fafa_binding_scores(
+
+    context, coverage, binding, assignments = [], [], [], []
+    for start in range(0, len(positions_cpu), batch_size):
+        cpu_rows = positions_cpu[start : start + batch_size]
+        rows = positions[start : start + batch_size]
+        width = int(last_column[cpu_rows].max())
+        chunk = []
+        for name, value in zip(names, targets, strict=True):
+            value = value if name == "target_scene" else value[:, :width]
+            index = cpu_rows if value.device.type == "cpu" else rows
+            chunk.append(value.index_select(0, index).to(device, non_blocking=True))
+        scene, persons, boxes, mask = chunk
+        if isinstance(native, NativeTargetBatch):
+            native_chunk = native.load(cpu_rows, width)
+        else:
+            index = cpu_rows if native.device.type == "cpu" else rows
+            native_chunk = native[:, :width].index_select(0, index)
+        indices = rows // candidates
+        selected = query.index_select(indices)
+        with torch.no_grad():
+            projected = (
+                model.encode_identity(persons.masked_fill(~mask[..., None], 0))
+                if identity is None
+                else identity[:, :width].index_select(0, rows)
+            )
+            matching = model.match_target(selected, projected, boxes, mask)
+        offset = fafa_binding_scores(
             selected.fafa,
-            fafa_targets,
+            native_chunk.to(device, non_blocking=True),
             matching=matching,
             k=model.fda_k,
             missing_penalty=model.fine_matching["missing_penalty"],
             pooling=pooling,
         )
-        return raw, matching.coverage, binding, matching.indices
-
-    context, coverage, binding, assignments = [], [], [], []
-    for start in range(0, pairs, batch_size):
-        stop = min(start + batch_size, pairs)
-        indices = torch.arange(start, stop, device=query.reference.device) // candidates
-        inputs = (indices, *(value[start:stop] for value in targets))
-        if pairs > batch_size and torch.is_grad_enabled():
-            values, covered, offset, assignment = checkpoint(
-                score_pairs, *inputs, use_reentrant=False
-            )
+        inputs = (indices, scene, persons, boxes, mask, matching.indices)
+        if len(positions_cpu) > batch_size and torch.is_grad_enabled():
+            values = checkpoint(score_pairs, *inputs, use_reentrant=False)
         else:
-            values, covered, offset, assignment = score_pairs(*inputs)
+            values = score_pairs(*inputs)
         context.append(values)
-        coverage.append(covered)
+        coverage.append(matching.coverage)
         binding.append(offset)
-        assignments.append(assignment)
+        assignments.append(matching.indices)
     shape = (queries, candidates)
+    if not context:
+        zero = query.reference.sum() * 0
+        return (
+            zero.expand(shape),
+            zero.detach().expand(shape),
+            zero.detach().expand(shape),
+            torch.full((*shape, query.identity.shape[1]), -1, device=device),
+        )
+
+    def scatter(chunks, fill=0):
+        values = torch.cat(chunks)
+        output = values.new_full((pairs, *values.shape[1:]), fill)
+        return output.index_copy(0, positions, values).unflatten(0, shape)
+
     return (
-        torch.cat(context).view(shape),
-        torch.cat(coverage).view(shape),
-        torch.cat(binding).view(shape),
-        torch.cat(assignments).unflatten(0, shape),
+        scatter(context),
+        scatter(coverage),
+        scatter(binding),
+        scatter(assignments, -1),
     )
 
 
@@ -241,7 +299,7 @@ def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
 
 def compute_loss(
     model: RCRModel,
-    batch: dict[str, Tensor | dict],
+    batch: dict[str, Tensor | dict | str | NativeTargetBatch],
     patch_hw: tuple[int, int],
     *,
     grounding_weight: float,
@@ -301,7 +359,6 @@ def compute_loss(
     identity_positive = batch["identity_positive_mask"]
     if (positive & ~identity_positive).any():
         raise ValueError("every Full Positive must also be an identity positive")
-    batch_size = len(positive)
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = swap = zero
@@ -371,20 +428,13 @@ def compute_loss(
         # Reuse the exact inference identity scorer without an unnecessary BxB
         # cross-query gallery. No state/relation label enters this identity task.
         with torch.autocast(query_identity.device.type, enabled=False):
-            coarse_scores = torch.stack(
-                [
-                    identity_scores(
-                        query_identity[i],
-                        logits[i].float(),
-                        target_identity[i],
-                        batch["target_mask"][i],
-                        query_mask=batch["query_person_mask"][i],
-                        subject_mask=None
-                        if "subject_mask" not in batch
-                        else batch["subject_mask"][i],
-                    )
-                    for i in range(batch_size)
-                ]
+            coarse_scores = identity_scores_paired(
+                query_identity,
+                logits.float(),
+                target_identity,
+                batch["target_mask"],
+                query_mask=batch["query_person_mask"],
+                subject_mask=batch.get("subject_mask"),
             )
         valid = batch["query_person_mask"].any(-1)[:, None] & batch["target_mask"].any(
             -1
@@ -397,8 +447,17 @@ def compute_loss(
         )
 
     if context_weight:
+        eligible = identity_positive
+        if context_rejection_weight:
+            eligible = eligible | batch["hard_identity_negative_mask"]
         raw_context, coverage, binding, assignments = _context_scores(
-            model, query, batch, patch_hw, context_batch_size
+            model,
+            query,
+            batch,
+            patch_hw,
+            context_batch_size,
+            eligible=eligible,
+            target_identity=target_identity,
         )
         scores = linear_score_components(
             binding,

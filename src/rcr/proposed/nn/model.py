@@ -424,7 +424,15 @@ class RCRModel(nn.Module):
         # Matching uses detached identity; context learns from aligned evidence.
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
-        matching = partial_identity_matching(
+        matching = self.match_target(query, target_identity, boxes, person_mask)
+        return self.score_aligned_context(
+            query, scene, semantic, boxes, matching.indices, patch_hw
+        ), matching
+
+    @torch.no_grad()
+    def match_target(self, query, target_identity, boxes, person_mask=None):
+        """Detached assignment, reusable outside activation checkpointing."""
+        return partial_identity_matching(
             query.identity,
             target_identity,
             query.membership,
@@ -434,9 +442,6 @@ class RCRModel(nn.Module):
             identity_threshold=self.fine_matching["identity_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )
-        return self.score_aligned_context(
-            query, scene, semantic, boxes, matching.indices, patch_hw
-        ), matching
 
     def score_aligned_context(self, query, scene, semantic, boxes, indices, patch_hw):
         """Score a condition on a fixed person assignment."""
@@ -476,6 +481,7 @@ class RCRModel(nn.Module):
         pooling: str = "penalized",
         context_weight: float = DEFAULT_CONTEXT_WEIGHT,
         coverage_weight: float = DEFAULT_COVERAGE_WEIGHT,
+        compute_context: bool = True,
     ) -> Tensor | dict[str, Tensor]:
         """Shared identity matching -> aligned evidence/context -> linear fine score.
 
@@ -484,9 +490,19 @@ class RCRModel(nn.Module):
         """
         if query.fafa is None:
             raise ValueError("fine retrieval requires native FAFA query features")
-        context, matching = self.score_context(
-            query, scene, persons, boxes, patch_hw, person_mask
-        )
+        if compute_context:
+            context, matching = self.score_context(
+                query, scene, persons, boxes, patch_hw, person_mask
+            )
+        else:
+            if context_weight != 0:
+                raise ValueError("skipping context requires context_weight=0")
+            padding = None if person_mask is None else ~person_mask[..., None]
+            identity = self.encode_identity(
+                persons if padding is None else persons.masked_fill(padding, 0)
+            )
+            matching = self.match_target(query, identity, boxes, person_mask)
+            context = torch.zeros_like(matching.coverage)
         if fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
             raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
         poolings = fafa_binding_scores(

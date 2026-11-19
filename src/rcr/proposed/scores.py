@@ -33,18 +33,38 @@ def linear_score_components(
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} weight must be finite and nonnegative")
     scale = torch.as_tensor(binding_scale, device=binding.device).float()
-    if scale.numel() != 1 or not torch.isfinite(scale).all() or (scale < 0).any():
+    if scale.numel() != 1:
         raise ValueError("binding scale must be finite and nonnegative")
     binding, context, coverage = binding.float(), context.float(), coverage.float()
-    if not all(torch.isfinite(x).all() for x in (binding, context, coverage)):
-        raise ValueError("fine score components contain NaN/Inf")
-    if ((coverage < 0) | (coverage > 1)).any():
-        raise ValueError("coverage must be in [0, 1]")
     bonus = coverage_weight * coverage
     contribution = context_weight * context
     fine = scale * binding + bonus + contribution
-    if not torch.isfinite(fine).all():
-        raise ValueError("fine scores overflowed float32")
+    checks = (
+        torch.stack(
+            (
+                torch.isfinite(scale).all() & (scale >= 0).all(),
+                torch.stack(
+                    [torch.isfinite(x).all() for x in (binding, context, coverage)]
+                ).all(),
+                ((coverage >= 0) & (coverage <= 1)).all(),
+                torch.isfinite(fine).all(),
+            )
+        )
+        .cpu()
+        .tolist()
+    )
+    for valid, message in zip(
+        checks,
+        (
+            "binding scale must be finite and nonnegative",
+            "fine score components contain NaN/Inf",
+            "coverage must be in [0, 1]",
+            "fine scores overflowed float32",
+        ),
+        strict=True,
+    ):
+        if not valid:
+            raise ValueError(message)
     return {
         "coverage_bonus": bonus,
         "context_contribution": contribution,
@@ -133,13 +153,42 @@ def identity_scores_batched(
     eps: float = 1e-6,
 ) -> Tensor:
     """Score [B,Kq,D] queries against one [G,Kt,D] gallery chunk, returning [B,G]."""
-    b, g = query_identity.shape[0], gallery_identity.shape[0]
-    if gallery_identity.shape[1] == 0:
-        return gallery_identity.new_full((b, g), -torch.inf)
-    if query_identity.shape[1] == 0:
-        scores = gallery_identity.new_zeros(b, g)
+    similarity = torch.einsum("bqd,gkd->bgqk", query_identity, gallery_identity)
+    return _pool_identity_similarity(
+        similarity,
+        grounding_logits,
+        None if gallery_mask is None else gallery_mask[None],
+        query_mask,
+        subject_mask,
+        eps,
+    )
+
+
+def identity_scores_paired(
+    query_identity: Tensor,
+    grounding_logits: Tensor,
+    target_identity: Tensor,
+    target_mask: Tensor | None = None,
+    query_mask: Tensor | None = None,
+    subject_mask: Tensor | None = None,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Score each query's own [B,C,Kt,D] candidates without a Python batch loop."""
+    similarity = torch.einsum("bqd,bckd->bcqk", query_identity, target_identity)
+    return _pool_identity_similarity(
+        similarity, grounding_logits, target_mask, query_mask, subject_mask, eps
+    )
+
+
+def _pool_identity_similarity(
+    similarity, grounding_logits, gallery_mask, query_mask, subject_mask, eps
+):
+    if similarity.shape[-1] == 0:
+        return similarity.new_full(similarity.shape[:2], -torch.inf)
+    if similarity.shape[-2] == 0:
+        scores = similarity.new_zeros(similarity.shape[:2])
         return (
-            scores.masked_fill(~gallery_mask.any(-1)[None], -torch.inf)
+            scores.masked_fill(~gallery_mask.any(-1), -torch.inf)
             if gallery_mask is not None
             else scores
         )
@@ -148,9 +197,8 @@ def identity_scores_batched(
         weight = weight * query_mask[:, None].to(weight.dtype)
     if subject_mask is not None:
         weight = weight * subject_mask[:, :, None].to(weight.dtype)
-    similarity = torch.einsum("bqd,gkd->bgqk", query_identity, gallery_identity)
     if gallery_mask is not None:
-        similarity = similarity.masked_fill(~gallery_mask[None, :, None, :], -torch.inf)
+        similarity = similarity.masked_fill(~gallery_mask[:, :, None, :], -torch.inf)
     best = similarity.amax(dim=-1)
     empty = ~torch.isfinite(best).any(dim=-1)
     best = best.masked_fill(empty[..., None], 0)
