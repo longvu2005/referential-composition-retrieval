@@ -83,7 +83,7 @@ loss:
   context_weight: 1.0
   context_temperature: 0.1
   context_rejection_weight: 0.5
-  context_swap_weight: 0.2
+  context_swap_weight: 0.0
   state_weight: 1.0
   state_temperature: 0.1
 retrieval:
