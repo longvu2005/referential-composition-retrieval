@@ -6,13 +6,13 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from statistics import fmean
 
+import numpy as np
 import torch
 
 from rcr.common.data import RCRData, required_identity_ids, split_image_ids
 from rcr.dataset.cases import CASE_TYPES
 from rcr.evaluation.metrics import (
     average_precision,
-    average_precision_at_ranks,
     candidate_recall_at_k,
     recall_at_k,
 )
@@ -55,21 +55,37 @@ class TopMSelectionEvaluator:
         masks = []
         for sample, top, coarse in zip(
             samples,
-            output["coarse_topm"].tolist(),
-            output["coarse_rankings"].tolist(),
+            output["coarse_topm"].numpy(),
+            output["coarse_rankings"].numpy(),
             strict=True,
         ):
             positives = {gallery[image] for image in sample["positive_image_ids"]}
             self.denominators.append(len(positives))
-            masks.append([index in positives for index in top])
+            positive_indices = np.fromiter(positives, dtype=np.int64)
+            masks.append(np.isin(top, positive_indices))
             self.tails.append(
-                [
-                    rank
-                    for rank, index in enumerate(coarse[self.width :], self.width + 1)
-                    if index in positives
-                ]
+                (
+                    np.flatnonzero(np.isin(coarse[self.width :], positive_indices))
+                    + self.width
+                    + 1
+                ).tolist()
             )
-        self.positives = torch.tensor(masks, dtype=torch.bool)
+        self.positives = torch.from_numpy(np.stack(masks))
+        counts = self.positives.sum(1).numpy()
+        self._head_rows = self.positives.nonzero().numpy()[:, 0]
+        starts = counts.cumsum() - counts
+        self._head_slots = np.arange(len(self._head_rows)) - starts[self._head_rows]
+        self._head_hits = (self._head_slots + 1).astype(np.float64)
+        width = max(
+            int(count) + len(tail)
+            for count, tail in zip(counts, self.tails, strict=True)
+        )
+        self._precision = np.zeros((len(samples), width), dtype=np.float64)
+        for index, (count, tail) in enumerate(zip(counts, self.tails, strict=True)):
+            self._precision[index, count : count + len(tail)] = (
+                count + np.arange(1, len(tail) + 1, dtype=np.float64)
+            ) / np.asarray(tail)
+        self._denominators = np.asarray(self.denominators, dtype=np.float64)
         self.cases = {
             case: [i for i, row in enumerate(samples) if row["case_type"] == case]
             for case in CASE_TYPES
@@ -79,15 +95,14 @@ class TopMSelectionEvaluator:
         """Use the official AP summation order for each shortlist permutation."""
         if order.shape != self.positives.shape or order.device.type != "cpu":
             raise ValueError("selection requires CPU orders aligned with coarse_topm")
-        ranks = [[] for _ in self.samples]
-        for query, position in self.positives.gather(1, order).nonzero().tolist():
-            ranks[query].append(position + 1)
-        aps = [
-            average_precision_at_ranks([*head, *tail], denominator)
-            for head, tail, denominator in zip(
-                ranks, self.tails, self.denominators, strict=True
-            )
-        ]
+        positions = self.positives.gather(1, order).numpy().nonzero()[1] + 1
+        precision = self._precision.copy()
+        precision[self._head_rows, self._head_slots] = self._head_hits / positions
+        # Accumulate positives in official rank order, including the fixed tail.
+        # A separately reduced tail sum would change float64 rounding and ties.
+        aps = (
+            np.add.accumulate(precision, axis=1)[:, -1] / self._denominators
+        ).tolist()
         return {
             "overall": {"num_queries": len(aps), "full_map": fmean(aps)},
             "by_case": {

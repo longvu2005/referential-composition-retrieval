@@ -4,6 +4,7 @@ import copy
 import json
 from itertools import product
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +20,7 @@ from rcr.proposed import train as training
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
 from rcr.proposed.matching import PersonMatching
 from rcr.proposed.nn.model import RCRModel
-from rcr.proposed.nn.reasoning import FineReasoner
+from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
 from rcr.proposed.scores import POOLING_MODES, pool_fafa_scores
@@ -88,6 +89,31 @@ def test_fusion_matches_fp64_reference_and_preserves_ties_and_tail():
     for bad in (float("nan"), float("inf"), -0.1):
         with pytest.raises(ValueError, match="finite and nonnegative"):
             ranking.fuse_fine_coarse_scores(fine, coarse, bad)
+
+
+def test_batched_calibration_normalization_matches_each_replay_row_exactly():
+    generator = torch.Generator().manual_seed(1812)
+    scores = torch.randn(37, 23, generator=generator, dtype=torch.float64)
+    support = torch.rand(37, 23, generator=generator) > 0.4
+    support[0] = False
+    support[1] = True
+    scores[1] = 0.1
+    support[2] = False
+    support[2, 7] = True
+    scores[3] = 1e30
+    scores = scores.masked_fill(~support, torch.nan)
+    expected = torch.stack(
+        [
+            ranking.normalize_fusion_scores(row, valid)
+            for row, valid in zip(scores, support, strict=True)
+        ]
+    )
+    actual = ranking.normalize_fusion_rows(scores, support)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.dtype == torch.float32
+    scores[1, 0] = torch.nan
+    with pytest.raises(ValueError, match="NaN/Inf"):
+        ranking.normalize_fusion_rows(scores, support)
 
 
 def test_complete_topm_is_independent_of_inference_chunks(tiny_ranker):
@@ -287,42 +313,396 @@ def test_multi_subject_export_retains_a_completely_missing_role(
         torch.testing.assert_close(direct["fafa_binding"], replayed["fafa_binding"])
 
 
-def test_ordered_pair_scoring_preserves_missing_subject_weights():
-    dim = 4
-    reasoner = FineReasoner(dim, 2, 2, 0)
-    subjects = torch.ones(1, 3, dtype=torch.bool)
-    condition, weights = reasoner.encode_condition(
-        torch.zeros(1, 3, dim), None, torch.eye(3, dtype=torch.bool)[None], subjects
-    )
-    assert condition.shape == (1, 6, dim)
-    torch.testing.assert_close(weights.sum(1), torch.ones(1))
-    reasoner.subject_score = torch.nn.Linear(2 * dim + 4, 1)
-    reasoner.pair_score = torch.nn.Linear(4 * dim + 5, 1, bias=False)
-    with torch.no_grad():
-        reasoner.subject_score.weight.zero_()
-        reasoner.subject_score.bias.fill_(1)
-        reasoner.pair_score.weight.zero_()
-        reasoner.pair_score.weight[0, 3 * dim] = 1
+class _AttentionProbe(torch.nn.Module):
+    def __init__(self, heads=2):
+        super().__init__()
+        self.num_heads = heads
+        self.calls = []
 
-    weights = torch.tensor([[0.25, 0, 0, 0.75, 0, 0]])
-    boxes = torch.tensor([[[0, 0, 0.25, 1], [0.5, 0, 0.75, 1], [0.75, 0, 1, 1]]])
-    membership = torch.eye(3)[None]
-    evidence = torch.zeros(1, 3, dim)
-    scene = torch.zeros(1, 4, dim)
-    full = reasoner(condition, weights, evidence, boxes, membership, scene, (2, 2))
-    reverse = reasoner(
-        condition, weights, evidence, boxes[:, [1, 0, 2]], membership, scene, (2, 2)
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        *,
+        attn_mask=None,
+        key_padding_mask=None,
+        need_weights=False,
+    ):
+        self.calls.append(
+            {
+                "query": query.detach().clone(),
+                "key": key.detach().clone(),
+                "bias": None if attn_mask is None else attn_mask.detach().clone(),
+                "padding": key_padding_mask,
+            }
+        )
+        return torch.zeros_like(query), None
+
+
+class _ZeroUpdate(torch.nn.Module):
+    def forward(self, tokens):
+        return torch.zeros_like(tokens)
+
+
+@pytest.fixture
+def aligned_reasoner():
+    reasoner = FineReasoner(4, 2, 2, 0).eval()
+    reasoner.norm_cross = torch.nn.Identity()
+    reasoner.norm_self = torch.nn.Identity()
+    reasoner.norm_out = torch.nn.Identity()
+    reasoner.ffn = _ZeroUpdate()
+    reasoner.self_attn = _AttentionProbe()
+    reasoner.score = torch.nn.Linear(4, 1)
+    with torch.no_grad():
+        reasoner.score.weight.zero_()
+        reasoner.score.bias.fill_(0.8)
+        reasoner.pair_proj.weight.zero_()
+        reasoner.pair_proj.bias.zero_()
+        reasoner.pair_proj.weight[0, 4] = 1  # First endpoint's first coordinate.
+        reasoner.pair_proj.weight[1, 8] = 1  # Second endpoint's first coordinate.
+        reasoner.pair_proj.weight[2, 0] = 1
+        reasoner.pair_proj.weight[3, 5] = 1
+        reasoner.pair_proj.weight[3, 9] = -1
+        reasoner.relation_geo.weight.zero_()
+        reasoner.relation_geo.weight[0, 0] = 1
+        reasoner.relation_geo.weight[1, 1] = 1
+    selected = torch.tensor([[[True, True], [True, False], [False, False]]])
+    matched = torch.tensor([[[True, False], [True, False], [False, False]]])
+    null = torch.nn.Parameter(torch.tensor([0.2, -0.4, 0.6, 0.1]))
+    target = torch.arange(24.0).reshape(1, 3, 2, 4) / 10
+    target = torch.where(matched[..., None], target, null)
+    target = target.masked_fill(~selected[..., None], 0)
+    boxes = torch.full((1, 6, 4), torch.nan)
+    boxes[0, 0] = torch.tensor([0.0, 0, 1, 1])
+    boxes[0, 2] = torch.tensor([0.5, 0.25, 1.25, 1.75])
+    args = dict(
+        reference=torch.arange(40.0).reshape(1, 10, 4) / 20,
+        target=target,
+        selected=selected,
+        subjects=torch.ones(1, 3, dtype=torch.bool),
+        condition=torch.tensor(
+            [[[0.3, 0.1, -0.2, 0], [0.1, -0.3, 0.5, 0], [0.2, 0.2, 0.1, -0.1]]]
+        ),
+        null_person=null,
+        query_mask=torch.ones(1, 10, dtype=torch.bool),
+        query_key_bias=torch.linspace(-0.5, 0.4, 10)[None],
+        aligned_boxes=boxes,
+        matched_mask=matched,
     )
-    membership[:, 1] = 0
-    missing = reasoner(condition, weights, evidence, boxes, membership, scene, (2, 2))
+    inputs = []
+    reasoner.pair_proj.register_forward_pre_hook(
+        lambda module, values: inputs.append(values[0].detach().clone())
+    )
+    return reasoner, args, inputs
+
+
+def test_ordered_pair_tokens_read_group_members_and_keep_endpoint_order(
+    aligned_reasoner,
+):
+    reasoner, args, inputs = aligned_reasoner
+    readouts, normalizations, feedforwards = [], [], []
+    reasoner.score.register_forward_pre_hook(
+        lambda module, values: readouts.append(values[0].detach().clone())
+    )
+    reasoner.norm_self.register_forward_hook(
+        lambda *values: normalizations.append(True)
+    )
+    reasoner.ffn.register_forward_hook(lambda *values: feedforwards.append(True))
+    score = reasoner(**args)
+    coverage = (
+        args["matched_mask"].sum(-1) / args["selected"].sum(-1).clamp_min(1)
+    ).mean(1)
+    torch.testing.assert_close(coverage, torch.tensor([0.5]))
     torch.testing.assert_close(
-        torch.cat((full, reverse, missing)),
-        torch.tensor(
+        score, torch.tensor([0.8])
+    )  # Coverage is 0.5, not a score multiplier.
+    injected = args["reference"] + torch.cat(
+        (torch.zeros(1, 4, 4), args["target"].flatten(1, 2)), 1
+    )
+    persons = injected[:, 4:].reshape(1, 3, 2, 4)
+    expected = []
+    for pair, (first, second) in enumerate(((0, 1), (0, 2), (1, 2))):
+        condition = args["condition"][0, pair]
+        endpoints = []
+        for subject in (first, second):
+            members = persons[0, subject, args["selected"][0, subject]]
+            endpoints.append(
+                args["null_person"]
+                if not len(members)
+                else ((members @ condition / 2).softmax(0)[:, None] * members).sum(0)
+            )
+        expected.append(torch.cat((condition, *endpoints)))
+    torch.testing.assert_close(inputs[0], torch.stack(expected)[None])
+    # GROUP has two separate slots, including its selected missing-match member.
+    calls = reasoner.self_attn.calls
+    assert len(calls) == 2
+    torch.testing.assert_close(calls[0]["query"][:, :10], injected)
+    torch.testing.assert_close(readouts[0], injected[:, 0])
+    assert len(normalizations) == 2 and len(feedforwards) == 1
+    assert calls[0]["query"].shape == (1, 13, 4)
+    bias = calls[0]["bias"]
+    torch.testing.assert_close(bias, calls[1]["bias"], rtol=0, atol=0)
+    assert bias[:, :, [7, 8, 9]].isneginf().all()  # Unselected person keys.
+    assert bias[:, :, 10:].count_nonzero() == 0  # Active pair keys remain neutral.
+    # Only person-to-person edges add directed geometry; other keys retain prior.
+    torch.testing.assert_close(bias[0, 4, 6], args["query_key_bias"][0, 6] + 0.375)
+    torch.testing.assert_close(bias[0, 6, 4], args["query_key_bias"][0, 4] - 0.375)
+    args["subjects"][0, 2] = False
+    reasoner(**args)
+    assert reasoner.self_attn.calls[-1]["bias"][:, :, 11:].isneginf().all()
+
+
+def test_eval_token_compaction_keeps_null_group_members_pairs_and_geometry(
+    aligned_reasoner,
+):
+    reasoner, args, inputs = aligned_reasoner
+    expected = reasoner(**args)
+    full_attention = reasoner.self_attn.calls[0]
+    full_pair_inputs = inputs[0]
+    membership = args["selected"].float()
+    query = SimpleNamespace(
+        reference=args["reference"],
+        mask=args["query_mask"],
+        subjects=args["subjects"],
+        membership=membership,
+    )
+    layout = ranking._reasoning_layout(query)
+    assert layout.reference_indices.tolist() == list(range(7))
+    assert layout.person_indices.tolist() == [0, 1, 2]
+    assert layout.token_indices.tolist() == [*range(7), 10, 11, 12]
+    assert layout.person_offset == 4
+    actual = reasoner(**args, layout=layout)
+    compact_attention = reasoner.self_attn.calls[2]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(inputs[1], full_pair_inputs, rtol=0, atol=0)
+    indices = layout.token_indices
+    torch.testing.assert_close(
+        compact_attention["query"], full_attention["query"].index_select(1, indices)
+    )
+    torch.testing.assert_close(
+        compact_attention["bias"],
+        full_attention["bias"].index_select(1, indices).index_select(2, indices),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_pair_condition_reads_marker_means_in_slot_order_before_injection():
+    reasoner = FineReasoner(4, 2, 2, 0)
+    attention = _AttentionProbe()
+    reasoner.condition_attn = attention
+    with torch.no_grad():
+        reasoner.pair_query.weight.copy_(
+            torch.cat((torch.eye(4), 10 * torch.eye(4)), 1)
+        )
+        reasoner.pair_query.bias.zero_()
+    tokens = torch.tensor(
+        [
             [
-                0.625,
-                -0.125,
-                0.25,
+                [1.0, 0, 0, 0],
+                [0, 2, 0, 0],
+                [3, 0, 0, 0],
+                [999, 999, 999, 999],
+                [0, 0, 5, 0],
             ]
+        ]
+    )
+    mentions = torch.tensor(
+        [
+            [
+                [True, False, True, True, False],
+                [False, True, False, False, False],
+                [False, False, False, False, True],
+            ]
+        ]
+    )
+    result = reasoner.encode_condition(
+        tokens,
+        torch.tensor([[True, True, True, False, True]]),
+        mentions,
+        torch.ones(1, 3, dtype=torch.bool),
+    )
+    expected = torch.tensor([[[2.0, 20, 0, 0], [2, 0, 50, 0], [0, 2, 50, 0]]])
+    assert len(attention.calls) == 1
+    torch.testing.assert_close(attention.calls[0]["query"], expected)
+    torch.testing.assert_close(result, torch.nn.functional.layer_norm(expected, (4,)))
+    assert attention.calls[0]["key"][0, 3].count_nonzero() == 0
+    assert not hasattr(reasoner, "subject_score") and not hasattr(
+        reasoner, "pair_score"
+    )
+
+
+def test_directed_geometry_is_fp32_and_neutral_for_unmatched_edges(aligned_reasoner):
+    reasoner, args, _ = aligned_reasoner
+    weights = torch.tensor([[1.0, 2, 3, 4, 5], [-2, 1, 0.5, -0.25, 1]])
+    with torch.no_grad():
+        reasoner.relation_geo.weight.copy_(weights)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        bias = reasoner._relation_bias(
+            args["aligned_boxes"], args["matched_mask"].flatten(1)
+        )
+    assert bias.dtype == torch.float32
+    geometry = torch.tensor([0.375, 0.5, 0.75, 1.5, 0.375 / 1.75])
+    geometry[2:4] = geometry[2:4].log()
+    reverse = geometry * torch.tensor([-1.0, -1, -1, -1, 1])
+    torch.testing.assert_close(bias[:, 0, 2], weights @ geometry)
+    torch.testing.assert_close(bias[:, 2, 0], weights @ reverse)
+    assert bias[:, [1, 3, 4, 5]].count_nonzero() == 0
+    assert bias[:, :, [1, 3, 4, 5]].count_nonzero() == 0
+    assert torch.isfinite(bias).all()
+
+
+def test_cls_score_gates_only_all_missing_and_handles_single_subject(aligned_reasoner):
+    reasoner, args, inputs = aligned_reasoner
+    args["reference"] = args["reference"][:, :6]
+    for name in ("target", "selected", "subjects", "matched_mask"):
+        args[name] = args[name][:, :1]
+    args["condition"] = torch.empty(1, 0, 4)
+    args["aligned_boxes"] = args["aligned_boxes"][:, :2]
+    args["query_mask"] = args["query_mask"][:, :6]
+    args["query_key_bias"] = args["query_key_bias"][:, :6]
+    torch.testing.assert_close(reasoner(**args), torch.tensor([0.8]))
+    assert not inputs  # No pair projection, condition token, or empty-pair attention.
+    assert reasoner.self_attn.calls[0]["query"].shape[1] == 6
+    args["matched_mask"] = torch.zeros_like(args["matched_mask"])
+    args["target"] = args["null_person"].expand_as(args["target"])
+    with torch.no_grad():
+        reasoner.score.bias.fill_(torch.nan)
+    result = reasoner(**args)
+    assert result.dtype == torch.float32 and torch.equal(result, torch.zeros(1))
+
+
+def test_no_person_slots_use_null_endpoints_without_empty_softmax(aligned_reasoner):
+    reasoner, args, inputs = aligned_reasoner
+    args["reference"] = args["reference"][:, :4]
+    for name in ("target", "selected", "matched_mask"):
+        args[name] = args[name][:, :, :0]
+    args["aligned_boxes"] = args["aligned_boxes"][:, :0]
+    args["query_mask"] = args["query_mask"][:, :4]
+    args["query_key_bias"] = args["query_key_bias"][:, :4]
+    assert torch.equal(reasoner(**args), torch.zeros(1))
+    torch.testing.assert_close(inputs[0][..., 4:8], args["null_person"].expand(1, 3, 4))
+    torch.testing.assert_close(inputs[0][..., 8:], args["null_person"].expand(1, 3, 4))
+
+
+def test_aligned_evidence_is_bound_once_and_injected_into_the_assigned_slots():
+    model = RCRModel(dim=4, identity_dim=2, num_heads=2).eval()
+    with torch.no_grad():
+        model.null_person.fill_(0.25)
+    calls, injected = [], []
+
+    class Binding(torch.nn.Module):
+        def forward(self, scene, persons, boxes, *args):
+            calls.append((persons.detach().clone(), boxes.detach().clone()))
+            return persons
+
+    model.grounding.binding = Binding()
+    model.reasoner.register_forward_pre_hook(
+        lambda module, args, kwargs: injected.append((args, kwargs)), with_kwargs=True
+    )
+    semantic = torch.tensor([[[1.0, 0, 0, 0], [0, 2, 0, 0], [0, 0, 3, 1]]])
+    boxes = torch.tensor(
+        [[[0.0, 0, 1, 1], [0.1, 0.2, 0.5, 0.6], [0.5, 0.25, 1.25, 1.75]]]
+    )
+    query = SimpleNamespace(
+        reference=torch.zeros(1, 9, 4),
+        mask=torch.ones(1, 9, dtype=torch.bool),
+        prior=torch.zeros(1, 9),
+        condition=torch.zeros(1, 1, 4),
+        membership=torch.tensor([[[0.8, 0.4, 0], [0, 0, 0.6]]]),
+        subjects=torch.ones(1, 2, dtype=torch.bool),
+    )
+    score = model.score_aligned_context(
+        query, torch.zeros(1, 4, 4), semantic, boxes, torch.tensor([[2, -1, 0]]), (2, 2)
+    )
+    assert len(calls) == 1 and calls[0][0].shape == (1, 3, 4)
+    torch.testing.assert_close(
+        calls[0][0], torch.stack((semantic[0, 2], torch.zeros(4), semantic[0, 0]))[None]
+    )
+    args, kwargs = injected[0]
+    target, selected, matched = args[1], args[2], kwargs["matched_mask"]
+    assert selected.tolist() == [[[True, True, False], [False, False, True]]]
+    assert matched.tolist() == [[[True, False, False], [False, False, True]]]
+    torch.testing.assert_close(target[0, 0, 1], model.null_person)
+    assert target[~selected].count_nonzero() == 0
+    builder = model.target_builder
+    expected = builder(calls[0][0], calls[0][1])
+    torch.testing.assert_close(target[0, 0, 0], expected[0, 0])
+    torch.testing.assert_close(target[0, 1, 2], expected[0, 2])
+    assert kwargs["aligned_boxes"].shape == (1, 6, 4)
+    assert kwargs["aligned_boxes"][0, [1, 2, 3, 4]].count_nonzero() == 0
+    score.sum().backward()
+    assert model.null_person.grad is not None and model.null_person.grad.abs().sum() > 0
+    assert model.target_builder.evidence_proj.weight.grad.abs().sum() > 0
+
+
+def test_target_builder_uses_center_size_projection_and_target_normalization():
+    builder = TargetPersonBuilder(4)
+    with torch.no_grad():
+        builder.evidence_proj.weight.copy_(torch.eye(4))
+        builder.box_proj.weight.copy_(torch.eye(4))
+        builder.evidence_proj.bias.zero_()
+        builder.box_proj.bias.zero_()
+    evidence = torch.tensor([[[1.0, 2, 3, 4]]])
+    output = builder(evidence, torch.tensor([[[0.0, 0, 2, 4]]]))
+    torch.testing.assert_close(
+        output,
+        torch.nn.functional.layer_norm(evidence + torch.tensor([1.0, 2, 2, 4]), (4,)),
+    )
+
+
+def test_pair_condition_is_cached_per_query_and_recondition_uses_marker_fallback():
+    torch.manual_seed(7)
+    model = RCRModel(dim=4, identity_dim=2, num_heads=2).eval()
+    calls = []
+    model.reasoner.condition_attn.register_forward_pre_hook(
+        lambda module, args: calls.append(args[0].detach().clone())
+    )
+    positions = torch.tensor([[0, 2]])
+    change = torch.randn(1, 3, 4)
+    query = model.encode_query(
+        torch.randn(1, 4, 4),
+        torch.randn(1, 2, 4),
+        torch.tensor([[[0.0, 0, 0.4, 1], [0.6, 0, 1, 1]]]),
+        torch.randn(1, 2, 2, 4),
+        change,
+        positions,
+        (2, 2),
+        change_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+    expected = model.reasoner.pair_query(
+        torch.cat((query.reference[:, 1], query.reference[:, 3]), -1)[:, None]
+    )
+    assert len(calls) == 1 and query.condition.shape == (1, 1, 4)
+    torch.testing.assert_close(calls[0], expected)
+    assert not hasattr(query, "condition_weights")
+    targets = query.repeat_candidates(3)
+    model.score_aligned_context(
+        targets,
+        torch.randn(3, 4, 4),
+        torch.randn(3, 2, 4),
+        torch.zeros(3, 2, 4),
+        torch.tensor([[0, 1]]).expand(3, -1),
+        (2, 2),
+    )
+    assert len(calls) == 1
+    edited = model.recondition_query(
+        query,
+        torch.randn(1, 2, 4),
+        torch.ones(1, 2, dtype=torch.bool),
+        change=change.flip(1),
+        subject_pos=positions,
+        change_mask=torch.ones(1, 3, dtype=torch.bool),
+        subject_token_mask=None,
+        subject_ids=torch.tensor([[1, 2]]),
+    )
+    assert len(calls) == 2 and edited.fafa is None
+    torch.testing.assert_close(edited.membership, query.membership)
+    torch.testing.assert_close(
+        calls[-1],
+        model.reasoner.pair_query(
+            torch.cat((edited.reference[:, 1], edited.reference[:, 3]), -1)[:, None]
         ),
     )
 

@@ -304,18 +304,27 @@ class GalleryCache:
             return persons, boxes, mask
         persons, mask = self.load_persons(indices)
         boxes = torch.zeros(len(indices), mask.shape[1], 4)
-        height, width = self.encoder_metadata["image_encoder"]["scene_size"]
         rows = {}
         for n, index in enumerate(indices.tolist()):
             rows.setdefault(index, []).append(n)
         for index, positions in rows.items():
-            geometry = self.detections.load_geometry(index)
-            coords = boxes_to_scene(
-                geometry["boxes_pixel"], geometry["image_size"], (width, height)
-            )
+            coords = self._scene_boxes(index)
             for n in positions:
                 boxes[n, mask[n]] = coords
         return persons, boxes, mask
+
+    def _scene_boxes(self, index: int) -> Tensor:
+        """Share immutable normalized geometry between matching and scene loading."""
+
+        def load():
+            geometry = self.detections.load_geometry(index)
+            height, width = self.encoder_metadata["image_encoder"]["scene_size"]
+            return boxes_to_scene(
+                geometry["boxes_pixel"], geometry["image_size"], (width, height)
+            )
+
+        # Charge boxes to the existing visual budget; leave native-shard LRU alone.
+        return self._cached(f"geometry:{index}", load)
 
     def load_scenes(self, indices: Tensor) -> Tensor:
         """Retain frozen storage precision until patches reach the compute device."""
@@ -363,11 +372,7 @@ class GalleryCache:
             if self._scene_cache is None:
                 raise ValueError("loading scene features requires data.scene_cache")
             item = self._scene_cache._load_item(index)
-            geometry = self.detections.load_geometry(index)
-            h, w = self.encoder_metadata["image_encoder"]["scene_size"]
-            item["boxes_scene"] = boxes_to_scene(
-                geometry["boxes_pixel"], geometry["image_size"], (w, h)
-            )
+            item["boxes_scene"] = self._scene_boxes(index)
             item["persons"] = self.person_row(index).clone()
         elif self._scene_cache is not None:
             # The published person index is authoritative. Clone rows so an LRU
@@ -394,7 +399,7 @@ class GalleryCache:
 
     def _cached(self, key, load):
         """Keep scene and native-shard budgets independent."""
-        # Scene keys are integer image indices; native query/target keys are tuples.
+        # Visual keys are scene indices/geometry strings; native keys are tuples.
         native = isinstance(key, tuple)
         with self._lock:
             items = self._native_items if native else self._items

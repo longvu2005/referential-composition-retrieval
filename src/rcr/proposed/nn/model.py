@@ -24,7 +24,7 @@ from rcr.proposed.nn.composition import (
 )
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
-from rcr.proposed.nn.reasoning import FineReasoner
+from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
@@ -45,7 +45,6 @@ class QueryEncoding:
     mask: Tensor
     prior: Tensor
     condition: Tensor
-    condition_weights: Tensor
     fafa: Tensor | None
     membership: Tensor
     subjects: Tensor
@@ -169,7 +168,9 @@ class RCRModel(nn.Module):
             mlp_ratio,
             dropout,
         )
+        self.target_builder = TargetPersonBuilder(dim)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
+        self.null_person = nn.Parameter(torch.zeros(dim))
 
     @property
     def binding_scale(self) -> Tensor:
@@ -342,10 +343,10 @@ class RCRModel(nn.Module):
         if mentions is None:
             positions = torch.arange(change.shape[1], device=change.device)
             mentions = subject_pos[..., None] == positions
-        readouts, weights = self.reasoner.encode_condition(
+        condition = self.reasoner.encode_condition(
             reference[:, 1 : 1 + change.shape[1]], change_mask, mentions, subjects
         )
-        return reference, mask, prior, readouts, weights
+        return reference, mask, prior, condition
 
     def recondition_query(
         self,
@@ -363,7 +364,7 @@ class RCRModel(nn.Module):
         semantic = self.encode_semantic(
             query_persons.masked_fill(~person_mask[..., None], 0)
         )
-        reference, mask, prior, readouts, weights = self._encode_condition(
+        reference, mask, prior, condition = self._encode_condition(
             semantic,
             query.membership,
             query.subjects,
@@ -378,8 +379,7 @@ class RCRModel(nn.Module):
             reference=reference,
             mask=mask,
             prior=prior,
-            condition=readouts,
-            condition_weights=weights,
+            condition=condition,
             fafa=None,
         )
 
@@ -444,28 +444,46 @@ class RCRModel(nn.Module):
             duplicate_iou=self.fine_matching["duplicate_iou"],
         )
 
-    def score_aligned_context(self, query, scene, semantic, boxes, indices, patch_hw):
+    def score_aligned_context(
+        self, query, scene, semantic, boxes, indices, patch_hw, *, layout=None
+    ):
         """Score a condition on a fixed person assignment."""
-        matched = indices >= 0
+        selected = query.subjects[..., None] & (query.membership > 0)
+        matched = selected & (indices >= 0)[:, None]
         boxes = gather_matched(boxes, indices)
         scene = self.visual_proj(scene)
+        reference, mask, prior = query.reference, query.mask, query.prior
+        if layout is not None:
+            reference = reference.index_select(1, layout.reference_indices)
+            mask = mask.index_select(1, layout.reference_indices)
+            prior = prior.index_select(1, layout.reference_indices)
         evidence = self.grounding.binding(
             scene,
             gather_matched(semantic, indices),
             boxes,
-            query.reference,
+            reference,
             patch_hw,
+            mask,
+            prior,
+        ).masked_fill(~(indices >= 0)[..., None], 0)
+        # Binding runs once per reference detection. Roles remain separate slots.
+        person = self.target_builder(evidence, boxes)[:, None]
+        target = torch.where(matched[..., None], person, self.null_person)
+        target = target.masked_fill(~selected[..., None], 0)
+        aligned_boxes = boxes[:, None].expand(-1, selected.shape[1], -1, -1)
+        aligned_boxes = aligned_boxes.masked_fill(~matched[..., None], 0).flatten(1, 2)
+        return self.reasoner(
+            query.reference,
+            target,
+            selected,
+            query.subjects,
+            query.condition,
+            self.null_person,
             query.mask,
             query.prior,
-        ).masked_fill(~matched[..., None], 0)
-        return self.reasoner(
-            query.condition,
-            query.condition_weights,
-            evidence,
-            boxes,
-            query.membership.masked_fill(~matched[:, None], 0),
-            scene,
-            patch_hw,
+            aligned_boxes=aligned_boxes,
+            matched_mask=matched,
+            layout=layout,
         )
 
     def score_target(

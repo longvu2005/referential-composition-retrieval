@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -12,6 +13,7 @@ from tqdm import tqdm
 
 from rcr.common.data import inference_samples
 from rcr.common.runtime import evaluating
+from rcr.proposed.matching import PersonMatching
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
@@ -19,8 +21,10 @@ from rcr.proposed.scores import (
     MINING_CONTEXT_WEIGHT,
     POOLING_MODES,
     combine_scores,
+    fafa_binding_scores,
     identity_scores_batched,
     linear_score_components,
+    pool_fafa_scores,
 )
 
 SCORE_SCHEMA_VERSION = 4
@@ -173,6 +177,36 @@ def normalize_fusion_scores(
     return result
 
 
+def normalize_fusion_rows(scores: Tensor, support: Tensor) -> Tensor:
+    """Batch CPU calibration statistics over rows with the same support size.
+
+    Pack only supported entries, preserving their order and the population
+    normalization used by the single-query replay scorer.
+    """
+    if scores.ndim != 2 or scores.shape != support.shape or support.dtype != torch.bool:
+        raise ValueError("normalization requires aligned score/mask matrices")
+    result = torch.full_like(scores, -torch.inf, dtype=torch.float32)
+    counts = support.sum(1)
+    for count in counts.unique().tolist():
+        if not count:
+            continue
+        rows = (counts == count).nonzero().flatten()
+        mask = support.index_select(0, rows)
+        values = scores.index_select(0, rows)[mask].float().reshape(-1, count)
+        if not torch.isfinite(values).all():
+            raise ValueError("fusion support contains NaN/Inf")
+        normalized = (values - values.mean(1, keepdim=True)) / values.std(
+            1, unbiased=False, keepdim=True
+        ).clamp_min(SCORE_EPS)
+        normalized = normalized.masked_fill(
+            (values == values[:, :1]).all(1)[:, None], 0
+        )
+        group = result.index_select(0, rows)
+        group[mask] = normalized.flatten()
+        result.index_copy_(0, rows, group)
+    return result
+
+
 def fuse_fine_coarse_scores(
     fine: Tensor, coarse: Tensor, weight: float, eps: float = SCORE_EPS
 ) -> Tensor:
@@ -247,6 +281,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "pooling",
         "query_batch_size",
         "gpu_cache_mib",
+        "prefetch_batches",
     }
     if unknown:
         raise ValueError(f"unknown retrieval settings: {', '.join(sorted(unknown))}")
@@ -260,6 +295,7 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         "pooling": "penalized",
         "query_batch_size": 1,
         "gpu_cache_mib": 512,
+        "prefetch_batches": 1,
         **cfg,
     }
     if settings["coarse_beta"] is None:
@@ -278,6 +314,13 @@ def retrieval_settings(cfg: dict, default_beta: float) -> dict:
         raise ValueError("retrieval batch sizes and top_m must be positive")
     if type(settings["gpu_cache_mib"]) is not int or settings["gpu_cache_mib"] < 0:
         raise ValueError("retrieval.gpu_cache_mib must be a nonnegative integer")
+    if type(settings["prefetch_batches"]) is not int or settings[
+        "prefetch_batches"
+    ] not in (
+        0,
+        1,
+    ):
+        raise ValueError("retrieval.prefetch_batches must be 0 or 1")
     if any(
         type(settings[key]) not in (int, float)
         or not math.isfinite(settings[key])
@@ -322,9 +365,11 @@ def _score_target_components(
     coverage_weight=DEFAULT_COVERAGE_WEIGHT,
     *,
     compute_context=True,
+    prefetch_batches=1,
 ):
     """Collect pairwise evidence without changing its scoring population."""
     from rcr.proposed.cache.native import NativeTargetBatch
+    from rcr.proposed.prefetch import OrderedPrefetch, PackedPersons
 
     components = {
         key: torch.empty(len(image_indices), device=device, dtype=torch.float32)
@@ -334,33 +379,211 @@ def _score_target_components(
             *(f"binding_{mode}" for mode in POOLING_MODES),
         )
     }
-    for start in range(0, len(image_indices), batch_size):
-        targets = image_indices[start : start + batch_size]
-        if not compute_context and hasattr(cache, "load_person_geometry"):
+    if pooling not in POOLING_MODES:
+        raise ValueError(f"unknown FAFA pooling: {pooling!r}")
+    if not compute_context and context_weight != 0:
+        raise ValueError("skipping context requires context_weight=0")
+    if not len(image_indices):
+        return components
+    sparse = hasattr(cache, "load_person_geometry") and hasattr(cache, "load_scenes")
+    layout = (
+        _reasoning_layout(query)
+        if sparse and compute_context and not model.training
+        else None
+    )
+    missing_bindings = {}
+    rows = torch.arange(len(image_indices))
+    if sparse and hasattr(cache, "mask"):
+        # Change execution order only. Fusion still sees the original complete Top-M.
+        counts = cache.mask[image_indices].sum(1)
+        rows = rows[torch.argsort(counts, stable=True)]
+
+    def prepare(rows):
+        targets = image_indices[rows]
+        if sparse:
             persons, boxes, mask = cache.load_person_geometry(targets)
-            scene = None
-        else:
-            scene, persons, boxes, mask = cache.load(targets)
-        details = model.score_target(
-            query.repeat_candidates(len(targets)),
-            None if scene is None else scene.to(device, non_blocking=True),
-            persons.to(device, non_blocking=True).float(),
-            boxes.to(device, non_blocking=True),
-            cache.patch_hw,
-            mask.to(device, non_blocking=True),
-            fafa_targets=NativeTargetBatch(cache, targets, persons.shape[1]),
-            return_details=True,
-            pooling=pooling,
-            context_weight=context_weight,
-            coverage_weight=coverage_weight,
-            compute_context=compute_context,
+            packed = PackedPersons.from_padded(persons, mask)
+            if device.type == "cuda":
+                packed.values = packed.values.pin_memory()
+                packed.positions = packed.positions.pin_memory()
+                boxes, mask = boxes.pin_memory(), mask.pin_memory()
+            return (
+                rows,
+                targets,
+                (packed, boxes, mask),
+            )
+        return rows, targets, None
+
+    with OrderedPrefetch(
+        rows.split(batch_size), prepare, enabled=sparse and bool(prefetch_batches)
+    ) as batches:
+        for rows, targets, prepared in batches:
+            if sparse:
+                details = _score_packed_targets(
+                    query,
+                    cache,
+                    model,
+                    device,
+                    targets,
+                    prepared,
+                    compute_context,
+                    layout,
+                    missing_bindings,
+                )
+            else:
+                # Keep the public reader/scorer API for legacy and third-party caches.
+                if not compute_context and hasattr(cache, "load_person_geometry"):
+                    persons, boxes, mask = cache.load_person_geometry(targets)
+                    scene = None
+                else:
+                    scene, persons, boxes, mask = cache.load(targets)
+                details = model.score_target(
+                    query.repeat_candidates(len(targets)),
+                    None if scene is None else scene.to(device, non_blocking=True),
+                    persons.to(device, non_blocking=True).float(),
+                    boxes.to(device, non_blocking=True),
+                    cache.patch_hw,
+                    mask.to(device, non_blocking=True),
+                    fafa_targets=NativeTargetBatch(cache, targets, persons.shape[1]),
+                    return_details=True,
+                    pooling=pooling,
+                    context_weight=context_weight,
+                    coverage_weight=coverage_weight,
+                    compute_context=compute_context,
+                )
+            positions = rows.to(device, non_blocking=True)
+            for key, output in components.items():
+                output.index_copy_(0, positions, details[key].float())
+    # Validate once per shortlist, avoiding an extra host synchronization per chunk.
+    if not torch.stack(
+        [torch.isfinite(value).all() for value in components.values()]
+    ).all():
+        raise ValueError("fine score components contain NaN/Inf")
+    return components
+
+
+def _reasoning_layout(query):
+    """Resolve query-only masks once on CPU, outside the candidate/chunk loop."""
+    from rcr.proposed.nn.reasoning import ReasoningLayout
+
+    selected = query.subjects[..., None] & (query.membership > 0)
+    offset = query.reference.shape[1] - selected.shape[1] * selected.shape[2]
+    valid = query.mask[0].clone()
+    valid[offset:] &= selected[0].flatten()
+    flags = torch.cat((valid, query.subjects[0])).cpu()
+    reference_mask, subjects = flags[: len(valid)], flags[len(valid) :]
+    reference = reference_mask.nonzero().flatten()
+    first, second = torch.triu_indices(len(subjects), len(subjects), offset=1)
+    pairs = (subjects[first] & subjects[second]).nonzero().flatten()
+    persons = reference[reference >= offset] - offset
+    return ReasoningLayout(
+        reference.to(query.reference.device, non_blocking=True),
+        torch.cat((reference, len(valid) + pairs)).to(
+            query.reference.device, non_blocking=True
+        ),
+        persons.to(query.reference.device, non_blocking=True),
+        int(reference_mask[:offset].sum()),
+    )
+
+
+def _score_packed_targets(
+    query,
+    cache,
+    model,
+    device,
+    targets,
+    prepared,
+    compute_context,
+    layout,
+    missing_bindings,
+):
+    """Match actual detections, then load/score evidence only where H can be nonzero."""
+    from rcr.proposed.cache.native import NativeTargetBatch
+
+    if query.fafa is None:
+        raise ValueError("fine retrieval requires native FAFA query features")
+    packed, boxes, mask = prepared
+    positions = packed.positions.to(device, non_blocking=True)
+    values = model.encode_semantic(packed.values.to(device, non_blocking=True).float())
+
+    def unpack(values):
+        output = values.new_zeros((mask.numel(), values.shape[-1]))
+        return output.index_copy_(0, positions, values).unflatten(0, mask.shape)
+
+    semantic = unpack(values)
+    identity = unpack(model.identity_head(values))
+    boxes = boxes.to(device, non_blocking=True)
+    mask_device = mask.to(device, non_blocking=True)
+    query = query.repeat_candidates(len(targets))
+    matching = model.match_target(query, identity, boxes, mask_device)
+    indices_cpu = matching.indices_cpu
+    if indices_cpu is None:
+        indices_cpu = matching.indices.cpu()
+    rows = (indices_cpu >= 0).any(1).nonzero().flatten()
+    if not missing_bindings:
+        # Preserve native null pooling arithmetic, including GROUP weight rounding.
+        # It depends on the query, so compute it once across all candidate chunks.
+        missing = PersonMatching(
+            torch.full_like(matching.indices[:1], -1),
+            matching.membership[:1],
+            matching.subjects[:1],
+            matching.subject_coverage[:1],
+            matching.coverage[:1],
         )
-        finite = torch.stack([torch.isfinite(details[key]).all() for key in components])
-        if not finite.all():
-            raise ValueError("fine score components contain NaN/Inf")
-        for key, output in components.items():
-            values = details[key].float()
-            output[start : start + len(targets)] = values
+        missing_bindings.update(
+            pool_fafa_scores(
+                torch.zeros_like(missing.membership),
+                missing,
+                model.fine_matching["missing_penalty"],
+            )
+        )
+    components = {
+        "context": matching.coverage.new_zeros(len(targets)),
+        "coverage": matching.coverage,
+        **{
+            f"binding_{mode}": value.expand(len(targets)).clone()
+            for mode, value in missing_bindings.items()
+        },
+    }
+    if not len(rows):
+        # All pooling modes equal the configured missing penalty; H is exactly zero.
+        return components
+    selected = rows.to(device, non_blocking=True)
+    if len(rows) == len(targets):
+        chosen, chosen_matching = query, matching
+    else:
+        chosen = query.index_select(selected)
+        chosen_matching = PersonMatching(
+            matching.indices.index_select(0, selected),
+            matching.membership.index_select(0, selected),
+            matching.subjects.index_select(0, selected),
+            matching.subject_coverage.index_select(0, selected),
+            matching.coverage.index_select(0, selected),
+            indices_cpu.index_select(0, rows),
+        )
+    native = NativeTargetBatch(cache, targets[rows], mask.shape[1])
+    poolings = fafa_binding_scores(
+        chosen.fafa,
+        native,
+        matching=chosen_matching,
+        k=model.fda_k,
+        missing_penalty=model.fine_matching["missing_penalty"],
+        return_poolings=True,
+    )
+    for mode, values in poolings.items():
+        components[f"binding_{mode}"].index_copy_(0, selected, values)
+    if compute_context:
+        scene = cache.load_scenes(targets[rows]).to(device, non_blocking=True).float()
+        context = model.score_aligned_context(
+            chosen,
+            scene,
+            semantic.index_select(0, selected),
+            boxes.index_select(0, selected),
+            chosen_matching.indices,
+            cache.patch_hw,
+            layout=layout,
+        )
+        components["context"].index_copy_(0, selected, context)
     return components
 
 
@@ -389,6 +612,7 @@ def retrieve_rankings(
     state_trained: bool = True,
     query_batch_size: int = 1,
     gpu_cache_mib: int = 512,
+    prefetch_batches: int = 1,
 ) -> dict[str, Any]:
     """Rank the gallery once for every query.
 
@@ -398,6 +622,10 @@ def retrieve_rankings(
     """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
+    started = perf_counter()
+    timings = dict.fromkeys(
+        ("gallery_encoding", "query_and_coarse", "fine_scoring", "ranking"), 0.0
+    )
     if not samples:
         raise ValueError("retrieval requires samples")
     samples = inference_samples(samples)
@@ -415,6 +643,7 @@ def retrieve_rankings(
             "pooling": pooling,
             "query_batch_size": query_batch_size,
             "gpu_cache_mib": gpu_cache_mib,
+            "prefetch_batches": prefetch_batches,
         },
         model.coarse_beta,
     )
@@ -433,6 +662,7 @@ def retrieve_rankings(
     text_stats = text_cache.statistics(list(samples))
     rows = [None] * len(samples)
     with evaluating(model, text_encoder):
+        stage = perf_counter()
         gallery_batches = _encode_gallery_identity(
             cache, model, device, identity_batch_size, image_indices
         )
@@ -446,6 +676,7 @@ def retrieve_rankings(
         gallery_batches, gallery_state = _cache_gallery_on_device(
             gallery_batches, gallery_state, device, gpu_cache_mib
         )
+        timings["gallery_encoding"] += perf_counter() - stage
         subject_groups = {}
         for index, sample in enumerate(samples):
             subject_groups.setdefault(len(sample["subjects"]), []).append(
@@ -458,6 +689,7 @@ def retrieve_rankings(
         ]
         progress = tqdm(total=len(samples), desc=description)
         for batch in batches:
+            stage = perf_counter()
             batch_samples = [sample for _, sample in batch]
             text = encode_query_text(
                 batch_samples, tokenizer, text_encoder, device, text_cache=text_cache
@@ -506,7 +738,9 @@ def retrieve_rankings(
                     .float()
                     .cpu()
                 )
+            timings["query_and_coarse"] += perf_counter() - stage
             for n, (sample_index, sample) in enumerate(batch):
+                stage = perf_counter()
                 query = queries.select(n)
                 query_index = gallery_by_id[sample["query_image_id"]]
                 coarse = combine_scores(
@@ -518,6 +752,8 @@ def retrieve_rankings(
                 order = torch.argsort(coarse, descending=True, stable=True)
                 order = order[order != query_index]
                 top = order[:top_m]
+                timings["ranking"] += perf_counter() - stage
+                stage = perf_counter()
                 evidence = {
                     key: value.cpu()
                     for key, value in _score_target_components(
@@ -530,8 +766,11 @@ def retrieve_rankings(
                         pooling,
                         context_weight,
                         coverage_weight,
+                        prefetch_batches=prefetch_batches,
                     ).items()
                 }
+                timings["fine_scoring"] += perf_counter() - stage
+                stage = perf_counter()
                 raw = {
                     "binding": evidence[f"binding_{pooling}"],
                     "context": evidence["context"],
@@ -562,9 +801,11 @@ def retrieve_rankings(
                     "fused_topm_scores": fused,
                     "rankings": rerank_topm(order, top, fused).to(torch.int32),
                 }
+                timings["ranking"] += perf_counter() - stage
             progress.update(len(batch))
         progress.close()
     output = {
+        "timings_seconds": timings,
         "sample_ids": [sample["sample_id"] for sample in samples],
         "gallery_ids": gallery_ids,
         "score_schema_version": SCORE_SCHEMA_VERSION,
@@ -579,6 +820,11 @@ def retrieve_rankings(
     }
     # Alias of the selected pooling's matrix, not a separate score matrix.
     output["fafa_binding"] = output[f"binding_{pooling}"]
+    timings["total"] = perf_counter() - started
+    tqdm.write(
+        f"{description} timing (s): "
+        + ", ".join(f"{key}={value:.2f}" for key, value in timings.items())
+    )
     return output
 
 
@@ -787,6 +1033,7 @@ def mine_hard_negatives(
                         settings["context_weight"],
                         settings["coverage_weight"],
                         compute_context=False,
+                        prefetch_batches=settings["prefetch_batches"],
                     )
                     fine = fine_score_components(
                         components[f"binding_{settings['pooling']}"].cpu(),

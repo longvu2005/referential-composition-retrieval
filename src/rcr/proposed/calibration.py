@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from tqdm import tqdm
@@ -31,7 +32,7 @@ from rcr.proposed.contracts import (
     SELECTED_RETRIEVAL_KEYS,
 )
 from rcr.proposed.matching import matching_settings
-from rcr.proposed.ranking import normalize_fusion_scores
+from rcr.proposed.ranking import normalize_fusion_rows
 from rcr.proposed.replay import replay_rankings, validate_artifact
 from rcr.proposed.scores import linear_score_components
 
@@ -61,6 +62,7 @@ def calibrate_rankings(
     metric: str = "checkpoint_score",
 ) -> CalibrationResult:
     """Search the complete coefficient product on CPU with fixed Top-M evidence."""
+    started = perf_counter()
     if metric not in SELECTION_METRICS:
         raise ValueError(
             "selection_metric must be checkpoint_score, full_map or macro_full_map"
@@ -103,12 +105,7 @@ def calibrate_rankings(
     )
     evaluator = TopMSelectionEvaluator(samples, output)
     support = torch.isfinite(output["coarse_topm_scores"])
-    coarse_z = torch.stack(
-        [
-            normalize_fusion_scores(scores, valid)
-            for scores, valid in zip(output["coarse_topm_scores"], support, strict=True)
-        ]
-    )
+    coarse_z = normalize_fusion_rows(output["coarse_topm_scores"], support)
     fingerprint = split_fingerprint(data, "val")
     rows = []
     best = None
@@ -121,12 +118,7 @@ def calibrate_rankings(
             context_weight=context,
             coverage_weight=coverage,
         )["fine_scores"]
-        fine_z = torch.stack(
-            [
-                normalize_fusion_scores(scores, valid)
-                for scores, valid in zip(fine, support, strict=True)
-            ]
-        )
+        fine_z = normalize_fusion_rows(fine, support)
         for weight in grid["fine_coarse_weight"]:
             fused = fine if weight == 0 else fine_z + weight * coarse_z
             if not torch.isfinite(fused[support]).all():
@@ -170,6 +162,13 @@ def calibrate_rankings(
             "cached calibration scores disagree with official evaluation"
         )
     best_metrics["overall"].update(selected_metrics)
+    elapsed = perf_counter() - started
+    best_output["timings_seconds"] = {
+        **output.get("timings_seconds", {}),
+        "calibration": elapsed,
+    }
+    best_output["provenance"]["timings_seconds"] = dict(best_output["timings_seconds"])
+    tqdm.write(f"calibration: {len(rows)} candidates in {elapsed:.2f}s (CPU)")
     return CalibrationResult(best_output, best_metrics, rows, best, metric)
 
 

@@ -78,7 +78,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert all(row["context_score_weight"] == 0.23 for row in weights)
     assert all(row["coverage_score_weight"] == 0.04 for row in weights)
     assert [row["context_swap_weight"] for row in weights] == [
-        0.25 * value for value in expected
+        cfg["loss"]["context_swap_weight"] * value for value in expected
     ]
     history = [
         json.loads(line)
@@ -252,7 +252,9 @@ def test_verified_swap_trains_context_on_the_same_assignment(
         torch.nn.functional.softplus(seen[2][1] - seen[1][1]).mean(),
     )
     loss.backward()
-    assert _has_gradient(model.reasoner.pair_score)
+    assert _has_gradient(model.reasoner.pair_proj)
+    assert _has_gradient(model.reasoner.score)
+    assert _has_gradient(model.target_builder)
     assert _has_gradient(text_encoder.proj)
     assert not _has_gradient(model.identity_head)
 
@@ -741,6 +743,97 @@ def test_context_loss_uses_scaled_context_and_full_score_for_rejection(
     torch.testing.assert_close(total, semantic + 0.5 * rejection)
     assert not binding.requires_grad
     assert parts["context_fda_error"].item() == 1
+
+
+def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
+    objective_batch, monkeypatch
+):
+    model, batch = objective_batch
+    batch["hard_identity_negative_mask"][0, 2] = True
+    context = torch.tensor([[0.8, 0.3, -0.4]], requires_grad=True)
+    binding = torch.tensor([[0.7, 0.2, 0.1]])
+    coverage = torch.full((1, 3), 0.5)
+    assignments = torch.full((1, 3, 1), -1, dtype=torch.long)
+    monkeypatch.setattr(
+        losses,
+        "_context_scores",
+        lambda *args, **kwargs: (context, coverage, binding, assignments),
+    )
+    observed = []
+
+    def read_loss(scores, positive, valid):
+        observed.append((scores.detach().clone(), valid.detach().clone()))
+        return retrieval_loss(scores, positive, valid)
+
+    monkeypatch.setattr(losses, "retrieval_loss", read_loss)
+    total, parts = compute_loss(
+        model,
+        batch,
+        (2, 2),
+        **{
+            **_only_loss("context"),
+            "context_temperature": 0.1,
+            "context_rejection_weight": 0.5,
+        },
+        context_score_weight=0.1,
+        coverage_score_weight=0.04,
+    )
+    assert len(observed) == 2
+    assert observed[0][0][0, 0].item() == pytest.approx(0.8)
+    assert observed[1][0][0, 0].item() == pytest.approx(8.0)
+    assert (observed[1][0][0, 0] * 0.1).item() == pytest.approx(0.80)
+    assert observed[0][1].tolist() == [[True, True, False]]
+    assert observed[1][1].tolist() == [[True, False, True]]
+    semantic = torch.nn.functional.softplus(torch.tensor(0.3 - 0.8))
+    rejection = torch.nn.functional.softplus(torch.tensor(0.8 - 8.0))
+    torch.testing.assert_close(parts["context_semantic"], semantic)
+    torch.testing.assert_close(parts["context_rejection"], rejection)
+    torch.testing.assert_close(total, semantic + 0.5 * rejection)
+    total.backward()
+    assert context.grad is not None and context.grad.abs().sum() > 0
+    assert not binding.requires_grad and not coverage.requires_grad
+
+
+def test_default_context_schedule_warms_up_then_enables_semantic_and_rejection(
+    tiny_training_run, monkeypatch
+):
+    cfg, cache, _, _ = tiny_training_run
+    data = training.load_rcr_data(None)
+    for index in range(34):
+        image = f"extra{index}"
+        _add_gallery_image(cache, data, image, "train")
+        if index % 2:
+            data.gt_head_boxes_by_image[image][0]["identity_id"] = "other"
+    cfg["train"].update(epochs=7, context_warmup_epochs=4, candidates=32)
+    cfg["train"]["sampling"].update(warmup_epochs=6, semantic_hard_fraction=0.5)
+    cfg["train"]["identity_sampling"]["max_crops"] = 0
+    cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
+    cfg["loss"]["context_rejection_weight"] = 0.5
+    assert cfg["loss"]["context_swap_weight"] == 0
+    assert cfg["retrieval"]["coverage_weight"] == 0.04
+    assert cfg["retrieval"]["context_weight"] == 0.1
+    compute, mine = training.compute_loss, training.mine_hard_negatives
+    schedule, mining = [], []
+
+    def observe(*args, **settings):
+        schedule.append(
+            (
+                settings["context_weight"],
+                settings["context_rejection_weight"],
+                settings["context_swap_weight"],
+            )
+        )
+        return compute(*args, **settings)
+
+    def observe_mining(*args, **kwargs):
+        mining.append(len(schedule))
+        return mine(*args, **kwargs)
+
+    monkeypatch.setattr(training, "compute_loss", observe)
+    monkeypatch.setattr(training, "mine_hard_negatives", observe_mining)
+    training.train(cfg)
+    assert schedule == [(0.0, 0.0, 0.0)] * 4 + [(1.0, 0.0, 0.0)] * 2 + [(1.0, 0.5, 0.0)]
+    assert mining == [6]
 
 
 def test_model_forward_uses_the_requested_linear_coefficients(objective_batch):

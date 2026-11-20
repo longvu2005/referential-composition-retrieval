@@ -141,6 +141,7 @@ def retrieval_metadata(
         },
         "query_subset": len(output["sample_ids"]) != len(data.splits[cfg["split"]]),
         "elapsed_seconds": elapsed_seconds,
+        "timings_seconds": output.get("timings_seconds", {}),
     }
 
 

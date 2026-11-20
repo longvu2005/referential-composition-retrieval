@@ -20,6 +20,11 @@ Model, loss, sampling, retrieval and runtime settings are defined in the same
 file. `--set key=value` overrides existing configuration keys.
 See [GPU performance](gpu_performance.md) for prefetch, packed feature transfers,
 gallery/text budgets, runtime diagnostics and CUDA profiling commands.
+Fine evaluation also uses bounded `retrieval.prefetch_batches=1`; set it to
+zero for a serial control. Evaluation logs stage times and writes
+`timings_seconds` into ranking artifacts and run metadata, so cache/coarse work
+can be distinguished from fine context scoring. Calibration reports its own
+elapsed CPU time and retains the complete configured coefficient grid.
 
 ## Prepare assets and caches
 
@@ -48,6 +53,22 @@ Use a fresh `output.dir` for each experiment. For example:
 Training performs scheduled validation, calibrates the configured scoring
 coefficients and saves the best selection. The selection criterion is defined
 in the [benchmark protocol](benchmark_protocol.md).
+The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v4`. Use a
+new run directory and train a new checkpoint; earlier reasoner checkpoints and
+resume states are incompatible. Compatible frozen feature caches are reusable.
+
+With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semantic
+context, and epoch 7 onward also enables mining and rejection at weight `0.5`.
+Context loss uses the original training coefficients `a_train=0.04` and
+`b_train=0.10`; validation calibration changes retrieval coefficients only.
+Left/right swap supervision defaults to zero. Enable it explicitly for a
+separate experiment:
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set loss.context_swap_weight=0.25 output.dir=runs/proposed-swap
+```
+
 W&B tracking is configured by `wandb`; use `wandb.mode=offline` or
 `wandb.enabled=false` when online tracking is unavailable.
 
@@ -128,3 +149,7 @@ artifacts can be replayed without model weights or feature caches:
 Replay can vary supported score coefficients on the saved shortlist. Changes
 to the model, matching, query inputs or shortlist require fresh retrieval.
 Use validation to select coefficients under the benchmark protocol.
+The artifact schema is unchanged by the CLS context architecture. New retrieval
+stores raw `H` before its coefficient, so the existing CPU calibration/replay
+path remains available. Older artifacts can still replay their saved scores,
+but do not contain context scores from this architecture.

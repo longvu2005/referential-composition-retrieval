@@ -1,6 +1,6 @@
 """Checkpoint names and validation selection fields; no model runtime imports."""
 
-ARCHITECTURE_VERSION = "fafa-subject-reasoner-v3"
+ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v4"
 
 FIXED_FINE_KEYS = (
     "pooling",

@@ -26,22 +26,145 @@ Coarse retrieval combines identity similarity with global image-text state
 similarity. The fine stage reranks the coarse shortlist using a shared partial,
 one-to-one identity assignment across Subjects.
 
-The fine score combines native FAFA evidence, identity coverage and contextual
-reasoning. The reasoner evaluates individual Subjects and ordered Subject pairs.
-Fine and coarse scores determine the final shortlist order; the remaining
-gallery retains its coarse order.
+The fine score combines native FAFA evidence, identity coverage and a single
+context score read from CLS after joint reasoning. Person tokens keep their
+Subject roles and individual GROUP members throughout the context path.
+
+### Aligned person evidence
+
+Let `R = [r_CLS, R_text, {r_ik}]` be the composed query, `m_ik` its detached
+membership, and `pi(k)` the shared partial assignment (`-1` means no match).
+
+```text
+selected(i,k) = subject_active(i) AND (m_ik > 0)
+matched(i,k)  = selected(i,k) AND (pi(k) >= 0)
+g(box)       = [cx, cy, width, height]
+
+o_ik = LN_target(W_e e_k + W_g g(box_pi(k)))  when matched(i,k)
+     = n_miss                               when selected but unmatched
+     = 0                                    otherwise
+
+X = LN_inject(R + Dropout([0_CLS, 0_text, {o_ik}]))
+```
+
+`EvidenceBinding` reads the target scene once per aligned reference detection
+to produce `e_k`; its output is then routed into the Subject-person slots.
+`TargetPersonBuilder` projects evidence and center/size geometry and normalizes
+their sum, following the aligned person design in `2221c4e`. `n_miss` is one
+learned vector shared by missing members and empty endpoint sets. Injection
+normalizes the entire reference sequence. Unselected slots are masked as keys;
+a selected member remains available when its target match is missing.
+
+### Ordered relation tokens
+
+Before target injection, average the composed text tokens marked by each
+Subject to obtain `a_i`, respecting `subject_token_mask` and `change_mask`.
+When the marker mask is absent, use `subject_pos`. Cache one condition for each
+slot pair `i < j` in `QueryEncoding`:
+
+```text
+u_ij = W_query concat(a_i, a_j)
+c_ij = LN_condition(u_ij + MHA(u_ij, R_text, R_text; text_mask))
+```
+
+For each candidate, let `x_sk` be the injected person token in `X` and
+`K_s = {k | selected(s,k)}`. Read the two endpoints separately:
+
+```text
+alpha_(s,k|ij) = softmax_over_K_s(dot(c_ij, x_sk) / sqrt(d))
+v_(s|ij)      = sum_over_K_s(alpha_(s,k|ij) * x_sk)
+p_ij          = W_pair concat(c_ij, v_(i|ij), v_(j|ij))
+```
+
+The shared `W_pair` always receives endpoint `i` before endpoint `j`. The member
+set includes selected people without a match. An empty member set reads
+`n_miss` directly, avoiding an empty softmax. A pair is a valid attention key
+when both Subjects are active, even if an endpoint has no members or evidence.
+A one-Subject query has zero pair tokens. Reconditioning rebuilds the same
+representation from new text while retaining the original membership.
+
+### Joint attention and CLS score
+
+```text
+Z0 = concat_tokens(X, {p_ij})
+Z1 = LN_attn(Z0 + Dropout(SelfAttention(Z0; A)))
+Z2 = LN_attn(Z1 + Dropout(SelfAttention(Z1; A)))
+Z  = LN_out(Z2 + FFN(Z2))
+h_cls = MLP(Z[CLS])
+H(q,t) = where(matched.any_over_Subject_and_person, h_cls, 0).float()
+```
+
+Both attention rounds share parameters, normalization and bias `A`; the FFN
+runs once afterward. Only CLS produces a scalar. `A` uses `query.prior` for
+reference keys, zero for valid pair keys, and `-inf` for masked keys. Matched
+person-to-person edges additionally receive a per-head directed geometry bias:
+
+```text
+Linear_geo([cx_b-cx_a, cy_b-cy_a, log(w_b/w_a), log(h_b/h_a), IoU(a,b)])
+```
+
+All other edges receive zero additional geometry. Sizes and IoU denominators
+are clamped at `1e-6`; geometry and biased self-attention run in FP32 under AMP.
+The match gate is equivalent to `coverage > 0` for this assignment. It uses
+`where`, so all-missing targets return exactly zero. Partial coverage does not
+scale the CLS score: `C=0.5, h_cls=0.8` gives `H=0.8`.
 
 ## Objective and ranking
 
-Training supervises grounding, person identity, coarse retrieval, contextual
-reasoning and global state. Auxiliary losses, sampling and warmup are controlled
-by [configs/proposed.yaml](../configs/proposed.yaml).
+The shared linear scorer combines native FAFA binding `B` (with the configured
+pooling), matching coverage `C`, and raw context `H`:
 
-Validation selects the checkpoint and scoring coefficients. Test uses that
+```text
+F = model.binding_scale * B + a_train * C + b_train * H
+
+L_sem = retrieval_loss(b_train * H / tau_c, P, I & (C > 0))
+L_rej = retrieval_loss(F / tau_c, P, (P | N) & (C > 0))
+L_ctx = L_sem + rho_effective * L_rej
+```
+
+`P` is Full Positives, `I` is identity positives, and `N` is hard identity
+negatives. `retrieval_loss(S,P,V)` uses every positive/negative pair within `V`
+and contributes `softplus(S_negative - S_positive)`. It averages pairs within
+each query, then queries with at least one valid pair; empty batches retain
+the existing differentiable-zero handling. Membership, assignment, `B` and `C`
+are detached in the context loss. Gradients through `H` reach the reasoner,
+composition and evidence path. Grounding, identity, coarse and global-state
+losses retain their existing weights and supervision.
+
+The defaults are `context_weight=1.0`, `tau_c=0.1`, rejection weight `0.5`,
+swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
+`B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic logit is
+`0.8`, and the rejection logit is `8.0`. Epochs 1–4 warm up without context;
+epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
+with `rho_effective=0.5`; it is zero earlier. These settings are controlled by
+[configs/proposed.yaml](../configs/proposed.yaml).
+
+Left/right swap supervision is opt-in. It reconditions text and calls the same
+aligned scorer using the original assignment for both sentences. Both deferred
+scene batches and materialized scene tensors are supported.
+
+The GPU input path keeps sparse eligible rows from `context_layout`, chunked
+`SceneTargetBatch` scene loads and assignment-based `NativeTargetBatch.load_matched`
+FAFA loads. Matching and cache I/O stay outside activation checkpointing;
+backward recomputes the neural context path. The default prefetch depth remains
+one batch; `train.prefetch_batches=0` runs the serial control. See
+[GPU performance](gpu_performance.md) for profiling and runtime settings.
+
+Mining sets `b=0` and `compute_context=False`, skipping the reasoner. Validation
+collects raw `H` before multiplying by `b`. The existing Top-M fusion scorer
+calibrates `(a,b,eta)` and selects the checkpoint; the rest of the gallery keeps
+its coarse order. Calibrated coefficients serve retrieval, while losses keep
+`a_train,b_train` from the original training config. Test uses the validation
 selection unchanged under the [benchmark protocol](benchmark_protocol.md).
 
 ## Configuration and checkpoints
 
 Model and experiment settings live in YAML. Checkpoints record the effective
-model configuration and feature provenance. Use the [run guide](proposed_runs.md)
-for execution and the [cache guide](detection_cache.md) for feature preparation.
+model configuration and feature provenance. This architecture is
+`fafa-aligned-pair-cls-v4`: start a fresh run and checkpoint. Weights and resume
+states from the earlier Subject/pair scalar architecture are incompatible.
+Compatible frozen feature caches can be reused. The score-artifact schema is
+unchanged; CPU replay still uses saved raw components without model weights.
+Changing to this reasoner requires fresh retrieval artifacts because `H` has
+changed. Use the [run guide](proposed_runs.md) for execution and the
+[cache guide](detection_cache.md) for feature preparation.

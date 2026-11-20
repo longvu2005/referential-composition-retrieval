@@ -3,10 +3,14 @@
 import csv
 import json
 from pathlib import Path
+from statistics import fmean
 
 import pytest
+import torch
 
-from rcr.evaluation.evaluate import evaluate_rankings
+from rcr.dataset.cases import CASE_TYPES
+from rcr.evaluation.evaluate import TopMSelectionEvaluator, evaluate_rankings
+from rcr.evaluation.metrics import average_precision
 from rcr.evaluation.report import ReportError
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed.retrieve import retrieve
@@ -40,6 +44,51 @@ def test_full_and_identity_metrics_use_their_own_positive_sets():
     assert result["overall"]["full_r1"] == 0
     assert result["overall"]["full_r5"] == 1
     assert result["by_case"]["DUAL"]["full_map"] == pytest.approx(0.5)
+
+
+def test_topm_selection_keeps_official_float_summation_and_fixed_tail():
+    generator = torch.Generator().manual_seed(81)
+    gallery = [str(i) for i in range(151)]
+    coarse = torch.stack([torch.randperm(150, generator=generator) for _ in range(16)])
+    samples = []
+    for index in range(len(coarse)):
+        positives = torch.randperm(150, generator=generator)[: 1 + index * 7]
+        samples.append(
+            {
+                "sample_id": str(index),
+                "case_type": CASE_TYPES[index % len(CASE_TYPES)],
+                "positive_image_ids": [gallery[i] for i in positives],
+            }
+        )
+    width = 37
+    evaluator = TopMSelectionEvaluator(
+        samples,
+        {
+            "gallery_ids": gallery,
+            "coarse_rankings": coarse,
+            "coarse_topm": coarse[:, :width],
+        },
+    )
+    for _ in range(19):
+        orders = torch.stack(
+            [torch.randperm(width, generator=generator) for _ in samples]
+        )
+        result = evaluator.evaluate(orders)
+        aps = []
+        for sample, row, order in zip(samples, coarse, orders, strict=True):
+            ranked = torch.cat((row[:width][order], row[width:]))
+            aps.append(
+                average_precision(
+                    [gallery[i] for i in ranked], sample["positive_image_ids"]
+                )
+            )
+        assert result["overall"]["full_map"] == fmean(aps)
+        for case in CASE_TYPES:
+            assert result["by_case"][case]["full_map"] == fmean(
+                ap
+                for ap, sample in zip(aps, samples, strict=True)
+                if sample["case_type"] == case
+            )
 
 
 # Report integrity and export.

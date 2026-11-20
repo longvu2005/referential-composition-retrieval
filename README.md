@@ -5,6 +5,11 @@ A query combines a reference image, Subject descriptions and a requested change.
 The method retrieves images that preserve the referenced identities and satisfy
 that change.
 
+The proposed RCR model injects aligned target evidence into individual person
+tokens and reasons jointly with ordered Subject-pair tokens. One CLS readout
+provides the context score; native FAFA binding and identity coverage complete
+the fine score. See the [method and formulas](docs/proposed_method.md).
+
 ```text
 dataset -> feature caches -> training -> retrieval -> evaluation
 ```
@@ -43,6 +48,8 @@ Continue an interrupted training run with its saved configuration:
 
 Outputs are written under `output.dir`. `best.pt` and `selected.yaml` describe
 the validation-selected model; `last.pt` supports training resume.
+The `fafa-aligned-pair-cls-v4` reasoner requires a new training run and checkpoint;
+compatible frozen feature caches can be reused.
 See the [run guide](docs/proposed_runs.md) for individual stages and outputs.
 
 ## Documentation

@@ -20,7 +20,7 @@ from rcr.proposed.matching import (
     unique_box_mask,
 )
 from rcr.proposed.nn.encoders import TextEncoder
-from rcr.proposed.nn.model import RCRModel
+from rcr.proposed.nn.model import QueryEncoding, RCRModel
 from rcr.proposed.prefetch import OrderedPrefetch, PackedPersons, VisualStager
 from rcr.proposed.scores import (
     fafa_binding_scores,
@@ -103,19 +103,37 @@ def test_packed_native_transfer_matches_dense_fda_and_skips_null_images(
     assert sum(t.numel() * t.element_size() for t in prepared.values()) <= 90
 
 
-def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(objective_batch):
+def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(
+    objective_batch, monkeypatch
+):
     model, batch = objective_batch
     reference = deepcopy(model)
     expected_batch = deepcopy(batch)
     scene = batch["target_scene"].flatten(0, 1)
-    reads = []
+    scene_reads, native_reads = [], []
+    cache = TinyCache()
+    images = torch.tensor([1, 2, 4])
 
     def load(indices):
-        reads.extend(indices.tolist())
-        return scene[indices]
+        scene_reads.extend(indices.tolist())
+        positions = torch.tensor([images.tolist().index(i) for i in indices.tolist()])
+        return scene[positions]
 
-    cache = SimpleNamespace(load_scenes=load)
-    batch["target_scene"] = SceneTargetBatch(cache, torch.arange(3))
+    native = cache.native_targets
+
+    def read_native(indices, width):
+        native_reads.extend(indices.tolist())
+        return native(indices, width)
+
+    monkeypatch.setattr(cache, "load_scenes", load, raising=False)
+    monkeypatch.setattr(cache, "native_targets", read_native)
+    batch["target_scene"] = SceneTargetBatch(cache, images)
+    batch["fafa_targets"] = NativeTargetBatch(cache, images)
+    batch["context_layout"] = {
+        "identity_rows": torch.tensor([0, 1]),
+        "rejection_rows": torch.tensor([0, 1]),
+        "widths": torch.ones(3, dtype=torch.long),
+    }
     settings = losses.loss_settings({})
     expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
     actual, _ = losses.compute_loss(
@@ -123,7 +141,9 @@ def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(objective_
     )
     expected.backward()
     actual.backward()
-    assert reads == [0, 1]
+    assert (
+        scene_reads == native_reads == [1, 2]
+    )  # No cache I/O is repeated in backward.
     torch.testing.assert_close(actual, expected)
     for parameter, other in zip(
         model.parameters(), reference.parameters(), strict=True
@@ -577,6 +597,164 @@ def test_retrieval_query_batching_preserves_order_and_evidence(tiny_ranker):
     for key, value in expected.items():
         if isinstance(value, torch.Tensor):
             torch.testing.assert_close(actual[key], value)
+
+
+@pytest.mark.parametrize("prefetch", [0, 1])
+def test_sparse_eval_retrieval_preserves_topm_artifacts_and_cpu_replay(
+    tiny_ranker, monkeypatch, prefetch
+):
+    from rcr.proposed.replay import replay_rankings
+
+    cache, _, _, _, _ = tiny_ranker
+    expected = _rank(tiny_ranker, query_batch_size=8)
+    monkeypatch.setattr(
+        cache,
+        "load_person_geometry",
+        lambda indices: (
+            cache.persons[indices],
+            cache.boxes[indices],
+            cache.mask[indices],
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cache, "load_scenes", lambda indices: cache.scenes[indices], raising=False
+    )
+    actual = _rank(tiny_ranker, query_batch_size=8, prefetch_batches=prefetch)
+    for key, value in expected.items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(actual[key], value)
+    for field in ("rankings", "fine_rankings", "coarse_rankings", "fafa_rankings"):
+        assert torch.equal(actual[field], expected[field])
+    assert torch.equal(replay_rankings(actual)["rankings"], actual["rankings"])
+    assert set(actual["timings_seconds"]) == {
+        "gallery_encoding",
+        "query_and_coarse",
+        "fine_scoring",
+        "ranking",
+        "total",
+    }
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("prefetch", [0, 1])
+@pytest.mark.parametrize("case", ["mixed", "missing", "mining"])
+def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
+    device, prefetch, case, monkeypatch
+):
+    torch.manual_seed(1812)
+    cache = TinyCache()
+    cache.mask = torch.arange(5)[None] < torch.tensor([3, 1, 0, 4, 2, 1])[:, None]
+    cache.persons = (
+        torch.randn(6, 5, 8).half().masked_fill(~cache.mask[..., None], torch.nan)
+    )
+    low = torch.arange(5).float() / 10
+    cache.boxes = torch.stack((low, low, low + 0.08, low + 0.08), -1)[None].expand(
+        6, -1, -1
+    )
+    cache.scenes = cache.scenes.half()
+    model = (
+        RCRModel(
+            dim=8,
+            identity_dim=6,
+            num_heads=2,
+            fine_matching={"identity_threshold": 1.0 if case == "missing" else -1.0},
+        )
+        .eval()
+        .to(device)
+    )
+    semantic = model.encode_semantic(cache.persons[:1, :3].to(device).float())
+    membership = torch.tensor([[[0.8, 0.6, 0], [0, 0, 0.7]]], device=device)
+    subjects = torch.ones(1, 2, device=device, dtype=torch.bool)
+    reference, mask, prior, condition = model._encode_condition(
+        semantic,
+        membership,
+        subjects,
+        torch.randn(1, 9, 8, device=device),
+        torch.tensor([[2, 5]], device=device),
+        None,
+        None,
+        None,
+    )
+    query = QueryEncoding(
+        torch.zeros_like(membership),
+        model.identity_head(semantic),
+        reference,
+        mask,
+        prior,
+        condition,
+        torch.randn(1, 2, 3, 5, device=device),
+        membership,
+        subjects,
+    )
+    targets = torch.tensor([4, 1, 2, 3, 5, 1])  # Repeated images and non-count order.
+    context = case != "mining"
+    with torch.inference_mode():
+        scene, persons, boxes, person_mask = cache.load(targets)
+        expected = model.score_target(
+            query.repeat_candidates(len(targets)),
+            scene.to(device).float(),
+            persons.to(device).float(),
+            boxes.to(device),
+            cache.patch_hw,
+            person_mask.to(device),
+            fafa_targets=cache.native_targets(targets, 5).to(device),
+            context_weight=0.1 if context else 0.0,
+            compute_context=context,
+            return_details=True,
+        )
+    scene_reads, native_reads, projected, reasoned = [], [], [], []
+
+    def load_geometry(indices):
+        return cache.persons[indices], cache.boxes[indices], cache.mask[indices]
+
+    def load_scenes(indices):
+        scene_reads.extend(indices.tolist())
+        return cache.scenes[indices]
+
+    native = cache.native_targets
+
+    def load_native(indices, width):
+        native_reads.extend(indices.tolist())
+        return native(indices, width)
+
+    monkeypatch.setattr(cache, "load_person_geometry", load_geometry, raising=False)
+    monkeypatch.setattr(cache, "load_scenes", load_scenes, raising=False)
+    monkeypatch.setattr(cache, "native_targets", load_native)
+    handles = [
+        model.person_proj.register_forward_pre_hook(
+            lambda m, x: projected.append(len(x[0]))
+        ),
+        model.reasoner.register_forward_pre_hook(
+            lambda m, x: reasoned.append(len(x[0]))
+        ),
+    ]
+    try:
+        with torch.inference_mode():
+            actual = ranking._score_target_components(
+                query,
+                cache,
+                model,
+                torch.device(device),
+                targets,
+                2,
+                "subject_mean",
+                context_weight=0.1 if context else 0.0,
+                compute_context=context,
+                prefetch_batches=prefetch,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+    for key, value in actual.items():
+        torch.testing.assert_close(value, expected[key], rtol=3e-5, atol=3e-6)
+    used = targets[expected["coverage"].cpu() > 0].tolist()
+    assert Counter(native_reads) == Counter(used)
+    assert Counter(scene_reads) == Counter(used if context else [])
+    assert sum(projected) == int(cache.mask[targets].sum())
+    assert sum(reasoned) == (len(used) if context else 0)
+    if case == "mixed":
+        assert ((actual["coverage"] > 0) & (actual["coverage"] < 1)).any()
 
 
 def test_retrieval_batching_restores_mixed_subject_order(tiny_ranker):

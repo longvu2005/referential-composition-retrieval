@@ -1,7 +1,8 @@
 Training prepares a bounded batch ahead of the current step, transfers frozen
 features in their stored precision, and runs the original loss and matching
-rules. The implementation avoids transferring padded/unused evidence while
-keeping model parameter names and shapes unchanged.
+rules. The input path avoids transferring padded/unused evidence. The aligned
+CLS reasoner and its checkpoint version are described in the
+[method guide](proposed_method.md).
 
 The supplied configuration enables these settings:
 
@@ -10,6 +11,7 @@ The supplied configuration enables these settings:
 | `train.prefetch_batches` | 1 | Prepares one future batch on a CPU worker. Zero disables background work. |
 | `train.context_batch_size` | 64 | Bounds context forward/backward work per chunk. |
 | `retrieval.query_batch_size` | 8 | Batches query/text encoding and coarse scoring by Subject count. |
+| `retrieval.prefetch_batches` | 1 | Reads one future fine-scoring chunk on a CPU worker; zero selects serial evaluation. |
 | `retrieval.gpu_cache_mib` | 512 | Budget for resident gallery identity/mask/global projections. |
 | `cache.text_lru_mib` | 768 | CPU budget for frozen CLIP token states; learned projections still run each step. |
 | `cache.native_lru_mib` | 256 | Independent CPU LRU for native shards; batch prefetch retains at most 128 MiB of target tokens. |
@@ -51,6 +53,58 @@ still collects context evidence for coefficient calibration. Gallery residency i
 used only when the projections fit both the configured budget and half the
 currently free CUDA memory; otherwise coarse scoring uses CPU-backed chunks.
 
+Fine evaluation loads person geometry first, packs actual detections in their
+stored precision and projects each actual person once for semantics and
+identity. Candidates are grouped by person count to reduce padding; component
+scores are scattered back into the original Top-M order before fusion. The
+detached assignment determines which candidates can contribute context. Only
+candidates with a match load target scenes and native FAFA rows or enter the
+reasoner. An all-missing candidate has exact `H=0`, `C=0` and the configured
+negative missing penalty for every native pooling mode. This shortcut also
+applies during early validation when many predicted assignments are empty.
+For matched candidates, evaluation also removes masked reference keys and
+masked reasoner rows/keys before attention. Every selected GROUP member,
+missing-match member and active ordered pair remains present. Geometry is
+gathered on the same person slots. This is the same masked attention population
+with less matrix work; training keeps its full layout and dropout path.
+Validation still computes raw `H` when its coefficient is zero. Explicit mining
+continues to set `compute_context=False` and never runs the reasoner.
+
+Fine-scoring prefetch is bounded to one geometry/packed-person chunk. It runs
+no model forward or CUDA kernel on the worker. CUDA sources are pinned there;
+cache errors propagate and the worker joins on every exit. `prefetch_batches=0`
+uses the same scoring path without a background worker. Lightweight third-party
+readers without the separate geometry/scene API retain the public dense scorer.
+Normalized detection boxes share the existing visual LRU between matching and
+scene loads, avoiding duplicate geometry-shard reads without another cache
+format or an additional memory budget.
+
+CPU calibration batches normalization by valid support size and computes AP
+from compact positive ranks. The sequential float64 accumulation includes the
+fixed coarse tail in official rank order, retaining exact AP values and the
+first-candidate tie rule. The complete coefficient grid, Top-M population and
+checkpoint criterion are unchanged. CPU replay/calibration still work without
+model imports, weights or feature caches.
+
+Retrieval logs wall times for gallery encoding, query/coarse scoring, fine
+scoring and ranking, and saves them as `timings_seconds` in `rankings.pt` and
+`run.json`. These are elapsed stage times including I/O and synchronization at
+output boundaries, not individual CUDA kernel timings. Calibration prints its
+candidate count and elapsed CPU time and adds a `calibration` timing to selected
+artifacts. Compare the same checkpoint, split and runtime when measuring an
+optimization; use a separate output directory:
+
+```bash
+.venv-proposed/bin/python tools/run.py run --config runs/proposed/selected.yaml \
+  --split val --set retrieval.prefetch_batches=0 output.dir=runs/eval-serial
+.venv-proposed/bin/python tools/run.py run --config runs/proposed/selected.yaml \
+  --split val --set retrieval.prefetch_batches=1 output.dir=runs/eval-prefetch
+```
+
+The evaluation input optimizations preserve model parameters, checkpoint
+architecture and score-artifact schema. Existing aligned CLS v4 inference
+checkpoints and compatible frozen caches remain usable.
+
 No new downcast is introduced: FP16 stored features become FP32 model inputs on
 the accelerator. FP32 stored features retain FP32 transfer. CUDA training retains
 its AMP/GradScaler policy, and FDA/geometry attention retain their FP32 regions.
@@ -58,9 +112,10 @@ Packing can change floating-point accumulation through different GEMM shapes;
 old and new training trajectories are not promised bitwise identical. Serial and
 prefetched execution use the same numerical path and are tested against each other.
 
-Cache files and inference weights remain compatible. Resume verification also
-binds the source hash, so retain the original implementation for an existing run.
-Use a new output directory with the updated implementation:
+Compatible frozen cache files remain reusable. The `fafa-aligned-pair-cls-v4`
+reasoner requires new inference weights and training state. Resume verification
+also binds the source hash, so retain the original implementation for an
+existing run. Use a new output directory with the updated implementation:
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \

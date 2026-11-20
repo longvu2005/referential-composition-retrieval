@@ -352,8 +352,21 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
         detection_root=source.root,
         scene_root=scene_root,
         query_root=query_root,
+        lru_mib=1,
     )
+    geometry_reads = []
+    read_geometry = gallery.detections.load_geometry
+
+    def count_geometry(index):
+        geometry_reads.append(index)
+        return read_geometry(index)
+
+    monkeypatch.setattr(gallery.detections, "load_geometry", count_geometry)
+    gallery.load_person_geometry(torch.tensor([0, 1]))
     patches, people, boxes, mask = gallery.load(torch.tensor([0, 1]))
+    gallery.load_person_geometry(torch.tensor([1, 0]))
+    assert geometry_reads == [0, 1]  # Scene loads reuse the matching geometry.
+    assert gallery._bytes <= 1024**2
     assert patches.shape == (2, 2, 4) and people.shape == (2, 2, 3)
     assert mask.tolist() == [[True, True], [False, False]]
     torch.testing.assert_close(
