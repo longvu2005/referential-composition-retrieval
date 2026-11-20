@@ -1,21 +1,27 @@
 """Numerical contracts and work bounds for the GPU execution paths."""
 
+import json
 from collections import Counter
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from rcr.proposed import losses, ranking
+from rcr.proposed.batch import build_batch, prepare_visual_batch
 from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.matching import partial_identity_matching, unique_box_mask
+from rcr.proposed.nn.encoders import TextEncoder
+from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
     fafa_binding_scores,
     identity_scores,
     identity_scores_paired,
 )
-from tests.helpers import TinyCache, Tokenizer, _only_loss, _rank
+from tests.helpers import TextBackbone, TinyCache, Tokenizer, _only_loss, _rank, _sample
+from tools import diagnose_gpu
 
 DEVICES = [
     "cpu",
@@ -26,6 +32,93 @@ DEVICES = [
         ),
     ),
 ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_warmup_skips_target_scene_reads_with_identical_loss_and_gradients(
+    device, monkeypatch
+):
+    cache = TinyCache()
+    model = RCRModel(dim=8, identity_dim=6, num_heads=2, state_dim=4).to(device)
+    reference = deepcopy(model)
+    text = TextEncoder(TextBackbone(), dim=8).to(device)
+    reference_text = deepcopy(text)
+    supervision = SimpleNamespace(
+        load_ids=lambda ids, width: [["p1"] * width for _ in ids]
+    )
+    args = ([_sample("train", "q", "a")], [["a", "n"]], cache, Tokenizer())
+    options = {"supervision": supervision, "identity_image_ids": [{"a", "n"}]}
+    expected_batch = build_batch(*args, reference_text, device, **options)
+    reads = []
+    load = cache.load
+
+    def track(indices):
+        reads.extend(cache.image_ids[i] for i in indices.tolist())
+        return load(indices)
+
+    monkeypatch.setattr(cache, "load", track)
+    batch = build_batch(*args, text, device, load_target_context=False, **options)
+    assert reads == ["q"]
+    assert "target_scene" not in batch and "target_boxes" not in batch
+    for name, value in batch.items():
+        torch.testing.assert_close(value, expected_batch[name])
+    settings = losses.loss_settings({"context_weight": 0.0})
+    expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
+    actual, _ = losses.compute_loss(model, batch, (2, 2), **settings)
+    expected.backward()
+    actual.backward()
+    torch.testing.assert_close(actual, expected)
+    parameters = [*model.parameters(), *text.proj.parameters()]
+    reference_parameters = [*reference.parameters(), *reference_text.proj.parameters()]
+    for parameter, other in zip(parameters, reference_parameters, strict=True):
+        torch.testing.assert_close(parameter.grad, other.grad)
+
+
+def test_context_cannot_omit_required_target_scenes():
+    with pytest.raises(ValueError, match="context training requires target scenes"):
+        prepare_visual_batch(
+            [],
+            [],
+            None,
+            supervision=None,
+            identity_image_ids=[],
+            fafa_pooling="subject_mean",
+            load_target_context=False,
+        )
+
+
+def test_diagnostics_records_cuda_kernel_failure(monkeypatch):
+    cfg = {"runtime": {"device": "cuda"}, "train": {"amp": True}}
+    monkeypatch.setattr(diagnose_gpu, "_command", lambda args: {})
+    monkeypatch.setattr(diagnose_gpu.shutil, "which", lambda name: None)
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_90"])
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "RTX 5060")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    def unsupported(*args, **kwargs):
+        raise RuntimeError("no kernel image is available for execution on the device")
+
+    monkeypatch.setattr(torch, "randn", unsupported)
+    report = diagnose_gpu.environment_report(cfg, torch.device("cuda"))
+    assert report["compute_capability"] == [12, 0]
+    assert report["cuda_kernel_smoke"]["status"] == "failed"
+    assert "no kernel image" in report["cuda_kernel_smoke"]["error"]
+
+
+def test_diagnostics_saves_failure_before_attempting_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnose_gpu, "load_config", lambda path: {})
+    environment = {"cuda_kernel_smoke": {"status": "failed", "error": "unsupported"}}
+    monkeypatch.setattr(diagnose_gpu, "environment_report", lambda *args: environment)
+    monkeypatch.setattr(
+        diagnose_gpu, "cache_report", lambda *args, **kwargs: pytest.fail("cache read")
+    )
+    output = tmp_path / "diagnostics.json"
+    status = diagnose_gpu.main(
+        ["--device", "cuda", "--cache-batches", "1", "--output", str(output)]
+    )
+    assert status == 1
+    assert json.loads(output.read_text()) == {"environment": environment}
 
 
 @pytest.mark.parametrize("device", DEVICES)

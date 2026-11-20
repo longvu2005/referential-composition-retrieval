@@ -784,6 +784,7 @@ def _train(cfg, output, resumed):
                     text_cache=text_cache,
                     fafa_pooling=fafa_pooling,
                     defer_native_targets=device.type == "cuda",
+                    load_target_context=fafa_pooling is not None,
                     include_direction_swaps=bool(
                         epoch_loss["context_weight"]
                         and epoch_loss["context_swap_weight"]

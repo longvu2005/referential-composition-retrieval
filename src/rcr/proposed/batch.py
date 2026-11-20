@@ -77,6 +77,16 @@ def _deduplicated_masks(
     return query_keep, target_keep, seen
 
 
+def load_visual_features(cache, query_indices, target_indices, *, target_context=True):
+    """Skip target scene shards and geometry when only identity/state are trained."""
+    if target_context:
+        return cache.load_groups(query_indices, target_indices)
+    query = cache.load(query_indices)
+    persons, mask = cache.load_persons(target_indices)
+    # The trainable projection expects FP32 inputs outside CUDA autocast.
+    return query, (None, persons.float(), None, mask)
+
+
 def prepare_visual_batch(
     samples: list[dict],
     candidate_image_ids: list[list[str]],
@@ -89,6 +99,7 @@ def prepare_visual_batch(
     hard_identity_image_ids=None,
     fafa_pooling: str | None = None,
     defer_native_targets: bool = False,
+    load_target_context: bool = True,
 ) -> dict[str, Tensor | dict | str | NativeTargetBatch]:
     """Load CPU visual features and labels. No model is executed here.
 
@@ -96,9 +107,12 @@ def prepare_visual_batch(
     frozen native FAFA query/target tokens that objective needs and records the
     pooling used for them. Without it no native token is read.
     Deferred targets retain only image indices and load useful chunks in the loss.
+    Target scene/box tensors can be omitted when the context objective is disabled.
     """
     if fafa_pooling is not None and fafa_pooling not in POOLING_MODES:
         raise ValueError(f"unknown FAFA pooling: {fafa_pooling!r}")
+    if fafa_pooling is not None and not load_target_context:
+        raise ValueError("context training requires target scenes and boxes")
     if not samples or len(samples) != len(candidate_image_ids):
         raise ValueError("training requires matching non-empty query/candidate rows")
     batch_size = len(samples)
@@ -119,7 +133,9 @@ def prepare_visual_batch(
     target_indices = torch.tensor(
         [cache.by_id[image_id] for row in candidate_image_ids for image_id in row]
     )
-    query, target = cache.load_groups(query_indices, target_indices)
+    query, target = load_visual_features(
+        cache, query_indices, target_indices, target_context=load_target_context
+    )
     q_scene, q_people, q_boxes, q_mask = query
     t_scene, t_people, t_boxes, t_mask = target
 
@@ -295,9 +311,7 @@ def prepare_visual_batch(
         "target_global": cache.load_global_features(target_indices).unflatten(
             0, (batch_size, candidates_per_query)
         ),
-        "target_scene": t_scene.unflatten(0, (batch_size, candidates_per_query)),
         "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
-        "target_boxes": t_boxes.unflatten(0, (batch_size, candidates_per_query)),
         "target_mask": t_mask.unflatten(0, (batch_size, candidates_per_query)),
         "target_identity_labels": target_labels.unflatten(
             0, (batch_size, candidates_per_query)
@@ -307,6 +321,9 @@ def prepare_visual_batch(
         ),
         "positive_mask": positive_mask,
     }
+    if load_target_context:
+        batch["target_scene"] = t_scene.unflatten(0, (batch_size, candidates_per_query))
+        batch["target_boxes"] = t_boxes.unflatten(0, (batch_size, candidates_per_query))
     batch["identity_positive_mask"] = torch.tensor(
         [
             [image_id in eligible for image_id in image_ids]
@@ -429,6 +446,7 @@ def build_batch(
     fafa_pooling: str | None = None,
     include_direction_swaps: bool = False,
     defer_native_targets: bool = False,
+    load_target_context: bool = True,
 ) -> dict[str, Tensor | dict | str | NativeTargetBatch]:
     text_cache = text_cache or QueryTextCache(tokenizer)
     visual = prepare_visual_batch(
@@ -442,6 +460,7 @@ def build_batch(
         hard_identity_image_ids=hard_identity_image_ids,
         fafa_pooling=fafa_pooling,
         defer_native_targets=defer_native_targets,
+        load_target_context=load_target_context,
     )
     visual = {
         key: (
