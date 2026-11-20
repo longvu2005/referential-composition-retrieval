@@ -21,7 +21,7 @@ from rcr.common.io import sha256_file
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve, sampling
 from rcr.proposed import train as training
-from rcr.proposed.batch import build_batch, prepare_visual_batch
+from rcr.proposed.batch import build_batch, build_supervision, prepare_visual_batch
 from rcr.proposed.losses import _context_scores, compute_loss, retrieval_loss
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.resume import capture_rng, restore_rng, training_lock
@@ -44,6 +44,27 @@ from tests.helpers import (
 from tools.run import main
 
 # Objectives, warmup, validation and checkpoint selection.
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_bulk_supervision_preserves_member_labels_and_vocabulary_order(empty):
+    ids = [[], []] if empty else [[None, "A", "B", "A"], ["C", None, "B", "D"]]
+    subjects = [
+        [{"identity_ids": ["A", "B", "A"]}, {"identity_ids": ["B"]}],
+        [{"identity_ids": ["C", "D"]}, {"identity_ids": ["B"]}],
+    ]
+    vocabulary = {"B": 0}
+    targets, labels = build_supervision(ids, subjects, vocabulary)
+    if empty:
+        assert labels.shape == (2, 0) and targets.shape == (2, 2, 0)
+        assert vocabulary == {"B": 0}
+    else:
+        assert labels.tolist() == [[-1, 1, 0, 1], [2, -1, 0, 3]]
+        assert targets.tolist() == [
+            [[0, 1, 1, 1], [0, 0, 1, 0]],
+            [[1, 0, 0, 1], [0, 0, 1, 0]],
+        ]
+        assert vocabulary == {"B": 0, "A": 1, "C": 2, "D": 3}
 
 
 @pytest.mark.parametrize("warmup", [0, 1])

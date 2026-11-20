@@ -14,7 +14,7 @@ from rcr.common.tensor_checks import TensorChecks, check_tensor
 from rcr.proposed import losses, ranking
 from rcr.proposed.batch import build_batch, prepare_visual_batch
 from rcr.proposed.cache.native import NativeFAFACache, NativeTargetBatch
-from rcr.proposed.cache.store import SceneTargetBatch
+from rcr.proposed.cache.store import GalleryCache, SceneTargetBatch
 from rcr.proposed.identity import IdentityLayout, select_identity_observations
 from rcr.proposed.matching import (
     PersonMatching,
@@ -42,6 +42,78 @@ DEVICES = [
         ),
     ),
 ]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("layout", ["packed", "legacy"])
+@pytest.mark.parametrize("indices", [[], [0, 0], [2, 0, 1, 3, 1, 2]])
+def test_direct_packed_index_preserves_crop_order_without_dense_cpu_persons(
+    dtype, layout, indices, monkeypatch
+):
+    cache = GalleryCache.__new__(GalleryCache)
+    cache.mask = torch.tensor(
+        [
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 1, 0, 0, 1, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [1, 0, 1, 1, 1, 0, 1, 0],
+        ],
+        dtype=torch.bool,
+    )
+    counts = cache.mask.sum(1)
+    cache.person_dim = 4
+    values = torch.arange(int(counts.sum()) * 4).reshape(-1, 4).to(dtype)
+    cache.person_offsets = torch.cat(
+        (torch.zeros(1, dtype=torch.long), counts.cumsum(0))
+    )
+    cache.persons = values
+    crops = [cache.person_row(i).clone() for i in range(len(counts))]
+    if layout == "legacy":
+        cache.persons = torch.full((4, 8, 4), torch.nan, dtype=dtype)
+        for i, row in enumerate(crops):
+            cache.persons[i, cache.mask[i]] = row
+        cache.person_offsets = None
+    cache.detections = object()
+    geometry = [torch.arange(len(row) * 4).float().reshape(-1, 4) for row in crops]
+    monkeypatch.setattr(cache, "_scene_boxes", lambda i: geometry[i])
+    indices = torch.tensor(indices, dtype=torch.long)
+    mask = cache.mask[indices]
+    mask = mask[:, mask.any(0)]
+    expected = torch.zeros(len(indices), mask.shape[1], 4, dtype=dtype)
+    boxes = torch.zeros(len(indices), mask.shape[1], 4)
+    for n, i in enumerate(indices.tolist()):
+        expected[n, mask[n]] = crops[i]
+        boxes[n, mask[n]] = geometry[i]
+    dense, dense_mask = cache.load_persons(indices)
+    torch.testing.assert_close(
+        dense.masked_fill(~mask[..., None], 0), expected, rtol=0, atol=0
+    )
+    assert torch.equal(dense_mask, mask)
+    monkeypatch.setattr(
+        cache, "load_persons", lambda *args: pytest.fail("padded CPU persons")
+    )
+    monkeypatch.setattr(
+        cache,
+        "load_person_geometry",
+        lambda *args: pytest.fail("dense geometry reader"),
+    )
+    monkeypatch.setattr(
+        cache, "person_row", lambda *args: pytest.fail("per-image crop gather")
+    )
+    for geometry_required in (False, True):
+        packed, actual_boxes, actual_mask = PackedPersons.from_cache(
+            cache, indices, geometry=geometry_required
+        )
+        assert packed.values.dtype == dtype
+        assert len(packed.values) == int(mask.sum())
+        torch.testing.assert_close(
+            packed.to_dense("cpu"), expected.float(), rtol=0, atol=0
+        )
+        assert torch.equal(actual_mask, mask)
+        if geometry_required:
+            torch.testing.assert_close(actual_boxes, boxes, rtol=0, atol=0)
+        else:
+            assert actual_boxes is None
 
 
 @pytest.mark.parametrize("device", DEVICES)

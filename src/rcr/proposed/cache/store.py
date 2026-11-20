@@ -287,15 +287,31 @@ class GalleryCache:
 
     def load_persons(self, indices: Tensor) -> tuple[Tensor, Tensor]:
         """Load the coarse index only, padding useful columns for this batch."""
+        if self.person_offsets is None:
+            mask = self.mask[indices]
+            columns = mask.any(dim=0)
+            return self.persons[indices[:, None], columns.nonzero().flatten()], mask[
+                :, columns
+            ]
+        values, positions, mask = self.load_packed_persons(indices)
+        persons = values.new_zeros(len(indices) * mask.shape[1], self.person_dim)
+        persons.index_copy_(0, positions, values)
+        return persons.unflatten(0, mask.shape), mask
+
+    def load_packed_persons(self, indices: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Gather actual crops directly from the index, without a padded CPU copy."""
         mask = self.mask[indices]
         columns = mask.any(dim=0)
         mask = mask[:, columns]
+        rows, slots = mask.nonzero(as_tuple=True)
+        positions = rows * mask.shape[1] + slots
         if self.person_offsets is None:
-            return self.persons[indices[:, None], columns.nonzero().flatten()], mask
-        persons = self.persons.new_zeros(len(indices), mask.shape[1], self.person_dim)
-        for n, index in enumerate(indices.tolist()):
-            persons[n, mask[n]] = self.person_row(index)
-        return persons, mask
+            values = self.persons[indices[rows], columns.nonzero().flatten()[slots]]
+        else:
+            ordinal = mask.long().cumsum(1) - 1
+            source = self.person_offsets[indices[rows]] + ordinal[rows, slots]
+            values = self.persons.index_select(0, source)
+        return values, positions, mask
 
     def load_person_geometry(self, indices: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Read person/box indices without opening scene shards in separated caches."""
@@ -303,15 +319,41 @@ class GalleryCache:
             _, persons, boxes, mask = self.load(indices)
             return persons, boxes, mask
         persons, mask = self.load_persons(indices)
+        return persons, self._person_boxes(indices, mask), mask
+
+    def load_packed_person_geometry(self, indices: Tensor) -> tuple:
+        """Match the packed crop order while keeping geometry small and padded."""
+        if self.detections is None:
+            _, persons, boxes, mask = self.load(indices)
+            positions = mask.flatten().nonzero().flatten()
+            values = persons.flatten(0, 1).index_select(0, positions)
+            return values, positions, boxes, mask
+        values, positions, mask = self.load_packed_persons(indices)
+        return values, positions, self._person_boxes(indices, mask), mask
+
+    def _person_boxes(self, indices, mask):
         boxes = torch.zeros(len(indices), mask.shape[1], 4)
-        rows = {}
-        for n, index in enumerate(indices.tolist()):
-            rows.setdefault(index, []).append(n)
-        for index, positions in rows.items():
+        image_rows = indices.tolist()
+        counts = dict(zip(image_rows, mask.sum(1).tolist(), strict=True))
+        offsets, chunks, offset = {}, [], 0
+        for index in dict.fromkeys(image_rows):
             coords = self._scene_boxes(index)
-            for n in positions:
-                boxes[n, mask[n]] = coords
-        return persons, boxes, mask
+            if len(coords) != counts[index]:
+                raise ValueError("cache person box count differs from index.pt")
+            offsets[index] = offset
+            chunks.append(coords)
+            offset += len(coords)
+        if chunks:
+            rows, slots = mask.nonzero(as_tuple=True)
+            starts = torch.tensor([offsets[i] for i in image_rows], dtype=torch.long)
+            ordinal = mask.long().cumsum(1) - 1
+            source = starts[rows] + ordinal[rows, slots]
+            boxes.flatten(0, 1).index_copy_(
+                0,
+                rows * mask.shape[1] + slots,
+                torch.cat(chunks).index_select(0, source),
+            )
+        return boxes
 
     def _scene_boxes(self, index: int) -> Tensor:
         """Share immutable normalized geometry between matching and scene loading."""

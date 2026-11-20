@@ -27,7 +27,7 @@ from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.prefetch import PackedPersons
 from rcr.proposed.sampling import (
     CandidateIndex,
-    identity_candidate_pools,
+    annotation_candidate_pools,
     sample_candidates,
     sampling_settings,
     training_batches,
@@ -148,8 +148,13 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
     data = load_rcr_data(cfg["data"]["final_dir"], cfg["data"]["image_root"])
     samples = split_samples(data, "train")
     gallery = split_image_ids(data, "train")
-    pools = identity_candidate_pools(data, samples, gallery)
-    index = CandidateIndex(samples, gallery, pools, negative_exclusions(samples))
+    settings = sampling_settings(cfg["train"].get("sampling", {}))
+    pools, partial = annotation_candidate_pools(
+        data, samples, gallery, include_partial=settings["partial_id_quota"] > 0
+    )
+    index = CandidateIndex(
+        samples, gallery, pools, negative_exclusions(samples), partial_pools=partial
+    )
     generator = derived_generator(cfg["train"]["seed"], "sampling", epoch)
     plan = training_batches(
         samples,
@@ -157,7 +162,6 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
         generator,
         case_balanced=cfg["train"].get("case_balanced", True),
     )
-    settings = sampling_settings(cfg["train"].get("sampling", {}))
     setup_seconds = perf_counter() - started
     rows = []
     chunk_size = cfg["train"].get("context_batch_size", 64)
@@ -178,6 +182,7 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
             identity_fraction=settings["identity_fraction"],
             hard_fraction=settings["hard_fraction"],
             semantic_hard_fraction=settings["semantic_hard_fraction"],
+            partial_id_quota=settings["partial_id_quota"],
             identity_rejection=bool(
                 cfg["loss"]["context_weight"]
                 and cfg["loss"].get("context_rejection_weight", 0)
@@ -212,10 +217,13 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
                 target_context=context,
                 defer_target_scenes=context,
                 preserve_storage=True,
+                pack_target_persons=True,
             )
             if context:
                 target[0].prepare(eligible)
-            packed = PackedPersons.from_padded(target[1], target[3])
+            packed = target[1]
+            if not isinstance(packed, PackedPersons):
+                packed = PackedPersons.from_padded(packed, target[3])
             assembly_seconds = perf_counter() - started
             tensors = [
                 value
@@ -237,6 +245,7 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
                 "queries": len(queries),
                 "candidates": len(targets),
                 "context_pairs": len(eligible) if context else 0,
+                "partial_id_images": sampled.partial_id_count,
                 "actual_target_people": int(counts.sum()),
                 "padded_target_people": target[3].numel(),
                 "projected_target_people": len(packed.values),

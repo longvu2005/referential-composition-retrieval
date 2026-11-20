@@ -23,6 +23,31 @@ class PackedPersons:
         packed = values.reshape(-1, values.shape[-1]).index_select(0, positions)
         return cls(packed, positions, tuple(values.shape))
 
+    @classmethod
+    def from_cache(cls, cache, indices, *, geometry=False):
+        """Read packed index rows when available; retain dense-reader compatibility."""
+        loader = getattr(
+            cache,
+            "load_packed_person_geometry" if geometry else "load_packed_persons",
+            None,
+        )
+        if loader is not None:
+            if geometry:
+                values, positions, boxes, mask = loader(indices)
+            else:
+                values, positions, mask = loader(indices)
+                boxes = None
+            return cls(values, positions, (*mask.shape, values.shape[-1])), boxes, mask
+        if geometry:
+            if hasattr(cache, "load_person_geometry"):
+                values, boxes, mask = cache.load_person_geometry(indices)
+            else:
+                _, values, boxes, mask = cache.load(indices)
+        else:
+            values, mask = cache.load_persons(indices)
+            boxes = None
+        return cls.from_padded(values, mask), boxes, mask
+
     def to_dense(self, device, *, copy=None):
         if copy is None:
 

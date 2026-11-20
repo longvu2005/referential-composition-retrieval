@@ -13,30 +13,39 @@ from rcr.proposed.scores import POOLING_MODES
 
 
 def _identity_labels(rows, vocabulary: dict[str, int]) -> Tensor:
-    labels = torch.full((len(rows), len(rows[0])), -1, dtype=torch.long)
-    for n, identities in enumerate(rows):
-        for person, identity in enumerate(identities):
-            if identity is None:
-                continue
-            identity = str(identity)
-            labels[n, person] = vocabulary.setdefault(identity, len(vocabulary))
-    return labels
+    return torch.tensor(
+        [
+            [
+                -1
+                if identity is None
+                else vocabulary.setdefault(str(identity), len(vocabulary))
+                for identity in identities
+            ]
+            for identities in rows
+        ],
+        dtype=torch.long,
+    ).reshape(len(rows), len(rows[0]))
 
 
 def build_supervision(identity_rows, subjects, vocabulary=None):
     """Build Subject membership targets and local identity-class labels."""
     vocabulary = {} if vocabulary is None else vocabulary
     labels = _identity_labels(identity_rows, vocabulary)
-    targets = torch.zeros(len(identity_rows), len(subjects[0]), len(identity_rows[0]))
-    for n, (identities, subject_rows) in enumerate(
-        zip(identity_rows, subjects, strict=True)
-    ):
+    memberships = []
+    for identities, subject_rows in zip(identity_rows, subjects, strict=True):
         required = [set(map(str, subject["identity_ids"])) for subject in subject_rows]
-        for person, identity in enumerate(identities):
-            if identity is None:
-                continue
-            for subject, identity_set in enumerate(required):
-                targets[n, subject, person] = str(identity) in identity_set
+        memberships.append(
+            [
+                [
+                    identity is not None and str(identity) in ids
+                    for identity in identities
+                ]
+                for ids in required
+            ]
+        )
+    targets = torch.tensor(memberships, dtype=torch.get_default_dtype()).reshape(
+        len(identity_rows), len(subjects[0]), len(identity_rows[0])
+    )
     return targets, labels
 
 
@@ -87,12 +96,20 @@ def load_visual_features(
     target_context=True,
     defer_target_scenes=False,
     preserve_storage=False,
+    pack_target_persons=False,
 ):
     """Skip target scene shards and geometry when only identity/state are trained."""
     if target_context and not defer_target_scenes:
         return cache.load_groups(query_indices, target_indices)
     query = cache.load(query_indices)
-    if target_context:
+    if pack_target_persons:
+        persons, boxes, mask = PackedPersons.from_cache(
+            cache, target_indices, geometry=target_context
+        )
+        if not preserve_storage:
+            persons.values = persons.values.float()
+        scene = SceneTargetBatch(cache, target_indices) if target_context else None
+    elif target_context:
         if hasattr(cache, "load_person_geometry"):
             persons, boxes, mask = cache.load_person_geometry(target_indices)
         else:
@@ -102,7 +119,9 @@ def load_visual_features(
         persons, mask = cache.load_persons(target_indices)
         scene = boxes = None
     # The trainable projection expects FP32 inputs outside CUDA autocast.
-    return query, (scene, persons if preserve_storage else persons.float(), boxes, mask)
+    if not preserve_storage and isinstance(persons, Tensor):
+        persons = persons.float()
+    return query, (scene, persons, boxes, mask)
 
 
 def prepare_visual_batch(
@@ -161,6 +180,7 @@ def prepare_visual_batch(
         target_context=load_target_context,
         defer_target_scenes=defer_target_scenes,
         preserve_storage=preserve_storage,
+        pack_target_persons=pack_target_persons,
     )
     q_scene, q_people, q_boxes, q_mask = query
     t_scene, t_people, t_boxes, t_mask = target
@@ -337,7 +357,15 @@ def prepare_visual_batch(
         "target_global": cache.load_global_features(target_indices).unflatten(
             0, (batch_size, candidates_per_query)
         ),
-        "target_persons": t_people.unflatten(0, (batch_size, candidates_per_query)),
+        "target_persons": (
+            PackedPersons(
+                t_people.values,
+                t_people.positions,
+                (batch_size, candidates_per_query, *t_people.shape[1:]),
+            )
+            if isinstance(t_people, PackedPersons)
+            else t_people.unflatten(0, (batch_size, candidates_per_query))
+        ),
         "target_mask": t_mask.unflatten(0, (batch_size, candidates_per_query)),
         "target_identity_labels": target_labels.unflatten(
             0, (batch_size, candidates_per_query)
@@ -416,9 +444,9 @@ def prepare_visual_batch(
         )
         batch["fafa_pooling"] = fafa_pooling
     if pack_target_persons:
-        packed = PackedPersons.from_padded(
-            batch["target_persons"], batch["target_mask"]
-        )
+        packed = batch["target_persons"]
+        if not isinstance(packed, PackedPersons):
+            packed = PackedPersons.from_padded(packed, batch["target_mask"])
         batch["target_persons"] = packed
         batch["target_layout"] = {"positions": packed.positions}
     batch["identity_layout"] = IdentityLayout.from_batch(batch)

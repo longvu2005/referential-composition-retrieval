@@ -21,9 +21,15 @@ Training uses the following input path:
 1. The producer samples candidates using private CPU generators and prepares
    visual inputs/labels. Only query scenes are needed during warmup. Joint
    training reads target scene patches for eligible context pairs.
-2. Person features are packed using the CPU validity mask. Only actual detections
+2. Person features are gathered directly from the packed CPU index. The producer
+   does not allocate a dense target-person tensor only to pack it again. One
+   batched gather retains crop order, repeated images and stored precision; boxes
+   are collated together and remain small padded metadata. Only actual detections
    cross PCIe; their exact zero padding is reconstructed on the device. Target
    identity projection also skips padded detections. It contains no dropout.
+   Query membership and identity labels are built in bulk, avoiding a tensor
+   assignment for every annotated person/Subject. Public dense cache readers and
+   third-party readers retain their existing API and fallback path.
 3. With prefetch enabled on CUDA, the worker pins source buffers and copies frozen
    inputs on a separate CUDA stream. The consumer waits on an event and records
    the tensors on its stream. CPU source buffers are retained until consumption.
@@ -187,7 +193,9 @@ small CUDA forward/backward smoke catches unsupported kernels even when
 exit status. No weights are downloaded and no caches/checkpoints are modified.
 
 The cache probe reads actual seeded candidates, sparse scenes and packed person
-inputs. It reports raw visual payload, CPU assembly time, native prefetch bytes
+inputs, including the configured partial-ID top-up. It uses the same direct
+packed readers as training, coarse gallery encoding and fine scoring. It reports
+raw visual payload, CPU assembly time, native prefetch bytes
 and reader LRU requests. It measures serial visual/query H2D components without
 pinning/stream overlap. Because it does not run grounding or matching, it reports
 a one-to-one upper bound for matched native-token transfer, rather than claiming

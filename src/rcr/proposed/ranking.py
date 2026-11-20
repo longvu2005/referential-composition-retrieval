@@ -125,10 +125,13 @@ def _encode_gallery(
     )
     for start in range(0, len(image_indices), batch_size):
         indices = image_indices[start : start + batch_size]
-        persons, mask = cache.load_persons(indices)
-        columns = mask.any(0)
-        persons, mask = persons[:, columns], mask[:, columns]
-        packed = PackedPersons.from_padded(persons, mask)
+        if hasattr(cache, "load_packed_persons"):
+            packed, _, mask = PackedPersons.from_cache(cache, indices)
+        else:
+            persons, mask = cache.load_persons(indices)
+            columns = mask.any(0)
+            persons, mask = persons[:, columns], mask[:, columns]
+            packed = PackedPersons.from_padded(persons, mask)
         projected = model.encode_identity(
             packed.values.to(device, non_blocking=True).float()
         )
@@ -418,8 +421,9 @@ def _score_target_components(
     def prepare(rows):
         targets = image_indices[rows]
         if sparse:
-            persons, boxes, mask = cache.load_person_geometry(targets)
-            packed = PackedPersons.from_padded(persons, mask)
+            packed, boxes, mask = PackedPersons.from_cache(
+                cache, targets, geometry=True
+            )
             if device.type == "cuda":
                 packed.values = packed.values.pin_memory()
                 packed.positions = packed.positions.pin_memory()
