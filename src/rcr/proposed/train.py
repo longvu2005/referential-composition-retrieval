@@ -75,7 +75,7 @@ from rcr.proposed.resume import (
 )
 from rcr.proposed.sampling import (
     CandidateIndex,
-    identity_candidate_pools,
+    annotation_candidate_pools,
     sample_candidates,
     sampling_settings,
     training_batches,
@@ -428,11 +428,21 @@ def _train(cfg, output, resumed):
         if use_extra_identities
         else None
     )
-    identity_pools = identity_candidate_pools(data, train_samples, train_gallery)
+    identity_pools, partial_pools = annotation_candidate_pools(
+        data,
+        train_samples,
+        train_gallery,
+        include_partial=sampling["partial_id_quota"] > 0,
+    )
     excluded = negative_exclusions(train_samples)
     candidate_index = CandidateIndex(
-        train_samples, train_gallery, identity_pools, excluded
+        train_samples,
+        train_gallery,
+        identity_pools,
+        excluded,
+        partial_pools=partial_pools,
     )
+    del partial_pools
     identity_images = {
         sample_id: set(pool) for sample_id, pool in identity_pools.items()
     }
@@ -618,6 +628,12 @@ def _train(cfg, output, resumed):
             hard_quota = int(
                 (cfg["train"]["candidates"] - 1) * sampling["hard_fraction"]
             )
+            rejection_mining_weight = (
+                sampling["rejection_mining_context_weight"]
+                if epoch_loss["context_weight"]
+                and epoch_loss["context_rejection_weight"]
+                else 0.0
+            )
             if (
                 not resuming_epoch
                 and (hard_quota or semantic_hard)
@@ -642,6 +658,7 @@ def _train(cfg, output, resumed):
                     identity_image_ids=identity_images,
                     semantic_hard=semantic_hard,
                     identity_rejection=identity_rejection,
+                    rejection_mining_context_weight=rejection_mining_weight,
                 )
                 write_json(
                     output / "hard_negatives.json",
@@ -658,6 +675,10 @@ def _train(cfg, output, resumed):
                             "context_weight": MINING_CONTEXT_WEIGHT,
                         },
                         "screen_pool_size": sampling["pool_size"],
+                        "rejection_mining_context_weight": rejection_mining_weight,
+                        "rejection_normalization": (
+                            "per_query_screened_wrong_id_population"
+                        ),
                         "pools": progress.hard_pools,
                     },
                 )
@@ -721,6 +742,8 @@ def _train(cfg, output, resumed):
             candidate_totals = {
                 "candidate_semantic_hard": 0,
                 "candidate_identity_hard": 0,
+                "candidate_partial_id": 0,
+                "candidate_rejection_context": 0,
             }
             if resuming_epoch:
                 totals, crop_totals, candidate_totals = (
@@ -766,6 +789,7 @@ def _train(cfg, output, resumed):
                 visual_options=visual_options,
                 hard_pools=progress.hard_pools,
                 rejection_enabled=bool(epoch_loss["context_rejection_weight"]),
+                rejection_mining_weight=rejection_mining_weight,
             ):
                 batch_index, rows = index_rows
                 sampled = sample_candidates(
@@ -779,6 +803,8 @@ def _train(cfg, output, resumed):
                     hard_fraction=sampling["hard_fraction"],
                     semantic_hard_fraction=sampling["semantic_hard_fraction"],
                     identity_rejection=identity_rejection,
+                    partial_id_quota=sampling["partial_id_quota"],
+                    rejection_mining_context_weight=rejection_mining_weight,
                 )
                 identity_crops = (
                     identity_sampler.sample(rows, sampled.images, identity_worker)
@@ -846,6 +872,10 @@ def _train(cfg, output, resumed):
                 )
                 candidate_totals["candidate_identity_hard"] += (
                     sampled.identity_hard_count
+                )
+                candidate_totals["candidate_partial_id"] += sampled.partial_id_count
+                candidate_totals["candidate_rejection_context"] += (
+                    sampled.rejection_context_count
                 )
                 batch = build_batch(
                     rows,

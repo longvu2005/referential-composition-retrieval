@@ -61,14 +61,47 @@ With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semant
 context, and epoch 7 onward also enables mining and rejection at weight `0.5`.
 Context loss uses the original training coefficients `a_train=0.04` and
 `b_train=0.10`; validation calibration changes retrieval coefficients only.
-The supplied experiment enables verified left/right swap supervision at `0.2`.
-The loss API keeps its zero default when no swap setting is supplied. To run
-an experiment without swap supervision:
+The supplied experiment disables verified left/right swap supervision
+(`loss.context_swap_weight=0.0`). To enable this optional objective, use a
+separate run directory, for example:
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set loss.context_swap_weight=0.0 output.dir=runs/proposed-no-swap
+  --set loss.context_swap_weight=0.2 output.dir=runs/proposed-with-swap
 ```
+
+`train.sampling.partial_id_quota=6` starts at epoch 1 for queries requiring at
+least two distinct IDs, including one-Subject GROUP queries. Rows keep 32 unique
+candidates: Full Positives, the existing same-ID semantic quota, mined wrong-ID
+negatives, a partial-ID top-up, then random fallback. The target of six includes
+partial-ID images already drawn by mining. The top-up prioritizes four images
+missing one ID and reserves absent-Subject and missing-member representatives
+within the remaining budget. With two singleton Subjects, it covers both
+omissions; single-ID choices favor IDs missing less often in the current row.
+Remaining diversity slots draw overlap groups with probability proportional
+to `2^(r-1)`. Images
+containing every requested ID plus extra people remain identity positives.
+
+Mining refreshes at epochs 7, 11, 15 and 19. Base semantic and wrong-ID pools
+use H=0 with population normalization over their screened union. With context
+and rejection active, `train.sampling.rejection_mining_context_weight=0.005`
+also scores H on at most `pool_size=64` screened wrong-ID images per query.
+Population fusion on that same wrong-ID list is computed before filtering
+`C>0`. Up to two images that improve rank and enter the H top ten form the
+rejection context pool. Each row randomly draws one of them before two base
+wrong-ID slots; unavailable slots return to the base pool, then random fallback.
+Only actual mined wrong-ID selections enter the rejection mask. Extra partial-ID
+and random selections retain their GT labels.
+
+Old configurations resolve the two new sampling keys to `0` and `0.0`, preserving
+base sampling and its RNG sequence. Changing either setting requires a new
+`output.dir`; resume compatibility checks retain the existing source/config
+contract. Mid-epoch resume restores hard pools, including the rejection context
+pool, and committed RNG states without refreshing them. `hard_negatives.json`
+records the mining coefficient separately from training/inference weights.
+`history.jsonl` logs `train_candidate_partial_id` (all selected partial-ID images,
+including mining and random draws) and `train_candidate_rejection_context`
+(actual H-slot selections).
 
 W&B tracking is configured by `wandb`; use `wandb.mode=offline` or
 `wandb.enabled=false` when online tracking is unavailable.

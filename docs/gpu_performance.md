@@ -71,8 +71,12 @@ masked reasoner rows/keys before attention. Every selected GROUP member,
 missing-match member and active ordered pair remains present. Geometry is
 gathered on the same person slots. This is the same masked attention population
 with less matrix work; training keeps its full layout and dropout path.
-Validation still computes raw `H` when its coefficient is zero. Explicit mining
-continues to set `compute_context=False` and never runs the reasoner.
+Validation still computes raw `H` when its coefficient is zero. Base mining
+skips the reasoner for semantic candidates. Rejection context mining computes
+`H` only for the bounded wrong-ID shortlist and reuses its `B,C` in the base
+union, avoiding a second assignment or binding pass. Setting
+`train.sampling.rejection_mining_context_weight=0.0` skips the reasoner for all
+mining candidates.
 
 Fine-scoring prefetch is bounded to one geometry/packed-person chunk. It runs
 no model forward or CUDA kernel on the worker. CUDA sources are pinned there;

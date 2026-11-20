@@ -69,6 +69,8 @@ train:
     warmup_epochs: 6
     refresh_every_epochs: 4
     pool_size: 64
+    partial_id_quota: 6
+    rejection_mining_context_weight: 0.005
 optimizer:
   lr: 0.0001
   text_lr: 1.0e-05

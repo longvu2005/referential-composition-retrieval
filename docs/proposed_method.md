@@ -132,17 +132,17 @@ composition and evidence path. Grounding, identity, coarse and global-state
 losses retain their existing weights and supervision.
 
 The defaults are `context_weight=1.0`, `tau_c=0.1`, rejection weight `0.5`,
-configured swap weight `0.2`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
+configured swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
 `B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic logit is
 `0.8`, and the rejection logit is `8.0`. Epochs 1–4 warm up without context;
 epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
 with `rho_effective=0.5`; it is zero earlier. These settings are controlled by
 [configs/proposed.yaml](../configs/proposed.yaml).
 
-The loss API defaults to no swap supervision; the supplied experiment enables
-it explicitly with `loss.context_swap_weight=0.2`. Set that value to zero to
-disable it. Swap supervision reconditions text and calls the same
-aligned scorer using the original assignment for both sentences. Both deferred
+The loss API and supplied experiment default to no swap supervision
+(`loss.context_swap_weight=0.0`). When enabled, swap supervision reconditions
+text and calls the same aligned scorer using the original assignment for both
+sentences. Both deferred
 scene batches and materialized scene tensors are supported.
 
 The GPU input path keeps sparse eligible rows from `context_layout`, chunked
@@ -152,8 +152,18 @@ backward recomputes the neural context path. The default prefetch depth remains
 one batch; `train.prefetch_batches=0` runs the serial control. See
 [GPU performance](gpu_performance.md) for profiling and runtime settings.
 
-Mining sets `b=0` and `compute_context=False`, skipping the reasoner. Validation
-collects raw `H` before multiplying by `b`. The existing Top-M fusion scorer
+Base mining uses `b=0` on the screened semantic/wrong-ID union. For one rejection
+slot, it also computes H on the screened wrong-ID group (including zero overlap
+and partial identity). It reuses that group's B and C for the base union, while
+semantic candidates skip the reasoner. On the same wrong-ID list, it compares
+`z(B' + a*C) + eta*z(G)` with `z(B' + a*C + b_mine*H) + eta*z(G)`, where
+`B'=model.binding_scale*B` and `b_mine=0.005`. Population z-scores precede the
+`C>0` filter; ranks and the top-ten test follow it, with coarse order breaking
+ties. The two highest H-ranked candidates with improved rank form a pool for
+one random batch slot; the other hard slots use the base wrong-ID pool. See the
+[run guide](proposed_runs.md) for quotas, partial-ID sampling and refresh timing.
+The mining coefficient affects selection only. Validation collects raw `H`
+before multiplying by `b`. The existing Top-M fusion scorer
 calibrates `(a,b,eta)` and selects the checkpoint; the rest of the gallery keeps
 its coarse order. Calibrated coefficients serve retrieval, while losses keep
 `a_train,b_train` from the original training config. Test uses the validation

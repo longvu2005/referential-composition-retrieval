@@ -9,6 +9,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,13 +19,18 @@ from torch import nn
 
 from rcr.common.io import sha256_file
 from rcr.evaluation.runner import evaluate_run
-from rcr.proposed import losses, ranking, retrieve
+from rcr.proposed import losses, ranking, retrieve, sampling
 from rcr.proposed import train as training
-from rcr.proposed.batch import build_batch
+from rcr.proposed.batch import build_batch, prepare_visual_batch
 from rcr.proposed.losses import _context_scores, compute_loss, retrieval_loss
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.resume import capture_rng, restore_rng, training_lock
-from rcr.proposed.sampling import CandidateIndex, sample_candidates
+from rcr.proposed.sampling import (
+    CandidateIndex,
+    annotation_candidate_pools,
+    sample_candidates,
+    sampling_settings,
+)
 from rcr.proposed.supervision import TrainSupervision
 from tests.helpers import (
     TextBackbone,
@@ -415,6 +421,298 @@ def test_training_rejects_invalid_calibration_before_reading_data(
 # Sampling, mining and fine-score supervision.
 
 
+def _partial_index(subjects, images, *, excluded=(), positives=("p",)):
+    sample = _sample("train", "q", positives[0])
+    sample["positive_image_ids"] = list(positives)
+    sample["case_type"] = "GROUP" if len(subjects) == 1 else "RELATIONAL"
+    sample["subjects"] = [
+        {"subject_id": i + 1, "identity_ids": list(ids)}
+        for i, ids in enumerate(subjects)
+    ]
+    sample["final_desc"] = "Identify " + " and ".join(
+        f"Subject {i + 1} as the people" for i in range(len(subjects))
+    )
+    sample["final_change"] = "retrieve images where " + " and ".join(
+        f"Subject {i + 1} is standing" for i in range(len(subjects))
+    )
+    data = SimpleNamespace(
+        gt_head_boxes_by_image={
+            image: [{"identity_id": identity} for identity in ids]
+            for image, ids in images.items()
+        }
+    )
+    identity, partial = annotation_candidate_pools(data, [sample], list(images))
+    index = CandidateIndex(
+        [sample], list(images), identity, {"train": excluded}, partial_pools=partial
+    )
+    return sample, index, identity["train"]
+
+
+def test_partial_pools_distinguish_group_members_subjects_and_extra_people():
+    sample, index, identity = _partial_index(
+        [("A", "B", "A"), ("C",)],
+        {
+            "q": "ABC",
+            "p": "ABC",
+            "unused_positive": "ABCD",
+            "extra_person": "AABCD",
+            "missing_member": "AC",
+            "missing_subject": "AB",
+            "only_c": "C",
+            "no_overlap": "D",
+            "disputed": "BC",
+        },
+        positives=("p", "unused_positive"),
+        excluded=("disputed",),
+    )
+    assert set(identity) == {"p", "unused_positive", "extra_person"}
+    assert index.rows["train"][2] == ["extra_person"]
+    partial = index.partial["train"]
+    assert set(partial) == {"missing_member", "missing_subject", "only_c"}
+    assert partial["missing_member"].missing_ids == {"B"}
+    assert partial["missing_member"].missing_subjects == set()
+    assert partial["missing_subject"].missing_ids == {"C"}
+    assert partial["missing_subject"].missing_subjects == {1}
+    assert partial["only_c"].missing_ids == {"A", "B"}
+    assert partial["only_c"].missing_subjects == {0}
+    assert partial["missing_member"].overlap == partial["missing_subject"].overlap == 2
+    sampled = sample_candidates(
+        [sample],
+        5,
+        torch.Generator().manual_seed(4),
+        index=index,
+        positives_per_query=1,
+        partial_id_quota=6,
+    )
+    row = set(sampled.images[0])
+    assert len(row & {"p", "unused_positive"}) == 1
+    assert row - {"p", "unused_positive"} == {
+        "extra_person",
+        "missing_member",
+        "missing_subject",
+        "only_c",
+    }
+    assert sampled.partial_id_count == 3
+    assert sampled.hard_identity_ids == [set()]
+
+
+def test_mined_partial_ids_count_once_before_top_up_and_keep_provenance(monkeypatch):
+    images = {"q": "ABC", "p": "ABC"}
+    images.update({f"s{i}": "ABCD" for i in range(20)})
+    images.update({f"pa{i}": "AC" for i in range(8)})
+    images.update({f"pb{i}": "AB" for i in range(8)})
+    images.update({f"pc{i}": "BC" for i in range(8)})
+    images.update({f"multi{i}": "C" for i in range(4)})
+    images.update({f"r{i}": "D" for i in range(80)})
+    sample, index, _ = _partial_index([("A", "B"), ("C",)], images)
+    before_random = []
+    random_negatives = sampling._random_negatives
+
+    def observe(gallery, forbidden, count, generator):
+        partial = index.partial["train"]
+        chosen = [partial[i] for i in forbidden if i in partial]
+        before_random.append((chosen, count))
+        return random_negatives(gallery, forbidden, count, generator)
+
+    monkeypatch.setattr(sampling, "_random_negatives", observe)
+    sampled = sample_candidates(
+        [sample],
+        32,
+        torch.Generator().manual_seed(8),
+        index=index,
+        identity_fraction=0.45,
+        hard_fraction=0.1,
+        identity_rejection=True,
+        partial_id_quota=6,
+        rejection_mining_context_weight=0.005,
+        hard_pools={
+            "train": {
+                "rejection_context": ["pa0"],
+                "identity": ["pa0", "pa1", "r0"],
+            }
+        },
+    )
+    assert sampled.hard_identity_ids == [{"pa0", "pa1", "r0"}]
+    assert sampled.identity_hard_count == 3 and sampled.rejection_context_count == 1
+    chosen, remaining = before_random[0]
+    assert len(chosen) == 6 and remaining == 11  # Two mined, four added.
+    assert sum(len(info.missing_ids) == 1 for info in chosen) >= 4
+    assert any(info.missing_subjects for info in chosen)
+    assert any(not info.missing_subjects for info in chosen)
+    assert any(info.missing_ids == {"A"} for info in chosen)
+    row = sampled.images[0]
+    assert len(row) == len(set(row)) == 32
+    assert sampled.partial_id_count == sum(i in index.partial["train"] for i in row)
+
+
+@pytest.mark.parametrize("size", [0, 2, 20])
+def test_one_subject_group_partial_sampling_handles_small_pools(size, monkeypatch):
+    images = {"q": "AB", "p": "AB", **{f"r{i}": "D" for i in range(40)}}
+    images.update({f"part{i}": "A" if i % 2 else "B" for i in range(size)})
+    sample, index, _ = _partial_index([("A", "B")], images)
+    random_negatives = sampling._random_negatives
+    reserved = []
+
+    def observe(gallery, forbidden, count, generator):
+        reserved.append(len(set(index.partial["train"]) & forbidden))
+        return random_negatives(gallery, forbidden, count, generator)
+
+    monkeypatch.setattr(sampling, "_random_negatives", observe)
+    sampled = sample_candidates(
+        [sample],
+        32,
+        torch.Generator().manual_seed(2),
+        index=index,
+        identity_fraction=0,
+        partial_id_quota=6,
+    )
+    assert reserved == [min(6, size)]
+    assert len(sampled.images[0]) == len(set(sampled.images[0])) == 32
+    assert sampled.hard_identity_ids == [set()]
+
+
+def test_partial_slots_cover_multi_id_errors_and_balance_single_id_omissions():
+    images = {"q": "ABCD", "p": "ABCD", "absent_subject": "AB"}
+    images.update({f"member{i}": "ACD" for i in range(8)})
+    sample, index, _ = _partial_index([("A", "B"), ("C", "D")], images)
+    constrained = sampling._partial_negatives(
+        sample, index.partial["train"], [], 1, 6, torch.Generator().manual_seed(1)
+    )
+    assert len(index.partial["train"][constrained[0]].missing_ids) == 1
+    selected = sampling._partial_negatives(
+        sample, index.partial["train"], [], 6, 6, torch.Generator().manual_seed(1)
+    )
+    assert len(selected) == 6 and "absent_subject" in selected
+    assert sum(len(index.partial["train"][i].missing_ids) == 1 for i in selected) == 5
+
+    images = {"q": "AB", "p": "AB"}
+    images.update({f"a{i}": "A" for i in range(8)})
+    images.update({f"b{i}": "B" for i in range(8)})
+    sample, index, _ = _partial_index([("A",), ("B",)], images)
+    selected = sampling._partial_negatives(
+        sample,
+        index.partial["train"],
+        ["a0", "a1"],
+        2,
+        6,
+        torch.Generator().manual_seed(2),
+    )
+    assert selected[0].startswith("b")
+    assert selected[1].startswith("b")  # B is already missing twice.
+    assert any(0 in index.partial["train"][i].missing_subjects for i in selected)
+    assert len(selected) == len(set(selected)) == 2
+
+
+def test_partial_diversity_weights_overlap_groups_instead_of_pool_sizes(monkeypatch):
+    images = {"q": "ABCD", "p": "ABCD"}
+    images.update({f"single{i}": "ABC" for i in range(4)})
+    images.update({f"low{i}": "A" for i in range(10)})
+    images.update({f"high{i}": "AB" for i in range(2)})
+    sample, index, _ = _partial_index([("A", "B", "C", "D")], images)
+    weights = []
+    multinomial = torch.multinomial
+
+    def observe(values, *args, **kwargs):
+        weights.append(values.clone())
+        return multinomial(values, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "multinomial", observe)
+    selected = sampling._partial_negatives(
+        sample,
+        index.partial["train"],
+        [f"single{i}" for i in range(4)],
+        2,
+        6,
+        torch.Generator().manual_seed(2),
+    )
+    assert len(selected) == len(set(selected)) == 2
+    torch.testing.assert_close(weights[0], torch.tensor([0.5, 1.0]))
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("partial_id_quota", -1),
+        ("partial_id_quota", 1.5),
+        ("partial_id_quota", True),
+        ("partial_id_quota", "6"),
+        ("rejection_mining_context_weight", -0.1),
+        ("rejection_mining_context_weight", float("nan")),
+        ("rejection_mining_context_weight", float("inf")),
+        ("rejection_mining_context_weight", True),
+    ],
+)
+def test_new_sampling_settings_reject_invalid_values(key, value):
+    with pytest.raises(ValueError, match=key):
+        sampling_settings({key: value})
+
+
+def test_new_sampling_settings_preserve_old_config_defaults():
+    defaults = sampling_settings({})
+    assert defaults["partial_id_quota"] == 0
+    assert defaults["rejection_mining_context_weight"] == 0.0
+    assert sampling_settings({"partial_id_quota": 6})["partial_id_quota"] == 6
+    assert (
+        sampling_settings({"rejection_mining_context_weight": 0.005})[
+            "rejection_mining_context_weight"
+        ]
+        == 0.005
+    )
+
+
+@pytest.mark.parametrize("explicit_zero", [False, True])
+def test_zero_sampling_features_preserve_baseline_candidates_and_rng(explicit_zero):
+    sample = _sample("train", "q", "p0")
+    sample["positive_image_ids"] = ["p0", "p1"]
+    semantic = [f"s{i}" for i in range(8)]
+    wrong = [f"w{i}" for i in range(16)]
+    index = CandidateIndex(
+        [sample],
+        ["q", "p0", "p1", *semantic, *wrong],
+        {"train": ["p0", "p1", *semantic]},
+        partial_pools={
+            "train": {
+                "w0": sampling.PartialIdentity(frozenset({"A"}), frozenset({0}), 1)
+            }
+        },
+    )
+    generator = torch.Generator().manual_seed(37)
+    result = sample_candidates(
+        [sample],
+        8,
+        generator,
+        index=index,
+        identity_fraction=0.5,
+        hard_fraction=1 / 3,
+        semantic_hard_fraction=0.5,
+        identity_rejection=True,
+        hard_pools={
+            "train": {
+                "semantic": semantic,
+                "identity": wrong,
+                "rejection_context": ["w15"],
+            }
+        },
+        **(
+            {"partial_id_quota": 0, "rejection_mining_context_weight": 0.0}
+            if explicit_zero
+            else {}
+        ),
+    )
+    # Captured from main at 60b497b, including the next RNG draws.
+    assert result.images == [["p1", "w1", "w0", "s0", "s2", "s3", "p0", "w3"]]
+    assert result.hard_identity_ids == [{"w1", "w3"}]
+    assert result.semantic_hard_count == result.identity_hard_count == 2
+    assert result.rejection_context_count == 0
+    assert torch.randint(1000000, (5,), generator=generator).tolist() == [
+        598371,
+        734402,
+        999155,
+        149980,
+        588835,
+    ]
+
+
 def test_candidate_quotas_keep_provenance_after_shuffle_and_exclusions():
     sample = _sample("train", "q", "p0")
     sample["positive_image_ids"] = positives = [f"p{i}" for i in range(3)]
@@ -589,6 +887,256 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
     assert scored == []
 
 
+@pytest.mark.parametrize("context_effect", [True, False])
+def test_rejection_context_mining_reuses_evidence_and_ranks_only_wrong_ids(
+    tiny_ranker, monkeypatch, context_effect
+):
+    cache, model, text, samples, settings = tiny_ranker
+    sample = samples[0]
+    sample["subjects"] = [
+        {"subject_id": 1, "identity_ids": ["A", "B"]},
+        {"subject_id": 2, "identity_ids": ["C"]},
+    ]
+    sample["final_desc"] = "Identify Subject 1 as the group and Subject 2 as the person"
+    sample["final_change"] = "Subject 1 stands near Subject 2"
+    data = SimpleNamespace(images_by_id={}, gt_head_boxes_by_image={})
+    wrong = [f"w{i}" for i in range(15)]
+    for image in wrong:
+        _add_gallery_image(cache, data, image, "train")
+    gallery = ["q", "a", "n", *wrong]
+    data.gt_head_boxes_by_image.update(
+        {
+            "q": [{"identity_id": i} for i in "ABC"],
+            "a": [{"identity_id": i} for i in "ABC"],
+            "n": [{"identity_id": i} for i in "ABCD"],
+            "w0": [{"identity_id": "D"}],  # Zero overlap is still wrong ID.
+            "w1": [{"identity_id": i} for i in "AC"],
+        }
+    )
+    identity, partial = annotation_candidate_pools(data, [sample], gallery)
+    assert "w0" not in partial["train"] and "w1" in partial["train"]
+    assert set(identity["train"]) == {"a", "n"}
+    with torch.no_grad():
+        model.binding_log_scale.copy_(torch.log(torch.expm1(torch.tensor(2.0))))
+    binding = {
+        "n": 100.0,
+        "w0": -1.0,
+        "w1": -1.1,
+        "w2": 0.0,
+        **{f"w{i}": 3.1 - i / 10 for i in range(3, 13)},
+        "w13": -2.0,
+        "w14": -3.0,
+    }
+    context = {"n": 1e6, "w0": 2000.0, "w1": 1800.0, "w2": 3000.0, "w14": 800.0}
+    scored, fusions = [], []
+
+    def identities(cache, model, device, batch_size, image_indices, **kwargs):
+        features = image_indices.float()[:, None, None].expand(-1, 1, 6)
+        return [(features, torch.ones(len(image_indices), 1, dtype=torch.bool))], None
+
+    def coarse(query, logits, gallery, *args, **kwargs):
+        return (10 - 0.01 * gallery[:, 0, 0])[None].expand(len(query), -1)
+
+    def evidence(
+        query,
+        cache,
+        model,
+        device,
+        indices,
+        batch_size,
+        pooling,
+        context_weight,
+        coverage_weight,
+        *,
+        compute_context,
+        **kwargs,
+    ):
+        images = [cache.image_ids[i] for i in indices.tolist()]
+        assert not model.training and not text.training and not torch.is_grad_enabled()
+        assert compute_context == (context_weight > 0)
+        if compute_context:
+            assert set(images) <= set(wrong) and len(images) <= 64
+            assert context_weight == 0.005
+        scored.extend((image, compute_context) for image in images)
+        return {
+            "context": torch.tensor(
+                [
+                    context.get(i, 0.0) if compute_context and context_effect else 0.0
+                    for i in images
+                ]
+            ),
+            "coverage": torch.tensor([0.0 if i == "w2" else 1.0 for i in images]),
+            **{
+                f"binding_{mode}": torch.tensor([binding[i] for i in images])
+                for mode in ranking.POOLING_MODES
+            },
+        }
+
+    fuse = ranking.fuse_fine_coarse_scores
+
+    def observe_fusion(fine, coarse, weight, *args):
+        result = fuse(fine, coarse, weight, *args)
+        # A separate population-z oracle includes even the zero-coverage image.
+        expected = (fine - fine.mean()) / fine.std(unbiased=False).clamp_min(1e-6)
+        expected += weight * (coarse - coarse.mean()) / coarse.std(unbiased=False)
+        torch.testing.assert_close(result, expected)
+        fusions.append((fine.clone(), coarse.clone(), result.clone()))
+        return result
+
+    monkeypatch.setattr(ranking, "_encode_gallery", identities)
+    monkeypatch.setattr(ranking, "identity_scores_batched", coarse)
+    monkeypatch.setattr(ranking, "_score_target_components", evidence)
+    monkeypatch.setattr(ranking, "fuse_fine_coarse_scores", observe_fusion)
+    options = dict(
+        gallery_ids=gallery,
+        retrieval={**settings, "coarse_beta": 0},
+        pool_size=64,
+        identity_image_ids={"train": set(identity["train"])},
+        semantic_hard=True,
+        identity_rejection=True,
+    )
+    model.train()
+    text.train()
+    mined = ranking.mine_hard_negatives(
+        [sample],
+        cache,
+        Tokenizer(),
+        text,
+        model,
+        torch.device("cpu"),
+        rejection_mining_context_weight=0.005,
+        **options,
+    )["train"]
+    assert model.training and text.training
+    assert len(scored) == len(set(i for i, _ in scored)) == 16
+    assert set(i for i, active in scored if active) == set(wrong)
+    assert ("n", False) in scored  # Semantic scoring skips the reasoner.
+    assert [len(row[0]) for row in fusions] == [16, 15, 15]
+    torch.testing.assert_close(
+        fusions[0][0],
+        torch.tensor([2 * binding[i] + 0.04 * (i != "w2") for i in ["n", *wrong]]),
+    )
+    assert torch.equal(fusions[1][1], fusions[2][1])
+    assert mined["semantic"] == ["n"]
+    assert mined["rejection_context"] == (["w0", "w1"] if context_effect else [])
+    assert not {"n", "w2", "w3", "w14"} & set(mined["rejection_context"])
+    # w14 improves rank but remains below the top ten; zero C never ranks.
+    covered = torch.tensor([i != "w2" for i in wrong])
+    ranks = []
+    for _, _, values in fusions[1:]:
+        order = values.argsort(descending=True, stable=True)
+        ranks.append([wrong[i] for i in order[covered[order]].tolist()])
+    if context_effect:
+        assert ranks[1].index("w14") < ranks[0].index("w14")
+        assert ranks[1].index("w14") >= 10
+    # Toggling H never changes either base pool, even with nonzero retrieval b.
+    fusions.clear()
+    base = ranking.mine_hard_negatives(
+        [sample],
+        cache,
+        Tokenizer(),
+        text,
+        model,
+        torch.device("cpu"),
+        **options,
+    )["train"]
+    assert {k: mined[k] for k in ("semantic", "identity")} == base
+
+
+@pytest.mark.parametrize(
+    "context_pool,base_pool,expected_h,expected_hard",
+    [
+        (["w0", "w1"], [f"w{i}" for i in range(6)], 1, 3),
+        ([], [f"w{i}" for i in range(6)], 0, 3),
+        (["q", "same"], [f"w{i}" for i in range(6)], 0, 3),
+        (["missing", "disputed"], [f"w{i}" for i in range(6)], 0, 3),
+        (["w0", "w1"], [], 1, 1),
+        ([], ["w0"], 0, 1),
+    ],
+)
+def test_rejection_context_slot_falls_back_and_tags_only_mined_choices(
+    context_pool, base_pool, expected_h, expected_hard
+):
+    sample = _sample("train", "q", "p")
+    index = CandidateIndex(
+        [sample],
+        ["q", "p", "same", "disputed", *[f"w{i}" for i in range(30)]],
+        {"train": ["p", "same"]},
+        {"train": {"disputed"}},
+    )
+    sampled = sample_candidates(
+        [sample],
+        12,
+        torch.Generator().manual_seed(5),
+        index=index,
+        identity_fraction=0.25,
+        hard_fraction=0.3,
+        identity_rejection=True,
+        rejection_mining_context_weight=0.005,
+        hard_pools={
+            "train": {"identity": base_pool, "rejection_context": context_pool}
+        },
+    )
+    assert sampled.rejection_context_count == expected_h
+    assert sampled.identity_hard_count == expected_hard
+    assert len(sampled.hard_identity_ids[0]) == expected_hard
+    assert sampled.hard_identity_ids[0] <= set(sampled.images[0])
+    assert len(sampled.images[0]) == len(set(sampled.images[0])) == 12
+    assert not {"q", "disputed", "missing"} & set(sampled.images[0])
+
+
+def test_partial_sampling_keeps_gt_masks_and_prefetch_mined_provenance(tiny_ranker):
+    cache, _, text, _, _ = tiny_ranker
+    sample, index, identity = _partial_index(
+        [("A", "B"), ("C",)],
+        {"q": "ABC", "a": "ABC", "n": "ABCD", "vq": "AC", "va": "AB", "vn": "D"},
+        positives=("a",),
+    )
+    sampled = sample_candidates(
+        [sample],
+        5,
+        torch.Generator().manual_seed(3),
+        index=index,
+        identity_fraction=0.25,
+        hard_fraction=0.5,
+        identity_rejection=True,
+        partial_id_quota=6,
+        rejection_mining_context_weight=0.005,
+        hard_pools={"train": {"rejection_context": ["vn"], "identity": ["vq"]}},
+    )
+    assert sampled.hard_identity_ids == [{"vn", "vq"}]
+    assert sampled.partial_id_count == 2
+    options = dict(
+        supervision=SimpleNamespace(
+            load_ids=lambda ids, width: [["A"] * width for _ in ids]
+        ),
+        identity_image_ids=[set(identity)],
+        hard_identity_image_ids=sampled.hard_identity_ids,
+        fafa_pooling="subject_mean",
+        defer_native_targets=True,
+        defer_target_scenes=True,
+    )
+    visual = prepare_visual_batch([sample], sampled.images, cache, **options)
+    batch = build_batch(
+        [sample],
+        sampled.images,
+        cache,
+        Tokenizer(),
+        text,
+        "cpu",
+        **options,
+        prepared_visual=visual,
+    )
+    for col, image in enumerate(sampled.images[0]):
+        assert bool(batch["positive_mask"][0, col]) == (image == "a")
+        assert bool(batch["identity_positive_mask"][0, col]) == (image in {"a", "n"})
+        assert bool(batch["hard_identity_negative_mask"][0, col]) == (
+            image in {"vq", "vn"}
+        )
+    rejected = batch["context_layout"]["rejection_rows"].tolist()
+    assert {sampled.images[0][i] for i in rejected} == {"a", "n", "vq", "vn"}
+
+
 @pytest.mark.parametrize("variant", ["both", "semantic", "rejection"])
 def test_train_runs_mining_and_validation_after_warmup(
     tiny_training_run, monkeypatch, variant
@@ -757,14 +1305,17 @@ def test_context_loss_uses_scaled_context_and_full_score_for_rejection(
     assert parts["context_fda_error"].item() == 1
 
 
+@pytest.mark.parametrize("covered_hard", [True, False])
 def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
-    objective_batch, monkeypatch
+    objective_batch, monkeypatch, covered_hard
 ):
     model, batch = objective_batch
     batch["hard_identity_negative_mask"][0, 2] = True
     context = torch.tensor([[0.8, 0.3, -0.4]], requires_grad=True)
     binding = torch.tensor([[0.7, 0.2, 0.1]])
     coverage = torch.full((1, 3), 0.5)
+    if not covered_hard:
+        coverage[0, 2] = 0
     assignments = torch.full((1, 3, 1), -1, dtype=torch.long)
     monkeypatch.setattr(
         losses,
@@ -795,14 +1346,19 @@ def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
     assert observed[1][0][0, 0].item() == pytest.approx(8.0)
     assert (observed[1][0][0, 0] * 0.1).item() == pytest.approx(0.80)
     assert observed[0][1].tolist() == [[True, True, False]]
-    assert observed[1][1].tolist() == [[True, False, True]]
+    assert observed[1][1].tolist() == [[True, False, covered_hard]]
     semantic = torch.nn.functional.softplus(torch.tensor(0.3 - 0.8))
-    rejection = torch.nn.functional.softplus(torch.tensor(0.8 - 8.0))
+    rejection = (
+        torch.nn.functional.softplus(torch.tensor(0.8 - 8.0))
+        if covered_hard
+        else torch.tensor(0.0)
+    )
     torch.testing.assert_close(parts["context_semantic"], semantic)
     torch.testing.assert_close(parts["context_rejection"], rejection)
     torch.testing.assert_close(total, semantic + 0.5 * rejection)
     total.backward()
     assert context.grad is not None and context.grad.abs().sum() > 0
+    assert bool(context.grad[0, 2] != 0) == covered_hard
     assert not binding.requires_grad and not coverage.requires_grad
 
 
@@ -811,13 +1367,24 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
 ):
     cfg, cache, _, _ = tiny_training_run
     data = training.load_rcr_data(None)
+    sample = data.samples_by_id["train"]
+    sample["subjects"][0]["identity_ids"] = ["p1", "p2"]
+    sample["case_type"] = "GROUP"
+    for image in ("q", "a"):
+        data.gt_head_boxes_by_image[image].append(
+            {**data.gt_head_boxes_by_image[image][0], "identity_id": "p2", "x": 0.7}
+        )
     for index in range(34):
         image = f"extra{index}"
         _add_gallery_image(cache, data, image, "train")
-        if index % 2:
+        if index % 3 == 0:
+            data.gt_head_boxes_by_image[image].append({"identity_id": "p2"})
+        elif index % 3 == 2:
             data.gt_head_boxes_by_image[image][0]["identity_id"] = "other"
-    cfg["train"].update(epochs=7, context_warmup_epochs=4, candidates=32)
-    cfg["train"]["sampling"].update(warmup_epochs=6, semantic_hard_fraction=0.5)
+    cfg["train"].update(epochs=20, context_warmup_epochs=4, candidates=32)
+    cfg["train"]["sampling"].update(
+        warmup_epochs=6, refresh_every_epochs=4, semantic_hard_fraction=0.5
+    )
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
     cfg["loss"]["context_rejection_weight"] = 0.5
@@ -825,6 +1392,8 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
     assert cfg["loss"]["context_swap_weight"] == 0
     assert cfg["retrieval"]["coverage_weight"] == 0.04
     assert cfg["retrieval"]["context_weight"] == 0.1
+    assert cfg["train"]["sampling"]["partial_id_quota"] == 6
+    assert cfg["train"]["sampling"]["rejection_mining_context_weight"] == 0.005
     compute, mine = training.compute_loss, training.mine_hard_negatives
     schedule, mining = [], []
 
@@ -839,14 +1408,54 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
         return compute(*args, **settings)
 
     def observe_mining(*args, **kwargs):
-        mining.append(len(schedule))
+        mining.append((len(schedule) + 1, kwargs["rejection_mining_context_weight"]))
         return mine(*args, **kwargs)
 
     monkeypatch.setattr(training, "compute_loss", observe)
     monkeypatch.setattr(training, "mine_hard_negatives", observe_mining)
+    checkpoint = training.train(cfg)
+    assert schedule == (
+        [(0.0, 0.0, 0.0)] * 4 + [(1.0, 0.0, 0.0)] * 2 + [(1.0, 0.5, 0.0)] * 14
+    )
+    assert mining == [(epoch, 0.005) for epoch in (7, 11, 15, 19)]
+    history = [
+        json.loads(s)
+        for s in (checkpoint.parent / "history.jsonl").read_text().splitlines()
+    ]
+    assert all(row["train_candidate_partial_id"] >= 6 for row in history)
+    mined = json.loads((checkpoint.parent / "hard_negatives.json").read_text())
+    assert mined["epoch"] == 19 and mined["rejection_mining_context_weight"] == 0.005
+    assert mined["retrieval"]["context_weight"] == 0
+    assert "rejection_context" in mined["pools"]["train"]
+
+
+def test_context_mining_waits_for_active_context_and_rejection(
+    tiny_training_run, monkeypatch
+):
+    cfg, cache, _, _ = tiny_training_run
+    data = training.load_rcr_data(None)
+    for i in range(4):
+        _add_gallery_image(cache, data, f"extra{i}", "train")
+    data.gt_head_boxes_by_image["n"][0]["identity_id"] = "other"
+    cfg["train"].update(epochs=3, context_warmup_epochs=2, candidates=4)
+    cfg["train"]["sampling"].update(
+        warmup_epochs=0, refresh_every_epochs=1, hard_fraction=0.34
+    )
+    cfg["train"]["identity_sampling"]["max_crops"] = 0
+    cfg["loss"]["context_rejection_weight"] = 0.5
+    cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
+    mine, weights, pools = training.mine_hard_negatives, [], []
+
+    def observe(*args, **kwargs):
+        weights.append(kwargs["rejection_mining_context_weight"])
+        result = mine(*args, **kwargs)
+        pools.append(result["train"])
+        return result
+
+    monkeypatch.setattr(training, "mine_hard_negatives", observe)
     training.train(cfg)
-    assert schedule == [(0.0, 0.0, 0.0)] * 4 + [(1.0, 0.0, 0.0)] * 2 + [(1.0, 0.5, 0.0)]
-    assert mining == [6]
+    assert weights == [0, 0, 0.005]
+    assert ["rejection_context" in pool for pool in pools] == [False, False, True]
 
 
 def test_model_forward_uses_the_requested_linear_coefficients(objective_batch):
@@ -1191,6 +1800,120 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
     assert sha256_file(output / "last.pt") == digest
 
 
+@pytest.mark.parametrize("prefetch", [0, 1])
+def test_resume_retains_partial_and_context_pools_batches_masks_and_rng(
+    tiny_training_run, monkeypatch, prefetch
+):
+    cfg, cache, _, _ = tiny_training_run
+    data = training.load_rcr_data(None)
+    _configure(cfg, data)
+    cfg["train"].update(candidates=32, prefetch_batches=prefetch)
+    cfg["train"]["sampling"].update(identity_fraction=0.45, hard_fraction=0.1)
+    cfg["train"]["identity_sampling"]["max_crops"] = 0
+    cfg["loss"]["context_rejection_weight"] = 0.5
+    cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
+    for sample_id in data.splits["train"]:
+        sample = data.samples_by_id[sample_id]
+        sample["subjects"][0]["identity_ids"] = ["p1", "p2"]
+        sample["case_type"] = "GROUP"
+    for image in ("q", "a"):
+        data.gt_head_boxes_by_image[image].append(
+            {**data.gt_head_boxes_by_image[image][0], "identity_id": "p2", "x": 0.7}
+        )
+    for prefix in ("same", "part", "zero"):
+        for i in range(16):
+            image = f"{prefix}{i}"
+            _add_gallery_image(cache, data, image, "train")
+            if prefix == "same":
+                data.gt_head_boxes_by_image[image].append({"identity_id": "p2"})
+            elif prefix == "zero":
+                data.gt_head_boxes_by_image[image][0]["identity_id"] = "other"
+    batches, mining = [], []
+    build = training.build_batch
+
+    def observe_batch(rows, images, *args, **kwargs):
+        batch = build(rows, images, *args, **kwargs)
+        for n, (sample, candidates) in enumerate(zip(rows, images, strict=True)):
+            required = {
+                i for subject in sample["subjects"] for i in subject["identity_ids"]
+            }
+            selected = kwargs["hard_identity_image_ids"][n]
+            partial = 0
+            for j, image in enumerate(candidates):
+                ids = {box["identity_id"] for box in data.gt_head_boxes_by_image[image]}
+                identity_positive = required <= ids
+                partial += 0 < len(required & ids) < len(required)
+                assert bool(batch["identity_positive_mask"][n, j]) == identity_positive
+                assert bool(batch["hard_identity_negative_mask"][n, j]) == (
+                    image in selected
+                )
+                assert not (image in selected and identity_positive)
+            assert partial >= 6
+            if len(batches) < 3:
+                assert (
+                    not selected
+                )  # Warmup random/partial images never acquire provenance.
+        batches.append((deepcopy(images), deepcopy(kwargs["hard_identity_image_ids"])))
+        return batch
+
+    def mine(rows, *args, **kwargs):
+        # A fixed valid pool isolates checkpoint/RNG recovery from rank changes.
+        assert kwargs["rejection_mining_context_weight"] == 0.005
+        mining.append(len(batches))
+        return {
+            row["sample_id"]: {
+                "semantic": [f"same{i}" for i in range(16)],
+                "identity": [i for j in range(16) for i in (f"part{j}", f"zero{j}")],
+                "rejection_context": ["part0", "zero0"],
+            }
+            for row in rows
+        }
+
+    monkeypatch.setattr(training, "build_batch", observe_batch)
+    monkeypatch.setattr(training, "mine_hard_negatives", mine)
+    reference_cfg = deepcopy(cfg)
+    reference_cfg["train"]["prefetch_batches"] = 0
+    reference_cfg["output"]["dir"] += "-reference"
+    reference_path = training.train(reference_cfg)
+    reference = torch.load(reference_path, weights_only=True)
+    expected_batches = list(batches)
+    expected_mining = list(mining)
+    batches.clear()
+    mining.clear()
+    compute = training.compute_loss
+
+    def stop(*args, **kwargs):
+        result = compute(*args, **kwargs)
+        if len(batches) == 5:
+            signal.raise_signal(signal.SIGTERM)
+        return result
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(training, "compute_loss", stop)
+        training.train(cfg)
+    output = Path(cfg["output"]["dir"])
+    pending = torch.load(output / "last.pt", weights_only=True)["training_state"][
+        "progress"
+    ]
+    assert pending["phase"] == "train" and pending["next_batch"] == 2
+    assert pending["hard_pools"]["train"]["rejection_context"] == ["part0", "zero0"]
+    assert pending["candidate_totals"]["candidate_rejection_context"] == 2
+    assert mining == [3]
+    resumed_path = training.train(cfg, resume="auto")
+    resumed = torch.load(resumed_path, weights_only=True)
+    assert batches == expected_batches
+    assert mining == expected_mining == [3, 9]
+    for key in ("model", "text_encoder", "state_supervised_pairs"):
+        _equal(resumed[key], reference[key])
+    for key in ("optimizer", "scaler", "rng", "progress"):
+        _equal(resumed["training_state"][key], reference["training_state"][key])
+    history = (output / "history.jsonl").read_text()
+    assert history == (reference_path.parent / "history.jsonl").read_text()
+    logs = [json.loads(row) for row in history.splitlines()]
+    assert [row["train_candidate_rejection_context"] for row in logs] == [0, 3, 3, 3]
+    assert all(row["train_candidate_partial_id"] >= 18 for row in logs)
+
+
 def test_prefetch_preserves_serial_weights_optimizer_sampling_and_history(
     tiny_training_run,
 ):
@@ -1266,6 +1989,25 @@ def test_incompatible_resume_leaves_run_untouched(
     with pytest.raises(ValueError, match=change):
         training.train(cfg, resume="auto")
     assert [sha256_file(path) for path in paths] == digests
+
+
+@pytest.mark.parametrize(
+    "key,value", [("partial_id_quota", 7), ("rejection_mining_context_weight", 0.006)]
+)
+def test_changed_sampling_settings_require_a_new_run(
+    tiny_training_run, monkeypatch, key, value
+):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"]["epochs"] = 2
+    _pause(cfg, monkeypatch)
+    path = Path(cfg["output"]["dir"]) / "last.pt"
+    digest = sha256_file(path)
+    cfg["train"]["sampling"][key] = value
+    with pytest.raises(ValueError, match="config"):
+        training.train(cfg, resume="auto")
+    assert sha256_file(path) == digest
+    with pytest.raises(FileExistsError, match="new output.dir"):
+        training.train(cfg)
 
 
 def test_resume_accepts_changed_checkpoint_cadence(tiny_training_run, monkeypatch):

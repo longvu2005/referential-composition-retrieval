@@ -772,6 +772,81 @@ def test_zero_context_mining_skips_reasoner_and_preserves_binding(objective_batc
         torch.testing.assert_close(actual[key], expected[key])
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("prefetch", [0, 1])
+def test_rejection_mining_reuses_matching_and_loads_only_wrong_id_scenes(
+    tiny_ranker, monkeypatch, device, prefetch
+):
+    cache, model, text, samples, settings = tiny_ranker
+    model.to(device)
+    text.to(device)
+    model.fine_matching.update(selection_threshold=0.0001, identity_threshold=-1.0)
+    scenes, natives, matched, reasoned = [], [], [], []
+    native_targets, match_target = cache.native_targets, model.match_target
+
+    def load_scenes(indices):
+        scenes.extend(indices.tolist())
+        return cache.scenes[indices]
+
+    def load_native(indices, width):
+        natives.extend(indices.tolist())
+        return native_targets(indices, width)
+
+    def match(query, identity, *args, **kwargs):
+        matched.append(len(identity))
+        return match_target(query, identity, *args, **kwargs)
+
+    monkeypatch.setattr(
+        cache,
+        "load_person_geometry",
+        lambda indices: (
+            cache.persons[indices],
+            cache.boxes[indices],
+            cache.mask[indices],
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(cache, "load_scenes", load_scenes, raising=False)
+    monkeypatch.setattr(cache, "native_targets", load_native)
+    monkeypatch.setattr(model, "match_target", match)
+    handle = model.reasoner.register_forward_pre_hook(
+        lambda module, inputs: reasoned.append(len(inputs[0]))
+    )
+    try:
+        with TransferAudit() as audit:
+            pools = ranking.mine_hard_negatives(
+                samples[:1],
+                cache,
+                Tokenizer(),
+                text,
+                model,
+                torch.device(device),
+                gallery_ids=cache.image_ids,
+                retrieval={
+                    **settings,
+                    "coarse_beta": 0,
+                    "fine_batch_size": 1,
+                    "prefetch_batches": prefetch,
+                },
+                pool_size=64,
+                identity_image_ids={"train": {"a", "n", "vq"}},
+                semantic_hard=True,
+                identity_rejection=True,
+                rejection_mining_context_weight=0.005,
+            )
+    finally:
+        handle.remove()
+    assert Counter(scenes) == Counter(cache.by_id[i] for i in ("va", "vn"))
+    assert Counter(natives) == Counter(cache.by_id[i] for i in ("n", "vq", "va", "vn"))
+    assert sum(matched) == 4  # Two semantic, two wrong-ID: no union rescore.
+    assert sum(reasoned) == 2
+    assert set(pools["train"]["semantic"]) == {"n", "vq"}
+    assert set(pools["train"]["identity"]) == {"va", "vn"}
+    assert (
+        audit.counts["cuda_boolean_index"] == audit.counts["cuda_dynamic_shapes"] == 0
+    )
+
+
 def test_retrieval_query_batching_preserves_order_and_evidence(tiny_ranker):
     expected = _rank(tiny_ranker, query_batch_size=1)
     actual = _rank(tiny_ranker, query_batch_size=8)

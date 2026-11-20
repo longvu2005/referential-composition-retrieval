@@ -865,13 +865,15 @@ def mine_hard_negatives(
     identity_image_ids=None,
     semantic_hard=False,
     identity_rejection=False,
+    rejection_mining_context_weight=0.0,
 ):
     """Mine train-only coarse or fine-ranked semantic/identity negative pools.
 
-    Coarse filters each requested group to ``pool_size`` images. Fine scores use
-    binding, coverage and coarse fusion over their union, with zero context
-    weight. Labels classify pools outside the scorer; normalization is shared
-    across groups and inference chunks.
+    Coarse filters each requested group to ``pool_size`` images. Base pools use
+    binding, coverage and coarse fusion over their union at H=0.
+    The optional rejection slot compares ranks with/without H on the same
+    wrong-ID shortlist. Only that group runs context; its evidence is reused
+    in the base union. Labels classify pools outside the scorer.
     """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
@@ -881,6 +883,15 @@ def mine_hard_negatives(
         raise ValueError("mining pool_size must be a positive integer")
     if type(query_batch_size) is not int or query_batch_size < 1:
         raise ValueError("mining query_batch_size must be a positive integer")
+    if (
+        type(rejection_mining_context_weight) not in (int, float)
+        or not math.isfinite(rejection_mining_context_weight)
+        or rejection_mining_context_weight < 0
+    ):
+        raise ValueError(
+            "rejection_mining_context_weight must be finite and nonnegative"
+        )
+    context_mining = identity_rejection and rejection_mining_context_weight > 0
     fine_mining = semantic_hard or identity_rejection
     if fine_mining and (
         identity_image_ids is None
@@ -1034,22 +1045,43 @@ def mine_hard_negatives(
                     selected = torch.cat(screened)
                     shortlist = order[torch.isin(order, selected)]
                     pools[sample_id].update({name: [] for name in negative_groups})
+                    if context_mining:
+                        pools[sample_id]["rejection_context"] = []
                     if not shortlist.numel():
                         continue
-                    components = _score_target_components(
-                        queries.select(n),
-                        cache,
-                        model,
-                        device,
-                        image_indices[shortlist],
-                        settings["fine_batch_size"],
-                        settings["pooling"],
-                        settings["context_weight"],
-                        settings["coverage_weight"],
-                        compute_context=False,
-                        prefetch_batches=settings["prefetch_batches"],
-                        return_cpu=True,
+                    wrong = (
+                        negative_groups["identity"][shortlist]
+                        if identity_rejection
+                        else torch.zeros_like(shortlist, dtype=torch.bool)
                     )
+                    groups = (
+                        [(wrong, True), (~wrong, False)]
+                        if context_mining
+                        else [(torch.ones_like(shortlist, dtype=torch.bool), False)]
+                    )
+                    components = {}
+                    for membership, compute_context in groups:
+                        positions = membership.nonzero().flatten()
+                        if not len(positions):
+                            continue
+                        evidence = _score_target_components(
+                            queries.select(n),
+                            cache,
+                            model,
+                            device,
+                            image_indices[shortlist[positions]],
+                            settings["fine_batch_size"],
+                            settings["pooling"],
+                            rejection_mining_context_weight if compute_context else 0.0,
+                            settings["coverage_weight"],
+                            compute_context=compute_context,
+                            prefetch_batches=settings["prefetch_batches"],
+                            return_cpu=True,
+                        )
+                        for key, values in evidence.items():
+                            if key not in components:
+                                components[key] = values.new_empty(len(shortlist))
+                            components[key].index_copy_(0, positions, values)
                     fine = fine_score_components(
                         components[f"binding_{settings['pooling']}"],
                         components["context"],
@@ -1071,6 +1103,42 @@ def mine_hard_negatives(
                         pools[sample_id][name] = [
                             gallery_ids[i]
                             for i in shortlist[ranked[keep[ranked]]].tolist()
+                        ]
+                    if context_mining and wrong.any():
+                        # Fuse before C>0 filtering: both ranks use the complete
+                        # finite wrong-ID population, independently of semantic IDs.
+                        fine_0 = fine["fine_scores"][wrong]
+                        fine_h = fine_score_components(
+                            components[f"binding_{settings['pooling']}"][wrong],
+                            components["context"][wrong],
+                            components["coverage"][wrong],
+                            binding_scale,
+                            settings["fine_score_mode"],
+                            rejection_mining_context_weight,
+                            settings["coverage_weight"],
+                        )["fine_scores"]
+                        score_0, score_h = (
+                            fuse_fine_coarse_scores(
+                                values,
+                                scores[shortlist[wrong]],
+                                settings["fine_coarse_weight"],
+                            )
+                            for values in (fine_0, fine_h)
+                        )
+                        covered = covered[wrong]
+                        order_0, order_h = (
+                            indices[covered[indices]]
+                            for indices in (
+                                score_0.argsort(descending=True, stable=True),
+                                score_h.argsort(descending=True, stable=True),
+                            )
+                        )
+                        rank_0 = torch.zeros(len(score_0), dtype=torch.long)
+                        rank_0[order_0] = torch.arange(len(order_0))
+                        top = order_h[:10]
+                        improved = top[torch.arange(len(top)) < rank_0[top]][:2]
+                        pools[sample_id]["rejection_context"] = [
+                            gallery_ids[i] for i in shortlist[wrong][improved].tolist()
                         ]
                 progress.update(len(rows))
         progress.close()
