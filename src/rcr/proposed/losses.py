@@ -8,6 +8,7 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from rcr.proposed.cache.native import NativeTargetBatch
+from rcr.proposed.cache.store import SceneTargetBatch
 from rcr.proposed.identity import select_identity_observations
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
@@ -133,6 +134,7 @@ def _context_scores(
     *,
     eligible=None,
     target_identity=None,
+    positions_cpu=None,
 ):
     """Score eligible pairs; transfer native features only for the current chunk."""
     queries, candidates = batch["positive_mask"].shape
@@ -143,23 +145,33 @@ def _context_scores(
         "target_boxes",
         "target_mask",
     ]
-    targets = tuple(batch[name].flatten(0, 1) for name in names)
+    targets = tuple(
+        batch[name]
+        if isinstance(batch[name], SceneTargetBatch)
+        else batch[name].flatten(0, 1)
+        for name in names
+    )
     native = batch["fafa_targets"]
     if isinstance(native, Tensor):
         native = native.flatten(0, 1)
     pooling = batch["fafa_pooling"]
     device = query.reference.device
-    if eligible is None:
-        positions_cpu = torch.arange(pairs)
-    else:
-        positions_cpu = eligible.detach().cpu().flatten().nonzero().flatten()
+    if positions_cpu is None:
+        positions_cpu = (
+            torch.arange(pairs)
+            if eligible is None
+            else eligible.detach().cpu().flatten().nonzero().flatten()
+        )
     positions = positions_cpu.to(device, non_blocking=True)
-    masks_cpu = batch["target_mask"].detach().flatten(0, 1).cpu()
-    last_column = (
-        torch.where(masks_cpu, torch.arange(masks_cpu.shape[1]), -1).amax(1) + 1
-        if masks_cpu.shape[1]
-        else torch.zeros(pairs, dtype=torch.long)
-    )
+    if "context_layout" in batch:
+        last_column = batch["context_layout"]["widths"]
+    else:
+        masks_cpu = batch["target_mask"].detach().flatten(0, 1).cpu()
+        last_column = (
+            torch.where(masks_cpu, torch.arange(masks_cpu.shape[1]), -1).amax(1) + 1
+            if masks_cpu.shape[1]
+            else torch.zeros(pairs, dtype=torch.long)
+        )
     identity = (
         None if target_identity is None else target_identity.detach().flatten(0, 1)
     )
@@ -184,12 +196,15 @@ def _context_scores(
         width = int(last_column[cpu_rows].max())
         chunk = []
         for name, value in zip(names, targets, strict=True):
+            if isinstance(value, SceneTargetBatch):
+                chunk.append(value.load(cpu_rows).to(device, non_blocking=True).float())
+                continue
             value = value if name == "target_scene" else value[:, :width]
             index = cpu_rows if value.device.type == "cpu" else rows
             chunk.append(value.index_select(0, index).to(device, non_blocking=True))
         scene, persons, boxes, mask = chunk
         if isinstance(native, NativeTargetBatch):
-            native_chunk = native.load(cpu_rows, width)
+            native_chunk = native.select(cpu_rows, width)
         else:
             index = cpu_rows if native.device.type == "cpu" else rows
             native_chunk = native[:, :width].index_select(0, index)
@@ -204,7 +219,9 @@ def _context_scores(
             matching = model.match_target(selected, projected, boxes, mask)
         offset = fafa_binding_scores(
             selected.fafa,
-            native_chunk.to(device, non_blocking=True),
+            native_chunk
+            if isinstance(native_chunk, NativeTargetBatch)
+            else native_chunk.to(device, non_blocking=True),
             matching=matching,
             k=model.fda_k,
             missing_penalty=model.fine_matching["missing_penalty"],
@@ -274,9 +291,15 @@ def _swap_loss(model, query, batch, patch_hw, context, assignments):
     persons = batch["target_persons"][rows, cols]
     boxes = batch["target_boxes"][rows, cols]
     padding = ~batch["target_mask"][rows, cols, :, None]
+    scene = batch["target_scene"]
+    if isinstance(scene, SceneTargetBatch):
+        positions = (rows * batch["positive_mask"].shape[1] + cols).detach().cpu()
+        scene = scene.load(positions).to(persons.device, non_blocking=True).float()
+    else:
+        scene = scene[rows, cols]
     wrong = model.score_aligned_context(
         alternative,
-        batch["target_scene"][rows, cols],
+        scene,
         model.encode_semantic(persons.masked_fill(padding, 0)),
         boxes.masked_fill(padding, 0),
         indices,
@@ -366,9 +389,25 @@ def compute_loss(
     hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
-        target_identity = model.encode_identity(
-            batch["target_persons"].masked_fill(~batch["target_mask"][..., None], 0)
-        )
+        persons = batch["target_persons"]
+        if "target_layout" in batch:
+            positions = batch["target_layout"]["positions"].to(
+                persons.device, non_blocking=True
+            )
+            projected_identity = model.encode_identity(
+                persons.flatten(0, 2).index_select(0, positions)
+            )
+            target_identity = (
+                projected_identity.new_zeros(
+                    (batch["target_mask"].numel(), projected_identity.shape[-1])
+                )
+                .index_copy(0, positions, projected_identity)
+                .reshape(*batch["target_mask"].shape, projected_identity.shape[-1])
+            )
+        else:
+            target_identity = model.encode_identity(
+                persons.masked_fill(~batch["target_mask"][..., None], 0)
+            )
 
     if grounding_weight:
         subjects = batch.get("subject_mask")
@@ -458,6 +497,13 @@ def compute_loss(
             context_batch_size,
             eligible=eligible,
             target_identity=target_identity,
+            positions_cpu=(
+                batch["context_layout"][
+                    "rejection_rows" if context_rejection_weight else "identity_rows"
+                ]
+                if "context_layout" in batch
+                else None
+            ),
         )
         scores = linear_score_components(
             binding,

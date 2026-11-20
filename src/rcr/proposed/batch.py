@@ -5,8 +5,9 @@ from torch import Tensor, nn
 
 from rcr.common.data import inference_sample, inference_samples, required_identity_ids
 from rcr.proposed.cache.native import NativeTargetBatch
-from rcr.proposed.cache.store import GalleryCache
+from rcr.proposed.cache.store import GalleryCache, SceneTargetBatch
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
+from rcr.proposed.prefetch import PackedPersons, StagedVisual
 from rcr.proposed.scores import POOLING_MODES
 
 
@@ -77,14 +78,30 @@ def _deduplicated_masks(
     return query_keep, target_keep, seen
 
 
-def load_visual_features(cache, query_indices, target_indices, *, target_context=True):
+def load_visual_features(
+    cache,
+    query_indices,
+    target_indices,
+    *,
+    target_context=True,
+    defer_target_scenes=False,
+    preserve_storage=False,
+):
     """Skip target scene shards and geometry when only identity/state are trained."""
-    if target_context:
+    if target_context and not defer_target_scenes:
         return cache.load_groups(query_indices, target_indices)
     query = cache.load(query_indices)
-    persons, mask = cache.load_persons(target_indices)
+    if target_context:
+        if hasattr(cache, "load_person_geometry"):
+            persons, boxes, mask = cache.load_person_geometry(target_indices)
+        else:
+            _, persons, boxes, mask = cache.load(target_indices)
+        scene = SceneTargetBatch(cache, target_indices)
+    else:
+        persons, mask = cache.load_persons(target_indices)
+        scene = boxes = None
     # The trainable projection expects FP32 inputs outside CUDA autocast.
-    return query, (None, persons.float(), None, mask)
+    return query, (scene, persons if preserve_storage else persons.float(), boxes, mask)
 
 
 def prepare_visual_batch(
@@ -100,6 +117,9 @@ def prepare_visual_batch(
     fafa_pooling: str | None = None,
     defer_native_targets: bool = False,
     load_target_context: bool = True,
+    defer_target_scenes: bool = False,
+    preserve_storage: bool = False,
+    pack_target_persons: bool = False,
 ) -> dict[str, Tensor | dict | str | NativeTargetBatch]:
     """Load CPU visual features and labels. No model is executed here.
 
@@ -134,7 +154,12 @@ def prepare_visual_batch(
         [cache.by_id[image_id] for row in candidate_image_ids for image_id in row]
     )
     query, target = load_visual_features(
-        cache, query_indices, target_indices, target_context=load_target_context
+        cache,
+        query_indices,
+        target_indices,
+        target_context=load_target_context,
+        defer_target_scenes=defer_target_scenes,
+        preserve_storage=preserve_storage,
     )
     q_scene, q_people, q_boxes, q_mask = query
     t_scene, t_people, t_boxes, t_mask = target
@@ -322,7 +347,11 @@ def prepare_visual_batch(
         "positive_mask": positive_mask,
     }
     if load_target_context:
-        batch["target_scene"] = t_scene.unflatten(0, (batch_size, candidates_per_query))
+        batch["target_scene"] = (
+            t_scene
+            if isinstance(t_scene, SceneTargetBatch)
+            else t_scene.unflatten(0, (batch_size, candidates_per_query))
+        )
         batch["target_boxes"] = t_boxes.unflatten(0, (batch_size, candidates_per_query))
     batch["identity_positive_mask"] = torch.tensor(
         [
@@ -355,6 +384,23 @@ def prepare_visual_batch(
     if (hard_mask & batch["identity_positive_mask"]).any():
         raise ValueError("hard identity negatives cannot contain all required IDs")
     batch["hard_identity_negative_mask"] = hard_mask
+    if defer_target_scenes and load_target_context:
+        width = (
+            torch.where(t_mask, torch.arange(t_mask.shape[1]), -1).amax(1) + 1
+            if t_mask.shape[1]
+            else torch.zeros(len(t_mask), dtype=torch.long)
+        )
+        batch["context_layout"] = {
+            "identity_rows": batch["identity_positive_mask"]
+            .flatten()
+            .nonzero()
+            .flatten(),
+            "rejection_rows": (batch["identity_positive_mask"] | hard_mask)
+            .flatten()
+            .nonzero()
+            .flatten(),
+            "widths": width,
+        }
     if fafa_pooling is not None:
         # Public query inputs only: native query features never see annotations.
         batch["fafa_query"] = cache.native_queries(
@@ -368,6 +414,12 @@ def prepare_visual_batch(
             )
         )
         batch["fafa_pooling"] = fafa_pooling
+    if pack_target_persons:
+        packed = PackedPersons.from_padded(
+            batch["target_persons"], batch["target_mask"]
+        )
+        batch["target_persons"] = packed
+        batch["target_layout"] = {"positions": packed.positions}
     return batch
 
 
@@ -447,27 +499,44 @@ def build_batch(
     include_direction_swaps: bool = False,
     defer_native_targets: bool = False,
     load_target_context: bool = True,
+    defer_target_scenes: bool = False,
+    preserve_storage: bool = False,
+    pack_target_persons: bool = False,
+    prepared_visual: dict | StagedVisual | None = None,
 ) -> dict[str, Tensor | dict | str | NativeTargetBatch]:
     text_cache = text_cache or QueryTextCache(tokenizer)
-    visual = prepare_visual_batch(
-        samples,
-        candidate_image_ids,
-        cache,
-        supervision=supervision,
-        identity_image_ids=identity_image_ids,
-        identity_crops=identity_crops,
-        identity_sampling=identity_sampling,
-        hard_identity_image_ids=hard_identity_image_ids,
-        fafa_pooling=fafa_pooling,
-        defer_native_targets=defer_native_targets,
-        load_target_context=load_target_context,
-    )
-    visual = {
-        key: (
-            value.to(device, non_blocking=True) if isinstance(value, Tensor) else value
+    if isinstance(prepared_visual, StagedVisual):
+        prepared_visual = prepared_visual.consume()
+    visual = (
+        prepared_visual
+        if prepared_visual is not None
+        else prepare_visual_batch(
+            samples,
+            candidate_image_ids,
+            cache,
+            supervision=supervision,
+            identity_image_ids=identity_image_ids,
+            identity_crops=identity_crops,
+            identity_sampling=identity_sampling,
+            hard_identity_image_ids=hard_identity_image_ids,
+            fafa_pooling=fafa_pooling,
+            defer_native_targets=defer_native_targets,
+            load_target_context=load_target_context,
+            defer_target_scenes=defer_target_scenes,
+            preserve_storage=preserve_storage,
+            pack_target_persons=pack_target_persons,
         )
-        for key, value in visual.items()
-    }
+    )
+
+    def transfer(value):
+        if isinstance(value, PackedPersons):
+            return value.to_dense(device)
+        if isinstance(value, Tensor):
+            value = value.to(device, non_blocking=True)
+            return value.float() if value.is_floating_point() else value
+        return value
+
+    visual = {key: transfer(value) for key, value in visual.items()}
     text = encode_tokenized_text(text_cache.batch(samples), text_encoder, device)
     if include_direction_swaps:
         swap = _swap_batch(

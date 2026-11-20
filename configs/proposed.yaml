@@ -51,6 +51,7 @@ train:
   batch_size: 24
   candidates: 32
   context_batch_size: 64
+  prefetch_batches: 1
   case_balanced: true
   seed: 0
   amp: true

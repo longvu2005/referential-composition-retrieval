@@ -324,6 +324,8 @@ def _score_target_components(
     compute_context=True,
 ):
     """Collect pairwise evidence without changing its scoring population."""
+    from rcr.proposed.cache.native import NativeTargetBatch
+
     components = {
         key: torch.empty(len(image_indices), device=device, dtype=torch.float32)
         for key in (
@@ -334,17 +336,19 @@ def _score_target_components(
     }
     for start in range(0, len(image_indices), batch_size):
         targets = image_indices[start : start + batch_size]
-        scene, persons, boxes, mask = cache.load(targets)
+        if not compute_context and hasattr(cache, "load_person_geometry"):
+            persons, boxes, mask = cache.load_person_geometry(targets)
+            scene = None
+        else:
+            scene, persons, boxes, mask = cache.load(targets)
         details = model.score_target(
             query.repeat_candidates(len(targets)),
-            scene.to(device, non_blocking=True),
-            persons.to(device, non_blocking=True),
+            None if scene is None else scene.to(device, non_blocking=True),
+            persons.to(device, non_blocking=True).float(),
             boxes.to(device, non_blocking=True),
             cache.patch_hw,
             mask.to(device, non_blocking=True),
-            fafa_targets=cache.native_targets(targets, persons.shape[1]).to(
-                device, non_blocking=True
-            ),
+            fafa_targets=NativeTargetBatch(cache, targets, persons.shape[1]),
             return_details=True,
             pooling=pooling,
             context_weight=context_weight,

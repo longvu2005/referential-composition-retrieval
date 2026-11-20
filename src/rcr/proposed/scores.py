@@ -1,6 +1,9 @@
 """Identity scores and FAFA pooling over a shared person assignment."""
 
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +13,9 @@ from rcr.proposed.matching import (
     PersonMatching,
     gather_matched,
 )
+
+if TYPE_CHECKING:
+    from rcr.proposed.cache.native import NativeTargetBatch
 
 POOLING_MODES = ("penalized", "matched_mean", "subject_mean")
 DEFAULT_CONTEXT_WEIGHT = 0.1
@@ -251,7 +257,7 @@ def combine_scores(
 
 def fafa_binding_scores(
     query: Tensor,
-    targets: Tensor,
+    targets: Tensor | NativeTargetBatch,
     *,
     matching: PersonMatching,
     k: int = 6,
@@ -260,12 +266,25 @@ def fafa_binding_scores(
     return_poolings: bool = False,
 ) -> Tensor | dict[str, Tensor]:
     """Compute native FDA once and pool the assigned person pairs."""
+    from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
+
     if pooling not in POOLING_MODES:
         raise ValueError(f"unknown FAFA pooling: {pooling!r}")
     if not math.isfinite(missing_penalty) or missing_penalty <= 1:
         raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
     if type(k) is not int or k < 1:
         raise ValueError("fda_k must be a positive integer")
+    prealigned = isinstance(targets, NativeTargetBatch)
+    if prealigned:
+        indices = matching.indices_cpu
+        if indices is None:
+            indices = matching.indices.detach().cpu()
+        loaded = targets.load_matched(indices)
+        targets = (
+            loaded.to_aligned(query.device)
+            if isinstance(loaded, MatchedTargetTokens)
+            else loaded.to(query.device, non_blocking=True)
+        )
     if (
         query.ndim != 4
         or targets.ndim != 4
@@ -273,6 +292,7 @@ def fafa_binding_scores(
         or query.shape[0] != targets.shape[0]
         or query.shape[-1] != targets.shape[-1]
         or targets.shape[2] < 1
+        or (prealigned and targets.shape[1] != query.shape[2])
     ):
         raise ValueError("incompatible FAFA query/target/matching shapes")
     with torch.no_grad(), torch.autocast(query.device.type, enabled=False):
@@ -280,9 +300,10 @@ def fafa_binding_scores(
         selected = member > 0
         length, dim = targets.shape[-2:]
         # Gather first: unused/padded detections (even NaN/Inf) cannot enter FDA.
-        flat = targets.detach().flatten(2)
         aligned = (
-            gather_matched(flat, matching.indices)
+            targets.detach().float()
+            if prealigned
+            else gather_matched(targets.detach().flatten(2), matching.indices)
             .float()
             .reshape(targets.shape[0], query.shape[2], length, dim)
         )

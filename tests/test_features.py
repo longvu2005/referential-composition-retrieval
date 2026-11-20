@@ -367,6 +367,25 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
     assert gallery.native_queries(data.samples, 2).shape == (1, 1, 2, 2)
     assert gallery.native_targets(torch.tensor([0, 1]), 2).shape == (2, 2, 2, 2)
     assert gallery.detection_cache_id == source.cache_id
+    packed = gallery.native_matched_targets(
+        torch.tensor([0, 1]), torch.tensor([[1, -1, 0], [-1, -1, -1]])
+    )
+    assert len(packed.values) == 2
+    aligned = packed.to_aligned("cpu")
+    assert aligned.shape == (2, 3, 2, 2)
+    assert aligned[0, 1].count_nonzero() == aligned[1].count_nonzero() == 0
+    with monkeypatch.context() as no_scenes:
+        no_scenes.setattr(
+            gallery._scene_cache,
+            "_load_item",
+            lambda i: pytest.fail("unused scene read"),
+        )
+        person_index, geometry, index_mask = gallery.load_person_geometry(
+            torch.tensor([0, 1])
+        )
+    torch.testing.assert_close(person_index.float(), people)
+    torch.testing.assert_close(geometry, boxes)
+    torch.testing.assert_close(index_mask, mask)
 
     bad = tmp_path / "changed-detections"
     values = iter([source.load_geometry(0)["boxes_pixel"].flip(0), torch.empty(0, 4)])

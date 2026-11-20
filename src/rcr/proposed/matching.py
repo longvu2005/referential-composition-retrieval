@@ -144,6 +144,7 @@ class PersonMatching:
     subjects: Tensor  # [B,S], active text Subject slots
     subject_coverage: Tensor  # [B,S], missing query Subject also has coverage zero
     coverage: Tensor  # [B], mean coverage over active Subjects
+    indices_cpu: Tensor | None = None  # Reuse the assignment workspace for CPU gathers.
 
     @property
     def matched(self) -> Tensor:
@@ -181,6 +182,7 @@ def partial_identity_matching(
     per_subject = weights / weights.sum(-1, keepdim=True).clamp_min(1e-6)
     importance = per_subject.sum(1)
     indices = torch.full((b, q), -1, device=membership.device, dtype=torch.long)
+    indices_cpu = torch.full((b, q), -1, dtype=torch.long)
     valid = (
         torch.ones(b, t, device=membership.device, dtype=torch.bool)
         if target_mask is None
@@ -231,14 +233,17 @@ def partial_identity_matching(
             )
             real = column < len(columns)
             assigned[n, rows[row[real]]] = columns[column[real]]
-        indices = torch.from_numpy(assigned).to(membership.device, non_blocking=True)
+        indices_cpu = torch.from_numpy(assigned)
+        indices = indices_cpu.to(membership.device, non_blocking=True)
     matched = indices >= 0
     subject_coverage = (per_subject * matched[:, None]).sum(-1).clamp(0, 1)
     coverage = subject_coverage.masked_fill(~active, 0).sum(-1) / active.sum(
         -1
     ).clamp_min(1)
     coverage = coverage.clamp(0, 1)
-    return PersonMatching(indices, weights, active, subject_coverage, coverage)
+    return PersonMatching(
+        indices, weights, active, subject_coverage, coverage, indices_cpu
+    )
 
 
 def gather_matched(values: Tensor, indices: Tensor) -> Tensor:

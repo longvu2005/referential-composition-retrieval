@@ -167,8 +167,9 @@ def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
     assert model.binding_scale.item() == 1.0
 
 
+@pytest.mark.parametrize("defer", [False, True])
 def test_verified_swap_trains_context_on_the_same_assignment(
-    tiny_training_run, monkeypatch
+    tiny_training_run, monkeypatch, defer
 ):
     _, cache, _, _ = tiny_training_run
     data = training.load_rcr_data()
@@ -221,6 +222,7 @@ def test_verified_swap_trains_context_on_the_same_assignment(
         identity_image_ids=[{"a", "n"}],
         fafa_pooling="subject_mean",
         include_direction_swaps=True,
+        defer_target_scenes=defer,
     )
     assert batch["direction_swap"]["positions"].tolist() == [[0, 1]]
     model = training.RCRModel(dim=8, identity_dim=6, num_heads=2)
@@ -1081,6 +1083,31 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
     digest = sha256_file(output / "last.pt")
     assert training.train(cfg, resume="auto") == resumed
     assert sha256_file(output / "last.pt") == digest
+
+
+def test_prefetch_preserves_serial_weights_optimizer_sampling_and_history(
+    tiny_training_run,
+):
+    cfg, _, _, _ = tiny_training_run
+    data = training.load_rcr_data(None)
+    _configure(cfg, data)
+    cfg["evaluation"]["enabled"] = False
+    cfg["wandb"]["enabled"] = False
+    serial_cfg = deepcopy(cfg)
+    serial_cfg["train"]["prefetch_batches"] = 0
+    serial_cfg["output"]["dir"] += "-serial"
+    serial_path = training.train(serial_cfg)
+    serial = torch.load(serial_path, weights_only=True)
+    cfg["train"]["prefetch_batches"] = 1
+    prefetched_path = training.train(cfg)
+    prefetched = torch.load(prefetched_path, weights_only=True)
+    for name in ("model", "text_encoder", "state_supervised_pairs"):
+        _equal(prefetched[name], serial[name])
+    for name in ("optimizer", "scaler", "rng", "progress"):
+        _equal(prefetched["training_state"][name], serial["training_state"][name])
+    assert (prefetched_path.parent / "history.jsonl").read_text() == (
+        serial_path.parent / "history.jsonl"
+    ).read_text()
 
 
 def test_legacy_checkpoint_rejected_without_overwriting(tiny_training_run):

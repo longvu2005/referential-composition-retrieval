@@ -37,9 +37,8 @@ class SubjectGrounding(nn.Module):
         if selection_mask is not None:
             selection_mask = selection_mask.reshape(b * s, length)
             empty = ~selection_mask.any(-1)
-            if empty.any():
-                selection_mask = selection_mask.clone()
-                selection_mask[empty, 0] = True
+            selection_mask = selection_mask.clone()
+            selection_mask[:, 0] |= empty
 
         bound = self.binding(
             scene,

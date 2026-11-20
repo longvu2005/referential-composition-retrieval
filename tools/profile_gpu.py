@@ -11,7 +11,7 @@ from torch import nn
 
 from rcr.common.config import load_config
 from rcr.common.runtime import seed_everything
-from rcr.proposed.cache.native import NativeTargetBatch
+from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.nn.model import RCRModel
 
@@ -24,6 +24,15 @@ class FrozenTargets:
     def native_targets(self, indices, width):
         self.loaded_people += len(indices) * width
         return self.values[:, :width].index_select(0, indices)
+
+    def native_matched_targets(self, images, assignments, *, prepared=None):
+        rows, columns = (assignments >= 0).nonzero(as_tuple=True)
+        self.loaded_people += len(rows)
+        return MatchedTargetTokens(
+            self.values[images[rows], assignments[rows, columns]],
+            rows * assignments.shape[1] + columns,
+            tuple(assignments.shape),
+        )
 
 
 def _inputs(cfg, queries, candidates, people, device):
@@ -85,6 +94,12 @@ def _inputs(cfg, queries, candidates, people, device):
         "change_mask": torch.ones(queries, length, dtype=torch.bool),
     }
     batch = {key: value.to(device) for key, value in batch.items()}
+    batch["target_layout"] = {"positions": target_mask.flatten().nonzero().flatten()}
+    batch["context_layout"] = {
+        "identity_rows": same.flatten().nonzero().flatten(),
+        "rejection_rows": (same | hard).flatten().nonzero().flatten(),
+        "widths": target_mask.flatten(0, 1).sum(1),
+    }
     source = FrozenTargets(
         torch.randn(
             queries * candidates, people, tokens, native_dim, dtype=torch.float16
@@ -223,7 +238,15 @@ def main(argv=None):
                 batch["identity_positive_mask"] | batch["hard_identity_negative_mask"]
             ).sum()
         ),
-        "native_padded_people_per_step": source.loaded_people / args.steps,
+        "native_transferred_people_per_step": source.loaded_people / args.steps,
+        "native_transferred_mib_per_step": (
+            source.loaded_people
+            / args.steps
+            * source.values.shape[-2]
+            * source.values.shape[-1]
+            * source.values.element_size()
+            / 1024**2
+        ),
         "warmup": args.warmup,
         "steps": args.steps,
         "step_seconds": timings,

@@ -24,6 +24,7 @@ from rcr.common.runtime import derived_generator
 from rcr.dataset.audit import negative_exclusions
 from rcr.proposed.batch import load_visual_features
 from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
+from rcr.proposed.prefetch import PackedPersons
 from rcr.proposed.sampling import (
     CandidateIndex,
     identity_candidate_pools,
@@ -62,6 +63,7 @@ def environment_report(cfg, device):
         "selected_device": str(device),
         "configured_device": cfg["runtime"]["device"],
         "amp": cfg["train"].get("amp", False),
+        "prefetch_batches": cfg["train"].get("prefetch_batches", 0),
         "deterministic": cfg["runtime"].get("deterministic", True),
         "environment": {
             key: os.environ.get(key)
@@ -204,12 +206,28 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
             previous = cache.requests.copy()
             started = perf_counter()
             query, target = load_visual_features(
-                cache, queries, targets, target_context=context
+                cache,
+                queries,
+                targets,
+                target_context=context,
+                defer_target_scenes=context,
+                preserve_storage=True,
             )
+            if context:
+                target[0].prepare(eligible)
+            packed = PackedPersons.from_padded(target[1], target[3])
             assembly_seconds = perf_counter() - started
             tensors = [
                 value
-                for value in (*query, *target, cache.load_global_features(targets))
+                for value in (
+                    *query,
+                    packed.values,
+                    packed.positions,
+                    target[2],
+                    target[3],
+                    cache.load_global_features(targets),
+                    target[0].values if context else None,
+                )
                 if isinstance(value, torch.Tensor)
             ]
             counts = target[3].sum(1)
@@ -221,14 +239,16 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
                 "context_pairs": len(eligible) if context else 0,
                 "actual_target_people": int(counts.sum()),
                 "padded_target_people": target[3].numel(),
+                "projected_target_people": len(packed.values),
+                "target_scene_pairs_loaded": len(eligible) if context else 0,
                 "visual_cpu_assembly_seconds": assembly_seconds,
                 "visual_payload_mib": _payload(tensors),
                 "visual_h2d_seconds": _transfer(tensors, device),
                 "visual_tensors_pinned": all(t.is_pinned() for t in tensors),
                 "native_cpu_seconds": 0.0,
-                "native_payload_mib": 0.0,
+                "native_query_payload_mib": 0.0,
+                "native_target_prefetch_mib": 0.0,
                 "native_h2d_seconds": 0.0 if device.type == "cuda" else None,
-                "largest_native_chunk_mib": 0.0,
             }
             if context:
                 started = perf_counter()
@@ -236,26 +256,38 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
                     inference_samples(samples), query[1].shape[1]
                 )
                 result["native_cpu_seconds"] += perf_counter() - started
-                result["native_payload_mib"] += _payload([native])
+                result["native_query_payload_mib"] += _payload([native])
                 transfer = _transfer([native], device)
                 if transfer is not None:
                     result["native_h2d_seconds"] += transfer
                 del native
-                for start in range(0, len(eligible), chunk_size):
-                    positions = eligible[start : start + chunk_size]
-                    width = int(counts[positions].max())
-                    started = perf_counter()
-                    native = cache.native_targets(targets[positions], width)
-                    result["native_cpu_seconds"] += perf_counter() - started
-                    size = _payload([native])
-                    result["native_payload_mib"] += size
-                    result["largest_native_chunk_mib"] = max(
-                        result["largest_native_chunk_mib"], size
-                    )
-                    transfer = _transfer([native], device)
-                    if transfer is not None:
-                        result["native_h2d_seconds"] += transfer
-                    del native
+                started = perf_counter()
+                prepared = cache.prepare_native_targets(
+                    targets[eligible],
+                    min(cfg.get("cache", {}).get("native_lru_mib", 0), 128) * 1024**2,
+                )
+                result["native_cpu_seconds"] += perf_counter() - started
+                result["native_target_prefetch_mib"] = _payload(prepared.values())
+                element_size = (
+                    next(iter(prepared.values())).element_size()
+                    if prepared
+                    else cache.persons.element_size()
+                )
+                person_bytes = cache.native.tokens * cache.native.dim * element_size
+                query_counts = query[3].sum(1)[eligible // cfg["train"]["candidates"]]
+                matched_upper = int(torch.minimum(query_counts, counts[eligible]).sum())
+                result["native_matched_transfer_upper_bound_mib"] = (
+                    matched_upper * (person_bytes + 8) / 1024**2
+                )
+                old_slots = sum(
+                    len(part) * int(counts[part].max())
+                    for part in eligible.split(chunk_size)
+                    if len(part)
+                )
+                result["previous_padded_native_transfer_mib"] = (
+                    old_slots * person_bytes / 1024**2
+                )
+                del prepared
             result["cache_requests"] = dict(cache.requests - previous)
             rows.append(result)
             print(json.dumps(result), flush=True)
@@ -264,10 +296,11 @@ def cache_report(cfg, device, *, batches, repeats, epoch):
         "setup_seconds": setup_seconds,
         "epoch": epoch,
         "context_enabled": context,
-        "scope": "production cache readers/collation and synchronized serial H2D",
+        "scope": "production sparse cache preparation; raw serial visual/query H2D",
         "excludes": (
             "text/visual model forwards, labels/extra identity crops, loss, matching, "
-            "optimizer, mining, validation and checkpoint I/O"
+            "matched target-token H2D, pinning/stream overlap, optimizer, mining, "
+            "validation and checkpoint I/O"
         ),
         "sampling": "seeded candidates without learned hard pools; not a resumed batch",
         "repeat_policy": "same batch and reader LRU; OS disk cache is not flushed",

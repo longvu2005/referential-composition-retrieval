@@ -7,6 +7,7 @@ indexed by public instruction/Subject slots, never by selected members or GT.
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -17,15 +18,60 @@ from rcr.proposed.cache.person_encoder import text_policy
 NATIVE_VERSION = "fafa-multimodal-fda-v1"
 
 
+@dataclass
+class MatchedTargetTokens:
+    """Packed assigned token rows; null/query padding never crosses PCIe."""
+
+    values: Tensor
+    positions: Tensor
+    shape: tuple[int, int]
+
+    def to_aligned(self, device):
+        values = self.values.to(device, non_blocking=True)
+        positions = self.positions.to(device, non_blocking=True)
+        out = values.new_zeros((self.shape[0] * self.shape[1], *values.shape[1:]))
+        out.index_copy_(0, positions, values)
+        return out.unflatten(0, self.shape)
+
+
 class NativeTargetBatch:
     """Read only the current training chunk, before padding and GPU transfer."""
 
-    def __init__(self, cache, image_indices: Tensor):
+    def __init__(self, cache, image_indices: Tensor, max_people: int | None = None):
         self.cache = cache
         self.image_indices = image_indices
+        self.max_people = max_people
+        self.prepared = {}
+
+    def select(self, rows: Tensor, max_people: int):
+        selected = NativeTargetBatch(self.cache, self.image_indices[rows], max_people)
+        selected.prepared = self.prepared
+        return selected
+
+    def prepare(self, rows: Tensor, max_bytes: int):
+        if max_bytes and hasattr(self.cache, "prepare_native_targets"):
+            self.prepared = self.cache.prepare_native_targets(
+                self.image_indices[rows], max_bytes
+            )
 
     def load(self, rows: Tensor, max_people: int) -> Tensor:
         return self.cache.native_targets(self.image_indices[rows], max_people)
+
+    def load_matched(self, indices: Tensor) -> Tensor | MatchedTargetTokens:
+        """Gather assigned detections on CPU, before allocating/transferring padding."""
+        if hasattr(self.cache, "native_matched_targets"):
+            return self.cache.native_matched_targets(
+                self.image_indices, indices, prepared=self.prepared
+            )
+        # Compatibility for synthetic/third-party readers implementing the old API.
+        if self.max_people is None:
+            raise ValueError("deferred native targets need their target person width")
+        values = self.cache.native_targets(self.image_indices, self.max_people)
+        if not values.shape[1]:
+            return values.new_zeros((len(indices), indices.shape[1], *values.shape[2:]))
+        shape = (*indices.shape, *values.shape[2:])
+        selected = values.gather(1, indices.clamp_min(0)[..., None, None].expand(shape))
+        return selected.masked_fill((indices < 0)[..., None, None], 0)
 
 
 def subject_conditions(sample: dict) -> list[str]:
@@ -319,3 +365,70 @@ class NativeFAFACache:
             if out is not None
             else self.gallery.persons.new_zeros(0, max_people, self.tokens, self.dim)
         )
+
+    def load_matched_targets(
+        self, image_indices: Tensor, assignments: Tensor, *, prepared=None
+    ) -> MatchedTargetTokens:
+        """Read each used image once, retaining only its assigned person token rows."""
+        if (
+            assignments.device.type != "cpu"
+            or assignments.dtype != torch.long
+            or assignments.ndim != 2
+            or len(assignments) != len(image_indices)
+            or (assignments < -1).any()
+        ):
+            raise ValueError(
+                "native assignments must be CPU int64 [images,query_people]"
+            )
+        rows = {}
+        for n, i in enumerate(image_indices.tolist()):
+            if (assignments[n] >= 0).any():
+                rows.setdefault(i, []).append(n)
+        values, locations = [], []
+        for i, positions in rows.items():
+            count = int(self.gallery.mask[i].sum())
+            features = (prepared or {}).get(i)
+            if features is None:
+                features = self.target_row(i)
+            positions = torch.tensor(positions)
+            chosen = assignments[positions]
+            valid = chosen >= 0
+            if (chosen[valid] >= count).any():
+                raise ValueError("native assignment exceeds the image person count")
+            values.append(features[chosen[valid]])
+            flat = positions[:, None] * assignments.shape[1] + torch.arange(
+                assignments.shape[1]
+            )
+            locations.append(flat[valid])
+        return MatchedTargetTokens(
+            torch.cat(values)
+            if values
+            else self.gallery.persons.new_empty((0, self.tokens, self.dim)),
+            torch.cat(locations) if locations else torch.empty(0, dtype=torch.long),
+            tuple(assignments.shape),
+        )
+
+    def target_row(self, index):
+        count = int(self.gallery.mask[index].sum())
+        shape = (count, self.tokens, self.dim)
+        return self.gallery._cached(
+            ("fafa-target", index, shape),
+            lambda: self._read("targets", index, self.gallery.image_ids[index], shape),
+        )
+
+    def prepare_targets(self, indices, max_bytes):
+        prepared, used = {}, 0
+        for index in dict.fromkeys(indices.tolist()):
+            count = int(self.gallery.mask[index].sum())
+            estimate = (
+                count * self.tokens * self.dim * self.gallery.persons.element_size()
+            )
+            if used + estimate > max_bytes:
+                break
+            value = self.target_row(index)
+            size = value.numel() * value.element_size()
+            if used + size > max_bytes:
+                break
+            prepared[index] = value
+            used += size
+        return prepared

@@ -1,80 +1,82 @@
-The training and retrieval paths use bounded chunks while preserving the model's
-matching and scoring rules. Native FAFA targets are loaded only for training pairs
-used by context losses, padded to each chunk's useful person columns, and then
-transferred to the accelerator. Assignment is detached and computed once per
-chunk; activation checkpointing recomputes the neural context path during backward.
+Training prepares a bounded batch ahead of the current step, transfers frozen
+features in their stored precision, and runs the original loss and matching
+rules. The implementation avoids transferring padded/unused evidence while
+keeping model parameter names and shapes unchanged.
 
-Box suppression and SciPy assignment share a batched CPU workspace. This avoids
-the former Python loop over CUDA scalar indices and dynamically sized masks.
-Suppression retains stable detection-order ties, the strict IoU threshold and
-greedy behavior; assignment retains shared one-to-one matching and private nulls.
-Mining skips contextual attention/reasoning when its context coefficient is zero.
-Validation still collects context evidence for coefficient calibration.
+The supplied configuration enables these settings:
 
-The supplied configuration includes these performance settings:
-
-| Setting | Default in `configs/proposed.yaml` | Effect |
+| Setting | Default | Effect |
 | --- | ---: | --- |
-| `train.context_batch_size` | 64 | Bounds neural context work and native target transfer per chunk. |
-| `retrieval.query_batch_size` | 8 | Batches text/query encoding and coarse scoring by Subject count. Output query order is preserved. |
-| `retrieval.gpu_cache_mib` | 512 | Budget for resident projected gallery identities, masks and global states. |
-| `cache.text_lru_mib` | 768 | CPU budget for frozen CLIP token states; the learned projection still runs each step. |
+| `train.prefetch_batches` | 1 | Prepares one future batch on a CPU worker. Zero disables background work. |
+| `train.context_batch_size` | 64 | Bounds context forward/backward work per chunk. |
+| `retrieval.query_batch_size` | 8 | Batches query/text encoding and coarse scoring by Subject count. |
+| `retrieval.gpu_cache_mib` | 512 | Budget for resident gallery identity/mask/global projections. |
+| `cache.text_lru_mib` | 768 | CPU budget for frozen CLIP token states; learned projections still run each step. |
+| `cache.native_lru_mib` | 256 | Independent CPU LRU for native shards; batch prefetch retains at most 128 MiB of target tokens. |
 
-The gallery remains in chunks. GPU residency is used only when the projected
-gallery fits both the configured budget and half the currently free device memory.
-Otherwise retrieval retains CPU-backed chunks. Set `retrieval.gpu_cache_mib=0`
-to disable residency. Existing configurations without `query_batch_size` keep
-single-query retrieval; they can opt into batching explicitly.
+Training uses the following input path:
 
-Frozen text cache keys are built from CPU token IDs before device transfer.
-Training metrics and fine-score validation flags are copied to CPU in groups.
-These changes retain the configured numerical precision. CUDA training still uses
-the existing AMP/GradScaler policy; FDA and geometry attention keep their FP32
-regions, and retrieval keeps FP32 inference.
+1. The producer samples candidates using private CPU generators and prepares
+   visual inputs/labels. Only query scenes are needed during warmup. Joint
+   training reads target scene patches for eligible context pairs.
+2. Person features are packed using the CPU validity mask. Only actual detections
+   cross PCIe; their exact zero padding is reconstructed on the device. Target
+   identity projection also skips padded detections. It contains no dropout.
+3. With prefetch enabled on CUDA, the worker pins source buffers and copies frozen
+   inputs on a separate CUDA stream. The consumer waits on an event and records
+   the tensors on its stream. CPU source buffers are retained until consumption.
+   Neural forwards, dropout, text projection and optimizer work stay on the
+   training thread.
+4. CPU layout metadata provides eligible pair positions and useful person widths,
+   avoiding GPU-to-CPU reads of invariant masks. Assignment remains detached and
+   runs once per chunk in its NumPy/SciPy workspace.
+5. Native FAFA tokens are gathered using the CPU assignment already computed by
+   matching. Only assigned token rows and their positions cross PCIe; null rows
+   and person padding are reconstructed on the device before FP32 FDA scoring.
+   Backward checkpointing recomputes only the neural context path.
 
-Skipping unused context pairs changes how many rows pass through dropout. Existing
-weights remain compatible because parameter names/shapes and the scoring contract
-are unchanged. Training trajectories can differ from older source. Resume should
-use a compatible saved configuration and source as described in the run guide.
+Each prefetched batch carries the sampling/identity generator states following
+that batch. Checkpoints commit the states of the consumed batch, even when the
+worker has already sampled the next one. Cancellation and errors join the worker;
+cache shard I/O is performed outside the LRU accounting lock. Native target
+prefetch and scene staging are bounded by the batch and configured memory limits.
+Prefetch retains inputs for one future batch, adding bounded CPU/pinned memory
+and CUDA input buffers. Set `train.prefetch_batches=0` when measuring the serial
+control or when that extra input batch exceeds the available VRAM.
 
-Measure the production joint training kernels on a CUDA machine without downloading
-models or preparing a dataset:
+Retrieval preserves query output order and FP32 inference. Mining with context
+coefficient zero skips the reasoner and target scene loading in separated caches.
+Fine scoring uses the same packed assigned-token path as training. Validation
+still collects context evidence for coefficient calibration. Gallery residency is
+used only when the projections fit both the configured budget and half the
+currently free CUDA memory; otherwise coarse scoring uses CPU-backed chunks.
+
+No new downcast is introduced: FP16 stored features become FP32 model inputs on
+the accelerator. FP32 stored features retain FP32 transfer. CUDA training retains
+its AMP/GradScaler policy, and FDA/geometry attention retain their FP32 regions.
+Packing can change floating-point accumulation through different GEMM shapes;
+old and new training trajectories are not promised bitwise identical. Serial and
+prefetched execution use the same numerical path and are tested against each other.
+
+Cache files and inference weights remain compatible. Resume verification also
+binds the source hash, so retain the original implementation for an existing run.
+Use a new output directory with the updated implementation:
 
 ```bash
-.venv-proposed/bin/python tools/profile_gpu.py --device cuda --trace \
-  --output-dir runs/gpu-profile
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set output.dir=runs/proposed-gpu-optimized
 ```
 
-`profile.json` records synchronized step timings, throughput, peak allocated and
-reserved VRAM, AMP scaler state and the number of context pairs/native person
-slots processed. `trace.json` can be opened in a Chrome trace/Perfetto viewer.
-Warmup iterations are excluded from timings; the optional traced step runs after
-the timing loop so profiler overhead does not enter reported throughput.
+For an RTX 5060, first check the exact Python/CUDA runtime. NVIDIA lists the
+[RTX 5060 at compute capability 12.0 (`sm_120`)](https://developer.nvidia.com/cuda/gpus).
+[PyTorch 2.7 introduced Blackwell support with CUDA 12.8 wheels](https://pytorch.org/blog/pytorch-2-7/).
+The proposed requirement `torch>=2.6` alone does not ensure Blackwell support;
+the separate FAFA environment pins PyTorch 2.5.1 and is not a supported Blackwell
+runtime. A recent driver does not replace an older PyTorch wheel. Existing
+compatible feature caches allow training without loading that frozen FAFA runtime.
+Changing its pinned dependencies requires separate encoder compatibility checks.
 
-The tool uses synthetic cached CLIP/FAFA feature shapes and the actual model,
-loss, matching, activation checkpointing and optimizer. It excludes disk/image
-I/O, frozen CLIP encoding, mining and validation, so its throughput is not an
-end-to-end training estimate. Compare results with the same configuration, hardware,
-software, batch/person sizes and AMP mode. `--people` controls person padding and
-can be increased to exercise crowded images; `--no-amp` provides an FP32 control.
-
-For a small CPU functional check:
-
-```bash
-PYTHONPATH=src:. python3.11 tools/profile_gpu.py --device cpu \
-  --batch-size 2 --candidates 4 --people 2 --warmup 1 --steps 2 --threads 1
-```
-
-Correctness coverage includes dense-versus-sparse context loss and gradients,
-dropout/checkpoint RNG, stable greedy suppression, duplicate/null assignments,
-paired coarse-score gradients, deferred native reads and batched retrieval order.
-CUDA-specific cases run automatically when CUDA is available and are skipped on
-CPU-only development machines.
-
-For low utilization on an RTX 5060, check the runtime and the input pipeline
-separately. The synthetic kernel profiler above excludes the cache reads and
-assembly that can leave the GPU waiting. Run the following in the same Python
-environment and with the same configuration as training:
+Run diagnostics in the same environment/configuration as the slow training:
 
 ```bash
 .venv-proposed/bin/python tools/diagnose_gpu.py --device cuda \
@@ -85,84 +87,85 @@ environment and with the same configuration as training:
   --output runs/gpu-diagnostics/warmup.json
 ```
 
-Without `--cache-batches`, the tool only checks the environment. It records the
-interpreter, PyTorch CUDA build, compiled architectures, CPU thread counts,
-relevant debugging/thread environment variables, source status and an
-`nvidia-smi` snapshot. A small CUDA forward/backward smoke test catches cases
-where `is_available()` is true but the installed wheel cannot execute kernels.
-Failure is saved in the JSON and returns a nonzero exit status without reading
-the dataset. It does not install packages, download weights, train, or change
-caches/checkpoints.
+Without `--cache-batches`, diagnostics only inspect the runtime. The JSON records
+PyTorch/CUDA versions, compiled architectures, interpreter, CPU thread counts,
+relevant environment variables, source status and an `nvidia-smi` snapshot. A
+small CUDA forward/backward smoke catches unsupported kernels even when
+`torch.cuda.is_available()` returns true. Failures are saved and return a nonzero
+exit status. No weights are downloaded and no caches/checkpoints are modified.
 
-RTX 5060 has compute capability 12.0 (`sm_120`), according to
-[NVIDIA's GPU table](https://developer.nvidia.com/cuda/gpus).
-[PyTorch 2.7 introduced Blackwell support with CUDA 12.8 wheels](https://pytorch.org/blog/pytorch-2-7/).
-Use a wheel that supports this architecture. The proposed runtime allows
-PyTorch >=2.6, which alone does not ensure Blackwell support; the separate
-person-encoder environment pins PyTorch 2.5.1 and is not a supported Blackwell
-runtime. Do not assume a recent driver fixes an older PyTorch wheel. The CUDA
-version in `nvidia-smi` describes driver support; `torch.version.cuda` identifies
-the PyTorch CUDA build. Changing the pinned FAFA environment needs separate
-compatibility validation. Existing compatible feature caches can be used for
-training without loading the native FAFA encoder.
+The cache probe reads actual seeded candidates, sparse scenes and packed person
+inputs. It reports raw visual payload, CPU assembly time, native prefetch bytes
+and reader LRU requests. It measures serial visual/query H2D components without
+pinning/stream overlap. Because it does not run grounding or matching, it reports
+a one-to-one upper bound for matched native-token transfer, rather than claiming
+to measure the actual assigned-token H2D path. It excludes label/extra-crop
+preparation, text/model forwards, optimizer, mining, validation and checkpoint I/O.
+Candidates use no learned hard pools. Each batch repeats twice by default; the
+reader LRU warms but the OS file cache is not flushed. These component timings
+are not end-to-end throughput or a full-epoch cache hit-rate estimate. CPU thread
+counts are preserved unless `--threads` is supplied.
 
-The optional cache probe uses the actual readers, seeded training candidate
-sampler, collation and native target chunk sizes. It times CPU assembly and
-serial synchronized H2D transfers separately, counts reader LRU hits/misses,
-and reports payload/padding. The default epoch is the first joint epoch;
-`--epoch 1` measures warmup. Each batch is repeated twice by default. A new
-reader starts with an empty Python LRU, but the OS file cache is not flushed.
-Repeating an identical batch demonstrates the effect of LRU residency; it does
-not estimate hit rates for a full epoch with changing candidates. The probe
-excludes text/model execution, label/extra-crop preparation, matching, optimizer,
-mining, validation and checkpoint I/O. Candidates do not use learned hard pools.
-These component timings must not be presented as end-to-end training throughput.
-Thread counts are preserved unless `--threads` is supplied.
+On the first seeded epoch-5 batch (24 queries, 32 candidates, 255 context pairs),
+the source after the `a0b6246` review reduces work as follows:
 
-The November 20, 2026 review of source based on `38e3276` found these remaining
-constraints:
+| Quantity | Before this optimization | Updated path |
+| --- | ---: | ---: |
+| Visual transfer payload, excluding labels/extra crops | 242.74 MiB | 31.99 MiB |
+| Target detections passed through identity projection | 43,008 padded slots | 4,886 actual detections |
+| Target scene pairs loaded | 768 | 255 |
+| Native target transfer | 89.67 MiB padded | At most 14.73 MiB, including positions |
+| Native target read-ahead storage | Padded per chunk on the step thread | 21.78 MiB of raw token rows on the producer |
 
-| Path | Evidence | Consequence |
-| --- | --- | --- |
-| Build-cache | Scene/detection extraction loops over individual images; FAFA uses batches of four crops within each image. | Decode/preprocessing and small forwards can leave gaps. This is separate from cached training and is not measured by either training-kernel or cache-reader timings. |
-| Training input | Batch preparation runs in the train thread; visual buffers are pageable and copied on the current stream. | CPU assembly does not overlap the next batch with GPU compute. `non_blocking=True` alone does not provide that overlap. |
-| Warmup | Target scenes/boxes were loaded even though every context loss was disabled. | Training now reads only query scenes/geometry and obtains target persons/global features from their indices. |
-| Joint training | The first seeded epoch-5 batch has 768 candidates, 255 eligible context pairs, and 4,886 actual target people padded to 43,008 slots. | Visual target loading is still dense even though native/context work is sparse. The visual payload is 242.74 MiB, plus 90.23 MiB of native queries/targets in this example. |
-| Matching | Detached assignment still transfers evidence to CPU for NumPy/SciPy and then returns indices to the device. | Each context/fine chunk has a synchronization boundary, despite the earlier removal of per-box synchronizations. |
-| Validation | With 1,799 queries and `top_m=500`, the fine path scores 899,500 pairs in 14,392 chunks of at most 64. | Query batching improves coarse scoring; fine scoring still loops through each query's shortlist. |
-| Mining | Context coefficient zero skips the neural reasoner, but the target helper still reads/transfers scene features. | Additional scene I/O remains even when mining only needs identity/FDA/coverage. |
-| Calibration | The configured 8 x 12 x 6 grid evaluates 576 coefficient combinations on CPU. | GPU inactivity during coefficient selection is expected. |
+The native bound assumes every possible query detection is matched and is not
+an actual assignment measurement. The payload values use real cache dimensions
+and candidate ordering. The development machine has CPU-only PyTorch 2.2.2 on
+macOS/T9; these results do not establish RTX 5060 speedups or utilization.
 
-The measured first joint batch on the development Mac/T9 took 6.54 seconds for
-visual read/collation and 1.42 seconds for native reads/padding; the same batch
-repeated with reader LRU hits took 0.171 and 0.031 seconds respectively. Its first
-pass had 761 visual, 48 native-query and 239 native-target LRU misses. These are
-observations on that host with PyTorch 2.2.2 and one CPU thread, without CUDA;
-they do not establish RTX 5060 timings or steady-state disk performance.
+Measure the actual joint-training kernels on the CUDA machine:
 
-For the same seeded epoch-1 batch, the warmup change reduces unique visual
-reader requests from 767 to 24 and the visual transfer payload from 253.98 to
-143.02 MiB. Query scene features, target person/global features and training
-labels are retained. This is a work/payload reduction; no CUDA speedup has been
-measured on the development host.
+```bash
+.venv-proposed/bin/python tools/profile_gpu.py --device cuda --trace \
+  --output-dir runs/gpu-profile
+```
 
-On the real machine, compare cache timings with the kernel profiler and collect
-`nvidia-smi` while the slow stage is running:
+This runs the production model, joint loss, packed target identity projection,
+matching, assigned-token transfer, activation checkpointing and optimizer on
+synthetic frozen features. Warmup is excluded from timings. `profile.json`
+records synchronized step times, throughput, transferred native person rows,
+AMP scaler state and peak VRAM; the optional `trace.json` is collected after the
+timing loop so tracing overhead does not enter reported throughput. It excludes
+real cache assembly, frozen CLIP forward, producer overlap, mining and validation.
+Compare the same workload/configuration, hardware, software, person counts and
+AMP mode. `--people` controls crowded-image padding; `--no-amp` gives an FP32
+control. For a CPU functional check:
+
+```bash
+PYTHONPATH=src:. python3.11 tools/profile_gpu.py --device cpu \
+  --batch-size 2 --candidates 4 --people 2 --warmup 1 --steps 2 --threads 1
+```
+
+Collect utilization while the real slow stage is running; the diagnostic's
+single snapshot is not a utilization trace:
 
 ```bash
 nvidia-smi --query-gpu=timestamp,name,utilization.gpu,memory.used,pstate,temperature.gpu,power.draw,power.limit --format=csv -l 1
 ```
 
-The diagnostic's single `nvidia-smi` snapshot is not a utilization trace.
-[NVIDIA defines GPU utilization as time with at least one kernel executing](https://docs.nvidia.com/deploy/nvidia-smi/index.html#utilization),
-so a low value can reflect gaps waiting for CPU work. It is not the percentage
-of CUDA cores used. For copy/compute overlap, PyTorch documents the need for
-[pinned source memory and a separate CUDA stream](https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html).
-This pipeline has no DataLoader; adding a `num_workers` config key does not
-introduce workers or prefetching. Next optimizations should measure/defer unused
-joint/mining scenes, then prefetch with bounded buffers and correct stream
-lifetimes. Preserve matching rules, numerical checks and the intended precision.
+[NVIDIA defines GPU utilization as time with at least one kernel executing](https://docs.nvidia.com/deploy/nvidia-smi/index.html#utilization).
+Low utilization can therefore reflect CPU gaps rather than GPU compute limits.
+[PyTorch documents pinned sources and separate streams for copy/compute overlap](https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html).
+The updated CUDA producer uses both, with explicit event and buffer lifetimes.
+There is no DataLoader; adding an unrelated `num_workers` setting has no effect.
 
-The warmup change preserves the loss/gradient contract and inference weights.
-Resume verification also binds a hash of the Python source, so an existing run
-must retain its original source; use the updated implementation for a new run.
+Remaining stage-specific constraints include CPU SciPy assignment per chunk,
+individual image/crop processing during build-cache, and CPU calibration of the
+configured 576 coefficient combinations. GPU inactivity during calibration is
+expected. Further changes to assignment, precision, compilation or batch sizes
+should be guided by a trace on the actual RTX 5060 rather than utilization alone.
+
+Regression coverage includes packed-vs-dense FDA and all pooling modes, null and
+duplicate assignments, lazy scene reads outside backward, packed identity loss
+and gradients under AMP/FP32, verified direction swaps, bounded prefetch/error
+cleanup, serial-vs-prefetched training state and interrupted resume. CUDA stream
+and numerical cases run when CUDA is available and skip on CPU-only hosts.

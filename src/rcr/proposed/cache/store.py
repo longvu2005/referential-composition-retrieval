@@ -12,6 +12,33 @@ from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache.scene import SceneCache
 
 
+class SceneTargetBatch:
+    """Frozen target patches read only for the context pairs that use them."""
+
+    def __init__(self, cache, image_indices):
+        self.cache = cache
+        self.image_indices = image_indices
+        self.values = None
+        self.positions = None
+
+    def load(self, rows):
+        if self.values is not None:
+            positions = self.positions[rows]
+            if (positions >= 0).all():
+                return self.values.index_select(0, positions.to(self.values.device))
+        indices = self.image_indices[rows]
+        if hasattr(self.cache, "load_scenes"):
+            return self.cache.load_scenes(indices)
+        return self.cache.load(indices)[0]
+
+    def prepare(self, rows):
+        if not len(rows):
+            return
+        self.values = self.load(rows)
+        self.positions = torch.full((len(self.image_indices),), -1, dtype=torch.long)
+        self.positions[rows] = torch.arange(len(rows))
+
+
 def gallery_cache_options(cfg: dict) -> dict:
     """Use the same joined cache paths and memory limits in train and retrieval."""
     data, cache = cfg["data"], cfg.get("cache", {})
@@ -234,6 +261,18 @@ class GalleryCache:
             raise ValueError("FAFA image/query caches are required; run build-cache")
         return self.native.load_targets(indices, max_people)
 
+    def native_matched_targets(
+        self, indices: Tensor, assignments: Tensor, *, prepared=None
+    ):
+        if self.native is None:
+            raise ValueError("FAFA image/query caches are required; run build-cache")
+        return self.native.load_matched_targets(indices, assignments, prepared=prepared)
+
+    def prepare_native_targets(self, indices: Tensor, max_bytes: int):
+        if self.native is None:
+            raise ValueError("FAFA image/query caches are required; run build-cache")
+        return self.native.prepare_targets(indices, max_bytes)
+
     def validate_gallery(self, image_ids: list[str]) -> None:
         """Require the cached image order to match the finalized benchmark."""
         if self.image_ids != image_ids:
@@ -257,6 +296,34 @@ class GalleryCache:
         for n, index in enumerate(indices.tolist()):
             persons[n, mask[n]] = self.person_row(index)
         return persons, mask
+
+    def load_person_geometry(self, indices: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Read person/box indices without opening scene shards in separated caches."""
+        if self.detections is None:
+            _, persons, boxes, mask = self.load(indices)
+            return persons, boxes, mask
+        persons, mask = self.load_persons(indices)
+        boxes = torch.zeros(len(indices), mask.shape[1], 4)
+        height, width = self.encoder_metadata["image_encoder"]["scene_size"]
+        rows = {}
+        for n, index in enumerate(indices.tolist()):
+            rows.setdefault(index, []).append(n)
+        for index, positions in rows.items():
+            geometry = self.detections.load_geometry(index)
+            coords = boxes_to_scene(
+                geometry["boxes_pixel"], geometry["image_size"], (width, height)
+            )
+            for n in positions:
+                boxes[n, mask[n]] = coords
+        return persons, boxes, mask
+
+    def load_scenes(self, indices: Tensor) -> Tensor:
+        """Retain frozen storage precision until patches reach the compute device."""
+        rows = indices.tolist()
+        items = {i: self._get_item(i)["scene"] for i in dict.fromkeys(rows)}
+        if not rows:
+            return torch.empty(0, self.patch_hw[0] * self.patch_hw[1], self.scene_dim)
+        return torch.stack([items[i] for i in rows])
 
     def _read_feature(self, index: int, *, geometry_only: bool = False) -> dict:
         item = torch.load(
@@ -332,21 +399,27 @@ class GalleryCache:
         with self._lock:
             items = self._native_items if native else self._items
             limit = self._native_limit if native else self._limit
-            used = self._native_bytes if native else self._bytes
             if key in items:
                 item, size = items.pop(key)
                 items[key] = (item, size)
                 return item
-            item = load()
-            if not limit:
-                return item
-            values = (item,) if isinstance(item, Tensor) else item.values()
-            storages = {
-                value.untyped_storage().data_ptr(): value.untyped_storage().nbytes()
-                for value in values
-                if isinstance(value, Tensor)
-            }
-            size = sum(storages.values())
+        # Different shards may be loaded by prefetch and the current step at once.
+        item = load()
+        if not limit:
+            return item
+        values = (item,) if isinstance(item, Tensor) else item.values()
+        storages = {
+            value.untyped_storage().data_ptr(): value.untyped_storage().nbytes()
+            for value in values
+            if isinstance(value, Tensor)
+        }
+        size = sum(storages.values())
+        with self._lock:
+            if key in items:
+                existing = items.pop(key)
+                items[key] = existing
+                return existing[0]
+            used = self._native_bytes if native else self._bytes
             if size <= limit:
                 while items and used + size > limit:
                     _, (_, removed) = items.popitem(last=False)

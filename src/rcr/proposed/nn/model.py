@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.contracts import ARCHITECTURE_VERSION
 from rcr.proposed.matching import (
     PersonMatching,
@@ -503,7 +504,10 @@ class RCRModel(nn.Module):
             )
             matching = self.match_target(query, identity, boxes, person_mask)
             context = torch.zeros_like(matching.coverage)
-        if fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
+        if isinstance(fafa_targets, NativeTargetBatch):
+            if len(fafa_targets.image_indices) != len(persons):
+                raise ValueError("deferred FAFA targets must match candidate images")
+        elif fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
             raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
         poolings = fafa_binding_scores(
             query.fafa,

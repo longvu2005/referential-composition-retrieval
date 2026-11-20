@@ -3,6 +3,7 @@
 import json
 import math
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter
 
@@ -26,7 +27,7 @@ from rcr.common.torch_io import save_torch
 from rcr.dataset.audit import negative_exclusions
 from rcr.evaluation.evaluate import selection_metrics
 from rcr.evaluation.provenance import retrieval_metadata
-from rcr.proposed.batch import build_batch
+from rcr.proposed.batch import build_batch, prepare_visual_batch
 from rcr.proposed.cache.build import (
     cache_paths,
     check_cache_config,
@@ -50,6 +51,7 @@ from rcr.proposed.nn.encoders import (
     text_encoder_state,
 )
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
+from rcr.proposed.prefetch import OrderedPrefetch, VisualStager
 from rcr.proposed.ranking import (
     mine_hard_negatives,
     retrieval_settings,
@@ -514,6 +516,7 @@ def _train(cfg, output, resumed):
     epochs = cfg["train"]["epochs"]
     evaluation = cfg.get("evaluation", {"enabled": False})
     every_steps = cfg["checkpointing"]["every_steps"]
+    prefetch = bool(cfg["train"].get("prefetch_batches", 0))
 
     def make_checkpoint(validation=None):
         return _make_checkpoint(
@@ -550,7 +553,8 @@ def _train(cfg, output, resumed):
         write_json(output / "training_status.json", status)
         print("RCR_CHECKPOINT " + json.dumps(status), flush=True)
 
-    with TrainingControl(run) as control:
+    with TrainingControl(run) as control, ExitStack() as resources:
+        stager = resources.enter_context(VisualStager(device, enabled=prefetch))
         if resumed is not None:
             restore_history(output, progress)
             restore_rng(resumed["training_state"]["rng"])
@@ -735,37 +739,109 @@ def _train(cfg, output, resumed):
                 return output / (
                     "best.pt" if progress.best["epoch"] is not None else "last.pt"
                 )
-            batch_progress = tqdm(
-                enumerate(batches[progress.next_batch :], progress.next_batch),
-                initial=progress.next_batch,
-                total=len(batches),
-                desc=f"epoch {epoch}/{epochs} ({phase})",
+            # Worker RNGs can advance ahead; checkpoints commit only consumed states.
+            sampling_worker = torch.Generator().set_state(generator.get_state())
+            identity_worker = torch.Generator().set_state(
+                identity_generator.get_state()
             )
-            for batch_index, rows in batch_progress:
-                optimizer.zero_grad(set_to_none=True)
+            visual_options = {
+                "supervision": supervision,
+                "identity_sampling": identity_settings if crop_mining else None,
+                "fafa_pooling": fafa_pooling,
+                "defer_native_targets": True,
+                "load_target_context": fafa_pooling is not None,
+                "defer_target_scenes": fafa_pooling is not None,
+                "preserve_storage": device.type == "cuda",
+                "pack_target_persons": True,
+            }
+
+            def prepare_training_batch(
+                index_rows,
+                sampling_worker=sampling_worker,
+                identity_worker=identity_worker,
+                visual_options=visual_options,
+                hard_pools=progress.hard_pools,
+                rejection_enabled=bool(epoch_loss["context_rejection_weight"]),
+            ):
+                batch_index, rows = index_rows
                 sampled = sample_candidates(
                     rows,
                     cfg["train"]["candidates"],
-                    generator,
+                    sampling_worker,
                     index=candidate_index,
                     positives_per_query=sampling["positives_per_query"],
                     identity_fraction=sampling["identity_fraction"],
-                    hard_pools=progress.hard_pools,
+                    hard_pools=hard_pools,
                     hard_fraction=sampling["hard_fraction"],
                     semantic_hard_fraction=sampling["semantic_hard_fraction"],
                     identity_rejection=identity_rejection,
                 )
+                identity_crops = (
+                    identity_sampler.sample(rows, sampled.images, identity_worker)
+                    if identity_sampler is not None
+                    else []
+                )
+                visual = prepare_visual_batch(
+                    rows,
+                    sampled.images,
+                    cache,
+                    identity_image_ids=[
+                        identity_images[row["sample_id"]] for row in rows
+                    ],
+                    identity_crops=identity_crops,
+                    hard_identity_image_ids=sampled.hard_identity_ids,
+                    **visual_options,
+                )
+                if prefetch and "context_layout" in visual:
+                    selected = visual["context_layout"][
+                        "rejection_rows" if rejection_enabled else "identity_rows"
+                    ]
+                    visual["target_scene"].prepare(selected)
+                    visual["fafa_targets"].prepare(
+                        selected,
+                        min(cache_cfg.get("native_lru_mib", 0), 128) * 1024**2,
+                    )
+                return (
+                    batch_index,
+                    rows,
+                    sampled,
+                    identity_crops,
+                    stager.stage(visual),
+                    sampling_worker.get_state(),
+                    identity_worker.get_state(),
+                )
+
+            prepared_batches = resources.enter_context(
+                OrderedPrefetch(
+                    enumerate(batches[progress.next_batch :], progress.next_batch),
+                    prepare_training_batch,
+                    enabled=prefetch,
+                )
+            )
+            batch_progress = tqdm(
+                prepared_batches,
+                initial=progress.next_batch,
+                total=len(batches),
+                desc=f"epoch {epoch}/{epochs} ({phase})",
+            )
+            for (
+                batch_index,
+                rows,
+                sampled,
+                identity_crops,
+                prepared_visual,
+                sampling_state,
+                identity_state,
+            ) in batch_progress:
+                generator.set_state(sampling_state)
+                identity_generator.set_state(identity_state)
+                optimizer.zero_grad(set_to_none=True)
                 candidates = sampled.images
                 candidate_totals["candidate_semantic_hard"] += (
                     sampled.semantic_hard_count
                 )
                 candidate_totals["candidate_identity_hard"] += (
                     sampled.identity_hard_count
-                )
-                identity_crops = (
-                    identity_sampler.sample(rows, candidates, identity_generator)
-                    if identity_sampler is not None
-                    else []
                 )
                 batch = build_batch(
                     rows,
@@ -774,21 +850,18 @@ def _train(cfg, output, resumed):
                     tokenizer,
                     text_encoder,
                     device,
-                    supervision=supervision,
                     identity_image_ids=[
                         identity_images[row["sample_id"]] for row in rows
                     ],
                     identity_crops=identity_crops,
-                    identity_sampling=identity_settings if crop_mining else None,
                     hard_identity_image_ids=sampled.hard_identity_ids,
                     text_cache=text_cache,
-                    fafa_pooling=fafa_pooling,
-                    defer_native_targets=device.type == "cuda",
-                    load_target_context=fafa_pooling is not None,
+                    prepared_visual=prepared_visual,
                     include_direction_swaps=bool(
                         epoch_loss["context_weight"]
                         and epoch_loss["context_swap_weight"]
                     ),
+                    **visual_options,
                 )
                 if state_pairs_epoch is not None:
                     positives = (
@@ -867,7 +940,7 @@ def _train(cfg, output, resumed):
                             "train/warmup": in_warmup,
                         }
                     )
-                del batch, loss, parts
+                del batch, loss, parts, prepared_visual
                 progress.next_batch = batch_index + 1
                 last_batch = progress.next_batch == len(batches)
                 if (

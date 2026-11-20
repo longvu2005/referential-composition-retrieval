@@ -3,6 +3,7 @@
 import json
 from collections import Counter
 from copy import deepcopy
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -11,10 +12,16 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from rcr.proposed import losses, ranking
 from rcr.proposed.batch import build_batch, prepare_visual_batch
-from rcr.proposed.cache.native import NativeTargetBatch
-from rcr.proposed.matching import partial_identity_matching, unique_box_mask
+from rcr.proposed.cache.native import NativeFAFACache, NativeTargetBatch
+from rcr.proposed.cache.store import SceneTargetBatch
+from rcr.proposed.matching import (
+    PersonMatching,
+    partial_identity_matching,
+    unique_box_mask,
+)
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.nn.model import RCRModel
+from rcr.proposed.prefetch import OrderedPrefetch, PackedPersons, VisualStager
 from rcr.proposed.scores import (
     fafa_binding_scores,
     identity_scores,
@@ -32,6 +39,206 @@ DEVICES = [
         ),
     ),
 ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("all_null", [False, True])
+def test_packed_native_transfer_matches_dense_fda_and_skips_null_images(
+    device, all_null
+):
+    torch.manual_seed(23)
+    counts = torch.tensor([0, 3, 8])
+    features = [torch.randn(int(k), 5, 3, dtype=torch.float16) for k in counts]
+    reads = []
+    native = NativeFAFACache.__new__(NativeFAFACache)
+    native.tokens, native.dim = 5, 3
+    native.gallery = SimpleNamespace(
+        persons=torch.empty(0, 3, dtype=torch.float16),
+        mask=torch.arange(8)[None] < counts[:, None],
+        image_ids=["empty", "three", "eight"],
+        _cached=lambda key, load: load(),
+    )
+
+    def read(group, index, key, shape):
+        reads.append(index)
+        assert features[index].shape == shape
+        return features[index]
+
+    native._read = read
+    images = torch.tensor([1, 2, 1, 0])
+    assignments = torch.tensor(
+        [[0, -1, 2, -1], [7, 1, -1, 0], [-1, 1, -1, -1], [-1, -1, -1, -1]]
+    )
+    if all_null:
+        assignments.fill_(-1)
+    packed = native.load_matched_targets(images, assignments)
+    assert reads == ([] if all_null else [1, 2])
+    assert len(packed.values) == int((assignments >= 0).sum())
+    assert packed.values.numel() < 4 * 8 * 5 * 3
+    member = torch.tensor([[[1.0, 0.7, 0, 0], [0, 0, 0.8, 1]]]).expand(4, -1, -1)
+    subject_coverage = (member * (assignments >= 0)[:, None]).sum(-1) / member.sum(-1)
+    matching = PersonMatching(
+        assignments.to(device),
+        member.to(device),
+        torch.ones(4, 2, dtype=torch.bool, device=device),
+        subject_coverage.to(device),
+        subject_coverage.mean(-1).to(device),
+        assignments,
+    )
+    query = torch.randn(4, 2, 4, 3, device=device)
+    dense = native.load_targets(images, 8).to(device)
+    cache = SimpleNamespace(native_matched_targets=native.load_matched_targets)
+    expected = fafa_binding_scores(
+        query, dense, matching=matching, return_poolings=True
+    )
+    actual = fafa_binding_scores(
+        query,
+        NativeTargetBatch(cache, images, 8),
+        matching=matching,
+        return_poolings=True,
+    )
+    torch.testing.assert_close(actual, expected)
+    prepared = native.prepare_targets(images, 3 * 5 * 3 * 2)
+    assert set(prepared) == {1}
+    assert sum(t.numel() * t.element_size() for t in prepared.values()) <= 90
+
+
+def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(objective_batch):
+    model, batch = objective_batch
+    reference = deepcopy(model)
+    expected_batch = deepcopy(batch)
+    scene = batch["target_scene"].flatten(0, 1)
+    reads = []
+
+    def load(indices):
+        reads.extend(indices.tolist())
+        return scene[indices]
+
+    cache = SimpleNamespace(load_scenes=load)
+    batch["target_scene"] = SceneTargetBatch(cache, torch.arange(3))
+    settings = losses.loss_settings({})
+    expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
+    actual, _ = losses.compute_loss(
+        model, batch, (2, 2), context_batch_size=1, **settings
+    )
+    expected.backward()
+    actual.backward()
+    assert reads == [0, 1]
+    torch.testing.assert_close(actual, expected)
+    for parameter, other in zip(
+        model.parameters(), reference.parameters(), strict=True
+    ):
+        torch.testing.assert_close(parameter.grad, other.grad, rtol=3e-4, atol=2e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("identity_weight", [0.0, 0.1])
+@pytest.mark.parametrize("amp", [False, True])
+def test_packed_person_projection_preserves_objective_and_gradients(
+    objective_batch, device, identity_weight, amp
+):
+    model, batch = objective_batch
+    model.to(device)
+    persons = batch["target_persons"].detach()
+    padded = persons.new_full((1, 3, 8, persons.shape[-1]), torch.nan)
+    padded[:, :, :1] = persons
+    mask = torch.zeros(1, 3, 8, dtype=torch.bool)
+    mask[:, :, :1] = True
+    for name in ("target_identity_labels", "target_identity_mask"):
+        value = batch[name]
+        expanded = value.new_zeros((1, 3, 8))
+        expanded[:, :, :1] = value
+        batch[name] = expanded
+    batch["target_persons"], batch["target_mask"] = padded, mask
+    batch = {
+        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
+    }
+    reference = deepcopy(model)
+    expected_batch = deepcopy(batch)
+    packed = PackedPersons.from_padded(padded, mask)
+    batch["target_persons"] = packed.to_dense(device)
+    batch["target_layout"] = {"positions": packed.positions}
+    assert len(packed.values) == 3  # 24 padded positions would otherwise be projected.
+    settings = losses.loss_settings(
+        {"context_weight": 0.0, "identity_weight": identity_weight}
+    )
+    dtype = torch.float16 if device == "cuda" else torch.bfloat16
+    with torch.autocast(device, dtype=dtype, enabled=amp):
+        expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
+        actual, _ = losses.compute_loss(model, batch, (2, 2), **settings)
+    expected.backward()
+    actual.backward()
+    torch.testing.assert_close(
+        actual, expected, rtol=2e-3 if amp else 1e-5, atol=2e-4 if amp else 1e-6
+    )
+    for parameter, other in zip(
+        model.parameters(), reference.parameters(), strict=True
+    ):
+        torch.testing.assert_close(
+            parameter.grad,
+            other.grad,
+            rtol=1e-2 if amp else 3e-4,
+            atol=5e-4 if amp else 2e-6,
+        )
+
+
+def test_prefetch_bounds_future_work_and_joins_on_early_exit():
+    produced, ready = [], Event()
+
+    def prepare(index):
+        produced.append(index)
+        if index == 1:
+            ready.set()
+        return index
+
+    with OrderedPrefetch(range(5), prepare, enabled=True) as queue:
+        iterator = iter(queue)
+        assert next(iterator) == 0
+        assert ready.wait(5)
+        assert produced == [0, 1]
+        iterator.close()
+    assert queue.pool is None
+    assert produced == [0, 1]
+
+
+def test_prefetch_propagates_worker_errors_and_closes():
+    def prepare(index):
+        if index == 1:
+            raise ValueError("broken cache shard")
+        return index
+
+    with OrderedPrefetch(range(3), prepare, enabled=True) as queue:
+        iterator = iter(queue)
+        assert next(iterator) == 0
+        with pytest.raises(ValueError, match="broken cache shard"):
+            next(iterator)
+    assert queue.pool is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_staging_preserves_storage_precision_padding_and_stream_lifetimes():
+    values = torch.randn(2, 3, 4, 8).half()
+    mask = torch.rand(2, 3, 4) > 0.5
+    values.masked_fill_(~mask[..., None], 0)
+    packed = PackedPersons.from_padded(values, mask)
+    scenes = SceneTargetBatch(None, torch.arange(2))
+    scenes.values = torch.randn(2, 4, 8).half()
+    scenes.positions = torch.arange(2)
+    expected_scenes = scenes.values.clone()
+    with VisualStager("cuda", enabled=True) as stager:
+        staged = stager.stage(
+            {"target_persons": packed, "target_scene": scenes, "mask": mask}
+        )
+        visual = staged.consume()
+        assert staged.sources and all(t.is_pinned() for t in staged.sources)
+        assert visual["target_persons"].dtype == torch.float32
+        assert scenes.values.dtype == torch.float16
+        torch.testing.assert_close(visual["target_persons"].cpu(), values.float())
+        torch.testing.assert_close(
+            scenes.load(torch.tensor([1, 0])).cpu(), expected_scenes.flip(0)
+        )
+        torch.testing.assert_close(visual["mask"].cpu(), mask)
 
 
 @pytest.mark.parametrize("device", DEVICES)
