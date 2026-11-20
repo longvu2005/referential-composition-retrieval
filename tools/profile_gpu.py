@@ -3,17 +3,56 @@
 import argparse
 import json
 import statistics
+from collections import Counter
 from pathlib import Path
 from time import perf_counter
 
 import torch
 from torch import nn
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rcr.common.config import load_config
 from rcr.common.runtime import seed_everything
+from rcr.common.tensor_checks import TensorChecks, check_tensor
 from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
+from rcr.proposed.identity import IdentityLayout
 from rcr.proposed.losses import compute_loss, loss_settings
 from rcr.proposed.nn.model import RCRModel
+
+
+class TransferAudit(TorchDispatchMode):
+    """Count readbacks and dynamic CUDA shapes outside timed benchmark steps."""
+
+    def __init__(self):
+        super().__init__()
+        self.counts = Counter()
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        source = args[0] if args and isinstance(args[0], torch.Tensor) else None
+        if source is not None:
+            prefix = source.device.type
+            if func == torch.ops.aten._local_scalar_dense.default:
+                self.counts[f"{prefix}_scalar_reads"] += 1
+            if func in (
+                torch.ops.aten.nonzero.default,
+                torch.ops.aten.masked_select.default,
+            ):
+                self.counts[f"{prefix}_dynamic_shapes"] += 1
+            if func == torch.ops.aten.index.Tensor and any(
+                isinstance(index, torch.Tensor) and index.dtype == torch.bool
+                for index in args[1]
+            ):
+                self.counts[f"{prefix}_boolean_index"] += 1
+            if func == torch.ops.aten._to_copy.default:
+                target = torch.device(kwargs.get("device") or source.device)
+                if source.device.type != target.type:
+                    direction = f"{source.device.type}_to_{target.type}"
+                    self.counts[direction] += 1
+                    self.counts[f"{direction}_source_bytes"] += (
+                        source.numel() * source.element_size()
+                    )
+        return func(*args, **kwargs)
 
 
 class FrozenTargets:
@@ -93,7 +132,10 @@ def _inputs(cfg, queries, candidates, people, device):
         "selection_mask": torch.ones(queries, subjects, length, dtype=torch.bool),
         "change_mask": torch.ones(queries, length, dtype=torch.bool),
     }
+    layout = IdentityLayout.from_batch(batch)
     batch = {key: value.to(device) for key, value in batch.items()}
+    batch["identity_layout"] = layout
+    layout.bind(batch)
     batch["target_layout"] = {"positions": target_mask.flatten().nonzero().flatten()}
     batch["context_layout"] = {
         "identity_rows": same.flatten().nonzero().flatten(),
@@ -190,15 +232,31 @@ def main(argv=None):
         # Match training: the learned text projection is outside visual AMP.
         batch["selections"], batch["change"] = (projection(value) for value in text)
         dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
-        with torch.autocast(device.type, dtype=dtype, enabled=amp):
-            loss, _ = compute_loss(
-                model,
-                batch,
-                (7, 7),
-                context_batch_size=cfg["train"]["context_batch_size"],
-                context_score_weight=cfg["retrieval"]["context_weight"],
-                coverage_score_weight=cfg["retrieval"]["coverage_weight"],
-                **settings,
+        with TensorChecks() as checks:
+            with torch.autocast(device.type, dtype=dtype, enabled=amp):
+                loss, parts = compute_loss(
+                    model,
+                    batch,
+                    (7, 7),
+                    context_batch_size=cfg["train"]["context_batch_size"],
+                    context_score_weight=cfg["retrieval"]["context_weight"],
+                    coverage_score_weight=cfg["retrieval"]["coverage_weight"],
+                    **settings,
+                )
+            check_tensor(
+                torch.isfinite(loss),
+                "profiling produced a non-finite loss",
+                FloatingPointError,
+            )
+            checks.cpu_values(
+                {
+                    "loss": loss,
+                    **{
+                        key: value
+                        for key, value in parts.items()
+                        if isinstance(value, torch.Tensor)
+                    },
+                }
             )
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -224,10 +282,14 @@ def main(argv=None):
             "synthetic frozen features; production joint loss, matching, "
             "checkpoint and optimizer"
         ),
-        "excludes": "image/disk I/O, frozen CLIP forward, mining and validation",
+        "excludes": (
+            "image/disk I/O, frozen CLIP forward, extra identity sampling, "
+            "verified swaps, gallery mining and validation"
+        ),
         "device": str(device),
         "torch": torch.__version__,
         "amp": amp,
+        "context_swap_weight": 0.0,
         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "queries": queries,
         "candidates": candidates,
@@ -261,7 +323,6 @@ def main(argv=None):
         if device.type == "cuda"
         else None,
     }
-    (output / "profile.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.trace:
         activities = [torch.profiler.ProfilerActivity.CPU]
         if device.type == "cuda":
@@ -272,6 +333,16 @@ def main(argv=None):
             step()
             synchronize()
         profile.export_chrome_trace(str(output / "trace.json"))
+        # Dispatch instrumentation can duplicate profiler operator events.
+        # Audit another untimed step so trace counts remain directly comparable.
+        with TransferAudit() as audit:
+            step()
+        synchronize()
+        result["transfer_audit"] = dict(audit.counts)
+        result["transfer_audit_scope"] = (
+            "one separate extra production step; excludes benchmark synchronization"
+        )
+    (output / "profile.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 
 

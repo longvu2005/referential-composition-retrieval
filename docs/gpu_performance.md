@@ -29,6 +29,9 @@ Training uses the following input path:
    the tensors on its stream. CPU source buffers are retained until consumption.
    Neural forwards, dropout, text projection and optimizer work stay on the
    training thread.
+   Small masks/labels share pinned transfer packets by dtype; larger visual
+   payloads retain their stored precision and bounded buffers. Consumer stream
+   lifetimes are recorded once per shared allocation.
 4. CPU layout metadata provides eligible pair positions and useful person widths,
    avoiding GPU-to-CPU reads of invariant masks. Assignment remains detached and
    runs once per chunk in its NumPy/SciPy workspace.
@@ -51,7 +54,8 @@ coefficient zero skips the reasoner and target scene loading in separated caches
 Fine scoring uses the same packed assigned-token path as training. Validation
 still collects context evidence for coefficient calibration. Gallery residency is
 used only when the projections fit both the configured budget and half the
-currently free CUDA memory; otherwise coarse scoring uses CPU-backed chunks.
+available CUDA memory, including reusable blocks held by the PyTorch allocator;
+otherwise coarse scoring uses CPU-backed chunks.
 
 Fine evaluation loads person geometry first, packs actual detections in their
 stored precision and projects each actual person once for semantics and
@@ -105,6 +109,35 @@ The evaluation input optimizations preserve model parameters, checkpoint
 architecture and score-artifact schema. Existing aligned CLS v4 inference
 checkpoints and compatible frozen caches remain usable.
 
+CPU/GPU boundaries are intentional and bounded as follows:
+
+| Stage | Readback policy |
+| --- | --- |
+| Query box suppression | One packed predicted confidence/geometry read for the CPU suppression workspace; zero/one-person tensors skip suppression/readback. |
+| Identity crop mining | Known annotation positions stay on CPU; only the model-dependent hardness vector is read when hard mining is active. |
+| Fine matching | One packed similarity/mask/geometry read per chunk for exact SciPy assignment; context/swap flags share that read. CPU assignments also drive native-token gathers. |
+| Train checks and metrics | One FP32 packet per step, validated before backward or optimizer updates. Nested losses add device predicates without Python truth-value checks. |
+| Gradient logging | Model/text norms share one read at the configured log interval. AMP optimizer overflow checks retain their framework behavior. |
+| Coarse retrieval/mining | Identity and state scores share one read per query batch; both use the same CPU shortlist/fusion convention. |
+| Fine retrieval/mining | H, C, all native poolings and pending numerical checks share one read per query. |
+| Gallery projection | Residency is decided from CPU masks and the VRAM budget before projection. Resident outputs stay on GPU; the fallback reads identity/state together per chunk. |
+| Frozen text cache | Misses write CPU cache rows once while current states stay on GPU; hits upload only unique cached rows in one batch. CPU token IDs stay on CPU for cache keys. |
+| Checkpoints | Commit the consumed training stream, without fencing the independent producer copy stream. Tensor serialization still performs its required state copies. |
+
+CPU annotation layouts replace CUDA boolean-index operations whose output size
+would require a host wait. A batch layout checks tensor identity/mutation
+versions and falls back when callers edit its supervision. The identity loss
+masks unknown observations at fixed size, including the empty/sole-known cases,
+without a CUDA nonzero operation. Swap annotations remain on CPU and reuse
+selection flags and assignments already returned by matching. Both original
+and edited sentences still use the exact same assignment and neural scorer.
+
+Standalone score/loss APIs continue to reject invalid inputs before returning.
+Training collects their numerical predicates and rejects failures before any
+backward/optimizer side effect. CPU metadata checks, necessary assignment reads,
+cache persistence and checkpoint serialization remain explicit; removing a
+`.tolist()` from CPU-only bookkeeping would not remove a GPU wait.
+
 No new downcast is introduced: FP16 stored features become FP32 model inputs on
 the accelerator. FP32 stored features retain FP32 transfer. CUDA training retains
 its AMP/GradScaler policy, and FDA/geometry attention retain their FP32 regions.
@@ -112,10 +145,10 @@ Packing can change floating-point accumulation through different GEMM shapes;
 old and new training trajectories are not promised bitwise identical. Serial and
 prefetched execution use the same numerical path and are tested against each other.
 
-Compatible frozen cache files remain reusable. The `fafa-aligned-pair-cls-v4`
-reasoner requires new inference weights and training state. Resume verification
-also binds the source hash, so retain the original implementation for an
-existing run. Use a new output directory with the updated implementation:
+The current synchronization/input changes preserve aligned CLS v4 inference
+weights and compatible frozen caches. Training resume also binds the source
+hash; retain the original implementation for an existing run, or use a new
+output directory with the updated training implementation:
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
@@ -161,22 +194,6 @@ reader LRU warms but the OS file cache is not flushed. These component timings
 are not end-to-end throughput or a full-epoch cache hit-rate estimate. CPU thread
 counts are preserved unless `--threads` is supplied.
 
-On the first seeded epoch-5 batch (24 queries, 32 candidates, 255 context pairs),
-the source after the `a0b6246` review reduces work as follows:
-
-| Quantity | Before this optimization | Updated path |
-| --- | ---: | ---: |
-| Visual transfer payload, excluding labels/extra crops | 242.74 MiB | 31.99 MiB |
-| Target detections passed through identity projection | 43,008 padded slots | 4,886 actual detections |
-| Target scene pairs loaded | 768 | 255 |
-| Native target transfer | 89.67 MiB padded | At most 14.73 MiB, including positions |
-| Native target read-ahead storage | Padded per chunk on the step thread | 21.78 MiB of raw token rows on the producer |
-
-The native bound assumes every possible query detection is matched and is not
-an actual assignment measurement. The payload values use real cache dimensions
-and candidate ordering. The development machine has CPU-only PyTorch 2.2.2 on
-macOS/T9; these results do not establish RTX 5060 speedups or utilization.
-
 Measure the actual joint-training kernels on the CUDA machine:
 
 ```bash
@@ -188,8 +205,14 @@ This runs the production model, joint loss, packed target identity projection,
 matching, assigned-token transfer, activation checkpointing and optimizer on
 synthetic frozen features. Warmup is excluded from timings. `profile.json`
 records synchronized step times, throughput, transferred native person rows,
-AMP scaler state and peak VRAM; the optional `trace.json` is collected after the
-timing loop so tracing overhead does not enter reported throughput. It excludes
+AMP scaler state and peak VRAM. With `--trace`, `transfer_audit` also counts
+explicit transfer calls/source bytes, scalar reads and dynamic-shape operations
+by device. The optional `trace.json` is collected after the timing loop so audit
+and tracing overhead do not enter reported throughput. The audit runs in a
+separate extra step so dispatch instrumentation cannot duplicate trace events.
+CUDA runtime/internal
+synchronizations are visible in the trace; source bytes are logical payloads,
+not measured PCIe traffic. It excludes
 real cache assembly, frozen CLIP forward, producer overlap, mining and validation.
 Compare the same workload/configuration, hardware, software, person counts and
 AMP mode. `--people` controls crowded-image padding; `--no-amp` gives an FP32
@@ -219,7 +242,9 @@ configured 576 coefficient combinations. GPU inactivity during calibration is
 expected. Further changes to assignment, precision, compilation or batch sizes
 should be guided by a trace on the actual RTX 5060 rather than utilization alone.
 
-Regression coverage includes packed-vs-dense FDA and all pooling modes, null and
+Regression coverage includes grouped checks/error propagation, fixed-shape
+identity loss and CPU layout invalidation, matching metadata piggybacking,
+direct gallery residency and coalesced score outputs, packed-vs-dense FDA and all pooling modes, null and
 duplicate assignments, lazy scene reads outside backward, packed identity loss
 and gradients under AMP/FP32, verified direction swaps, bounded prefetch/error
 cleanup, serial-vs-prefetched training state and interrupted resume. CUDA stream

@@ -23,6 +23,7 @@ from rcr.common.data import (
 )
 from rcr.common.io import atomic_write_text, sha256_file, write_json
 from rcr.common.runtime import derived_generator, resolve_device, seed_everything
+from rcr.common.tensor_checks import TensorChecks, check_tensor
 from rcr.common.torch_io import save_torch
 from rcr.dataset.audit import negative_exclusions
 from rcr.evaluation.evaluate import selection_metrics
@@ -168,8 +169,9 @@ def _gradient_norm(*modules):
             if parameter.grad is not None:
                 squared_norms.append(parameter.grad.detach().float().square().sum())
     if not squared_norms:
-        return 0.0
-    return torch.stack(squared_norms).sum().sqrt().item()
+        parameter = next((p for module in modules for p in module.parameters()), None)
+        return torch.zeros(()) if parameter is None else parameter.new_zeros(())
+    return torch.stack(squared_norms).sum().sqrt()
 
 
 def build_optimizer(model, text_encoder, config):
@@ -536,7 +538,9 @@ def _train(cfg, output, resumed):
 
     def save_last(validation=None, *, reason="running"):
         if device.type == "cuda":
-            torch.cuda.synchronize(device)
+            # Commit consumed model/optimizer work; do not fence the producer's
+            # independent copies for the following input batch.
+            torch.cuda.current_stream(device).synchronize()
         checkpoint = make_checkpoint(validation)
         checkpoint["training_state"] = training_state(
             progress, optimizer, scaler, signature
@@ -872,21 +876,39 @@ def _train(cfg, output, resumed):
                     ).sum(1)
                     state_pairs_epoch += (positives * negatives).sum()
 
-                with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
-                    loss, parts = compute_loss(
-                        model,
-                        batch,
-                        cache.patch_hw,
-                        context_batch_size=cfg["train"]["context_batch_size"],
-                        context_score_weight=cfg["retrieval"]["context_weight"],
-                        coverage_score_weight=cfg["retrieval"]["coverage_weight"],
-                        **epoch_loss,
-                    )
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(
+                with TensorChecks() as checks:
+                    with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
+                        loss, parts = compute_loss(
+                            model,
+                            batch,
+                            cache.patch_hw,
+                            context_batch_size=cfg["train"]["context_batch_size"],
+                            context_score_weight=cfg["retrieval"]["context_weight"],
+                            coverage_score_weight=cfg["retrieval"]["coverage_weight"],
+                            **epoch_loss,
+                        )
+                    check_tensor(
+                        torch.isfinite(loss),
                         f"non-finite loss at epoch {epoch}: "
-                        f"{[row['sample_id'] for row in rows]}"
+                        f"{[row['sample_id'] for row in rows]}",
+                        FloatingPointError,
                     )
+                    metrics = {"loss": loss.detach()}
+                    metrics.update(
+                        (key, value)
+                        for key, value in parts.items()
+                        if key not in crop_totals
+                    )
+                    host_metrics = checks.cpu_values(metrics)
+                    values = dict(
+                        zip(
+                            metrics,
+                            torch.stack(list(host_metrics.values())).tolist(),
+                            strict=True,
+                        )
+                    )
+                # Values and all numerical checks share one device-to-host copy.
+                # Reject invalid loss before backward or an optimizer side effect.
                 scaler.scale(loss).backward()
                 progress.global_step += 1
                 should_log = run is not None and (
@@ -894,25 +916,19 @@ def _train(cfg, output, resumed):
                 )
                 if should_log:
                     scaler.unscale_(optimizer)
-                    model_gradient_norm = _gradient_norm(model)
-                    text_gradient_norm = _gradient_norm(text_encoder.proj)
+                    norms = checks.cpu_values(
+                        {
+                            "model": _gradient_norm(model),
+                            "text": _gradient_norm(text_encoder.proj),
+                        }
+                    )
+                    model_gradient_norm, text_gradient_norm = torch.stack(
+                        list(norms.values())
+                    ).tolist()
                     gradient_norm = math.hypot(model_gradient_norm, text_gradient_norm)
                 scaler.step(optimizer)
                 scaler.update()
 
-                metrics = {"loss": loss.detach()}
-                metrics.update(
-                    (key, value)
-                    for key, value in parts.items()
-                    if key not in crop_totals
-                )
-                values = dict(
-                    zip(
-                        metrics,
-                        torch.stack(list(metrics.values())).cpu().tolist(),
-                        strict=True,
-                    )
-                )
                 for key in crop_totals:
                     crop_totals[key] += int(parts[key])
                 for name, value in values.items():

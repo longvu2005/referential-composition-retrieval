@@ -10,10 +10,12 @@ import pytest
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from rcr.common.tensor_checks import TensorChecks, check_tensor
 from rcr.proposed import losses, ranking
 from rcr.proposed.batch import build_batch, prepare_visual_batch
 from rcr.proposed.cache.native import NativeFAFACache, NativeTargetBatch
 from rcr.proposed.cache.store import SceneTargetBatch
+from rcr.proposed.identity import IdentityLayout, select_identity_observations
 from rcr.proposed.matching import (
     PersonMatching,
     partial_identity_matching,
@@ -29,6 +31,7 @@ from rcr.proposed.scores import (
 )
 from tests.helpers import TextBackbone, TinyCache, Tokenizer, _only_loss, _rank, _sample
 from tools import diagnose_gpu
+from tools.profile_gpu import TransferAudit
 
 DEVICES = [
     "cpu",
@@ -39,6 +42,160 @@ DEVICES = [
         ),
     ),
 ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_device_checks_and_values_share_one_readback(device):
+    values = torch.tensor([[0.8, -0.3]], device=device, requires_grad=True)
+    positives = torch.tensor([[True, False]], device=device)
+    with TransferAudit() as audit:
+        with TensorChecks() as checks:
+            loss = losses.retrieval_loss(values, positives)
+            check_tensor(torch.isfinite(loss), "invalid loss")
+            result = checks.cpu_values({"scores": values, "loss": loss})
+    assert result["scores"].device.type == "cpu"
+    torch.testing.assert_close(result["scores"], values.detach().cpu())
+    assert audit.counts["cuda_scalar_reads"] == 0
+    assert audit.counts["cuda_to_cpu"] == (1 if device == "cuda" else 0)
+    assert (
+        audit.counts["cuda_boolean_index"] == audit.counts["cuda_dynamic_shapes"] == 0
+    )
+    loss.backward()
+    assert values.grad is not None
+    with pytest.raises(ValueError, match="first invalid predicate"):
+        with TensorChecks() as checks:
+            check_tensor(torch.tensor(False, device=device), "first invalid predicate")
+            check_tensor(torch.tensor(False), "second invalid predicate")
+            checks.cpu_values({"value": values})
+    # Failed/nested scopes must not leak a pending check into later API calls.
+    losses.retrieval_loss(values.detach(), positives)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize(
+    "labels", [[-1, -1, -1], [7, -1, -1], [2, -1, 2, 3, 3], [1, 2, -1]]
+)
+def test_identity_unknown_rows_match_filtered_loss_and_gradients_without_dynamic_shapes(
+    device, labels
+):
+    torch.manual_seed(41)
+    labels = torch.tensor(labels, device=device)
+    features = (
+        torch.randn(len(labels), 7, device=device)
+        .masked_fill((labels < 0)[:, None], torch.nan)
+        .requires_grad_()
+    )
+    original = features.detach().clone().requires_grad_()
+    keep = labels >= 0
+    valid = torch.nn.functional.normalize(original[keep].float(), dim=-1)
+    ids = labels[keep]
+    if len(valid) < 2:
+        expected = valid.sum() * 0
+    else:
+        logits = valid @ valid.T / 0.2
+        diagonal = torch.eye(len(valid), device=device, dtype=torch.bool)
+        positive = (ids[:, None] == ids[None]) & ~diagonal
+        probability = logits - logits.masked_fill(diagonal, -torch.inf).logsumexp(
+            1, keepdim=True
+        )
+        counts = positive.sum(1)
+        per_anchor = -probability.masked_fill(~positive, 0).sum(1) / counts.clamp_min(1)
+        expected = per_anchor.masked_fill(counts == 0, 0).sum() / (
+            counts > 0
+        ).sum().clamp_min(1)
+    with TransferAudit() as audit:
+        actual = losses.identity_loss(features, labels, 0.2)
+    torch.testing.assert_close(actual, expected)
+    actual.backward()
+    expected.backward()
+    torch.testing.assert_close(features.grad, original.grad, rtol=3e-5, atol=3e-6)
+    assert torch.isfinite(features.grad).all()
+    assert (
+        audit.counts["cuda_scalar_reads"]
+        == audit.counts["cuda_dynamic_shapes"]
+        == audit.counts["cuda_boolean_index"]
+        == 0
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_identity_cpu_layout_preserves_gradients_and_invalidates_after_edit(
+    objective_batch, device
+):
+    model, batch = objective_batch
+    model = model.to(device)
+    reference = deepcopy(model)
+    layout = IdentityLayout.from_batch(batch)
+    batch = {
+        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
+    }
+    batch["identity_layout"] = layout
+    layout.bind(batch)
+    baseline = {key: value for key, value in batch.items() if key != "identity_layout"}
+    settings = _only_loss("identity")
+    expected, _ = losses.compute_loss(reference, baseline, (2, 2), **settings)
+    with TransferAudit() as audit:
+        actual, _ = losses.compute_loss(model, batch, (2, 2), **settings)
+    torch.testing.assert_close(actual, expected)
+    actual.backward()
+    expected.backward()
+    for parameter, other in zip(
+        model.parameters(), reference.parameters(), strict=True
+    ):
+        if other.grad is not None:
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=3e-5, atol=3e-6)
+    assert (
+        audit.counts["cuda_scalar_reads"]
+        == audit.counts["cuda_dynamic_shapes"]
+        == audit.counts["cuda_boolean_index"]
+        == 0
+    )
+    assert layout.current(batch)
+    original_labels = batch["query_identity_labels"]
+    batch["query_identity_labels"] = original_labels.clone()
+    assert not layout.current(batch)
+    batch["query_identity_labels"] = original_labels
+    assert layout.current(batch)
+    original_labels.add_(0)
+    assert not layout.current(batch)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_hard_identity_layout_reads_only_hardness_and_preserves_reserved_slots(device):
+    source = {
+        "query_identity_labels": torch.tensor([[0, 1]]),
+        "query_identity_mask": torch.ones(1, 2, dtype=torch.bool),
+        "target_identity_labels": torch.tensor([[[0, 2], [1, 0]]]),
+        "target_identity_mask": torch.ones(1, 2, 2, dtype=torch.bool),
+        "identity_anchor_mask": torch.ones(1, 2, dtype=torch.bool),
+        "supplemental_target_indices": torch.tensor([1, 2, 3]),
+        "supplemental_target_labels": torch.tensor([2, 1, 0]),
+        "extra_identity_positive_mask": torch.tensor([True, False, False, False]),
+        "extra_identity_target_indices": torch.tensor([2, -1, 1, 3]),
+        "extra_identity_labels": torch.tensor([0, 2, 2, 0]),
+    }
+    query = torch.eye(2, device=device)[None]
+    targets = torch.tensor(
+        [[[[1.0, 0], [0, 1]], [[0.9, 0.1], [0.1, 0.9]]]], device=device
+    )
+    settings = {"max_crops": 3, "hard_negative_fraction": 0.5}
+    batch = {key: value.to(device) for key, value in source.items()}
+    expected = select_identity_observations(query, targets, batch, settings)
+    batch["identity_layout"] = IdentityLayout.from_batch(source)
+    batch["identity_layout"].bind(batch)
+    with TransferAudit() as audit:
+        hard, extra = select_identity_observations(query, targets, batch, settings)
+    torch.testing.assert_close(hard, expected[0].cpu())
+    torch.testing.assert_close(extra, expected[1].cpu())
+    assert hard.tolist() == [1] and extra.tolist() == [0, 1]
+    assert audit.counts["cuda_to_cpu"] == (1 if device == "cuda" else 0)
+    assert (
+        audit.counts["cuda_scalar_reads"]
+        == audit.counts["cuda_boolean_index"]
+        == audit.counts["cuda_dynamic_shapes"]
+        == 0
+    )
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -247,10 +404,28 @@ def test_cuda_staging_preserves_storage_precision_padding_and_stream_lifetimes()
     scenes.positions = torch.arange(2)
     expected_scenes = scenes.values.clone()
     with VisualStager("cuda", enabled=True) as stager:
-        staged = stager.stage(
-            {"target_persons": packed, "target_scene": scenes, "mask": mask}
-        )
+        labels = torch.arange(6).reshape(2, 3)
+        with TransferAudit() as audit:
+            staged = stager.stage(
+                {
+                    "target_persons": packed,
+                    "target_scene": scenes,
+                    "mask": mask,
+                    "mask_copy": ~mask,
+                    "labels": labels,
+                    "labels_copy": labels + 3,
+                }
+            )
         visual = staged.consume()
+        assert audit.counts["cpu_to_cuda"] == 5
+        assert (
+            visual["mask"].untyped_storage().data_ptr()
+            == visual["mask_copy"].untyped_storage().data_ptr()
+        )
+        assert (
+            visual["labels"].untyped_storage().data_ptr()
+            == visual["labels_copy"].untyped_storage().data_ptr()
+        )
         assert staged.sources and all(t.is_pinned() for t in staged.sources)
         assert visual["target_persons"].dtype == torch.float32
         assert scenes.values.dtype == torch.float16
@@ -259,6 +434,9 @@ def test_cuda_staging_preserves_storage_precision_padding_and_stream_lifetimes()
             scenes.load(torch.tensor([1, 0])).cpu(), expected_scenes.flip(0)
         )
         torch.testing.assert_close(visual["mask"].cpu(), mask)
+        torch.testing.assert_close(visual["mask_copy"].cpu(), ~mask)
+        torch.testing.assert_close(visual["labels"].cpu(), labels)
+        torch.testing.assert_close(visual["labels_copy"].cpu(), labels + 3)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -288,7 +466,11 @@ def test_warmup_skips_target_scene_reads_with_identical_loss_and_gradients(
     assert reads == ["q"]
     assert "target_scene" not in batch and "target_boxes" not in batch
     for name, value in batch.items():
-        torch.testing.assert_close(value, expected_batch[name])
+        if name == "identity_layout":
+            torch.testing.assert_close(value.host, expected_batch[name].host)
+            torch.testing.assert_close(value.positions, expected_batch[name].positions)
+        else:
+            torch.testing.assert_close(value, expected_batch[name])
     settings = losses.loss_settings({"context_weight": 0.0})
     expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
     actual, _ = losses.compute_loss(model, batch, (2, 2), **settings)
@@ -730,7 +912,7 @@ def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
         ),
     ]
     try:
-        with torch.inference_mode():
+        with torch.inference_mode(), TransferAudit() as audit:
             actual = ranking._score_target_components(
                 query,
                 cache,
@@ -742,12 +924,24 @@ def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
                 context_weight=0.1 if context else 0.0,
                 compute_context=context,
                 prefetch_batches=prefetch,
+                return_cpu=case == "mixed",
             )
     finally:
         for handle in handles:
             handle.remove()
     for key, value in actual.items():
-        torch.testing.assert_close(value, expected[key], rtol=3e-5, atol=3e-6)
+        torch.testing.assert_close(
+            value, expected[key].to(value.device), rtol=3e-5, atol=3e-6
+        )
+    assert (
+        audit.counts["cuda_scalar_reads"]
+        == audit.counts["cuda_dynamic_shapes"]
+        == audit.counts["cuda_boolean_index"]
+        == 0
+    )
+    assert (
+        audit.counts["cuda_to_cpu"] <= 4
+    )  # Three matching chunks plus one final packet.
     used = targets[expected["coverage"].cpu() > 0].tolist()
     assert Counter(native_reads) == Counter(used)
     assert Counter(scene_reads) == Counter(used if context else [])
@@ -804,17 +998,71 @@ def test_context_trims_target_padding_before_native_load(objective_batch, monkey
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_gallery_device_cache_honors_budget():
-    batches = [(torch.randn(512, 8, 128), torch.ones(512, 8, dtype=torch.bool))]
-    state = torch.randn(512, 128)
-    original, original_state = ranking._cache_gallery_on_device(
-        batches, state, torch.device("cuda"), 1
-    )
-    assert original is batches and original_state is state
-    resident, resident_state = ranking._cache_gallery_on_device(
-        batches, state, torch.device("cuda"), 8
-    )
+    cache = TinyCache()
+    cache.persons = torch.randn(512, 8, 8)
+    cache.mask = torch.ones(512, 8, dtype=torch.bool)
+    cache.scenes = torch.randn(512, 4, 8)
+    model = RCRModel(dim=8, identity_dim=128, state_dim=128, num_heads=2).cuda().eval()
+    indices = torch.arange(512)
+    with TransferAudit() as fallback:
+        batches, state = ranking._encode_gallery(
+            cache,
+            model,
+            torch.device("cuda"),
+            512,
+            indices,
+            state=True,
+            budget_mib=1,
+        )
+    assert batches[0][0].device.type == state.device.type == "cpu"
+    assert fallback.counts["cuda_to_cpu"] == 1
+    with TransferAudit() as cached:
+        resident, resident_state = ranking._encode_gallery(
+            cache,
+            model,
+            torch.device("cuda"),
+            512,
+            indices,
+            state=True,
+            budget_mib=8,
+        )
+    assert cached.counts["cuda_to_cpu"] == 0
     assert resident[0][0].is_cuda and resident_state.is_cuda
     torch.testing.assert_close(resident[0][0].cpu(), batches[0][0])
+    torch.testing.assert_close(resident_state.cpu(), state)
+
+
+def test_gallery_residency_is_decided_before_projection(monkeypatch):
+    cache = TinyCache()
+    cache.mask = torch.ones(512, 8, dtype=torch.bool)
+    model = RCRModel(dim=8, identity_dim=128, state_dim=128, num_heads=2)
+    cuda = torch.device("cuda")
+    indices = torch.arange(512)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *a: 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a: 0)
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda *a: (16 * 1024**2, 16 * 1024**2)
+    )
+    assert (
+        ranking._gallery_output_device(cache, model, cuda, 512, indices, True, 1).type
+        == "cpu"
+    )
+    assert (
+        ranking._gallery_output_device(cache, model, cuda, 512, indices, True, 8)
+        == cuda
+    )
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a: (1024**2, 16 * 1024**2))
+    assert (
+        ranking._gallery_output_device(cache, model, cuda, 512, indices, True, 8).type
+        == "cpu"
+    )
+    # Training's unused allocator blocks can hold the gallery without eviction.
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *a: 16 * 1024**2)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a: 2 * 1024**2)
+    assert (
+        ranking._gallery_output_device(cache, model, cuda, 512, indices, True, 8)
+        == cuda
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -835,3 +1083,69 @@ def test_text_cache_hits_accept_cpu_ids_without_running_backbone():
     for key in expected:
         assert actual[key].is_cuda
         torch.testing.assert_close(actual[key], expected[key])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_text_cache_reuses_fresh_device_states_and_uploads_unique_hits(device):
+    encoder = TextEncoder(TextBackbone(), dim=8, cache_mib=1).to(device)
+    ids = torch.tensor([[5, 1, 2, 6, 0, 0], [5, 1, 2, 6, 0, 0], [5, 4, 6, 0, 0, 0]])
+    mask = (ids != 0).long()
+    with torch.no_grad():
+        expected = encoder._backbone_tokens(ids.to(device), mask.to(device))
+        expected = expected.masked_fill(~mask.to(device).bool()[..., None], 0)
+        with TransferAudit() as cold:
+            actual = encoder._cached_backbone(ids, mask)
+        with TransferAudit() as warm:
+            repeated = encoder._cached_backbone(ids, mask)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(repeated, expected)
+    if device == "cuda":
+        assert cold.counts["cuda_to_cpu"] == 1
+        assert (
+            cold.counts["cpu_to_cuda"] == 2
+        )  # Token IDs/mask only; no hidden-state upload.
+        assert warm.counts["cuda_to_cpu"] == 0
+        assert warm.counts["cpu_to_cuda"] == 1
+        assert warm.counts["cpu_to_cuda_source_bytes"] == 2 * 6 * 8 * 4
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("deduplicate", [0.9, 1.0])
+@pytest.mark.parametrize("people", [1, 2])
+def test_context_flags_share_the_exact_matching_readback(device, deduplicate, people):
+    identities = torch.eye(2, device=device)[None]
+    membership = torch.tensor([[[0.8, 0], [0, 0.7]]], device=device)
+    subjects = torch.ones(1, 2, device=device, dtype=torch.bool)
+    mask = torch.ones(1, 2, device=device, dtype=torch.bool)
+    boxes = torch.tensor([[[0, 0, 0.4, 1], [0.6, 0, 1, 1]]], device=device)
+    flags = torch.tensor([[True, False, True, True, False]], device=device)
+    args = (
+        identities,
+        identities[:, :people],
+        membership,
+        subjects,
+        mask[:, :people],
+        boxes[:, :people],
+    )
+    expected = partial_identity_matching(*args, duplicate_iou=deduplicate)
+    with TransferAudit() as audit:
+        actual = partial_identity_matching(
+            *args, duplicate_iou=deduplicate, context_flags=flags
+        )
+    torch.testing.assert_close(actual.indices, expected.indices)
+    torch.testing.assert_close(actual.coverage, expected.coverage)
+    torch.testing.assert_close(actual.context_flags_cpu, flags.cpu())
+    assert audit.counts["cuda_to_cpu"] == (1 if device == "cuda" else 0)
+    assert audit.counts["cuda_scalar_reads"] == audit.counts["cuda_dynamic_shapes"] == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_single_person_suppression_has_no_cpu_readback(device):
+    mask = torch.tensor([[True], [False]], device=device)
+    boxes = torch.tensor([[[0.0, 0, 1, 1]], [[torch.nan, 0, 0, 0]]], device=device)
+    with TransferAudit() as audit:
+        actual = unique_box_mask(boxes, mask, threshold=0.9)
+    torch.testing.assert_close(actual, mask)
+    assert audit.counts["cuda_to_cpu"] == audit.counts["cuda_scalar_reads"] == 0
+    with pytest.raises(ValueError, match="boxes must have shape"):
+        unique_box_mask(boxes[..., :3], mask, threshold=0.9)

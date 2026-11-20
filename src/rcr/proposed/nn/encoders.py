@@ -374,7 +374,7 @@ class TextEncoder(nn.Module):
         attention_mask = attention_mask.detach().cpu()
         id_rows = input_ids.tolist()
         mask_rows = attention_mask.tolist()
-        keys = []
+        keys, canonical = [], {}
         for ids, mask in zip(id_rows, mask_rows, strict=True):
             length = sum(bool(value) for value in mask)
             right_padded = length > 0 and all(mask[:length]) and not any(mask[length:])
@@ -389,6 +389,7 @@ class TextEncoder(nn.Module):
                     tuple(mask),
                 )
             )
+            canonical[keys[-1]] = right_padded
         values, missing = {}, {}
         for n, key in enumerate(keys):
             if key in self._hidden:
@@ -396,13 +397,29 @@ class TextEncoder(nn.Module):
                 self._hidden[key] = values[key] = value
             else:
                 missing.setdefault(key, n)
+        fresh = {}
         if missing:
             indices = torch.tensor(list(missing.values()))
             # Separate AMP/FP32 keys keep validation features at their own precision.
-            hidden = self._backbone_tokens(
-                input_ids[indices].to(device, non_blocking=True),
-                attention_mask[indices].to(device, non_blocking=True),
-            ).cpu()
+            ids_device = input_ids[indices].to(device, non_blocking=True)
+            mask_device = attention_mask[indices].to(device, non_blocking=True)
+            hidden_device = self._backbone_tokens(
+                ids_device,
+                mask_device,
+            )
+            if all(canonical[key] for key in missing):
+                keep = mask_device.bool()
+            else:
+                keep = (
+                    torch.arange(input_ids.shape[1])[None]
+                    < torch.tensor([len(key[-2]) for key in missing])[:, None]
+                )
+                keep = keep.to(device, non_blocking=True)
+            current = hidden_device.masked_fill(~keep[..., None], 0)
+            # Persist CPU cache rows, but reuse fresh device states for this
+            # forward instead of immediately uploading those same states again.
+            hidden = hidden_device.cpu()
+            fresh.update(zip(missing, current, strict=True))
             for key, row in zip(missing, hidden, strict=True):
                 value = row[: len(key[-2])].clone()
                 values[key] = value
@@ -416,16 +433,22 @@ class TextEncoder(nn.Module):
                     self._hidden[key] = value
                     self._hidden_bytes += size
         length = input_ids.shape[1]
-        rows = []
-        for key in keys:
+        hits, rows = [], []
+        for key in dict.fromkeys(keys):
+            if key in fresh:
+                continue
             value = values[key]
             if value.shape[0] == length:
                 rows.append(value)
-                continue
-            row = value.new_zeros(length, value.shape[-1])
-            row[: value.shape[0]] = value
-            rows.append(row)
-        return torch.stack(rows).to(device, non_blocking=True)
+            else:
+                row = value.new_zeros(length, value.shape[-1])
+                row[: value.shape[0]] = value
+                rows.append(row)
+            hits.append(key)
+        if hits:
+            uploaded = torch.stack(rows).to(device, non_blocking=True)
+            fresh.update(zip(hits, uploaded, strict=True))
+        return torch.stack([fresh[key] for key in keys])
 
 
 class IdentityHead(nn.Module):

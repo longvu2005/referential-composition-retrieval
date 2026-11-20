@@ -132,14 +132,16 @@ composition and evidence path. Grounding, identity, coarse and global-state
 losses retain their existing weights and supervision.
 
 The defaults are `context_weight=1.0`, `tau_c=0.1`, rejection weight `0.5`,
-swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
+configured swap weight `0.2`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
 `B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic logit is
 `0.8`, and the rejection logit is `8.0`. Epochs 1–4 warm up without context;
 epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
 with `rho_effective=0.5`; it is zero earlier. These settings are controlled by
 [configs/proposed.yaml](../configs/proposed.yaml).
 
-Left/right swap supervision is opt-in. It reconditions text and calls the same
+The loss API defaults to no swap supervision; the supplied experiment enables
+it explicitly with `loss.context_swap_weight=0.2`. Set that value to zero to
+disable it. Swap supervision reconditions text and calls the same
 aligned scorer using the original assignment for both sentences. Both deferred
 scene batches and materialized scene tensors are supported.
 

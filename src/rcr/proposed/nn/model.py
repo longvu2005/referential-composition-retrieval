@@ -24,7 +24,7 @@ from rcr.proposed.nn.composition import (
 )
 from rcr.proposed.nn.encoders import SUBJECT_MARKERS, IdentityHead
 from rcr.proposed.nn.grounding import SubjectGrounding
-from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
+from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder, context_flags
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
     DEFAULT_COVERAGE_WEIGHT,
@@ -431,7 +431,9 @@ class RCRModel(nn.Module):
         ), matching
 
     @torch.no_grad()
-    def match_target(self, query, target_identity, boxes, person_mask=None):
+    def match_target(
+        self, query, target_identity, boxes, person_mask=None, *, capture_context=False
+    ):
         """Detached assignment, reusable outside activation checkpointing."""
         return partial_identity_matching(
             query.identity,
@@ -442,6 +444,7 @@ class RCRModel(nn.Module):
             boxes,
             identity_threshold=self.fine_matching["identity_threshold"],
             duplicate_iou=self.fine_matching["duplicate_iou"],
+            context_flags=context_flags(query) if capture_context else None,
         )
 
     def score_aligned_context(

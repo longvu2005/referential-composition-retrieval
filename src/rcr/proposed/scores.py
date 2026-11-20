@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from rcr.common.tensor_checks import check_tensor, checked
 from rcr.proposed.matching import (
     PersonMatching,
     gather_matched,
@@ -24,6 +25,7 @@ MINING_CONTEXT_WEIGHT = 0.0
 FINE_SCORE_MODE = "linear"
 
 
+@checked
 def linear_score_components(
     binding: Tensor,
     context: Tensor,
@@ -45,22 +47,15 @@ def linear_score_components(
     bonus = coverage_weight * coverage
     contribution = context_weight * context
     fine = scale * binding + bonus + contribution
-    checks = (
-        torch.stack(
-            (
-                torch.isfinite(scale).all() & (scale >= 0).all(),
-                torch.stack(
-                    [torch.isfinite(x).all() for x in (binding, context, coverage)]
-                ).all(),
-                ((coverage >= 0) & (coverage <= 1)).all(),
-                torch.isfinite(fine).all(),
-            )
-        )
-        .cpu()
-        .tolist()
-    )
     for valid, message in zip(
-        checks,
+        (
+            torch.isfinite(scale).all() & (scale >= 0).all(),
+            torch.stack(
+                [torch.isfinite(x).all() for x in (binding, context, coverage)]
+            ).all(),
+            ((coverage >= 0) & (coverage <= 1)).all(),
+            torch.isfinite(fine).all(),
+        ),
         (
             "binding scale must be finite and nonnegative",
             "fine score components contain NaN/Inf",
@@ -69,8 +64,7 @@ def linear_score_components(
         ),
         strict=True,
     ):
-        if not valid:
-            raise ValueError(message)
+        check_tensor(valid, message)
     return {
         "coverage_bonus": bonus,
         "context_contribution": contribution,

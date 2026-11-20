@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
+from rcr.common.tensor_checks import check_tensor, checked
 from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.cache.store import SceneTargetBatch
 from rcr.proposed.identity import select_identity_observations
@@ -81,15 +82,20 @@ def grounding_loss(logits: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
 def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
     """Supervised contrastive loss; anchors without a positive are ignored."""
     keep = labels != -1
-    identity = F.normalize(identity[keep].float(), dim=-1)
-    labels = labels[keep]
+    # Keep a fixed tensor shape. Boolean indexing CUDA tensors would first
+    # synchronize to discover the number of known observations.
+    identity = F.normalize(identity.float().masked_fill(~keep[..., None], 0), dim=-1)
     if len(identity) < 2:
         return identity.sum() * 0
 
     similarity = identity @ identity.T / temperature
     diagonal = torch.eye(len(identity), device=identity.device, dtype=torch.bool)
-    positive = labels[:, None].eq(labels[None]) & ~diagonal
-    masked_similarity = similarity.masked_fill(diagonal, -torch.inf)
+    valid = keep[:, None] & keep[None] & ~diagonal
+    positive = labels[:, None].eq(labels[None]) & valid
+    masked_similarity = similarity.masked_fill(~valid, -torch.inf)
+    # Unknown/sole-known rows have no keys. A neutral denominator avoids NaN
+    # gradients from logsumexp(-inf), while those rows still contribute zero.
+    masked_similarity = masked_similarity.masked_fill(~valid.any(1, keepdim=True), 0)
     log_probability = masked_similarity - torch.logsumexp(
         masked_similarity, dim=1, keepdim=True
     )
@@ -101,6 +107,7 @@ def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
     return per_anchor.masked_fill(~valid, 0).sum() / valid.sum().clamp_min(1)
 
 
+@checked
 def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None = None):
     """Mean pairwise softplus per query, then mean over queries with both labels.
 
@@ -114,8 +121,9 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
         else valid_mask.bool()
     )
     scores = scores.float().masked_fill(~valid, 0)
-    if not torch.isfinite(scores).all():
-        raise ValueError("ranking loss requires finite eligible scores")
+    check_tensor(
+        torch.isfinite(scores).all(), "ranking loss requires finite eligible scores"
+    )
     positive = positive.bool() & valid
     pairs = positive[:, :, None] & (valid & ~positive)[:, None]
     difference = scores[:, None, :] - scores[:, :, None]
@@ -135,6 +143,7 @@ def _context_scores(
     eligible=None,
     target_identity=None,
     positions_cpu=None,
+    host_matching=None,
 ):
     """Score eligible pairs; transfer native features only for the current chunk."""
     queries, candidates = batch["positive_mask"].shape
@@ -216,7 +225,31 @@ def _context_scores(
                 if identity is None
                 else identity[:, :width].index_select(0, rows)
             )
-            matching = model.match_target(selected, projected, boxes, mask)
+            matching = model.match_target(
+                selected,
+                projected,
+                boxes,
+                mask,
+                **({"capture_context": True} if host_matching is not None else {}),
+            )
+        if host_matching is not None:
+            if not host_matching:
+                host_matching["assignments"] = torch.full(
+                    (pairs, query.identity.shape[1]), -1, dtype=torch.long
+                )
+                host_matching["selected"] = torch.zeros(
+                    query.membership.shape, dtype=torch.bool
+                )
+            host_matching["assignments"].index_copy_(0, cpu_rows, matching.indices_cpu)
+            if matching.context_flags_cpu is not None:
+                end = query.reference.shape[1]
+                offset = end - query.membership.shape[1] * query.membership.shape[2]
+                selected_cpu = matching.context_flags_cpu[:, offset:end].unflatten(
+                    1, query.membership.shape[1:]
+                )
+                host_matching["selected"].index_copy_(
+                    0, cpu_rows // candidates, selected_cpu
+                )
         offset = fafa_binding_scores(
             selected.fafa,
             native_chunk
@@ -259,7 +292,7 @@ def _context_scores(
     )
 
 
-def _swap_loss(model, query, batch, patch_hw, context, assignments):
+def _swap_loss(model, query, batch, patch_hw, context, assignments, host_matching=None):
     """Rank a verified edited condition below the original on the same assignment."""
     pair = batch.get("direction_swap")
     zero = context.sum() * 0
@@ -267,33 +300,58 @@ def _swap_loss(model, query, batch, patch_hw, context, assignments):
         return zero, zero.detach()
 
     rows, cols = pair["positions"].unbind(1)
-    indices = assignments[rows, cols]
-    assigned_role = pair["target_roles"].gather(
-        2, indices.clamp_min(0)[:, None].expand_as(pair["query_roles"])
+    host = (
+        host_matching
+        if host_matching and pair["positions"].device.type == "cpu"
+        else None
     )
-    correct = (
-        (query.membership[rows] > 0)
-        & (indices >= 0)[:, None]
-        & pair["query_roles"]
-        & assigned_role
+    if host is not None:
+        indices = host["assignments"].unflatten(0, batch["positive_mask"].shape)[
+            rows, cols
+        ]
+        selected = host["selected"][rows]
+    else:
+        rows, cols = (value.to(query.reference.device) for value in (rows, cols))
+        indices = assignments[rows, cols]
+        selected = query.membership[rows] > 0
+    query_roles, target_roles = (
+        pair[key].to(indices.device) for key in ("query_roles", "target_roles")
     )
+    assigned_role = target_roles.gather(
+        2, indices.clamp_min(0)[:, None].expand_as(query_roles)
+    )
+    correct = selected & (indices >= 0)[:, None] & query_roles & assigned_role
     valid = correct.any(2).all(1)
     if not valid.any():
         return zero, zero.detach()
 
     rows, cols, indices = rows[valid], cols[valid], indices[valid]
+    positions_cpu = (
+        rows * batch["positive_mask"].shape[1] + cols if host is not None else None
+    )
+    device = query.reference.device
+    rows, cols, indices = (
+        value.to(device, non_blocking=True) for value in (rows, cols, indices)
+    )
+    positions = valid.nonzero().flatten().to(device, non_blocking=True)
     alternative = model.recondition_query(
         query.index_select(rows),
         batch["query_persons"][rows],
         batch["query_person_mask"][rows],
-        **{key: value[valid] for key, value in pair["text"].items()},
+        **{
+            key: value.index_select(0, positions) for key, value in pair["text"].items()
+        },
     )
     persons = batch["target_persons"][rows, cols]
     boxes = batch["target_boxes"][rows, cols]
     padding = ~batch["target_mask"][rows, cols, :, None]
     scene = batch["target_scene"]
     if isinstance(scene, SceneTargetBatch):
-        positions = (rows * batch["positive_mask"].shape[1] + cols).detach().cpu()
+        positions = (
+            positions_cpu
+            if positions_cpu is not None
+            else (rows * batch["positive_mask"].shape[1] + cols).detach().cpu()
+        )
         scene = scene.load(positions).to(persons.device, non_blocking=True).float()
     else:
         scene = scene[rows, cols]
@@ -320,6 +378,7 @@ def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
     return (wrong.sum() / pairs.sum().clamp_min(1)).detach()
 
 
+@checked
 def compute_loss(
     model: RCRModel,
     batch: dict[str, Tensor | dict | str | NativeTargetBatch],
@@ -380,8 +439,10 @@ def compute_loss(
         )
     positive = batch["positive_mask"]
     identity_positive = batch["identity_positive_mask"]
-    if (positive & ~identity_positive).any():
-        raise ValueError("every Full Positive must also be an identity positive")
+    check_tensor(
+        ~(positive & ~identity_positive).any(),
+        "every Full Positive must also be an identity positive",
+    )
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = swap = zero
@@ -419,15 +480,35 @@ def compute_loss(
         ground = grounding_loss(logits, targets, mask)
 
     if identity_weight:
+        layout = batch.get("identity_layout")
+        layout = layout if layout is not None and layout.current(batch) else None
+        source = layout.host if layout is not None else batch
         query_keep, target_keep = (
-            batch["query_identity_mask"],
-            batch["target_identity_mask"],
+            source["query_identity_mask"],
+            source["target_identity_mask"],
         )
         labels = [
-            batch["query_identity_labels"][query_keep],
-            batch["target_identity_labels"][target_keep],
+            source["query_identity_labels"][query_keep],
+            source["target_identity_labels"][target_keep],
         ]
-        features = [query_identity[query_keep], target_identity[target_keep]]
+
+        def take(values, indices):
+            return values.index_select(0, indices.to(values.device, non_blocking=True))
+
+        features = (
+            [
+                take(
+                    query_identity.flatten(0, 1),
+                    layout.positions["query_identity_mask"],
+                ),
+                take(
+                    target_identity.flatten(0, 2),
+                    layout.positions["target_identity_mask"],
+                ),
+            ]
+            if layout is not None
+            else [query_identity[query_keep], target_identity[target_keep]]
+        )
         if "identity_sampling" in batch:
             hard, extra = select_identity_observations(
                 query_identity, target_identity, batch, batch["identity_sampling"]
@@ -435,32 +516,36 @@ def compute_loss(
             target_flat = target_identity.flatten(0, 2)
             # Index selection is detached; these gathers preserve head/projection
             # gradients. A crop present in targets needs no extra identity encode.
-            features.append(target_flat[hard])
-            target_labels = torch.full_like(batch["target_identity_labels"], -1)
-            target_labels.view(-1)[batch["supplemental_target_indices"]] = batch[
+            features.append(take(target_flat, hard))
+            target_labels = torch.full_like(source["target_identity_labels"], -1)
+            target_labels.view(-1)[source["supplemental_target_indices"]] = source[
                 "supplemental_target_labels"
             ]
             labels.append(target_labels.flatten()[hard])
-            reused = batch["extra_identity_target_indices"][extra]
+            reused = source["extra_identity_target_indices"][extra]
             in_target = reused >= 0
-            features.append(target_flat[reused[in_target]])
+            features.append(take(target_flat, reused[in_target]))
             if extra.numel():
-                extra_labels = batch["extra_identity_labels"][extra]
+                extra_labels = source["extra_identity_labels"][extra]
                 labels.extend((extra_labels[in_target], extra_labels[~in_target]))
                 outside = extra[~in_target]
                 if outside.numel():
                     features.append(
-                        model.encode_identity(batch["extra_identity_persons"][outside])
+                        model.encode_identity(
+                            take(batch["extra_identity_persons"], outside)
+                        )
                     )
                 else:
                     features.append(target_flat[:0])
             hard_count, random_count = hard.numel(), extra.numel()
-        elif batch.get("extra_identity_labels", labels[0][:0]).numel():
-            labels.append(batch["extra_identity_labels"])
+        elif source.get("extra_identity_labels", labels[0][:0]).numel():
+            labels.append(source["extra_identity_labels"])
             features.append(model.encode_identity(batch["extra_identity_persons"]))
             random_count = batch["extra_identity_labels"].numel()
         identity = identity_loss(
-            torch.cat(features), torch.cat(labels), identity_temperature
+            torch.cat(features),
+            torch.cat(labels).to(query_identity.device, non_blocking=True),
+            identity_temperature,
         )
 
     if coarse_weight:
@@ -489,6 +574,9 @@ def compute_loss(
         eligible = identity_positive
         if context_rejection_weight:
             eligible = eligible | batch["hard_identity_negative_mask"]
+        host_matching = (
+            {} if context_swap_weight and "direction_swap" in batch else None
+        )
         raw_context, coverage, binding, assignments = _context_scores(
             model,
             query,
@@ -497,6 +585,7 @@ def compute_loss(
             context_batch_size,
             eligible=eligible,
             target_identity=target_identity,
+            host_matching=host_matching,
             positions_cpu=(
                 batch["context_layout"][
                     "rejection_rows" if context_rejection_weight else "identity_rows"
@@ -524,8 +613,10 @@ def compute_loss(
         )
         if context_rejection_weight:
             hard = batch["hard_identity_negative_mask"].bool()
-            if (hard & identity_positive).any():
-                raise ValueError("rejection negatives must lack required identities")
+            check_tensor(
+                ~(hard & identity_positive).any(),
+                "rejection negatives must lack required identities",
+            )
             rejection_valid = (positive | hard) & (coverage > 0)
             rejection = retrieval_loss(
                 scores["fine_scores"] / context_temperature, positive, rejection_valid
@@ -539,7 +630,7 @@ def compute_loss(
 
         if context_swap_weight:
             swap, swap_active = _swap_loss(
-                model, query, batch, patch_hw, raw_context, assignments
+                model, query, batch, patch_hw, raw_context, assignments, host_matching
             )
             context = context + context_swap_weight * swap
 

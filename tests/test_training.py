@@ -168,8 +168,20 @@ def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
 
 
 @pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
 def test_verified_swap_trains_context_on_the_same_assignment(
-    tiny_training_run, monkeypatch, defer
+    tiny_training_run, monkeypatch, defer, device
 ):
     _, cache, _, _ = tiny_training_run
     data = training.load_rcr_data()
@@ -210,14 +222,14 @@ def test_verified_swap_trains_context_on_the_same_assignment(
                         ids[i] = 3
             return tokens
 
-    text_encoder = TextEncoder(TextBackbone(), dim=8)
+    text_encoder = TextEncoder(TextBackbone(), dim=8).to(device)
     batch = build_batch(
         [sample],
         [["n", "a"]],
         cache,
         DirectionTokenizer(),
         text_encoder,
-        "cpu",
+        device,
         supervision=supervision,
         identity_image_ids=[{"a", "n"}],
         fafa_pooling="subject_mean",
@@ -225,7 +237,7 @@ def test_verified_swap_trains_context_on_the_same_assignment(
         defer_target_scenes=defer,
     )
     assert batch["direction_swap"]["positions"].tolist() == [[0, 1]]
-    model = training.RCRModel(dim=8, identity_dim=6, num_heads=2)
+    model = training.RCRModel(dim=8, identity_dim=6, num_heads=2).to(device)
     monkeypatch.setattr(
         model.grounding,
         "forward",
@@ -486,9 +498,9 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
             assert all(set(s) == {"subject_id"} for s in row["subjects"])
         return native(rows, width)
 
-    def identities(cache, model, device, batch_size, image_indices):
+    def identities(cache, model, device, batch_size, image_indices, **kwargs):
         features = image_indices.float()[:, None, None].expand(-1, 1, 6)
-        return [(features, torch.ones(len(image_indices), 1, dtype=torch.bool))]
+        return [(features, torch.ones(len(image_indices), 1, dtype=torch.bool))], None
 
     def coarse(query, logits, gallery, *a, **kw):
         return (10 - gallery[:, 0, 0])[None].expand(len(query), -1)
@@ -507,7 +519,7 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
         }
 
     monkeypatch.setattr(cache, "native_queries", public_queries)
-    monkeypatch.setattr(ranking, "_encode_gallery_identity", identities)
+    monkeypatch.setattr(ranking, "_encode_gallery", identities)
     monkeypatch.setattr(ranking, "identity_scores_batched", coarse)
     monkeypatch.setattr(model, "score_target", fine)
     model.train()
@@ -794,7 +806,7 @@ def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
     assert not binding.requires_grad and not coverage.requires_grad
 
 
-def test_default_context_schedule_warms_up_then_enables_semantic_and_rejection(
+def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
     tiny_training_run, monkeypatch
 ):
     cfg, cache, _, _ = tiny_training_run
@@ -809,6 +821,7 @@ def test_default_context_schedule_warms_up_then_enables_semantic_and_rejection(
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
     cfg["loss"]["context_rejection_weight"] = 0.5
+    cfg["loss"]["context_swap_weight"] = 0.0
     assert cfg["loss"]["context_swap_weight"] == 0
     assert cfg["retrieval"]["coverage_weight"] == 0.04
     assert cfg["retrieval"]["context_weight"] == 0.1

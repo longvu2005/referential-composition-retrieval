@@ -17,6 +17,15 @@ class ReasoningLayout:
     person_offset: int
 
 
+def context_flags(query):
+    """GPU masks whose CPU layout can share the matching workspace transfer."""
+    selected = query.subjects[..., None] & (query.membership > 0)
+    offset = query.reference.shape[1] - selected.shape[1] * selected.shape[2]
+    valid = query.mask.clone()
+    valid[:, offset:] &= selected.flatten(1)
+    return torch.cat((valid, query.subjects), 1)
+
+
 class TargetPersonBuilder(nn.Module):
     """Project contextual evidence and center/size geometry before injection."""
 

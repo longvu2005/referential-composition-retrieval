@@ -58,6 +58,7 @@ See the [run guide](docs/proposed_runs.md) for individual stages and outputs.
 | --- | --- |
 | [Method](docs/proposed_method.md) | Model overview and training objectives |
 | [Run guide](docs/proposed_runs.md) | Configuration, training, resume and retrieval |
+| [GPU performance](docs/gpu_performance.md) | CPU/GPU transfers, synchronization, cache budgets and profiling |
 | [Feature contracts](docs/feature_contracts.md) | Encoder, cache and checkpoint compatibility |
 | [Cache guide](docs/detection_cache.md) | Cache preparation and reuse |
 | [Benchmark protocol](docs/benchmark_protocol.md) | Galleries, positives, metrics and split usage |

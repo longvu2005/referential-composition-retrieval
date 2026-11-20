@@ -61,12 +61,13 @@ With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semant
 context, and epoch 7 onward also enables mining and rejection at weight `0.5`.
 Context loss uses the original training coefficients `a_train=0.04` and
 `b_train=0.10`; validation calibration changes retrieval coefficients only.
-Left/right swap supervision defaults to zero. Enable it explicitly for a
-separate experiment:
+The supplied experiment enables verified left/right swap supervision at `0.2`.
+The loss API keeps its zero default when no swap setting is supplied. To run
+an experiment without swap supervision:
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set loss.context_swap_weight=0.25 output.dir=runs/proposed-swap
+  --set loss.context_swap_weight=0.0 output.dir=runs/proposed-no-swap
 ```
 
 W&B tracking is configured by `wandb`; use `wandb.mode=offline` or

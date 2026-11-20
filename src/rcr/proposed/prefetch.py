@@ -95,11 +95,15 @@ class StagedVisual:
         if self.ready is not None:
             stream = torch.cuda.current_stream(self.device)
             stream.wait_event(self.ready)
+            recorded = set()
             for value in self.visual.values():
                 if isinstance(value, SceneTargetBatch):
                     value = value.values
                 if isinstance(value, torch.Tensor) and value.device.type == "cuda":
-                    value.record_stream(stream)
+                    pointer = value.untyped_storage().data_ptr()
+                    if pointer not in recorded:
+                        value.record_stream(stream)
+                        recorded.add(pointer)
         return self.visual
 
 
@@ -135,7 +139,29 @@ class VisualStager:
             )
 
         with torch.cuda.device(self.device), torch.cuda.stream(self.stream):
+            # Coalesce small masks/labels by dtype. Large visual/native payloads
+            # retain their existing bounded transfer path and storage precision.
+            groups = {}
             for key, value in visual.items():
+                if (
+                    isinstance(value, torch.Tensor)
+                    and value.device.type == "cpu"
+                    and value.numel() * value.element_size() <= 64 * 1024
+                ):
+                    groups.setdefault(value.dtype, []).append((key, value))
+            for group in groups.values():
+                if len(group) < 2:
+                    continue
+                packet = copy(torch.cat([value.flatten() for _, value in group]))
+                offset = 0
+                for key, value in group:
+                    staged[key] = packet[offset : offset + value.numel()].reshape(
+                        value.shape
+                    )
+                    offset += value.numel()
+            for key, value in visual.items():
+                if key in staged:
+                    continue
                 if isinstance(value, torch.Tensor):
                     value = copy(value)
                 elif isinstance(value, PackedPersons):

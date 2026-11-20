@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from rcr.common.data import inference_sample, inference_samples, required_identity_ids
 from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.cache.store import GalleryCache, SceneTargetBatch
+from rcr.proposed.identity import IdentityLayout
 from rcr.proposed.nn.encoders import QueryTextCache, encode_tokenized_text
 from rcr.proposed.prefetch import PackedPersons, StagedVisual
 from rcr.proposed.scores import POOLING_MODES
@@ -420,6 +421,7 @@ def prepare_visual_batch(
         )
         batch["target_persons"] = packed
         batch["target_layout"] = {"positions": packed.positions}
+    batch["identity_layout"] = IdentityLayout.from_batch(batch)
     return batch
 
 
@@ -467,9 +469,11 @@ def _swap_batch(
     tokens = text_cache.batch(variants)
     change, mask, _ = text_encoder(tokens["change_ids"], tokens["change_mask"])
     return {
-        "positions": torch.tensor(positions, device=device),
-        "query_roles": torch.stack(query_roles).to(device),
-        "target_roles": torch.stack(target_roles).to(device),
+        # Annotation routing stays on CPU. The same detached matching workspace
+        # decides eligibility before any alternative neural forward is launched.
+        "positions": torch.tensor(positions),
+        "query_roles": torch.stack(query_roles),
+        "target_roles": torch.stack(target_roles),
         "text": {
             "change": change,
             "change_mask": mask,
@@ -537,6 +541,7 @@ def build_batch(
         return value
 
     visual = {key: transfer(value) for key, value in visual.items()}
+    visual["identity_layout"].bind(visual)
     text = encode_tokenized_text(text_cache.batch(samples), text_encoder, device)
     if include_direction_swaps:
         swap = _swap_batch(

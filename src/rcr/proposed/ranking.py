@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ from tqdm import tqdm
 
 from rcr.common.data import inference_samples
 from rcr.common.runtime import evaluating
+from rcr.common.tensor_checks import check_tensor, checked, cpu_tensors
 from rcr.proposed.matching import PersonMatching
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
@@ -33,35 +35,6 @@ DEFAULT_FINE_COARSE_WEIGHT = 0.15
 if TYPE_CHECKING:
     from rcr.proposed.cache.store import GalleryCache
     from rcr.proposed.nn.encoders import QueryTextCache
-
-
-def _encode_gallery_identity(
-    cache: GalleryCache,
-    model: nn.Module,
-    device: torch.device,
-    batch_size: int,
-    image_indices: Tensor | None = None,
-) -> list[tuple[Tensor, Tensor]]:
-    """Project once, retaining only CPU batches with useful person columns.
-
-    Packed caches pad only the current batch. Legacy dense caches drop columns
-    masked out for an entire batch without removing evidence.
-    Never concatenate these batches on the accelerator (or duplicate them in RAM).
-    """
-
-    if image_indices is None:
-        image_indices = torch.arange(len(cache.image_ids))
-    batches = []
-    dtype = model.identity_head.proj.weight.dtype
-    for start in range(0, len(image_indices), batch_size):
-        indices = image_indices[start : start + batch_size]
-        persons, mask = cache.load_persons(indices)
-        persons = persons.to(device=device, dtype=dtype)
-        identity = model.encode_identity(persons)
-        batches.append((identity.cpu(), mask.cpu()))
-        # Release GPU outputs before allocating the next projection batch.
-        del persons, identity
-    return batches
 
 
 def _coarse_scores_chunked(
@@ -100,43 +73,83 @@ def _coarse_scores_chunked(
     return scores[0] if single else scores
 
 
-def _encode_gallery_state(
-    cache: GalleryCache,
-    model: nn.Module,
-    device: torch.device,
-    batch_size: int,
-    image_indices: Tensor,
-) -> Tensor:
-    """Project global image features once per retrieval call, retaining CPU output."""
-    projection = model.state_image_proj.weight
-    state = torch.empty(len(image_indices), projection.shape[0], dtype=projection.dtype)
-    for start in range(0, len(image_indices), batch_size):
-        stop = min(start + batch_size, len(image_indices))
-        chunk = cache.load_global_features(image_indices[start:stop]).to(
-            device=device, dtype=projection.dtype
-        )
-        state[start:stop] = model.encode_image_state(chunk).cpu()
-    return state
-
-
-def _cache_gallery_on_device(batches, state, device, budget_mib):
-    """Keep small projected galleries resident within an explicit VRAM budget."""
+def _gallery_output_device(
+    cache, model, device, batch_size, image_indices, state, budget_mib
+):
+    """Choose residency from CPU mask metadata before any projected tensor copy."""
     if device.type != "cuda" or not budget_mib:
-        return batches, state
-    tensors = [value for batch in batches for value in batch]
-    if state is not None:
-        tensors.append(state)
-    size = sum(value.numel() * value.element_size() for value in tensors)
+        return torch.device("cpu")
+    mask = cache.mask[image_indices]
+    size = 0
+    for part in mask.split(batch_size):
+        columns = int(part.any(0).sum())
+        size += len(part) * columns * (4 * model.identity_head.proj.out_features + 1)
+    if state:
+        size += len(image_indices) * model.state_image_proj.out_features * 4
     free, _ = torch.cuda.mem_get_info(device)
-    # Leave room for fine scoring and the CUDA allocator's working buffers.
-    if size > min(budget_mib * 1024**2, free // 2):
-        return batches, state
-    resident = [
-        tuple(value.to(device, non_blocking=True) for value in batch)
-        for batch in batches
-    ]
-    state = None if state is None else state.to(device, non_blocking=True)
-    return resident, state
+    reusable = max(
+        0, torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    )
+    available = free + reusable
+    return (
+        device
+        if size <= min(budget_mib * 1024**2, available // 2)
+        else torch.device("cpu")
+    )
+
+
+@torch.inference_mode()
+def _encode_gallery(
+    cache, model, device, batch_size, image_indices, *, state, budget_mib
+):
+    """Project real detections once and place outputs directly in their final cache.
+
+    GPU-resident galleries never take a GPU->CPU->GPU round trip. The CPU
+    fallback copies identity/global outputs together, once per bounded chunk.
+    """
+    from rcr.proposed.prefetch import PackedPersons
+
+    destination = _gallery_output_device(
+        cache, model, device, batch_size, image_indices, state, budget_mib
+    )
+    batches = []
+    states = (
+        torch.empty(
+            len(image_indices),
+            model.state_image_proj.out_features,
+            dtype=torch.float32,
+            device=destination,
+        )
+        if state
+        else None
+    )
+    for start in range(0, len(image_indices), batch_size):
+        indices = image_indices[start : start + batch_size]
+        persons, mask = cache.load_persons(indices)
+        columns = mask.any(0)
+        persons, mask = persons[:, columns], mask[:, columns]
+        packed = PackedPersons.from_padded(persons, mask)
+        projected = model.encode_identity(
+            packed.values.to(device, non_blocking=True).float()
+        )
+        identity = projected.new_zeros((mask.numel(), projected.shape[-1]))
+        identity.index_copy_(
+            0, packed.positions.to(device, non_blocking=True), projected
+        )
+        values = {"identity": identity.unflatten(0, mask.shape)}
+        if state:
+            globals_ = (
+                cache.load_global_features(indices)
+                .to(device, non_blocking=True)
+                .float()
+            )
+            values["state"] = model.encode_image_state(globals_)
+        if destination.type == "cpu":
+            values = cpu_tensors(values)
+        batches.append((values["identity"], mask.to(destination, non_blocking=True)))
+        if state:
+            states[start : start + len(indices)] = values["state"]
+    return batches, states
 
 
 def fine_score_components(
@@ -353,6 +366,14 @@ def _gallery_scope(cache, gallery_ids, samples, label):
     return gallery_ids, local, indices
 
 
+@dataclass
+class _FineQueryState:
+    layout: Any = None
+    flags_cpu: Tensor | None = None
+    missing_bindings: dict = field(default_factory=dict)
+
+
+@checked
 def _score_target_components(
     query,
     cache,
@@ -366,6 +387,7 @@ def _score_target_components(
     *,
     compute_context=True,
     prefetch_batches=1,
+    return_cpu=False,
 ):
     """Collect pairwise evidence without changing its scoring population."""
     from rcr.proposed.cache.native import NativeTargetBatch
@@ -384,14 +406,9 @@ def _score_target_components(
     if not compute_context and context_weight != 0:
         raise ValueError("skipping context requires context_weight=0")
     if not len(image_indices):
-        return components
+        return cpu_tensors(components) if return_cpu else components
     sparse = hasattr(cache, "load_person_geometry") and hasattr(cache, "load_scenes")
-    layout = (
-        _reasoning_layout(query)
-        if sparse and compute_context and not model.training
-        else None
-    )
-    missing_bindings = {}
+    state = _FineQueryState()
     rows = torch.arange(len(image_indices))
     if sparse and hasattr(cache, "mask"):
         # Change execution order only. Fusion still sees the original complete Top-M.
@@ -427,8 +444,7 @@ def _score_target_components(
                     targets,
                     prepared,
                     compute_context,
-                    layout,
-                    missing_bindings,
+                    state,
                 )
             else:
                 # Keep the public reader/scorer API for legacy and third-party caches.
@@ -455,34 +471,38 @@ def _score_target_components(
             for key, output in components.items():
                 output.index_copy_(0, positions, details[key].float())
     # Validate once per shortlist, avoiding an extra host synchronization per chunk.
-    if not torch.stack(
-        [torch.isfinite(value).all() for value in components.values()]
-    ).all():
-        raise ValueError("fine score components contain NaN/Inf")
-    return components
+    check_tensor(
+        torch.stack(
+            [torch.isfinite(value).all() for value in components.values()]
+        ).all(),
+        "fine score components contain NaN/Inf",
+    )
+    return cpu_tensors(components) if return_cpu else components
 
 
-def _reasoning_layout(query):
+def _reasoning_layout(query, flags_cpu=None):
     """Resolve query-only masks once on CPU, outside the candidate/chunk loop."""
-    from rcr.proposed.nn.reasoning import ReasoningLayout
+    from rcr.proposed.nn.reasoning import ReasoningLayout, context_flags
 
-    selected = query.subjects[..., None] & (query.membership > 0)
-    offset = query.reference.shape[1] - selected.shape[1] * selected.shape[2]
-    valid = query.mask[0].clone()
-    valid[offset:] &= selected[0].flatten()
-    flags = torch.cat((valid, query.subjects[0])).cpu()
-    reference_mask, subjects = flags[: len(valid)], flags[len(valid) :]
+    offset = (
+        query.reference.shape[1] - query.membership.shape[1] * query.membership.shape[2]
+    )
+    length = query.mask.shape[1]
+    flags = context_flags(query)[0].cpu() if flags_cpu is None else flags_cpu[0]
+    reference_mask, subjects = flags[:length], flags[length:]
     reference = reference_mask.nonzero().flatten()
     first, second = torch.triu_indices(len(subjects), len(subjects), offset=1)
     pairs = (subjects[first] & subjects[second]).nonzero().flatten()
     persons = reference[reference >= offset] - offset
+    tokens = torch.cat((reference, length + pairs))
+    packet = torch.cat((reference, tokens, persons)).to(
+        query.reference.device, non_blocking=True
+    )
+    reference, tokens, persons = packet.split(
+        (len(reference), len(tokens), len(persons))
+    )
     return ReasoningLayout(
-        reference.to(query.reference.device, non_blocking=True),
-        torch.cat((reference, len(valid) + pairs)).to(
-            query.reference.device, non_blocking=True
-        ),
-        persons.to(query.reference.device, non_blocking=True),
-        int(reference_mask[:offset].sum()),
+        reference, tokens, persons, int(reference_mask[:offset].sum())
     )
 
 
@@ -494,8 +514,7 @@ def _score_packed_targets(
     targets,
     prepared,
     compute_context,
-    layout,
-    missing_bindings,
+    state,
 ):
     """Match actual detections, then load/score evidence only where H can be nonzero."""
     from rcr.proposed.cache.native import NativeTargetBatch
@@ -515,12 +534,17 @@ def _score_packed_targets(
     boxes = boxes.to(device, non_blocking=True)
     mask_device = mask.to(device, non_blocking=True)
     query = query.repeat_candidates(len(targets))
-    matching = model.match_target(query, identity, boxes, mask_device)
+    capture = compute_context and not model.training and state.flags_cpu is None
+    matching = model.match_target(
+        query, identity, boxes, mask_device, capture_context=capture
+    )
+    if matching.context_flags_cpu is not None and state.flags_cpu is None:
+        state.flags_cpu = matching.context_flags_cpu[:1].clone()
     indices_cpu = matching.indices_cpu
     if indices_cpu is None:
         indices_cpu = matching.indices.cpu()
     rows = (indices_cpu >= 0).any(1).nonzero().flatten()
-    if not missing_bindings:
+    if not state.missing_bindings:
         # Preserve native null pooling arithmetic, including GROUP weight rounding.
         # It depends on the query, so compute it once across all candidate chunks.
         missing = PersonMatching(
@@ -530,7 +554,7 @@ def _score_packed_targets(
             matching.subject_coverage[:1],
             matching.coverage[:1],
         )
-        missing_bindings.update(
+        state.missing_bindings.update(
             pool_fafa_scores(
                 torch.zeros_like(missing.membership),
                 missing,
@@ -542,7 +566,7 @@ def _score_packed_targets(
         "coverage": matching.coverage,
         **{
             f"binding_{mode}": value.expand(len(targets)).clone()
-            for mode, value in missing_bindings.items()
+            for mode, value in state.missing_bindings.items()
         },
     }
     if not len(rows):
@@ -573,6 +597,8 @@ def _score_packed_targets(
     for mode, values in poolings.items():
         components[f"binding_{mode}"].index_copy_(0, selected, values)
     if compute_context:
+        if not model.training and state.layout is None:
+            state.layout = _reasoning_layout(query, state.flags_cpu)
         scene = cache.load_scenes(targets[rows]).to(device, non_blocking=True).float()
         context = model.score_aligned_context(
             chosen,
@@ -581,7 +607,7 @@ def _score_packed_targets(
             boxes.index_select(0, selected),
             chosen_matching.indices,
             cache.patch_hw,
-            layout=layout,
+            layout=state.layout,
         )
         components["context"].index_copy_(0, selected, context)
     return components
@@ -663,18 +689,14 @@ def retrieve_rankings(
     rows = [None] * len(samples)
     with evaluating(model, text_encoder):
         stage = perf_counter()
-        gallery_batches = _encode_gallery_identity(
-            cache, model, device, identity_batch_size, image_indices
-        )
-        gallery_state = (
-            _encode_gallery_state(
-                cache, model, device, identity_batch_size, image_indices
-            )
-            if need_state
-            else None
-        )
-        gallery_batches, gallery_state = _cache_gallery_on_device(
-            gallery_batches, gallery_state, device, gpu_cache_mib
+        gallery_batches, gallery_state = _encode_gallery(
+            cache,
+            model,
+            device,
+            identity_batch_size,
+            image_indices,
+            state=need_state,
+            budget_mib=gpu_cache_mib,
         )
         timings["gallery_encoding"] += perf_counter() - stage
         subject_groups = {}
@@ -710,34 +732,33 @@ def retrieve_rankings(
                 ),
                 **{key: value for key, value in text.items() if key != "change_global"},
             )
-            identity = (
-                _coarse_scores_chunked(
-                    queries.identity,
-                    queries.logits,
-                    q_mask,
-                    gallery_batches,
-                    coarse_batch_size,
-                )
-                .float()
-                .cpu()
-            )
+            identity = _coarse_scores_chunked(
+                queries.identity,
+                queries.logits,
+                q_mask,
+                gallery_batches,
+                coarse_batch_size,
+            ).float()
             state = None
             if need_state:
                 query_state = model.encode_text_state(text["change_global"])
-                state = (
-                    torch.cat(
-                        [
-                            query_state
-                            @ gallery_state[start : start + coarse_batch_size]
-                            .to(device, non_blocking=True)
-                            .T
-                            for start in range(0, len(gallery_ids), coarse_batch_size)
-                        ],
-                        dim=1,
-                    )
-                    .float()
-                    .cpu()
-                )
+                state = torch.cat(
+                    [
+                        query_state
+                        @ gallery_state[start : start + coarse_batch_size]
+                        .to(device, non_blocking=True)
+                        .T
+                        for start in range(0, len(gallery_ids), coarse_batch_size)
+                    ],
+                    dim=1,
+                ).float()
+            host_coarse = cpu_tensors(
+                {
+                    "identity": identity,
+                    **({"state": state} if state is not None else {}),
+                }
+            )
+            identity, state = host_coarse["identity"], host_coarse.get("state")
             timings["query_and_coarse"] += perf_counter() - stage
             for n, (sample_index, sample) in enumerate(batch):
                 stage = perf_counter()
@@ -754,21 +775,19 @@ def retrieve_rankings(
                 top = order[:top_m]
                 timings["ranking"] += perf_counter() - stage
                 stage = perf_counter()
-                evidence = {
-                    key: value.cpu()
-                    for key, value in _score_target_components(
-                        query,
-                        cache,
-                        model,
-                        device,
-                        image_indices[top],
-                        fine_batch_size,
-                        pooling,
-                        context_weight,
-                        coverage_weight,
-                        prefetch_batches=prefetch_batches,
-                    ).items()
-                }
+                evidence = _score_target_components(
+                    query,
+                    cache,
+                    model,
+                    device,
+                    image_indices[top],
+                    fine_batch_size,
+                    pooling,
+                    context_weight,
+                    coverage_weight,
+                    prefetch_batches=prefetch_batches,
+                    return_cpu=True,
+                )
                 timings["fine_scoring"] += perf_counter() - stage
                 stage = perf_counter()
                 raw = {
@@ -892,27 +911,16 @@ def mine_hard_negatives(
     pools = {}
 
     with evaluating(model, text_encoder):
-        gallery_identity = _encode_gallery_identity(
+        gallery_identity, gallery_state = _encode_gallery(
             cache,
             model,
             device,
             settings["identity_batch_size"],
             image_indices,
+            state=need_state,
+            budget_mib=settings["gpu_cache_mib"],
         )
-        gallery_state = (
-            _encode_gallery_state(
-                cache,
-                model,
-                device,
-                settings["identity_batch_size"],
-                image_indices,
-            )
-            if need_state
-            else None
-        )
-        gallery_identity, gallery_state = _cache_gallery_on_device(
-            gallery_identity, gallery_state, device, settings["gpu_cache_mib"]
-        )
+        binding_scale = model.binding_scale.item()
         progress = tqdm(total=len(samples), desc="mine train negatives")
         for sample_group in subject_groups.values():
             for start in range(0, len(sample_group), query_batch_size):
@@ -978,6 +986,13 @@ def mine_hard_negatives(
                             query_state @ gallery_state[j:stop].to(device).T
                         )
 
+                host_coarse = cpu_tensors(
+                    {
+                        "identity": identity,
+                        **({"state": state} if state is not None else {}),
+                    }
+                )
+                identity, state = host_coarse["identity"], host_coarse.get("state")
                 for n, row in enumerate(rows):
                     query_index = gallery_by_id[row["query_image_id"]]
                     scores = combine_scores(
@@ -992,13 +1007,12 @@ def mine_hard_negatives(
                     if not identity_rejection:
                         pools[sample_id]["coarse"] = [
                             gallery_ids[index]
-                            for index in order[:limit].cpu().tolist()
+                            for index in order[:limit].tolist()
                             if gallery_ids[index] not in forbidden[sample_id]
                         ][:pool_size]
                     if not fine_mining:
                         continue
                     # Build the bounded union in coarse order for stable ties.
-                    scores, order = scores.cpu(), order.cpu()
                     eligible = (
                         torch.tensor(
                             [i not in forbidden[sample_id] for i in gallery_ids]
@@ -1034,12 +1048,13 @@ def mine_hard_negatives(
                         settings["coverage_weight"],
                         compute_context=False,
                         prefetch_batches=settings["prefetch_batches"],
+                        return_cpu=True,
                     )
                     fine = fine_score_components(
-                        components[f"binding_{settings['pooling']}"].cpu(),
-                        components["context"].cpu(),
-                        components["coverage"].cpu(),
-                        model.binding_scale.item(),
+                        components[f"binding_{settings['pooling']}"],
+                        components["context"],
+                        components["coverage"],
+                        binding_scale,
                         settings["fine_score_mode"],
                         settings["context_weight"],
                         settings["coverage_weight"],
@@ -1050,7 +1065,7 @@ def mine_hard_negatives(
                         settings["fine_coarse_weight"],
                     )
                     ranked = fused.argsort(descending=True, stable=True)
-                    covered = components["coverage"].cpu() > 0
+                    covered = components["coverage"] > 0
                     for name, membership in negative_groups.items():
                         keep = covered & membership[shortlist]
                         pools[sample_id][name] = [

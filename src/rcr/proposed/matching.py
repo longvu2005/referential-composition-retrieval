@@ -80,6 +80,8 @@ def unique_box_mask(
         return mask.bool().clone()
     if boxes.shape != (*mask.shape, 4):
         raise ValueError("boxes must have shape [B,K,4] matching the person mask")
+    if mask.shape[1] <= 1:
+        return mask.bool().clone()
     values = [boxes.detach().float(), mask[..., None].float()]
     if priority is not None:
         values.append(priority.detach()[..., None].float())
@@ -145,6 +147,7 @@ class PersonMatching:
     subject_coverage: Tensor  # [B,S], missing query Subject also has coverage zero
     coverage: Tensor  # [B], mean coverage over active Subjects
     indices_cpu: Tensor | None = None  # Reuse the assignment workspace for CPU gathers.
+    context_flags_cpu: Tensor | None = None
 
     @property
     def matched(self) -> Tensor:
@@ -162,6 +165,7 @@ def partial_identity_matching(
     *,
     identity_threshold: float = 0.2,
     duplicate_iou: float = 0.9,
+    context_flags: Tensor | None = None,
 ) -> PersonMatching:
     """Globally maximize confidence-weighted identity utility with private nulls.
 
@@ -181,8 +185,11 @@ def partial_identity_matching(
     weights = weights * F.one_hot(owner, s).permute(0, 2, 1)
     per_subject = weights / weights.sum(-1, keepdim=True).clamp_min(1e-6)
     importance = per_subject.sum(1)
-    indices = torch.full((b, q), -1, device=membership.device, dtype=torch.long)
-    indices_cpu = torch.full((b, q), -1, dtype=torch.long)
+    if context_flags is not None and (
+        context_flags.ndim != 2 or len(context_flags) != b
+    ):
+        raise ValueError("context flags must be a [batch,tokens] matrix")
+    context_flags_cpu = None
     valid = (
         torch.ones(b, t, device=membership.device, dtype=torch.bool)
         if target_mask is None
@@ -199,20 +206,29 @@ def partial_identity_matching(
         )
         # Assignment and box suppression share one device-to-host transfer.
         parts = [similarity.float().flatten(1), importance, confidence, valid.float()]
-        deduplicate = target_boxes is not None and duplicate_iou != 1
+        deduplicate = target_boxes is not None and duplicate_iou != 1 and t > 1
         if deduplicate:
             parts.append(target_boxes.detach().float().flatten(1))
+        if context_flags is not None:
+            parts.append(context_flags.detach().float())
         packed = torch.cat(parts, dim=1).cpu().numpy()
         boundaries = np.cumsum([q * t, q, q, t])
-        similarity_cpu, priority_cpu, confidence_cpu, valid_cpu, boxes_cpu = np.split(
-            packed, boundaries, axis=1
+        similarity_cpu, priority_cpu, confidence_cpu, valid_cpu, auxiliary_cpu = (
+            np.split(packed, boundaries, axis=1)
         )
+        geometry_width = 4 * t if deduplicate else 0
+        if context_flags is not None:
+            context_flags_cpu = torch.from_numpy(
+                auxiliary_cpu[:, geometry_width:]
+            ).bool()
         similarity_cpu = similarity_cpu.reshape(b, q, t)
         selected_cpu = confidence_cpu > 0
         valid_cpu = valid_cpu.astype(bool)
         if deduplicate:
             valid_cpu = _unique_boxes(
-                boxes_cpu.reshape(b, t, 4), valid_cpu, duplicate_iou
+                auxiliary_cpu[:, :geometry_width].reshape(b, t, 4),
+                valid_cpu,
+                duplicate_iou,
             )
         assigned = np.full((b, q), -1, dtype=np.int64)
         for n in range(b):
@@ -234,7 +250,9 @@ def partial_identity_matching(
             real = column < len(columns)
             assigned[n, rows[row[real]]] = columns[column[real]]
         indices_cpu = torch.from_numpy(assigned)
-        indices = indices_cpu.to(membership.device, non_blocking=True)
+    else:
+        indices_cpu = torch.full((b, q), -1, dtype=torch.long)
+    indices = indices_cpu.to(membership.device, non_blocking=True)
     matched = indices >= 0
     subject_coverage = (per_subject * matched[:, None]).sum(-1).clamp(0, 1)
     coverage = subject_coverage.masked_fill(~active, 0).sum(-1) / active.sum(
@@ -242,7 +260,13 @@ def partial_identity_matching(
     ).clamp_min(1)
     coverage = coverage.clamp(0, 1)
     return PersonMatching(
-        indices, weights, active, subject_coverage, coverage, indices_cpu
+        indices,
+        weights,
+        active,
+        subject_coverage,
+        coverage,
+        indices_cpu,
+        context_flags_cpu,
     )
 
 
