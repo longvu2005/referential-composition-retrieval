@@ -73,6 +73,29 @@ def test_bulk_supervision_preserves_member_labels_and_vocabulary_order(empty):
         assert vocabulary == {"B": 0, "A": 1, "C": 2, "D": 3}
 
 
+@pytest.mark.parametrize("people", [(0, 1), (1, 0), (1, 1)])
+@pytest.mark.parametrize("positive", [False, True])
+def test_matching_loss_returns_differentiable_zero_without_valid_pairs(
+    people, positive
+):
+    query_people, target_people = people
+    query = torch.randn(1, query_people, 4, requires_grad=True)
+    target = torch.randn(1, 2, target_people, 4, requires_grad=True)
+    batch = {
+        "positive_mask": torch.tensor([[positive, False]]),
+        "grounding_targets": torch.ones(1, 1, query_people),
+        "query_identity_labels": torch.zeros(1, query_people, dtype=torch.long),
+        "query_person_mask": torch.ones(1, query_people, dtype=torch.bool),
+        "target_identity_labels": torch.zeros(1, 2, target_people, dtype=torch.long),
+        "target_mask": torch.ones(1, 2, target_people, dtype=torch.bool),
+    }
+    value, active = losses.matching_loss(query, target, batch, max_positives=1)
+    assert value == active == 0
+    value.backward()
+    torch.testing.assert_close(query.grad, torch.zeros_like(query))
+    torch.testing.assert_close(target.grad, torch.zeros_like(target))
+
+
 @pytest.mark.parametrize("warmup", [0, 1])
 def test_training_warmup_and_validation_selected_checkpoint(
     tiny_training_run, monkeypatch, warmup
@@ -100,6 +123,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     def observe(model, batch, *args, **settings):
         weights.append(settings)
         native_tokens.append("fafa_targets" in batch)
+        assert settings["matching_max_positives"] == 1
         assert batch["grounding_targets"].flatten().tolist() == [1.0, 0.0]
         return compute(model, batch, *args, **settings)
 
@@ -108,6 +132,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     expected = [0.0 if epoch <= warmup else 1.0 for epoch in range(1, 4)]
     assert [row["context_weight"] for row in weights] == expected
     assert native_tokens == [bool(value) for value in expected]
+    assert all(row["matching_weight"] == 0.1 for row in weights)
     assert all(row["context_score_weight"] == 0.23 for row in weights)
     assert all(row["coverage_score_weight"] == 0.04 for row in weights)
     assert [row["context_swap_weight"] for row in weights] == [
@@ -121,6 +146,10 @@ def test_training_warmup_and_validation_selected_checkpoint(
         "warmup" if value == 0 else "joint" for value in expected
     ]
     assert all("train_context_fda_error" in row for row in history)
+    assert all(
+        row["train_matching"] == row["train_matching_active_fraction"] == 0
+        for row in history
+    )
     assert all("val_checkpoint_score" not in row for row in history[:warmup])
     best = max(
         (row for row in history if "val_checkpoint_score" in row),
@@ -318,6 +347,7 @@ def test_training_enables_identity_crop_mining_after_warmup(
     cfg["retrieval"]["coarse_beta"] = 0  # This fixture has no same-ID state pair.
     cfg["train"]["sampling"].update(warmup_epochs=1, hard_fraction=0)
     cfg["train"]["identity_sampling"].update(max_crops=4, hard_negative_fraction=0.5)
+    background = cfg["model"]["fine_matching"]["background_logit"]
     data = training.load_rcr_data(None)
     data.gt_head_boxes_by_image["n"][0]["identity_id"] = "p2"
     build, evaluate = training.build_batch, training._evaluate
@@ -335,9 +365,9 @@ def test_training_enables_identity_crop_mining_after_warmup(
     monkeypatch.setattr(training, "_evaluate", observe_evaluate)
     checkpoint = training.train(cfg)
     assert mining == [False, True]
-    assert backgrounds == [-3.5, -3.5]
+    assert backgrounds == [background, background]
     saved = torch.load(checkpoint, weights_only=True)
-    assert saved["config"]["model"]["fine_matching"]["background_logit"] == -3.5
+    assert saved["config"]["model"]["fine_matching"]["background_logit"] == background
     history = [
         json.loads(line)
         for line in (checkpoint.parent / "history.jsonl").read_text().splitlines()

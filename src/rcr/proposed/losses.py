@@ -1,4 +1,4 @@
-"""Train grounding, crop identity, coarse identity, context and global state."""
+"""Train grounding, crop identity, person matching, coarse, context and state."""
 
 import math
 
@@ -26,6 +26,7 @@ def loss_settings(config: dict) -> dict:
     defaults = {
         "grounding_weight": 1.0,
         "identity_weight": 0.1,
+        "matching_weight": 0.0,
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_rejection_weight": 0.0,
@@ -34,6 +35,7 @@ def loss_settings(config: dict) -> dict:
         "context_temperature": 0.1,
         "state_weight": 1.0,
         "identity_temperature": 0.1,
+        "matching_temperature": 0.1,
         "coarse_temperature": 0.1,
         "state_temperature": 0.1,
     }
@@ -110,6 +112,71 @@ def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
         log_probability.masked_fill(~positive, 0).sum(1) / counts.clamp_min(1)
     )
     return per_anchor.masked_fill(~valid, 0).sum() / valid.sum().clamp_min(1)
+
+
+def matching_loss(
+    query_identity: Tensor,
+    target_identity: Tensor,
+    batch: dict,
+    temperature: float = 0.1,
+    *,
+    max_positives: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Rank crop correspondences within each Full Positive using GT anchors.
+
+    Average valid images per anchor, anchors per query, then supervised queries.
+    The second result is the fraction of queries with at least one valid anchor.
+    """
+    positive = batch["positive_mask"]
+    target_labels = batch["target_identity_labels"]
+    target_mask = batch["target_mask"]
+    if max_positives is not None and max_positives < positive.shape[1]:
+        # Select before masking labels. Zero scores mark unused slots.
+        selected, columns = positive.float().topk(max_positives, sorted=False)
+        rows = torch.arange(len(positive), device=positive.device)[:, None]
+        target_identity = target_identity[rows, columns]
+        target_labels = target_labels[rows, columns]
+        target_mask = target_mask[rows, columns]
+        positive = selected.bool()
+    if not target_labels.numel() or not query_identity.shape[1]:
+        # Empty slices link both embeddings to zero even if ignored data is NaN.
+        zero = query_identity[:, :0].sum(dtype=torch.float32)
+        zero = zero + target_identity[:, :, :0].sum(dtype=torch.float32)
+        return zero, zero.detach()
+
+    members = batch["grounding_targets"].bool()
+    if "subject_mask" in batch:
+        members = members & batch["subject_mask"][..., None]
+    query_labels = batch["query_identity_labels"]
+    requested = members.any(1) & batch["query_person_mask"]
+    known = (target_labels >= 0) & target_mask & positive[..., None]
+    keys = known[:, None]
+    correct = (query_labels[:, :, None, None] == target_labels[:, None]) & keys
+    valid = requested[..., None] & correct.any(-1) & (keys & ~correct).any(-1)
+    active = valid.any(-1)
+    valid_crops = known & valid.any(1)[..., None]
+
+    with torch.autocast(query_identity.device.type, enabled=False):
+        query = F.normalize(
+            query_identity.float().masked_fill(~active[..., None], 0), dim=-1
+        )
+        target = F.normalize(
+            target_identity.float().masked_fill(~valid_crops[..., None], 0), dim=-1
+        )
+        cosine = query.bmm(target.flatten(1, 2).transpose(1, 2))
+        logits = cosine.unflatten(-1, target_labels.shape[1:]) / temperature
+        logits.masked_fill_(~keys, -torch.inf)
+        # Use a finite row for invalid anchors so both reductions have a
+        # finite backward even when the image contains zero labeled people.
+        logits.masked_fill_(~valid[..., None], 0)
+        log_probs = logits.log_softmax(-1)
+        log_correct = log_probs.masked_fill(valid[..., None] & ~correct, -torch.inf)
+        per_image = -log_correct.logsumexp(-1).masked_fill(~valid, 0)
+
+    per_person = per_image.sum(-1) / valid.sum(-1).clamp_min(1)
+    per_query = per_person.sum(1) / active.sum(1).clamp_min(1)
+    supervised = active.any(1).sum()
+    return per_query.sum() / supervised.clamp_min(1), supervised.float() / len(active)
 
 
 @checked
@@ -428,6 +495,9 @@ def compute_loss(
     identity_temperature: float,
     coarse_temperature: float,
     state_temperature: float,
+    matching_weight: float = 0.0,
+    matching_temperature: float = 0.1,
+    matching_max_positives: int | None = None,
     context_rejection_weight: float = 0.0,
     rejection_loss_mode: str = "softplus",
     context_swap_weight: float = 0.0,
@@ -481,12 +551,13 @@ def compute_loss(
         "every Full Positive must also be an identity positive",
     )
     zero = query_identity.new_zeros(())
-    ground, identity, coarse, context, state = [zero] * 5
+    ground, identity, matching, coarse, context, state = [zero] * 6
     semantic = rejection = swap = zero
+    matching_active = zero.detach()
     context_active = rejection_active = swap_active = fda_error = zero.detach()
     hard_count = random_count = 0
     target_identity = None
-    if identity_weight or coarse_weight:
+    if identity_weight or coarse_weight or matching_weight:
         persons = batch["target_persons"]
         if "target_layout" in batch:
             positions = batch["target_layout"]["positions"].to(
@@ -583,6 +654,15 @@ def compute_loss(
             torch.cat(features),
             torch.cat(labels).to(query_identity.device, non_blocking=True),
             identity_temperature,
+        )
+
+    if matching_weight:
+        matching, matching_active = matching_loss(
+            query_identity,
+            target_identity,
+            batch,
+            matching_temperature,
+            max_positives=matching_max_positives,
         )
 
     if coarse_weight:
@@ -701,6 +781,7 @@ def compute_loss(
     total = (
         grounding_weight * ground
         + identity_weight * identity
+        + matching_weight * matching
         + coarse_weight * coarse
         + context_weight * context
         + state_weight * state
@@ -708,6 +789,8 @@ def compute_loss(
     return total, {
         "grounding": ground.detach(),
         "identity": identity.detach(),
+        "matching": matching.detach(),
+        "matching_active_fraction": matching_active.detach(),
         "coarse": coarse.detach(),
         "context": context.detach(),
         "context_semantic": semantic.detach(),

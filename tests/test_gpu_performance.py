@@ -416,6 +416,144 @@ def test_rejection_hinge_keeps_fixed_shapes_and_defers_device_checks(device, dty
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("amp", [False, True])
+def test_matching_loss_matches_per_person_reference(device, amp):
+    # Query 0 has two requested people and two Full Positives. The first
+    # person is matched in both images, the second only in image 0.
+    positive = torch.tensor([[1, 1, 0], [0, 1, 0], [1, 1, 0]], dtype=torch.bool)
+    batch = {
+        "positive_mask": positive,
+        "query_identity_labels": torch.tensor([[0, 1, 2], [3, 4, -1], [5, 6, -1]]),
+        "grounding_targets": torch.tensor(
+            [[[1, 1, 0], [0, 0, 1]], [[1, 0, 0], [0, 1, 0]], [[1, 0, 0], [0, 1, 0]]]
+        ),
+        "subject_mask": torch.tensor([[1, 0], [1, 1], [1, 1]], dtype=torch.bool),
+        "query_person_mask": torch.tensor(
+            [[1, 1, 1], [1, 0, 1], [1, 0, 0]], dtype=torch.bool
+        ),
+        "target_identity_labels": torch.tensor(
+            [
+                [[1, 0, 0, 2, -1], [0, 2, -1, -1, 1], [0, 1, 2, -1, -1]],
+                [[3, 4, -1, -1, -1], [3, 4, -1, -1, -1], [3, 4, -1, -1, -1]],
+                [[5, 5, -1, -1, -1], [6, 7, -1, -1, -1], [-1, -1, -1, -1, -1]],
+            ]
+        ),
+        "target_mask": torch.ones(3, 3, 5, dtype=torch.bool),
+    }
+    batch["target_mask"][0, 1, 4] = False
+    batch = {key: value.to(device) for key, value in batch.items()}
+    torch.manual_seed(6)
+    query = torch.randn(3, 3, 4, device=device)
+    query[0, 2] = query[1, 1] = query[1, 2] = torch.nan
+    target = torch.randn(3, 3, 5, 4, device=device)
+    usable = (
+        batch["positive_mask"][..., None]
+        & batch["target_mask"]
+        & (batch["target_identity_labels"] >= 0)
+    )
+    target = target.masked_fill(~usable[..., None], torch.nan)
+    query.requires_grad_()
+    target.requires_grad_()
+    temperature = 0.18
+    dtype = torch.float16 if device == "cuda" else torch.bfloat16
+    with torch.autocast(device, dtype=dtype, enabled=amp), TransferAudit() as audit:
+        actual, active = losses.matching_loss(
+            query, target, batch, temperature, max_positives=2
+        )
+    assert actual.dtype == torch.float32
+    assert all(
+        audit.counts[key] == 0
+        for key in (
+            "cuda_to_cpu",
+            f"{device}_scalar_reads",
+            f"{device}_dynamic_shapes",
+            f"{device}_boolean_index",
+        )
+    )
+
+    def per_image(q, person, candidate, width, correct):
+        logits = (
+            torch.nn.functional.cosine_similarity(
+                query[q, person], target[q, candidate, :width], dim=-1
+            )
+            / temperature
+        )
+        return logits.logsumexp(0) - logits[correct].logsumexp(0)
+
+    first = (per_image(0, 0, 0, 4, [1, 2]) + per_image(0, 0, 1, 2, [0])) / 2
+    second = per_image(0, 1, 0, 4, [0])
+    expected = ((first + second) / 2 + per_image(1, 0, 1, 2, [0])) / 2
+    dense, dense_active = losses.matching_loss(query, target, batch, temperature)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(dense, expected)
+    torch.testing.assert_close(active, active.new_tensor(2 / 3))
+    torch.testing.assert_close(active, dense_active)
+    expected_grad = torch.autograd.grad(expected, (query, target))
+    for value in (actual, dense):
+        torch.testing.assert_close(
+            torch.autograd.grad(value, (query, target)), expected_grad
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_matching_loss_reuses_identity_embeddings_and_reads_current_mask(device):
+    cache = TinyCache()
+    cache.persons = torch.cat((cache.persons, cache.persons.roll(1, 0)), dim=1)
+    cache.mask = cache.mask.expand(-1, 2)
+    cache.boxes = cache.boxes.expand(-1, 2, -1)
+    batch = build_batch(
+        [_sample("train", "q", "a")],
+        [["n", "a"]],
+        cache,
+        Tokenizer(),
+        TextEncoder(TextBackbone(), dim=8).to(device),
+        device,
+        supervision=SimpleNamespace(
+            load_ids=lambda ids, width: [["p1", "p2"][:width] for _ in ids]
+        ),
+        identity_image_ids=[{"a", "n"}],
+        load_target_context=False,
+        pack_target_persons=True,
+    )
+    batch["target_persons"].requires_grad_()
+    batch["query_persons"].requires_grad_()
+    model = RCRModel(dim=8, identity_dim=6, num_heads=2, state_dim=4).to(device)
+    coarse = _only_loss("coarse")
+    weight = 0.1
+    baseline, baseline_parts = losses.compute_loss(model, batch, (2, 2), **coarse)
+    assert baseline_parts["matching"] == 0
+    projected = []
+    handle = model.identity_head.register_forward_hook(lambda *_: projected.append(1))
+    new, parts = losses.compute_loss(
+        model,
+        batch,
+        (2, 2),
+        matching_max_positives=1,
+        **{**coarse, "matching_weight": weight},
+    )
+    handle.remove()
+    assert len(projected) == 2  # One query and one target projection shared by both.
+    assert parts["matching_active_fraction"] == 1
+    torch.testing.assert_close(new, baseline + weight * parts["matching"])
+
+    # Label the other candidate and move the Full Positive marker.
+    batch["target_identity_labels"][0, 0] = batch["target_identity_labels"][0, 1]
+    batch["positive_mask"].logical_not_()
+    value, parts = losses.compute_loss(
+        model, batch, (2, 2), matching_max_positives=1, **_only_loss("matching")
+    )
+    assert parts["matching_active_fraction"] == 1
+    value.backward()
+    assert model.identity_head.proj.weight.grad.abs().sum() > 0
+    assert model.person_proj[0].weight.grad.abs().sum() > 0
+    assert all(parameter.grad is None for parameter in model.grounding.parameters())
+    assert batch["query_persons"].grad[0, 0].abs().sum() > 0
+    assert batch["query_persons"].grad[0, 1].count_nonzero() == 0
+    assert batch["target_persons"].grad[0, 0].abs().sum() > 0
+    assert batch["target_persons"].grad[0, 1].count_nonzero() == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("identity_weight", [0.0, 0.1])
 @pytest.mark.parametrize("amp", [False, True])
 def test_packed_person_projection_preserves_objective_and_gradients(

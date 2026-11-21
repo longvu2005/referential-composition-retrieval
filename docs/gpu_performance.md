@@ -1,7 +1,7 @@
-Training prepares a bounded batch ahead of the current step, transfers frozen
-features in their stored precision, and runs the original loss and matching
-rules. The input path avoids transferring padded/unused evidence. The aligned
-CLS reasoner and its checkpoint version are described in the
+Training prepares a bounded batch ahead of the current step and transfers
+frozen features in their stored precision. The input path avoids transferring
+padded or unused evidence. The losses, aligned CLS reasoner and checkpoint
+version are described in the
 [method guide](proposed_method.md).
 
 The supplied configuration enables these settings:
@@ -39,8 +39,8 @@ Training uses the following input path:
    payloads retain their stored precision and bounded buffers. Consumer stream
    lifetimes are recorded once per shared allocation.
 4. CPU layout metadata provides eligible pair positions and useful person widths,
-   avoiding GPU-to-CPU reads of invariant masks. Assignment remains detached and
-   runs once per chunk in its NumPy/SciPy workspace.
+   avoiding GPU-to-CPU reads of invariant masks. Assignment for context scoring
+   runs once per chunk in its detached NumPy/SciPy workspace.
 5. Native FAFA tokens are gathered using the CPU assignment already computed by
    matching. Only assigned token rows and their positions cross PCIe; null rows
    and person padding are reconstructed on the device before FP32 FDA scoring.
@@ -125,6 +125,7 @@ CPU/GPU boundaries are intentional and bounded as follows:
 | --- | --- |
 | Query box suppression | One packed predicted confidence/geometry read for the CPU suppression workspace; zero/one-person tensors skip suppression/readback. |
 | Identity crop mining | Known annotation positions stay on CPU; only the model-dependent hardness vector is read when hard mining is active. |
+| Person correspondence loss | Selects candidate labels, masks and shared embeddings up to the sampler's limit before masking and scoring. FP32 logits are masked in place before reduction. |
 | Fine matching | One packed similarity/mask/geometry read per chunk for exact SciPy assignment; context/swap flags share that read. CPU assignments also drive native-token gathers. |
 | Train checks and metrics | One FP32 packet per step, validated before backward or optimizer updates. Nested losses add device predicates without Python truth-value checks. |
 | Gradient logging | Model/text norms share one read at the configured log interval. AMP optimizer overflow checks retain their framework behavior. |
@@ -155,14 +156,12 @@ Packing can change floating-point accumulation through different GEMM shapes;
 old and new training trajectories are not promised bitwise identical. Serial and
 prefetched execution use the same numerical path and are tested against each other.
 
-The current synchronization/input changes preserve aligned CLS v4 inference
-weights and compatible frozen caches. Training resume also binds the source
-hash; retain the original implementation for an existing run, or use a new
-output directory with the updated training implementation:
+Exact training resume uses the source and configuration captured for the
+original run. Start updated training in a clean workspace with compatible
+frozen caches and a fresh `runs/proposed` directory.
 
 ```bash
-.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set output.dir=runs/proposed-gpu-optimized
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml
 ```
 
 For an RTX 5060, first check the exact Python/CUDA runtime. NVIDIA lists the
@@ -213,13 +212,14 @@ Measure the actual joint-training kernels on the CUDA machine:
   --output-dir runs/gpu-profile
 ```
 
-This runs the production model, joint loss, packed target identity projection,
-matching, assigned-token transfer, activation checkpointing and optimizer on
-synthetic frozen features. Warmup is excluded from timings. `profile.json`
-records synchronized step times, throughput, transferred native person rows,
-AMP scaler state and peak VRAM. With `--trace`, `transfer_audit` also counts
-explicit transfer calls/source bytes, scalar reads and dynamic-shape operations
-by device. The optional `trace.json` is collected after the timing loop so audit
+This runs the production model, joint loss with a bounded Full Positive selection,
+target identity projection, fine matching, assigned-token transfer,
+activation checkpointing and optimizer on synthetic frozen features.
+`profile.json` records synchronized step times after profiling warmup,
+throughput, the matching loss weight and candidate width, transferred native
+person rows, AMP scaler state and peak VRAM. With `--trace`, `transfer_audit`
+counts explicit transfer calls/source bytes, scalar reads and dynamic-shape
+operations by device. The optional `trace.json` is collected after the timing loop so audit
 and tracing overhead do not enter reported throughput. The audit runs in a
 separate extra step so dispatch instrumentation cannot duplicate trace events.
 CUDA runtime/internal
@@ -255,7 +255,8 @@ expected. Further changes to assignment, precision, compilation or batch sizes
 should be guided by a trace on the actual RTX 5060 rather than utilization alone.
 
 Regression coverage includes grouped checks/error propagation, fixed-shape
-identity loss and CPU layout invalidation, matching metadata piggybacking,
+identity loss and CPU layout invalidation, correspondence loss and
+gradient parity, matching metadata piggybacking,
 direct gallery residency and coalesced score outputs, packed-vs-dense FDA and all pooling modes, null and
 duplicate assignments, lazy scene reads outside backward, packed identity loss
 and gradients under AMP/FP32, verified direction swaps, bounded prefetch/error

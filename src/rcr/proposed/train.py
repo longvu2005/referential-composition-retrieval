@@ -320,6 +320,7 @@ def _training_config(cfg):
         for key in (
             "grounding_weight",
             "identity_weight",
+            "matching_weight",
             "coarse_weight",
             "state_weight",
         )
@@ -355,6 +356,7 @@ def _train(cfg, output, resumed):
     warmup_epochs = cfg["train"].get("context_warmup_epochs", 0)
     sampling = cfg["train"]["sampling"]
     max_negatives = cfg["train"]["candidates"] - 1
+    matching_max_positives = min(sampling["positives_per_query"], max_negatives)
     semantic_hard = (
         sampling["semantic_hard_fraction"] > 0
         and int(max_negatives * sampling["identity_fraction"]) > 0
@@ -711,6 +713,8 @@ def _train(cfg, output, resumed):
                     "loss",
                     "grounding",
                     "identity",
+                    "matching",
+                    "matching_active_fraction",
                     "coarse",
                     "context",
                     "context_semantic",
@@ -912,6 +916,7 @@ def _train(cfg, output, resumed):
                             model,
                             batch,
                             cache.patch_hw,
+                            matching_max_positives=matching_max_positives,
                             context_batch_size=cfg["train"]["context_batch_size"],
                             context_score_weight=cfg["retrieval"]["context_weight"],
                             coverage_score_weight=cfg["retrieval"]["coverage_weight"],

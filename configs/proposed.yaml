@@ -40,7 +40,7 @@ model:
   mlp_ratio: 2
   geo_dim: 32
   fine_matching:
-    background_logit: -3.5
+    background_logit: -0.5
     selection_threshold: 0.5
     identity_threshold: 0.2
     missing_penalty: 1.1
@@ -80,6 +80,8 @@ loss:
   grounding_weight: 1.0
   identity_weight: 0.1
   identity_temperature: 0.1
+  matching_weight: 0.1
+  matching_temperature: 0.1
   coarse_weight: 1.0
   coarse_temperature: 0.1
   context_weight: 1.0

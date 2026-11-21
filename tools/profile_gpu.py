@@ -84,15 +84,18 @@ def _inputs(cfg, queries, candidates, people, device):
     target[:, :same_count] = (
         query[:, None] + torch.randn_like(target[:, :same_count]) * 0.02
     )
+    positive_count = min(
+        cfg["train"].get("sampling", {}).get("positives_per_query", 2), same_count - 1
+    )
     positive = torch.zeros(queries, candidates, dtype=torch.bool)
-    positive[:, : min(2, same_count - 1)] = True
+    positive[:, :positive_count] = True
     same = torch.zeros_like(positive)
     same[:, :same_count] = True
     hard = torch.zeros_like(positive)
     hard[:, same_count : same_count + max(1, candidates // 10)] = True
     labels = torch.arange(queries * people).reshape(queries, people)
     target_labels = torch.full((queries, candidates, people), -1)
-    target_labels[:, :2] = labels[:, None]
+    target_labels[:, :positive_count] = labels[:, None]
     target_mask = torch.arange(people) < torch.randint(
         1, people + 1, (queries, candidates, 1)
     )
@@ -155,7 +158,7 @@ def _inputs(cfg, queries, candidates, people, device):
         torch.randn(queries, subjects, length, global_dim, device=device),
         torch.randn(queries, length, global_dim, device=device),
     )
-    return batch, source, text
+    return batch, source, text, positive_count
 
 
 def main(argv=None):
@@ -220,7 +223,9 @@ def main(argv=None):
         if hasattr(torch.amp, "GradScaler")
         else torch.cuda.amp.GradScaler(enabled=amp)
     )
-    batch, source, text = _inputs(cfg, queries, candidates, args.people, device)
+    batch, source, text, positive_count = _inputs(
+        cfg, queries, candidates, args.people, device
+    )
     settings = loss_settings({**cfg["loss"], "context_swap_weight": 0.0})
 
     def synchronize():
@@ -238,6 +243,7 @@ def main(argv=None):
                     model,
                     batch,
                     (7, 7),
+                    matching_max_positives=positive_count,
                     context_batch_size=cfg["train"]["context_batch_size"],
                     context_score_weight=cfg["retrieval"]["context_weight"],
                     coverage_score_weight=cfg["retrieval"]["coverage_weight"],
@@ -289,6 +295,10 @@ def main(argv=None):
         "device": str(device),
         "torch": torch.__version__,
         "amp": amp,
+        "matching_weight": settings["matching_weight"],
+        "matching_candidates_per_query": positive_count
+        if settings["matching_weight"]
+        else 0,
         "context_swap_weight": 0.0,
         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "queries": queries,

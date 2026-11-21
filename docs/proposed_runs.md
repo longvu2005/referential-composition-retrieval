@@ -43,19 +43,21 @@ query features for train and validation; retrieval needs the requested split.
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml
 ```
 
-Use a fresh `output.dir` for each experiment. For example:
-
-```bash
-.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set train.seed=1 output.dir=runs/proposed-seed1
-```
+Start training in a workspace with a fresh `runs/proposed` directory for the
+`proposed` experiment.
 
 Training performs scheduled validation, calibrates the configured scoring
 coefficients and saves the best selection. The selection criterion is defined
 in the [benchmark protocol](benchmark_protocol.md).
-The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v4`. Use a
-new run directory and train a new checkpoint; earlier reasoner checkpoints and
-resume states are incompatible. Compatible frozen feature caches are reusable.
+The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v4`.
+Compatible frozen feature caches are reusable.
+
+The supplied configuration adds the person matching loss in every phase with
+`loss.matching_weight=0.1` and `loss.matching_temperature=0.1`. Training history
+records `train_matching` and `train_matching_active_fraction`. Set
+`loss.matching_weight=0.0` for the ablation. Older configurations without the
+key resolve to zero. The resume signature binds the objective and source, so
+start a fresh run to train with updated settings.
 
 With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semantic
 context, and epoch 7 onward also enables mining and rejection at weight `0.5`.

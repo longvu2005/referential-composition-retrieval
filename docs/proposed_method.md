@@ -109,7 +109,32 @@ The match gate is equivalent to `coverage > 0` for this assignment. It uses
 `where`, so all-missing targets return exactly zero. Partial coverage does not
 scale the CLS score: `C=0.5, h_cls=0.8` gives `H=0.8`.
 
-## Objective and ranking
+## Training objectives and ranking
+
+### Matching supervision
+
+The training objective includes a crop correspondence loss on sampled Full
+Positives. For each annotated query crop that belongs to a requested Subject,
+compare the crop with all labeled target crops in the same image. The batch
+contributes this comparison when the target contains a crop of the same ID
+and a crop of a different ID. Unknown and padded crops are masked. Each GROUP
+member contributes using their individual ID.
+
+```text
+s(k,j) = cosine(query_identity[k], target_identity[j]) / matching_temperature
+L_match(k,image) = logsumexp(s(k, labeled_crops)) - logsumexp(s(k, same_id_crops))
+```
+
+The loss sums the predicted probability of all same-ID crops before taking the
+negative log. It averages valid images per query person, then people per
+query, then queries with supervision. The supplied experiment adds
+`0.1 * L_match` to the total loss from epoch 1 with temperature `0.1`.
+Gradients update the shared person projection and identity head that supply
+cosine similarities to Hungarian assignment. Use
+`train_matching_active_fraction` in training history to see the fraction of
+sampled queries with a valid comparison.
+
+### Context and retrieval
 
 The shared linear scorer combines native FAFA binding `B` (with the configured
 pooling), matching coverage `C`, and raw context `H`:
@@ -156,9 +181,7 @@ valid pair, including queries with zero loss. Invalid values are masked before
 score differences. A batch without valid pairs returns a differentiable zero.
 `context_rejection_weight` multiplies the reduced rejection loss.
 Membership, assignment, `B` and `C` are detached in the context loss.
-Gradients through `H` reach the reasoner,
-composition and evidence path. Grounding, identity, coarse and global-state
-losses retain their existing weights and supervision.
+Gradients through `H` reach the reasoner, composition and evidence path.
 
 The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
 weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
@@ -204,12 +227,10 @@ selection unchanged under the [benchmark protocol](benchmark_protocol.md).
 
 ## Configuration and checkpoints
 
-Model and experiment settings live in YAML. Checkpoints record the effective
-model configuration and feature provenance. This architecture is
-`fafa-aligned-pair-cls-v4`: start a fresh run and checkpoint. Weights and resume
-states from the earlier Subject/pair scalar architecture are incompatible.
-Compatible frozen feature caches can be reused. The score-artifact schema is
-unchanged; CPU replay still uses saved raw components without model weights.
-Changing to this reasoner requires fresh retrieval artifacts because `H` has
-changed. Use the [run guide](proposed_runs.md) for execution and the
+Model and experiment settings live in YAML. Checkpoints for
+`fafa-aligned-pair-cls-v4` record the effective training configuration and
+feature provenance. Compatible frozen feature caches can be reused for training
+with matching supervision. Score artifacts record evidence from the checkpoint
+that produced them. Regenerate them to evaluate weights trained with the new
+objective. Use the [run guide](proposed_runs.md) for execution and the
 [cache guide](detection_cache.md) for feature preparation.
