@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 import os
 import random
 import signal
@@ -22,7 +23,12 @@ from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve, sampling
 from rcr.proposed import train as training
 from rcr.proposed.batch import build_batch, build_supervision, prepare_visual_batch
-from rcr.proposed.losses import _context_scores, compute_loss, retrieval_loss
+from rcr.proposed.losses import (
+    _context_scores,
+    compute_loss,
+    rejection_hinge_loss,
+    retrieval_loss,
+)
 from rcr.proposed.nn.encoders import TextEncoder
 from rcr.proposed.resume import capture_rng, restore_rng, training_lock
 from rcr.proposed.sampling import (
@@ -1158,9 +1164,10 @@ def test_partial_sampling_keeps_gt_masks_and_prefetch_mined_provenance(tiny_rank
     assert {sampled.images[0][i] for i in rejected} == {"a", "n", "vq", "vn"}
 
 
+@pytest.mark.parametrize("rejection_loss_mode", ["softplus", "hinge"])
 @pytest.mark.parametrize("variant", ["both", "semantic", "rejection"])
 def test_train_runs_mining_and_validation_after_warmup(
-    tiny_training_run, monkeypatch, variant
+    tiny_training_run, monkeypatch, variant, rejection_loss_mode
 ):
     cfg, cache, wandb, _ = tiny_training_run
     data = training.load_rcr_data(None)
@@ -1185,8 +1192,17 @@ def test_train_runs_mining_and_validation_after_warmup(
         selection_threshold=0.0001, identity_threshold=-1
     )
     rejection_weight = 0.2 if variant != "semantic" else 0
-    cfg["loss"]["context_rejection_weight"] = rejection_weight
+    cfg["loss"].update(
+        context_rejection_weight=rejection_weight,
+        rejection_loss_mode=rejection_loss_mode,
+    )
     mine, observed = training.mine_hard_negatives, []
+    hinge_calls = []
+
+    def observe_hinge(*args, **kwargs):
+        value = rejection_hinge_loss(*args, **kwargs)
+        hinge_calls.append(value.detach())
+        return value
 
     def observe_mining(*args, **kwargs):
         assert set(kwargs["gallery_ids"]) == {"q", "a", "n", "s0", "s1", "s2"}
@@ -1195,12 +1211,16 @@ def test_train_runs_mining_and_validation_after_warmup(
         return result
 
     monkeypatch.setattr(training, "mine_hard_negatives", observe_mining)
+    monkeypatch.setattr(losses, "rejection_hinge_loss", observe_hinge)
     checkpoint = training.train(cfg)
     history = [
         json.loads(s)
         for s in (checkpoint.parent / "history.jsonl").read_text().splitlines()
     ]
     assert len(observed) == 2
+    assert len(hinge_calls) == (
+        2 if rejection_loss_mode == "hinge" and rejection_weight else 0
+    )
     assert all(
         pools["train"].get("identity", []) == (["n"] if rejection_weight else [])
         for pools in observed
@@ -1246,6 +1266,7 @@ def test_train_runs_mining_and_validation_after_warmup(
     saved = torch.load(checkpoint, weights_only=True)
     assert saved["config"]["method"] == "proposed"
     assert saved["config"]["loss"]["context_rejection_weight"] == rejection_weight
+    assert saved["config"]["loss"]["rejection_loss_mode"] == rejection_loss_mode
     assert saved["config"]["retrieval"]["context_weight"] == 0.1
     assert wandb.finished
 
@@ -1267,6 +1288,176 @@ def _encode(model, batch):
         subject_ids=batch.get("subject_ids"),
         fafa_query=batch["fafa_query"],
     )
+
+
+@pytest.mark.parametrize(
+    "delta,residual,temperature,expected",
+    [
+        (0.08, 0.03, 0.1, 0.0),
+        (0.08, 0.11, 0.1, 0.30),
+        (-0.08, -0.03, 0.1, 0.0),
+        (-0.08, 0.03, 0.1, 0.30),
+        (0.0, 0.03, 0.1, 0.30),
+        (0.0, -0.03, 0.1, 0.0),
+        (0.08, 0.11, 0.2, 0.15),
+    ],
+)
+def test_rejection_hinge_values_and_detached_margin(
+    delta, residual, temperature, expected
+):
+    base = torch.tensor([[delta, 0.0]], requires_grad=True)
+    raw_context = torch.tensor([[0.0, residual / 0.1]], requires_grad=True)
+    positive = torch.tensor([[True, False]])
+    value = rejection_hinge_loss(
+        base, 0.1 * raw_context, positive, torch.ones_like(positive), temperature
+    )
+    assert value.item() == pytest.approx(expected, abs=1e-7)
+    value.backward()
+    assert base.grad is None
+    expected_grad = torch.tensor([[-0.1, 0.1]]) / temperature
+    if expected == 0:
+        expected_grad.zero_()
+    torch.testing.assert_close(raw_context.grad, expected_grad)
+
+
+def test_rejection_hinge_reduction_counts_zero_pairs_and_queries_and_masks_nonfinite():
+    positive = torch.tensor(
+        [[1, 1, 0, 0, 0], [1, 0, 0, 0, 0], [0, 0, 1, 0, 0]], dtype=torch.bool
+    )
+    valid = torch.tensor(
+        [[1, 1, 1, 1, 0], [1, 1, 0, 0, 0], [1, 1, 0, 0, 0]], dtype=torch.bool
+    )
+    base = torch.zeros(3, 5).masked_fill(~valid, torch.nan).requires_grad_()
+    context = torch.tensor(
+        [
+            [0.0, 0.2, 0.1, 0.3, torch.nan],
+            [0.2, 0.1, torch.inf, torch.nan, -torch.inf],
+            [10.0, 20.0, torch.nan, torch.inf, -torch.inf],
+        ],
+        requires_grad=True,
+    )
+    value = rejection_hinge_loss(base, context, positive, valid)
+    # Query 0: (1 + 3 + 0 + 1) / 4; query 1: 0; query 2: no valid positive.
+    assert value.item() == pytest.approx(0.625)
+    value.backward()
+    torch.testing.assert_close(
+        context.grad,
+        torch.tensor([[-2.5, -1.25, 1.25, 2.5, 0], [0.0] * 5, [0.0] * 5]),
+    )
+    assert base.grad is None
+
+
+@pytest.mark.parametrize(
+    "positive,valid",
+    [
+        ([True, False, False], [False, False, False]),
+        ([True, True, True], [True, True, True]),
+        ([False, False, False], [True, True, True]),
+        ([True, False, False], [True, False, False]),
+    ],
+)
+def test_rejection_hinge_empty_pairs_backward(positive, valid):
+    valid = torch.tensor([valid])
+    base = torch.zeros(1, 3).masked_fill(~valid, torch.inf).requires_grad_()
+    context = torch.zeros(1, 3).masked_fill(~valid, torch.nan).requires_grad_()
+    value = rejection_hinge_loss(base, context, torch.tensor([positive]), valid)
+    assert value.item() == 0 and value.requires_grad
+    value.backward()
+    torch.testing.assert_close(context.grad, torch.zeros_like(context))
+    assert base.grad is None
+
+
+@pytest.mark.parametrize("mode", ["invalid", "HINGE", "", None, True, 1, []])
+def test_loss_settings_reject_invalid_rejection_modes(mode):
+    with pytest.raises(ValueError, match="loss.rejection_loss_mode"):
+        losses.loss_settings({"rejection_loss_mode": mode})
+
+
+def test_legacy_rejection_mode_matches_explicit_softplus(objective_batch):
+    model, batch = objective_batch
+    batch["hard_identity_negative_mask"][0, 2] = True
+    legacy = {**_only_loss("context"), "context_rejection_weight": 0.5}
+    legacy.pop("rejection_loss_mode")
+    resolved = losses.loss_settings(legacy)
+    explicit = losses.loss_settings({**legacy, "rejection_loss_mode": "softplus"})
+    assert resolved == explicit and resolved["rejection_loss_mode"] == "softplus"
+    reference, reference_parts = compute_loss(model, batch, (2, 2), **explicit)
+    reference_grad = torch.autograd.grad(reference, batch["target_persons"])[0]
+    for settings in (legacy, resolved):
+        value, parts = compute_loss(model, batch, (2, 2), **settings)
+        torch.testing.assert_close(value, reference, rtol=0, atol=0)
+        for key in reference_parts:
+            torch.testing.assert_close(parts[key], reference_parts[key], rtol=0, atol=0)
+        gradient = torch.autograd.grad(value, batch["target_persons"])[0]
+        torch.testing.assert_close(gradient, reference_grad, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("weight,temperature", [(0.1, 0.1), (0.2, 0.15), (0.0, 0.1)])
+@pytest.mark.parametrize("covered", ["both", "positive_only", "hard_only", "unmined"])
+def test_context_hinge_reuses_scores_and_detaches_binding_and_coverage(
+    objective_batch, monkeypatch, weight, temperature, covered
+):
+    model, batch = objective_batch
+    batch["hard_identity_negative_mask"][0, 2] = covered != "unmined"
+    with torch.no_grad():
+        model.binding_log_scale.fill_(math.log(math.expm1(2)))
+    model.binding_log_scale.requires_grad_(True)
+    context = torch.tensor([[0.8, 9.0, 1.9]], requires_grad=True)
+    binding = torch.tensor([[0.02, 9.0, 0.0]], requires_grad=True)
+    coverage = torch.tensor(
+        [
+            [
+                0.0 if covered == "hard_only" else 0.75,
+                0.25,
+                0.0 if covered == "positive_only" else 0.25,
+            ]
+        ],
+        requires_grad=True,
+    )
+    calls = []
+
+    def score(*args, **kwargs):
+        calls.append(kwargs)
+        return context, coverage, binding, torch.full((1, 3, 1), -1)
+
+    monkeypatch.setattr(losses, "_context_scores", score)
+    value, parts = compute_loss(
+        model,
+        batch,
+        (2, 2),
+        **{
+            **_only_loss("context"),
+            "rejection_loss_mode": "hinge",
+            "context_rejection_weight": 0.5,
+            "context_temperature": temperature,
+        },
+        context_score_weight=weight,
+        coverage_score_weight=0.07,
+    )
+    assert len(calls) == 1
+    torch.testing.assert_close(
+        calls[0]["eligible"],
+        batch["identity_positive_mask"] | batch["hard_identity_negative_mask"],
+    )
+    semantic = (
+        torch.nn.functional.softplus(torch.tensor(weight * (9.0 - 0.8) / temperature))
+        if covered != "hard_only"
+        else torch.tensor(0.0)
+    )
+    # D(p)-D(n) = 2*0.02 + 0.07*(0.75-0.25) = 0.075.
+    rejection = max(weight * (1.9 - 0.8) - 0.075, 0) / temperature
+    if covered != "both":
+        rejection = 0.0
+    torch.testing.assert_close(parts["context_semantic"], semantic)
+    assert parts["context_rejection"].item() == pytest.approx(
+        rejection, rel=1e-6, abs=1e-7
+    )
+    torch.testing.assert_close(value, semantic + 0.5 * rejection)
+    value.backward()
+    assert binding.grad is None and coverage.grad is None
+    assert model.binding_log_scale.grad is None
+    assert bool(context.grad[0, 2] > 0) == (rejection > 0)
+    assert torch.isfinite(context.grad).all()
 
 
 @pytest.mark.parametrize("weight,temperature", [(0.1, 0.1), (0.2, 0.15), (0.0, 0.1)])
@@ -1383,8 +1574,9 @@ def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
     assert not binding.requires_grad and not coverage.requires_grad
 
 
+@pytest.mark.parametrize("rejection_loss_mode", ["softplus", "hinge"])
 def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
-    tiny_training_run, monkeypatch
+    tiny_training_run, monkeypatch, rejection_loss_mode
 ):
     cfg, cache, _, _ = tiny_training_run
     data = training.load_rcr_data(None)
@@ -1410,6 +1602,8 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
     cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
     cfg["loss"]["context_rejection_weight"] = 0.5
     cfg["loss"]["context_swap_weight"] = 0.0
+    assert cfg["loss"]["rejection_loss_mode"] == "hinge"
+    cfg["loss"]["rejection_loss_mode"] = rejection_loss_mode
     assert cfg["loss"]["context_swap_weight"] == 0
     assert cfg["retrieval"]["coverage_weight"] == 0.04
     assert cfg["retrieval"]["context_weight"] == 0.1
@@ -1419,6 +1613,7 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
     schedule, mining = [], []
 
     def observe(*args, **settings):
+        assert settings["rejection_loss_mode"] == rejection_loss_mode
         schedule.append(
             (
                 settings["context_weight"],
@@ -2013,17 +2208,23 @@ def test_incompatible_resume_leaves_run_untouched(
 
 
 @pytest.mark.parametrize(
-    "key,value", [("partial_id_quota", 7), ("rejection_mining_context_weight", 0.006)]
+    "section,key,value",
+    [
+        ("sampling", "partial_id_quota", 7),
+        ("sampling", "rejection_mining_context_weight", 0.006),
+        ("loss", "rejection_loss_mode", "softplus"),
+    ],
 )
-def test_changed_sampling_settings_require_a_new_run(
-    tiny_training_run, monkeypatch, key, value
+def test_changed_training_settings_require_a_new_run(
+    tiny_training_run, monkeypatch, section, key, value
 ):
     cfg, _, _, _ = tiny_training_run
     cfg["train"]["epochs"] = 2
     _pause(cfg, monkeypatch)
     path = Path(cfg["output"]["dir"]) / "last.pt"
     digest = sha256_file(path)
-    cfg["train"]["sampling"][key] = value
+    settings = cfg["loss"] if section == "loss" else cfg["train"]["sampling"]
+    settings[key] = value
     with pytest.raises(ValueError, match="config"):
         training.train(cfg, resume="auto")
     assert sha256_file(path) == digest

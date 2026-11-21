@@ -332,10 +332,13 @@ def test_packed_native_transfer_matches_dense_fda_and_skips_null_images(
     assert sum(t.numel() * t.element_size() for t in prepared.values()) <= 90
 
 
+@pytest.mark.parametrize("rejection", ["disabled", "softplus", "hinge"])
 def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(
-    objective_batch, monkeypatch
+    objective_batch, monkeypatch, rejection
 ):
     model, batch = objective_batch
+    enabled = rejection != "disabled"
+    batch["hard_identity_negative_mask"][0, 2] = enabled
     reference = deepcopy(model)
     expected_batch = deepcopy(batch)
     scene = batch["target_scene"].flatten(0, 1)
@@ -360,10 +363,15 @@ def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(
     batch["fafa_targets"] = NativeTargetBatch(cache, images)
     batch["context_layout"] = {
         "identity_rows": torch.tensor([0, 1]),
-        "rejection_rows": torch.tensor([0, 1]),
+        "rejection_rows": torch.tensor([0, 1, 2] if enabled else [0, 1]),
         "widths": torch.ones(3, dtype=torch.long),
     }
-    settings = losses.loss_settings({})
+    settings = losses.loss_settings(
+        {
+            "context_rejection_weight": 0.5 if enabled else 0.0,
+            "rejection_loss_mode": rejection if enabled else "softplus",
+        }
+    )
     expected, _ = losses.compute_loss(reference, expected_batch, (2, 2), **settings)
     actual, _ = losses.compute_loss(
         model, batch, (2, 2), context_batch_size=1, **settings
@@ -371,13 +379,40 @@ def test_lazy_scenes_load_only_eligible_pairs_once_outside_checkpoint(
     expected.backward()
     actual.backward()
     assert (
-        scene_reads == native_reads == [1, 2]
+        scene_reads == native_reads == ([1, 2, 4] if enabled else [1, 2])
     )  # No cache I/O is repeated in backward.
     torch.testing.assert_close(actual, expected)
     for parameter, other in zip(
         model.parameters(), reference.parameters(), strict=True
     ):
         torch.testing.assert_close(parameter.grad, other.grad, rtol=3e-4, atol=2e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_rejection_hinge_keeps_fixed_shapes_and_defers_device_checks(device, dtype):
+    base = torch.tensor(
+        [[0.08, 0.0, torch.nan]], device=device, dtype=dtype, requires_grad=True
+    )
+    context = torch.tensor(
+        [[0.0, 0.11, torch.nan]], device=device, dtype=dtype, requires_grad=True
+    )
+    positive = torch.tensor([[True, False, False]], device=device)
+    valid = torch.tensor([[True, True, False]], device=device)
+    with TensorChecks(), TransferAudit() as audit:
+        value = losses.rejection_hinge_loss(base, context, positive, valid)
+        value.backward()
+    assert value.dtype == torch.float32
+    torch.testing.assert_close(value, value.new_tensor(0.3), rtol=2e-3, atol=1e-5)
+    torch.testing.assert_close(context.grad, context.new_tensor([[-10.0, 10.0, 0.0]]))
+    assert base.grad is None
+    assert (
+        audit.counts[f"{device}_scalar_reads"]
+        == audit.counts[f"{device}_dynamic_shapes"]
+        == audit.counts[f"{device}_boolean_index"]
+        == audit.counts["cuda_to_cpu"]
+        == 0
+    )
 
 
 @pytest.mark.parametrize("device", DEVICES)

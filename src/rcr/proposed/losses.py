@@ -29,6 +29,7 @@ def loss_settings(config: dict) -> dict:
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_rejection_weight": 0.0,
+        "rejection_loss_mode": "softplus",
         "context_swap_weight": 0.0,
         "context_temperature": 0.1,
         "state_weight": 1.0,
@@ -40,6 +41,10 @@ def loss_settings(config: dict) -> dict:
         raise ValueError(f"unknown loss settings: {', '.join(sorted(unknown))}")
     settings = {**defaults, **config}
     for key, value in settings.items():
+        if key == "rejection_loss_mode":
+            if type(value) is not str or value not in ("softplus", "hinge"):
+                raise ValueError("loss.rejection_loss_mode must be softplus or hinge")
+            continue
         if (
             type(value) not in (int, float)
             or not math.isfinite(value)
@@ -128,6 +133,37 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
     pairs = positive[:, :, None] & (valid & ~positive)[:, None]
     difference = scores[:, None, :] - scores[:, :, None]
     pair_loss = F.softplus(difference).masked_fill(~pairs, 0)
+    counts = pairs.sum((1, 2))
+    per_query = pair_loss.sum((1, 2)) / counts.clamp_min(1)
+    return per_query.sum() / (counts > 0).sum().clamp_min(1)
+
+
+@checked
+def rejection_hinge_loss(
+    base_scores: Tensor,
+    context_contribution: Tensor,
+    positive: Tensor,
+    valid_mask: Tensor,
+    temperature: float = 0.1,
+) -> Tensor:
+    """Penalize context only when it worsens a Full Positive/wrong-ID ordering.
+
+    ``base_scores`` is binding_scale * B + a_train * C; its entire margin is
+    detached. ``context_contribution`` already includes b_train. Valid pairs,
+    including zero hinges, use the same per-query reduction as retrieval_loss.
+    """
+    valid = valid_mask.bool()
+    base = base_scores.detach().float().masked_fill(~valid, 0)
+    context = context_contribution.float().masked_fill(~valid, 0)
+    check_tensor(
+        torch.isfinite(base).all() & torch.isfinite(context).all(),
+        "rejection hinge requires finite eligible scores",
+    )
+    positive = positive.bool() & valid
+    pairs = positive[:, :, None] & (valid & ~positive)[:, None]
+    margin = (base[:, :, None] - base[:, None, :]).clamp_min(0)
+    residual = context[:, None, :] - context[:, :, None]
+    pair_loss = F.relu(residual - margin).masked_fill(~pairs, 0) / temperature
     counts = pairs.sum((1, 2))
     per_query = pair_loss.sum((1, 2)) / counts.clamp_min(1)
     return per_query.sum() / (counts > 0).sum().clamp_min(1)
@@ -393,6 +429,7 @@ def compute_loss(
     coarse_temperature: float,
     state_temperature: float,
     context_rejection_weight: float = 0.0,
+    rejection_loss_mode: str = "softplus",
     context_swap_weight: float = 0.0,
     context_temperature: float = 0.1,
     context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
@@ -594,11 +631,12 @@ def compute_loss(
                 else None
             ),
         )
+        binding_scale = model.binding_scale
         scores = linear_score_components(
             binding,
             raw_context,
             coverage,
-            model.binding_scale,
+            binding_scale,
             context_score_weight,
             coverage_score_weight,
         )
@@ -618,9 +656,27 @@ def compute_loss(
                 "rejection negatives must lack required identities",
             )
             rejection_valid = (positive | hard) & (coverage > 0)
-            rejection = retrieval_loss(
-                scores["fine_scores"] / context_temperature, positive, rejection_valid
-            )
+            if rejection_loss_mode == "softplus":
+                rejection = retrieval_loss(
+                    scores["fine_scores"] / context_temperature,
+                    positive,
+                    rejection_valid,
+                )
+            elif rejection_loss_mode == "hinge":
+                with torch.no_grad():
+                    base = (
+                        binding_scale.float() * binding.float()
+                        + scores["coverage_bonus"]
+                    )
+                rejection = rejection_hinge_loss(
+                    base,
+                    scores["context_contribution"],
+                    positive,
+                    rejection_valid,
+                    context_temperature,
+                )
+            else:
+                raise ValueError("loss.rejection_loss_mode must be softplus or hinge")
             rejection_active = (
                 ((positive & rejection_valid).any(1) & (hard & rejection_valid).any(1))
                 .float()

@@ -118,23 +118,53 @@ pooling), matching coverage `C`, and raw context `H`:
 F = model.binding_scale * B + a_train * C + b_train * H
 
 L_sem = retrieval_loss(b_train * H / tau_c, P, I & (C > 0))
-L_rej = retrieval_loss(F / tau_c, P, (P | N) & (C > 0))
 L_ctx = L_sem + rho_effective * L_rej
 ```
 
 `P` is Full Positives, `I` is identity positives, and `N` is hard identity
 negatives. `retrieval_loss(S,P,V)` uses every positive/negative pair within `V`
 and contributes `softplus(S_negative - S_positive)`. It averages pairs within
-each query, then queries with at least one valid pair; empty batches retain
-the existing differentiable-zero handling. Membership, assignment, `B` and `C`
-are detached in the context loss. Gradients through `H` reach the reasoner,
+each query, then queries with at least one valid pair. Semantic context always
+uses same-ID pairs with positive coverage.
+
+`loss.rejection_loss_mode=softplus` retains the baseline rejection objective:
+
+```text
+L_rej = retrieval_loss(F / tau_c, P, (P | N) & (C > 0))
+```
+
+The supplied experiment uses `loss.rejection_loss_mode=hinge`. For each Full
+Positive `p` and mined wrong-ID negative `n`, both with `C > 0`, it computes:
+
+```text
+D(t) = model.binding_scale * B(t) + a_train * C(t)
+delta_0 = stopgrad(D(p) - D(n))
+residual = b_train * (H(n) - H(p))
+pair_loss = relu(residual - max(delta_0, 0)) / tau_c
+```
+
+For a positive base margin, context is penalized only when it makes the wrong-ID
+image overtake the Full Positive. For a nonpositive base margin, context is
+penalized only when it widens the wrong-ID lead; narrowing that lead has zero
+loss even if the Full Positive still ranks below it. The whole base margin is
+detached, so this term trains only the context contribution. The scorer's
+`context_contribution` already includes `b_train`; temperature is applied once.
+
+Both rejection modes use the same masks and reduction: average all valid pairs
+within each query, including zero hinges, then average queries with at least one
+valid pair, including queries with zero loss. Invalid values are masked before
+score differences. A batch without valid pairs returns a differentiable zero.
+`context_rejection_weight` multiplies the reduced rejection loss.
+Membership, assignment, `B` and `C` are detached in the context loss.
+Gradients through `H` reach the reasoner,
 composition and evidence path. Grounding, identity, coarse and global-state
 losses retain their existing weights and supervision.
 
-The defaults are `context_weight=1.0`, `tau_c=0.1`, rejection weight `0.5`,
-configured swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding scale `1`,
-`B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic logit is
-`0.8`, and the rejection logit is `8.0`. Epochs 1–4 warm up without context;
+The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
+weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
+scale `1`, `B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic
+logit is `0.8`, and the baseline softplus rejection logit is `8.0`.
+Epochs 1–4 warm up without context;
 epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
 with `rho_effective=0.5`; it is zero earlier. These settings are controlled by
 [configs/proposed.yaml](../configs/proposed.yaml).
@@ -145,6 +175,9 @@ text and calls the same aligned scorer using the original assignment for both
 sentences. Both deferred
 scene batches and materialized scene tensors are supported.
 
+The hinge loss reuses the forward's `B`, `C` and weighted `H` in FP32 and uses
+fixed-shape tensor operations with deferred numerical checks. It introduces no
+device scalar reads, dynamic boolean indexing or extra scorer/cache calls.
 The GPU input path keeps sparse eligible rows from `context_layout`, chunked
 `SceneTargetBatch` scene loads and assignment-based `NativeTargetBatch.load_matched`
 FAFA loads. Matching and cache I/O stay outside activation checkpointing;

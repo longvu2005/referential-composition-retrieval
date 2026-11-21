@@ -61,6 +61,35 @@ With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semant
 context, and epoch 7 onward also enables mining and rejection at weight `0.5`.
 Context loss uses the original training coefficients `a_train=0.04` and
 `b_train=0.10`; validation calibration changes retrieval coefficients only.
+The supplied RCR experiment retains the name `proposed`, uses
+`loss.rejection_loss_mode=hinge` and writes to `runs/proposed`.
+Configurations missing this key resolve to `softplus`,
+preserving the baseline objective. The mode changes only the rejection term;
+candidate eligibility, quotas, mining schedule and calibration follow the same
+process in both modes.
+
+For the ablation, run both modes from the same source commit with seed `0` and
+the same caches/runtime. These commands retain rejection weight `0.5`,
+temperature `0.1`, `retrieval.context_weight=0.10`, partial-ID quota `6` and
+mining context coefficient `0.005` from the supplied configuration.
+
+Run each command in a separate clean workspace at that commit. Both keep the
+experiment and W&B name `proposed` and use `runs/proposed` within their workspace.
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set loss.rejection_loss_mode=softplus train.seed=0
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set loss.rejection_loss_mode=hinge train.seed=0
+```
+
+Each workspace must have a fresh `runs/proposed`. Compare validation-selected
+metrics and the rejection/semantic loss histories in each run; raw rejection magnitudes
+have different meanings across the two objectives. The `0.005` coefficient is
+used only to mine candidates; `0.10` is `b_train` in the loss. Validation still
+calibrates `b` for inference. Changing the mode requires a new run; the existing
+resume checks enforce the effective configuration and source contract.
+
 The supplied experiment disables verified left/right swap supervision
 (`loss.context_swap_weight=0.0`). To enable this optional objective, use a
 separate run directory, for example:

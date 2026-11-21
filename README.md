@@ -48,9 +48,12 @@ Continue an interrupted training run with its saved configuration:
 
 Outputs are written under `output.dir`. `best.pt` and `selected.yaml` describe
 the validation-selected model; `last.pt` supports training resume.
+The supplied RCR configuration uses hinge rejection and retains the experiment
+name `proposed` and output directory `runs/proposed`.
 The `fafa-aligned-pair-cls-v4` reasoner requires a new training run and checkpoint;
 compatible frozen feature caches can be reused.
-See the [run guide](docs/proposed_runs.md) for individual stages and outputs.
+See the [run guide](docs/proposed_runs.md) for stages, outputs and the matched
+softplus ablation.
 
 ## Documentation
 
