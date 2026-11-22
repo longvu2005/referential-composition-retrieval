@@ -51,11 +51,19 @@ o_ik = LN_target(W_e e_k + W_g g(box_pi(k)))  when matched(i,k)
 X = LN_inject(R + Dropout([0_CLS, 0_text, {o_ik}]))
 ```
 
-`reasoning_binding` uses the same `EvidenceBinding` implementation with its
-own parameters. It conditions target patches on the composed query and produces
-`e_k` once per aligned reference detection. The model routes the result into
-the Subject-person slots. Both bindings start with identical parameter values
-so their initial outputs agree on identical inputs in evaluation mode.
+`reasoning_binding` conditions target patches on the composed query and
+produces `e_k` once per aligned reference detection. The model routes the
+result into the Subject-person slots.
+
+During the first `train.context_warmup_epochs` epochs, `grounding.binding` and
+`reasoning_binding` refer to the same `EvidenceBinding` instance. Any validation
+reasoning in this phase reads the warmed binding directly. At the start of the
+next epoch, before mining or training, the model copies its parameters and
+buffers into an independent `reasoning_binding`. Grounding retains its
+optimizer moments and step counters. Reasoning begins with fresh optimizer
+state and learns independently from context supervision. With zero warmup
+epochs, this split happens before epoch 1.
+
 `TargetPersonBuilder` projects evidence and center/size geometry and normalizes
 their sum, following the aligned person design in `2221c4e`. `n_miss` is one
 learned vector shared by missing members and empty endpoint sets. Injection
@@ -163,10 +171,9 @@ valid pair, including queries with zero loss. Invalid values are masked before
 score differences. A batch without valid pairs returns a differentiable zero.
 `context_rejection_weight` multiplies the reduced rejection loss.
 Membership, assignment, `B` and `C` are detached in the context loss.
-Gradients through `H` reach the reasoner, composition, target-side binding
-and shared feature projections. During context warmup, the query-side binding
-learns from grounding and coarse supervision. The target-side binding starts
-learning when context loss becomes active.
+After the split, gradients through `H` reach the reasoner, composition,
+target-side binding and shared feature projections. Grounding and coarse
+supervision continue to train the query-side binding.
 
 The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
 weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
@@ -215,7 +222,10 @@ selection unchanged under the [benchmark protocol](benchmark_protocol.md).
 Model and experiment settings live in YAML. Checkpoints record the effective
 model configuration and feature provenance. Train `fafa-aligned-pair-cls-v5`
 in a fresh run directory using compatible frozen feature caches.
-For v4 inference, retrieval loads the saved shared weights into both bindings.
+Checkpoints record `binding_shared` to restore the binding phase during
+retrieval and resume. Joint-phase resume restores both learned bindings and
+their optimizer states. Warmup resume retains sharing until the split epoch.
+For v4 inference, retrieval restores its shared binding.
 After training v5, generate new retrieval artifacts to capture its learned `H`.
 CPU replay uses the raw components saved with each ranking.
 Use the [run guide](proposed_runs.md) for execution and the

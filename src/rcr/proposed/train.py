@@ -186,6 +186,14 @@ def build_optimizer(model, text_encoder, config):
     return torch.optim.AdamW(groups, weight_decay=config["weight_decay"])
 
 
+def split_reasoning_binding(model, optimizer):
+    """Add the cloned binding to the model group with fresh optimizer state."""
+    if model.split_reasoning_binding():
+        optimizer.param_groups[0]["params"].extend(
+            p for p in model.reasoning_binding.parameters() if p.requires_grad
+        )
+
+
 def _evaluate(
     samples,
     data,
@@ -278,6 +286,7 @@ def _make_checkpoint(
         "detection_cache_id": cache.detection_cache_id,
         "native_cache": cache.native.metadata,
         "architecture_version": model.architecture_version,
+        "binding_shared": model.binding_shared,
         "representation": "shared_person",
         "best_epoch": best["epoch"],
         "best_full_map": best["full_map"],
@@ -470,6 +479,7 @@ def _train(cfg, output, resumed):
         input_dim=scene_dim,
         global_dim=cache.global_dim,
         person_input_dim=person_dim,
+        shared_binding=True,
     ).to(device)
 
     optimizer = build_optimizer(model, text_encoder, cfg["optimizer"])
@@ -481,6 +491,9 @@ def _train(cfg, output, resumed):
         scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
     if resumed is not None:
+        if not resumed["binding_shared"]:
+            # Match the parameter ordering used when the run first split.
+            split_reasoning_binding(model, optimizer)
         model.load_state_dict(resumed["model"])
         load_text_encoder_state(text_encoder, tokenizer, resumed["text_encoder"])
         optimizer.load_state_dict(resumed["training_state"]["optimizer"])
@@ -582,6 +595,8 @@ def _train(cfg, output, resumed):
         first_epoch = progress.epoch + (progress.phase == "epoch_end")
 
         for epoch in range(first_epoch, epochs + 1):
+            if epoch > warmup_epochs:
+                split_reasoning_binding(model, optimizer)
             resuming_epoch = progress.epoch == epoch and progress.phase != "epoch_end"
             if not resuming_epoch:
                 progress.epoch, progress.phase, progress.next_batch = epoch, "train", 0

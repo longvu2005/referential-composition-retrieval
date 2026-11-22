@@ -1324,16 +1324,30 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
         )
 
 
-def test_shared_binding_checkpoint_reproduces_tied_inference(saved_pipeline):
+@pytest.mark.parametrize("shared", [False, True])
+def test_shared_binding_checkpoint_reproduces_tied_inference(
+    saved_pipeline, monkeypatch, shared
+):
     cfg, _, _ = saved_pipeline
     checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
     checkpoint["config"]["model"]["fine_matching"].update(
         identity_threshold=-1.0, selection_threshold=0.0001
     )
     state = checkpoint["model"]
+    checkpoint["binding_shared"] = shared
     # A fresh v5 checkpoint starts from the same weights on both paths.
+    rank = retrieve.retrieve_rankings
+    models = []
+
+    def inspect_model(*args, **kwargs):
+        model = args[4]
+        models.append(model)
+        return rank(*args, **kwargs)
+
+    monkeypatch.setattr(retrieve, "retrieve_rankings", inspect_model)
     torch.save(checkpoint, cfg["checkpoint"])
     expected = retrieve.retrieve(cfg)
+    assert models[-1].binding_shared == shared
     assert expected["context"].abs().max() > 0
 
     checkpoint["model"] = {
@@ -1347,6 +1361,7 @@ def test_shared_binding_checkpoint_reproduces_tied_inference(saved_pipeline):
     torch.save(checkpoint, cfg["checkpoint"])
     digest = sha256_file(cfg["checkpoint"])
     actual = retrieve.retrieve(cfg)
+    assert models[-1].binding_shared
     assert sha256_file(cfg["checkpoint"]) == digest
     assert actual["provenance"]["architecture_version"] == SHARED_BINDING_ARCHITECTURE
     for key in ("context", "fine_scores", "rankings"):

@@ -20,7 +20,7 @@ from rcr.common.io import atomic_write_text, sha256_file
 from rcr.evaluation.provenance import digest_json
 from rcr.proposed.contracts import ARCHITECTURE_VERSION, CALIBRATED_RETRIEVAL_KEYS
 
-RESUME_VERSION = 1
+RESUME_VERSION = 2
 
 
 def require_new_run(output: Path) -> None:
@@ -168,6 +168,14 @@ def load_resume(path: Path, output: Path) -> dict:
             "resume from last.pt in output.dir; keep the complete run directory"
         )
     progress = TrainingProgress(**state["progress"])
+    expected_shared = progress.epoch <= checkpoint["config"]["train"].get(
+        "context_warmup_epochs", 0
+    )
+    if (
+        type(checkpoint.get("binding_shared")) is not bool
+        or checkpoint["binding_shared"] != expected_shared
+    ):
+        raise ValueError("checkpoint binding phase disagrees with training progress")
     if (
         not 0 <= progress.epoch <= checkpoint["config"]["train"]["epochs"]
         or progress.global_step < 0

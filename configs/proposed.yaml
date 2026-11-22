@@ -46,7 +46,7 @@ model:
     missing_penalty: 1.1
     duplicate_iou: 0.9
 train:
-  epochs: 20
+  epochs: 25
   context_warmup_epochs: 4
   batch_size: 24
   candidates: 32

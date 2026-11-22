@@ -50,8 +50,9 @@ Outputs are written under `output.dir`. `best.pt` and `selected.yaml` describe
 the validation-selected model; `last.pt` supports training resume.
 The supplied RCR configuration uses hinge rejection and retains the experiment
 name `proposed` and output directory `runs/proposed`.
-The `fafa-aligned-pair-cls-v5` architecture learns separate binding weights
-for query grounding and target reasoning. Train it in a fresh run directory.
+The `fafa-aligned-pair-cls-v5` architecture shares one binding during warmup,
+then clones its warmed weights for independent target reasoning before the
+first joint epoch. Train this schedule in a fresh run directory.
 Retrieval also supports v4 checkpoints trained with shared binding weights.
 See the [run guide](docs/proposed_runs.md) for stages, outputs and the matched
 softplus ablation.

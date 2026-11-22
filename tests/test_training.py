@@ -216,6 +216,139 @@ def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
     assert model.binding_scale.item() == 1.0
 
 
+def test_binding_split_copies_warmed_state_and_preserves_grounding_optimizer(
+    objective_batch,
+):
+    _, batch = objective_batch
+    model = training.RCRModel(
+        dim=8, identity_dim=6, num_heads=2, dropout=0.1, shared_binding=True
+    )
+    binding = model.grounding.binding
+    binding.register_buffer("warmup_updates", torch.tensor(3))
+    text = TextEncoder(TextBackbone(), dim=8)
+    optimizer = training.build_optimizer(
+        model, text, {"lr": 1e-3, "text_lr": 1e-4, "weight_decay": 0.01}
+    )
+    assert model.reasoning_binding is binding
+    loss, _ = compute_loss(model, batch, (2, 2), **_only_loss("grounding"))
+    loss.backward()
+    optimizer.step()
+    warmed = deepcopy(binding.state_dict())
+    original_parameters = list(binding.parameters())
+    original_optimizer = deepcopy(
+        {id(p): state for p, state in optimizer.state.items()}
+    )
+    rng = torch.get_rng_state().clone()
+    model.eval()
+    training.split_reasoning_binding(model, optimizer)
+
+    assert model.grounding.binding is binding
+    assert not model.binding_shared
+    assert not model.reasoning_binding.training
+    _equal(torch.get_rng_state(), rng)
+    _equal(model.reasoning_binding.state_dict(), warmed)
+    for source, cloned in zip(
+        binding.parameters(), model.reasoning_binding.parameters(), strict=True
+    ):
+        assert source.data_ptr() != cloned.data_ptr()
+        assert cloned.grad is None and cloned not in optimizer.state
+    assert (
+        binding.warmup_updates.data_ptr()
+        != model.reasoning_binding.warmup_updates.data_ptr()
+    )
+    parameters = optimizer.param_groups[0]["params"]
+    assert len(parameters) == len({id(p) for p in parameters})
+    assert {id(p) for p in parameters} == {
+        id(p) for p in model.parameters() if p.requires_grad
+    }
+    _equal({id(p): state for p, state in optimizer.state.items()}, original_optimizer)
+    assert all(optimizer.state[p]["step"] == 1 for p in original_parameters)
+    param_count = len(parameters)
+    training.split_reasoning_binding(model, optimizer)
+    assert len(parameters) == param_count
+    _equal(model.reasoning_binding.state_dict(), warmed)
+
+    optimizer.zero_grad(set_to_none=True)
+    for p in model.reasoning_binding.parameters():
+        p.grad = torch.ones_like(p)
+    optimizer.step()
+    _equal(binding.state_dict(), warmed)
+    assert all(optimizer.state[p]["step"] == 1 for p in original_parameters)
+    assert all(
+        optimizer.state[p]["step"] == 1 for p in model.reasoning_binding.parameters()
+    )
+
+
+@pytest.mark.parametrize("warmup", [0, 1, 4])
+def test_binding_splits_before_joint_mining_and_training(
+    tiny_training_run, monkeypatch, warmup
+):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"].update(epochs=warmup + 2, context_warmup_epochs=warmup)
+    cfg["train"]["sampling"].update(
+        warmup_epochs=warmup,
+        refresh_every_epochs=1,
+        identity_fraction=1.0,
+        hard_fraction=0.0,
+        semantic_hard_fraction=0.5,
+    )
+    cfg["evaluation"]["enabled"] = cfg["wandb"]["enabled"] = False
+    build, compute, mine = (
+        training.build_optimizer,
+        training.compute_loss,
+        training.mine_hard_negatives,
+    )
+    steps, mining = [], []
+    optimizers, warmed_weights, warmed_optimizer = [], [], []
+
+    def record_optimizer(model, text, options):
+        assert model.binding_shared
+        optimizer = build(model, text, options)
+        optimizers.append(optimizer)
+        warmed_weights.append(deepcopy(model.grounding.binding.state_dict()))
+
+        def after_step(*_args):
+            steps.append(model.binding_shared)
+            if model.binding_shared:
+                warmed_weights[0] = deepcopy(model.grounding.binding.state_dict())
+                warmed_optimizer[:] = [
+                    deepcopy({id(p): state for p, state in optimizer.state.items()})
+                ]
+
+        optimizer.register_step_post_hook(after_step)
+        return optimizer
+
+    def observe_mining(*args, **kwargs):
+        model = args[4]
+        assert not model.binding_shared
+        if not mining:
+            assert len(steps) == warmup
+            _equal(model.grounding.binding.state_dict(), warmed_weights[0])
+            _equal(model.reasoning_binding.state_dict(), warmed_weights[0])
+            assert all(
+                p not in optimizers[0].state
+                for p in model.reasoning_binding.parameters()
+            )
+            _equal(
+                {id(p): state for p, state in optimizers[0].state.items()},
+                warmed_optimizer[0] if warmup else {},
+            )
+        mining.append(len(steps))
+        return mine(*args, **kwargs)
+
+    def observe_training(model, *args, **kwargs):
+        assert model.binding_shared == (len(steps) < warmup)
+        return compute(model, *args, **kwargs)
+
+    monkeypatch.setattr(training, "build_optimizer", record_optimizer)
+    monkeypatch.setattr(training, "mine_hard_negatives", observe_mining)
+    monkeypatch.setattr(training, "compute_loss", observe_training)
+    path = training.train(cfg)
+    assert steps == [True] * warmup + [False, False]
+    assert mining == [warmup, warmup + 1]
+    assert torch.load(path, weights_only=True)["binding_shared"] is False
+
+
 @pytest.mark.parametrize("defer", [False, True])
 @pytest.mark.parametrize(
     "device",
@@ -1912,7 +2045,20 @@ def _configure(cfg, data):
         data.splits["train"].append(key)
 
 
-@pytest.mark.parametrize("fault", ["signal", "after_step", "validation", "selection"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "initial",
+        "warmup_signal",
+        "warmup_end",
+        "joint_mining",
+        "before_joint_step",
+        "signal",
+        "after_step",
+        "validation",
+        "selection",
+    ],
+)
 def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, fault):
     cfg, _, wandb_run, _ = tiny_training_run
     data = training.load_rcr_data(None)
@@ -1958,11 +2104,12 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
     previous_handler = signal.getsignal(signal.SIGTERM)
 
     with monkeypatch.context() as interrupted:
-        if fault == "signal":
+        if fault in ("warmup_signal", "warmup_end", "signal"):
+            stop_step = {"warmup_signal": 2, "warmup_end": 3, "signal": 5}[fault]
 
             def stop(*args, **kwargs):
                 result = observe(*args, **kwargs)
-                if len(observations) == 5:
+                if len(observations) == stop_step:
                     assert signal.getsignal(signal.SIGTERM) != previous_handler
                     signal.raise_signal(signal.SIGTERM)
                 return result
@@ -1970,7 +2117,30 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
             interrupted.setattr(training, "compute_loss", stop)
             training.train(cfg)
         else:
-            if fault == "after_step":
+            if fault == "initial":
+                save = training.save_torch
+
+                def fail_initial(checkpoint, path):
+                    save(checkpoint, path)
+                    raise RuntimeError("injected interruption")
+
+                interrupted.setattr(training, "save_torch", fail_initial)
+            elif fault == "before_joint_step":
+
+                def stop_after_mining(*args, **kwargs):
+                    result = observe_mining(*args, **kwargs)
+                    signal.raise_signal(signal.SIGTERM)
+                    return result
+
+                interrupted.setattr(training, "mine_hard_negatives", stop_after_mining)
+            elif fault == "joint_mining":
+
+                def fail_mining(*args, **kwargs):
+                    assert not args[4].binding_shared
+                    raise RuntimeError("injected interruption")
+
+                interrupted.setattr(training, "mine_hard_negatives", fail_mining)
+            elif fault == "after_step":
 
                 def fail_log(values):
                     if values.get("global_step") == 5:
@@ -1992,14 +2162,31 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
                     raise RuntimeError("injected interruption")
 
                 interrupted.setattr(training, "save_selection", fail_selection)
-            with pytest.raises(RuntimeError, match="injected interruption"):
+            if fault == "before_joint_step":
                 training.train(cfg)
+            else:
+                with pytest.raises(RuntimeError, match="injected interruption"):
+                    training.train(cfg)
     assert signal.getsignal(signal.SIGTERM) == previous_handler
     output = Path(cfg["output"]["dir"])
     pending = torch.load(output / "last.pt", weights_only=True)
     state = pending["training_state"]
     saved_step = state["progress"]["global_step"]
-    assert saved_step == (5 if fault == "signal" else 4 if fault == "after_step" else 6)
+    assert (
+        saved_step
+        == {
+            "initial": 0,
+            "warmup_signal": 2,
+            "warmup_end": 3,
+            "joint_mining": 3,
+            "before_joint_step": 3,
+            "signal": 5,
+            "after_step": 4,
+            "validation": 6,
+            "selection": 6,
+        }[fault]
+    )
+    assert pending["binding_shared"] == (state["progress"]["epoch"] <= 1)
     if fault in ("validation", "selection"):
         assert state["progress"]["phase"] == "validation"
     observations[:] = observations[:saved_step]

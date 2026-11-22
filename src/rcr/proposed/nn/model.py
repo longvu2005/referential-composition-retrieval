@@ -98,6 +98,7 @@ class RCRModel(nn.Module):
         person_input_dim: int,
         global_dim: int | None = None,
         max_subjects: int = len(SUBJECT_MARKERS),
+        shared_binding: bool = False,
     ) -> "RCRModel":
         """Create the model from the single YAML model section."""
         dim = config.get("dim", input_dim)
@@ -107,6 +108,7 @@ class RCRModel(nn.Module):
             person_input_dim=person_input_dim,
             global_dim=global_dim,
             max_subjects=max_subjects,
+            shared_binding=shared_binding,
             **{
                 key: value
                 for key, value in config.items()
@@ -130,6 +132,7 @@ class RCRModel(nn.Module):
         dropout: float = 0.0,
         fine_matching: dict | None = None,
         fda_k: int = 6,
+        shared_binding: bool = False,
     ) -> None:
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
@@ -162,8 +165,7 @@ class RCRModel(nn.Module):
         )
         binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim, dropout)
         self.grounding = SubjectGrounding(binding, dim)
-        # Match the shared model's initialization while allowing independent updates.
-        self.reasoning_binding = deepcopy(binding)
+        self.reasoning_binding = binding if shared_binding else deepcopy(binding)
         self.composition = StructuredComposition(
             dim,
             num_heads,
@@ -178,6 +180,18 @@ class RCRModel(nn.Module):
     @property
     def binding_scale(self) -> Tensor:
         return F.softplus(self.binding_log_scale.float())
+
+    @property
+    def binding_shared(self) -> bool:
+        return self.reasoning_binding is self.grounding.binding
+
+    def split_reasoning_binding(self) -> bool:
+        """Clone warmed parameters and buffers once, preserving the module's mode."""
+        if not self.binding_shared:
+            return False
+        self.reasoning_binding = deepcopy(self.grounding.binding)
+        self.reasoning_binding.zero_grad(set_to_none=True)
+        return True
 
     def encode_identity(self, persons: Tensor) -> Tensor:
         return self.identity_head(self.person_proj(persons))

@@ -54,8 +54,13 @@ Training performs scheduled validation, calibrates the configured scoring
 coefficients and saves the best selection. The selection criterion is defined
 in the [benchmark protocol](benchmark_protocol.md).
 The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v5`.
-Start a fresh run to train its two bindings independently. A v4 checkpoint
-supports retrieval by loading its shared binding weights into both modules.
+Start a fresh run to use this schedule. Grounding and context
+reasoning share one binding for `train.context_warmup_epochs` epochs, including
+any validation reasoning. Before mining or training in the following epoch,
+reasoning receives a copy of the warmed parameters and buffers. Grounding keeps
+its AdamW state, while reasoning starts with fresh state. Zero warmup epochs
+split the bindings before epoch 1. A v4 checkpoint supports retrieval using
+its shared binding weights.
 Resuming a v4 training run requires its original implementation and optimizer
 state. Both architectures use the same frozen feature caches.
 
@@ -150,6 +155,9 @@ An explicit path may follow `--resume`. Resume uses the full training state in
 the original run directory, numerical settings, total epoch count, source,
 runtime, data and caches compatible with the saved state. `best.pt` is the
 inference checkpoint.
+The saved `binding_shared` flag restores the module sharing and optimizer
+parameter order. Resume within joint training preserves the learned reasoning
+weights. A resumed warmup run splits at the configured boundary.
 
 ## Seeds and reproducibility
 

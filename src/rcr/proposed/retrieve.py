@@ -190,6 +190,10 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         global_dim=checkpoint["global_dim"],
         person_input_dim=checkpoint["person_input_dim"],
         max_subjects=max_subjects,
+        shared_binding=(
+            architecture == SHARED_BINDING_ARCHITECTURE
+            or checkpoint.get("binding_shared", False)
+        ),
     ).to(device)
     state = checkpoint["model"]
     if architecture == SHARED_BINDING_ARCHITECTURE:
