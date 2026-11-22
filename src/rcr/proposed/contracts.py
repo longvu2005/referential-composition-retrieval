@@ -3,6 +3,9 @@
 ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v5"
 SHARED_BINDING_ARCHITECTURE = "fafa-aligned-pair-cls-v4"
 
+DEFAULT_OWNER_MODE = "raw_logit"
+OWNER_MODES = (DEFAULT_OWNER_MODE, "crop_log_softmax")
+
 FIXED_FINE_KEYS = (
     "pooling",
     "fine_score_mode",

@@ -8,8 +8,15 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from rcr.proposed.contracts import DEFAULT_OWNER_MODE, OWNER_MODES
 
-def matching_settings(config: dict | None = None) -> dict[str, float]:
+
+def _validate_owner_mode(owner_mode: str) -> None:
+    if owner_mode not in OWNER_MODES:
+        raise ValueError(f"fine_matching.owner_mode must be {' or '.join(OWNER_MODES)}")
+
+
+def matching_settings(config: dict | None = None) -> dict[str, float | str]:
     """Resolve architecture settings, shared by training and inference."""
     defaults = {
         "background_logit": 0.0,
@@ -19,7 +26,7 @@ def matching_settings(config: dict | None = None) -> dict[str, float]:
         "duplicate_iou": 0.9,
     }
     config = {} if config is None else config
-    unknown = set(config) - set(defaults)
+    unknown = set(config) - defaults.keys() - {"owner_mode"}
     if unknown:
         raise ValueError(f"unknown fine_matching settings: {sorted(unknown)}")
     settings = {key: float(config.get(key, value)) for key, value in defaults.items()}
@@ -34,7 +41,9 @@ def matching_settings(config: dict | None = None) -> dict[str, float]:
         raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
     if not 0 < settings["duplicate_iou"] <= 1:
         raise ValueError("duplicate_iou must be in (0, 1]; 1 disables deduplication")
-    return settings
+    owner_mode = config.get("owner_mode", DEFAULT_OWNER_MODE)
+    _validate_owner_mode(owner_mode)
+    return {**settings, "owner_mode": owner_mode}
 
 
 def _unique_boxes(coords, valid, threshold, priority=None):
@@ -105,19 +114,20 @@ def exclusive_membership(
     background_logit: float = 0.0,
     selection_threshold: float = 0.5,
     duplicate_iou: float = 0.9,
+    owner_mode: str = DEFAULT_OWNER_MODE,
 ) -> Tensor:
     """Select a variable-sized set per Subject, with one owner per query person.
 
-    Background has a fixed configurable logit. Softmax is over Subject/background, never
-    over people. Masked BCE supervises the raw grounding logits; the exclusive
-    distribution limits each person to one owner. Fine decisions are detached
-    from retrieval loss; coarse scoring uses sigmoid of the raw logits.
+    Softmax over Subjects and background sets the selection mask and confidence.
+    The optional crop log-softmax ranks owners above the raw background logit.
+    Fine decisions are detached. Coarse scoring uses sigmoid of the raw logits.
     """
     b, s, k = logits.shape
     if not math.isfinite(background_logit):
         raise ValueError("background_logit must be finite")
     if s == 0:
         raise ValueError("a query must have at least one Subject slot")
+    _validate_owner_mode(owner_mode)
     valid = (
         torch.ones(b, k, device=logits.device, dtype=torch.bool)
         if person_mask is None
@@ -133,6 +143,17 @@ def exclusive_membership(
     selected = unique_box_mask(
         boxes, selected, threshold=duplicate_iou, priority=confidence
     )
+    if owner_mode == "crop_log_softmax" and s > 1 and k > 1:
+        # Include all valid crops in the denominator, before selection and dedup.
+        has_logits = torch.isfinite(foreground).any(dim=-1, keepdim=True)
+        owner_scores = F.log_softmax(foreground.masked_fill(~has_logits, 0), dim=-1)
+        eligible = foreground > background_logit
+        owner_scores = owner_scores.masked_fill(~eligible, -torch.inf)
+        best_roles = eligible & (owner_scores == owner_scores.amax(1, keepdim=True))
+        # Break normalized ties by raw logit, then by Subject order.
+        normalized_owner = foreground.masked_fill(~best_roles, -torch.inf).argmax(1)
+        # With one valid crop every eligible Subject has a normalized score of zero.
+        owner = torch.where(valid.sum(-1, keepdim=True) > 1, normalized_owner, owner)
     role = F.one_hot(owner, s).permute(0, 2, 1).bool()
     return (role & selected[:, None]).to(confidence.dtype) * confidence[:, None]
 

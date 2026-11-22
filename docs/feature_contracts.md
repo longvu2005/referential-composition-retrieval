@@ -36,7 +36,8 @@ See the [cache guide](detection_cache.md) for construction and reuse.
 Checkpoints bind the model architecture, effective settings, encoder metadata
 and source cache identities. Retrieval restores the trained matching and pooling
 settings. Validation-selected scoring coefficients are frozen for test together
-with the checkpoint and validation fingerprints.
+with the checkpoint and validation fingerprints. Matching records the Subject
+owner mode. Checkpoints without that field use `raw_logit` for retrieval.
 
 Architecture or feature changes may require a fresh training run. Resume requires
 the compatible full training state in `last.pt`; `best.pt` is for inference.

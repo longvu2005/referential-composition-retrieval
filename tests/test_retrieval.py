@@ -21,13 +21,19 @@ from rcr.proposed.contracts import (
     CALIBRATED_RETRIEVAL_KEYS,
     SHARED_BINDING_ARCHITECTURE,
 )
-from rcr.proposed.matching import PersonMatching
+from rcr.proposed.matching import (
+    PersonMatching,
+    exclusive_membership,
+    matching_settings,
+)
+from rcr.proposed.nn.grounding import SubjectGrounding
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
 from rcr.proposed.scores import POOLING_MODES, pool_fafa_scores
 from tests.helpers import _add_gallery_image, _rank, _sample
+from tools.run import main
 
 # Fine scores, shortlist ranking and replay.
 
@@ -274,6 +280,86 @@ def test_global_and_subject_means_have_distinct_weighting():
     assert scores["penalized"].item() == pytest.approx((0.61 - 0.84) / 2)
     assert scores["matched_mean"].item() == pytest.approx((0.72 + 0.04) / 1.1)
     assert scores["subject_mean"].item() == pytest.approx((0.8 + 0.2) / 2)
+
+
+def test_crop_log_softmax_preserves_selection_and_includes_valid_duplicates():
+    logits = torch.tensor([[[4.0, 3.0, 3.0, 500.0], [3.0, 2.0, 1.0, 500.0]]])
+    subjects = torch.tensor([[True, True]])
+    valid = torch.tensor([[True, True, True, False]])
+    boxes = torch.tensor(
+        [[[0, 0, 1, 1], [1, 0, 2, 1], [1, 0, 2, 1], [2, 0, 3, 1]]],
+        dtype=torch.float32,
+    )
+
+    raw = exclusive_membership(logits, subjects, valid, boxes)
+    relative = exclusive_membership(
+        logits, subjects, valid, boxes, owner_mode="crop_log_softmax"
+    )
+
+    assert torch.equal(raw.sum(1), relative.sum(1))
+    assert (raw > 0).tolist() == [[[True, True, False, False], [False] * 4]]
+    assert torch.equal(relative, raw.flip(1))
+
+
+def test_crop_log_softmax_includes_crops_rejected_by_background():
+    logits = torch.tensor([[[0.0, -0.5, -3.6], [-1.0, -1.5, -20.0]]])
+    subjects = torch.tensor([[True, True]])
+    raw = exclusive_membership(logits, subjects, background_logit=-3.5)
+    relative = exclusive_membership(
+        logits, subjects, background_logit=-3.5, owner_mode="crop_log_softmax"
+    )
+    assert (raw > 0).tolist() == [[[True, True, False], [False] * 3]]
+    assert torch.equal(relative, raw.flip(1))
+
+
+def test_crop_log_softmax_requires_raw_eligibility_and_breaks_ties():
+    logits = torch.tensor(
+        [
+            [[4.0, 4.0, 4.0], [-3.5, -8.0, -8.0]],
+            [[2.0, 1.0, -10.0], [4.0, 3.0, -8.0]],
+            [[2.0, 1.0, -10.0], [2.0, 1.0, -10.0]],
+        ]
+    )
+    subjects = torch.ones(3, 2, dtype=torch.bool)
+    raw = exclusive_membership(logits, subjects, background_logit=-3.5)
+    relative = exclusive_membership(
+        logits, subjects, background_logit=-3.5, owner_mode="crop_log_softmax"
+    )
+    assert torch.equal(relative, raw)
+    assert (relative > 0).tolist() == [
+        [[True, True, True], [False] * 3],
+        [[False] * 3, [True, True, False]],
+        [[True, True, False], [False] * 3],
+    ]
+
+
+def test_crop_log_softmax_handles_padding_and_empty_or_single_owner_sets():
+    logits = torch.tensor([[2.0, 1.0], [3.0, float("nan")]]).repeat(4, 1, 1)
+    subjects = torch.tensor([[True, True], [True, False], [True, True], [False, False]])
+    valid = torch.tensor([[True, False], [True, True], [False, False], [True, True]])
+    raw = exclusive_membership(logits, subjects, valid)
+    relative = exclusive_membership(
+        logits, subjects, valid, owner_mode="crop_log_softmax"
+    )
+
+    assert torch.equal(relative, raw)
+    assert (relative > 0).tolist() == [
+        [[False, False], [True, False]],
+        [[True, True], [False, False]],
+        [[False, False], [False, False]],
+        [[False, False], [False, False]],
+    ]
+    for width in (0, 1):
+        empty_or_single = logits[..., :width]
+        expected = exclusive_membership(empty_or_single, subjects)
+        actual = exclusive_membership(
+            empty_or_single, subjects, owner_mode="crop_log_softmax"
+        )
+        assert torch.equal(actual, expected)
+
+    assert matching_settings()["owner_mode"] == "raw_logit"
+    with pytest.raises(ValueError, match="fine_matching.owner_mode"):
+        matching_settings({"owner_mode": "unknown"})
 
 
 def test_multi_subject_export_retains_a_completely_missing_role(
@@ -1072,10 +1158,14 @@ def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
     assert torch.equal(retrieve.retrieve(selected)["rankings"], expected["rankings"])
 
 
+@pytest.mark.parametrize("owner_mode", ["raw_logit", "crop_log_softmax"])
 def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
-    saved_pipeline, tmp_path, monkeypatch
+    saved_pipeline, tmp_path, monkeypatch, owner_mode
 ):
     cfg, data, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["config"]["model"]["fine_matching"]["owner_mode"] = owner_mode
+    torch.save(checkpoint, cfg["checkpoint"])
     cfg["retrieval"]["top_m"] = 1
     retrieve.retrieve(cfg)
     root = tmp_path / "calibration"
@@ -1083,6 +1173,10 @@ def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
         _settings([Path(cfg["output"]["dir"]) / "val/rankings.pt"], root)
     )
     selected = yaml.safe_load((root / "selected.yaml").read_text())
+    matching = selected["model"]["fine_matching"]
+    assert matching["owner_mode"] == owner_mode
+    if owner_mode == "raw_logit":
+        del matching["owner_mode"]  # Old selected configs have no owner rule.
     selected["split"] = "test"
     # Reuse the tiny cache's other images as a separate test gallery.
     sample = _sample("test", "q", "a")
@@ -1101,13 +1195,94 @@ def test_selected_test_only_fine_scores_topm_and_checks_checkpoint(
     monkeypatch.setattr(RCRModel, "score_target", counted)
     output = retrieve.retrieve(selected)
     assert len(pairs) == 1
+    assert output["fine_matching"]["owner_mode"] == owner_mode
     assert output["rankings"].shape == (1, 2)
     assert output["fafa_binding"].shape == (1, 1)
+    changed_owner = (
+        "raw_logit" if owner_mode == "crop_log_softmax" else "crop_log_softmax"
+    )
+    tampered = copy.deepcopy(selected)
+    tampered["model"]["fine_matching"]["owner_mode"] = changed_owner
+    with pytest.raises(ValueError, match="owner mode differs from validation"):
+        retrieve.retrieve(tampered)
+    with pytest.raises(ValueError, match="diagnostics require the validation split"):
+        retrieve.retrieve(selected, diagnostic_owner_mode=changed_owner)
     checkpoint = torch.load(selected["checkpoint"], weights_only=True)
     checkpoint["epoch"] += 1
     torch.save(checkpoint, selected["checkpoint"])
     with pytest.raises(ValueError, match="checkpoint changed since val selection"):
         retrieve.retrieve(selected)
+
+
+def test_owner_mode_diagnostic_uses_fixed_checkpoint_and_shortlist(
+    saved_pipeline, tmp_path, monkeypatch
+):
+    cfg, data, _ = saved_pipeline
+    cfg["evaluation"]["calibration"] = {}
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    del checkpoint["config"]["model"]["fine_matching"]["owner_mode"]
+    torch.save(checkpoint, cfg["checkpoint"])
+
+    sample = data.samples_by_id["val"]
+    sample["case_type"] = "DUAL"
+    sample["subjects"].append({"subject_id": 2, "identity_ids": ["p2"]})
+    sample["final_desc"] = "Identify Subject 1 as the man and Subject 2 as the woman"
+    sample["final_change"] = "then retrieve images where Subject 1 is beside Subject 2"
+    for image_id in (sample["query_image_id"], *sample["positive_image_ids"]):
+        data.gt_head_boxes_by_image[image_id].append({"identity_id": "p2"})
+    cache = retrieve.GalleryCache()
+    cache.persons = torch.cat([cache.persons, cache.persons.flip(-1)], dim=1)
+    cache.mask = cache.mask.expand(-1, 2)
+    cache.boxes = torch.tensor([[0.0, 0.0, 0.5, 1.0], [0.5, 0.0, 1.0, 1.0]])
+    cache.boxes = cache.boxes.expand(len(cache.image_ids), -1, -1)
+
+    def ground(self, scene, *args, **kwargs):
+        return scene.new_tensor([[4.0, 4.0], [3.0, 0.0]]).expand(len(scene), -1, -1)
+
+    encode_query = RCRModel.encode_query
+    memberships = []
+
+    def observe(self, *args, **kwargs):
+        query = encode_query(self, *args, **kwargs)
+        memberships.append(query.membership)
+        return query
+
+    monkeypatch.setattr(SubjectGrounding, "forward", ground)
+    monkeypatch.setattr(RCRModel, "encode_query", observe)
+    baseline = retrieve.retrieve(cfg)
+    baseline_path = Path(cfg["output"]["dir"]) / "val/rankings.pt"
+    selection_root = tmp_path / "baseline-selection"
+    calibration.calibrate(_settings([baseline_path], selection_root))
+    config_path = selection_root / "selected.yaml"
+    diagnostic_root = tmp_path / "diagnostic"
+    diagnostic = main(
+        [
+            "retrieve",
+            "--config",
+            str(config_path),
+            "--diagnostic-owner-mode",
+            "crop_log_softmax",
+            "--set",
+            f"output.dir={diagnostic_root}",
+        ]
+    )
+    assert baseline["fine_matching"]["owner_mode"] == "raw_logit"
+    assert diagnostic["fine_matching"]["owner_mode"] == "crop_log_softmax"
+    assert not baseline["provenance"].get("fine_score_ablation")
+    assert diagnostic["provenance"]["fine_score_ablation"]
+    for key in ("score_config", "checkpoint_sha256"):
+        assert baseline["provenance"][key] == diagnostic["provenance"][key]
+    for key in ("coarse_rankings", "coarse_topm", "coarse_topm_scores"):
+        assert torch.equal(baseline[key], diagnostic[key])
+    raw, relative = memberships
+    assert torch.equal(raw.sum(1), relative.sum(1))
+    assert (raw > 0).tolist() == [[[True, True], [False, False]]]
+    assert (relative > 0).tolist() == [[[False, True], [True, False]]]
+    assert torch.equal(replay_rankings(diagnostic)["rankings"], diagnostic["rankings"])
+    with pytest.raises(ValueError, match="calibration requires the checkpoint pooling"):
+        calibration.calibrate(
+            _settings([diagnostic_root / "val/rankings.pt"], tmp_path / "calibrated")
+        )
 
 
 def test_calibration_cli_runs_with_no_model_imports_and_only_real_annotations(

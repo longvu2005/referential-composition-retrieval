@@ -69,8 +69,8 @@ def calibrate_rankings(
         )
     if output["provenance"].get("fine_score_ablation"):
         raise ValueError(
-            "calibration requires the checkpoint pooling and fine score mode; "
-            "use the official validation export"
+            "calibration requires the checkpoint pooling and fine score mode, along "
+            "with its owner mode; use the official validation export"
         )
     if (
         output["sample_ids"] != [row["sample_id"] for row in split_samples(data, "val")]

@@ -40,6 +40,7 @@ model:
   mlp_ratio: 2
   geo_dim: 32
   fine_matching:
+    owner_mode: crop_log_softmax
     background_logit: -3.5
     selection_threshold: 0.5
     identity_threshold: 0.2

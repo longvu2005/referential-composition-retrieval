@@ -18,8 +18,27 @@ Grounding associates Subject descriptions with people in the reference image.
 description. Each person token attends to those patches, and the grounding head
 scores the resulting token. The grounding loss supervises these logits, and
 the coarse identity loss uses their sigmoid values to weight query detections.
-A Subject may contain one or several people. Composition combines these
-representations with Subject roles and the requested change.
+
+For each valid crop, a softmax across active Subjects and background sets its
+confidence `1 - P(background)`. Selection requires confidence at least
+`selection_threshold` and an active Subject with a raw logit strictly above
+`background_logit`. Duplicate-box suppression uses the same confidence. The
+winning Subject receives that crop's full confidence as detached membership.
+
+`model.fine_matching.owner_mode` controls the choice among eligible Subjects.
+`raw_logit` picks the highest raw score. `crop_log_softmax` uses
+
+```text
+owner_score(s, i) = logit(s, i) - logsumexp_j(logit(s, j))
+```
+
+The sum runs over all valid crops `j` in the same query image before selection
+and duplicate-box suppression. The winner maximizes this score among active
+Subjects whose raw logit for `i` exceeds `background_logit`. Ties use the
+higher raw logit, then the existing Subject order. With a single valid crop,
+both modes use the baseline owner. Each selected crop has one owner and each
+Subject may contain several people. Composition combines these memberships
+with Subject roles and the requested change.
 
 Membership and identity matching use predicted evidence at inference. Ground
 truth annotations provide training supervision and evaluation labels.

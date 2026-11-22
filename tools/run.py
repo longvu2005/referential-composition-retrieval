@@ -9,6 +9,7 @@ from rcr.common.config import (
     parse_overrides,
     validate_training_schedule,
 )
+from rcr.proposed.contracts import OWNER_MODES
 
 
 def main(argv=None):
@@ -55,6 +56,12 @@ def main(argv=None):
                 "--split",
                 choices=("val", "test") if name == "run" else ("train", "val", "test"),
                 help="Override YAML split (default: val)",
+            )
+        if name == "retrieve":
+            command.add_argument(
+                "--diagnostic-owner-mode",
+                choices=OWNER_MODES,
+                help="Compare owner rules with fixed weights on validation",
             )
 
     args = parser.parse_args(argv)
@@ -105,7 +112,7 @@ def main(argv=None):
     if command == "retrieve":
         from rcr.proposed.retrieve import retrieve
 
-        return retrieve(cfg)
+        return retrieve(cfg, diagnostic_owner_mode=args.diagnostic_owner_mode)
     if command == "evaluate":
         from rcr.evaluation.runner import evaluate_run
 

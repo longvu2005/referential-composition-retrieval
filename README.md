@@ -54,8 +54,8 @@ The `fafa-aligned-pair-cls-v5` architecture shares one binding during warmup,
 then clones its warmed weights for independent target reasoning before the
 first joint epoch. Train this schedule in a fresh run directory.
 Retrieval also supports v4 checkpoints trained with shared binding weights.
-See the [run guide](docs/proposed_runs.md) for stages, outputs and the matched
-softplus ablation.
+See the [run guide](docs/proposed_runs.md) for stages, outputs and the
+comparison of Subject owner rules.
 
 ## Documentation
 

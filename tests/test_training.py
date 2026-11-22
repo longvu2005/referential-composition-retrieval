@@ -18,6 +18,7 @@ import torch
 import yaml
 from torch import nn
 
+from rcr.common.config import override_config
 from rcr.common.io import sha256_file
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve, sampling
@@ -82,6 +83,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     cfg["train"].update(epochs=3, context_warmup_epochs=warmup)
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["retrieval"]["context_weight"] = 0.23
+    cfg["model"]["fine_matching"]["owner_mode"] = "crop_log_softmax"
     data = training.load_rcr_data()
     query = data.samples_by_id["train"]
     query["case_type"] = "DUAL"
@@ -102,6 +104,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
         weights.append(settings)
         native_tokens.append("fafa_targets" in batch)
         assert batch["grounding_targets"].flatten().tolist() == [1.0, 0.0]
+        assert model.fine_matching["owner_mode"] == "crop_log_softmax"
         return compute(model, batch, *args, **settings)
 
     monkeypatch.setattr(training, "compute_loss", observe)
@@ -136,6 +139,9 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["epoch"] == 3
     assert saved["config"]["retrieval"]["fine_score_mode"] == "linear"
     assert saved["config"]["retrieval"]["context_weight"] == 0.23
+    selected = yaml.safe_load((checkpoint.parent / "selected.yaml").read_text())
+    for config in (saved["config"], last["config"], selected):
+        assert config["model"]["fine_matching"]["owner_mode"] == "crop_log_softmax"
     assert saved["scene_cache_id"] == cache.scene_cache_id
     assert saved["detection_cache_id"] == cache.detection_cache_id
     assert saved["state_supervised_pairs"] > 0
@@ -2061,6 +2067,8 @@ def _configure(cfg, data):
 )
 def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, fault):
     cfg, _, wandb_run, _ = tiny_training_run
+    if fault == "before_joint_step":
+        cfg["model"]["fine_matching"]["owner_mode"] = "crop_log_softmax"
     data = training.load_rcr_data(None)
     _configure(cfg, data)
     monkeypatch.setattr(torch.amp, "GradScaler", _Scaler, raising=False)
@@ -2425,23 +2433,23 @@ def test_incompatible_resume_leaves_run_untouched(
 
 
 @pytest.mark.parametrize(
-    "section,key,value",
+    "key,value",
     [
-        ("sampling", "partial_id_quota", 7),
-        ("sampling", "rejection_mining_context_weight", 0.006),
-        ("loss", "rejection_loss_mode", "softplus"),
+        ("train.sampling.partial_id_quota", 7),
+        ("train.sampling.rejection_mining_context_weight", 0.006),
+        ("loss.rejection_loss_mode", "softplus"),
+        ("model.fine_matching.owner_mode", "crop_log_softmax"),
     ],
 )
 def test_changed_training_settings_require_a_new_run(
-    tiny_training_run, monkeypatch, section, key, value
+    tiny_training_run, monkeypatch, key, value
 ):
     cfg, _, _, _ = tiny_training_run
     cfg["train"]["epochs"] = 2
     _pause(cfg, monkeypatch)
     path = Path(cfg["output"]["dir"]) / "last.pt"
     digest = sha256_file(path)
-    settings = cfg["loss"] if section == "loss" else cfg["train"]["sampling"]
-    settings[key] = value
+    cfg = override_config(cfg, {key: value})
     with pytest.raises(ValueError, match="config"):
         training.train(cfg, resume="auto")
     assert sha256_file(path) == digest

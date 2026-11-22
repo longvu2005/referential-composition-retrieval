@@ -27,6 +27,7 @@ from rcr.proposed.cache.native import checkpoint_native_metadata
 from rcr.proposed.cache.store import GalleryCache, gallery_cache_options
 from rcr.proposed.contracts import (
     ARCHITECTURE_VERSION,
+    DEFAULT_OWNER_MODE,
     FIXED_FINE_KEYS,
     SELECTED_RETRIEVAL_KEYS,
     SHARED_BINDING_ARCHITECTURE,
@@ -45,8 +46,15 @@ from rcr.proposed.ranking import (
 from rcr.proposed.scores import FINE_SCORE_MODE
 
 
-def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
+def retrieve(
+    cfg: dict,
+    *,
+    max_queries: int | None = None,
+    diagnostic_owner_mode: str | None = None,
+) -> dict:
     """Rank one split and save its Top-M scores with complete provenance."""
+    if diagnostic_owner_mode is not None and cfg["split"] != "val":
+        raise ValueError("owner mode diagnostics require the validation split")
     started = perf_counter()
     configure_determinism(cfg["runtime"].get("deterministic", True))
     device = resolve_device(cfg)
@@ -70,13 +78,14 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
     train_cfg = checkpoint["config"]
     if train_cfg.get("retrieval", {}).get("fine_score_mode") != FINE_SCORE_MODE:
         raise ValueError("checkpoint uses an obsolete fine scorer; train a new run")
-    # Architecture settings, including background, are checkpoint-authoritative.
+    # Architecture settings are checkpoint-authoritative for regular retrieval.
     # A retrieval YAML cannot silently change query encoding after val selection.
     model_cfg = {
         **train_cfg["model"],
         "fine_matching": matching_settings(train_cfg["model"].get("fine_matching")),
     }
     background = model_cfg["fine_matching"]["background_logit"]
+    trained_owner_mode = model_cfg["fine_matching"]["owner_mode"]
     settings = retrieval_settings(
         cfg["retrieval"], model_cfg.get("coarse_beta", DEFAULT_COARSE_BETA)
     )
@@ -109,6 +118,15 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         )
     if selected is not None and cfg.get("selected_background_logit", 0.0) != background:
         raise ValueError("background changed since val selection; rerun val retrieval")
+    if selected is not None:
+        selected_matching = cfg.get("model", {}).get("fine_matching") or {}
+        selected_owner_mode = selected_matching.get("owner_mode", DEFAULT_OWNER_MODE)
+        if selected_owner_mode != trained_owner_mode:
+            raise ValueError("owner mode differs from validation selection")
+    if diagnostic_owner_mode is not None:
+        model_cfg["fine_matching"] = matching_settings(
+            {**model_cfg["fine_matching"], "owner_mode": diagnostic_owner_mode}
+        )
     architecture = checkpoint.get("architecture_version")
     if architecture not in (ARCHITECTURE_VERSION, SHARED_BINDING_ARCHITECTURE):
         raise ValueError(
@@ -232,6 +250,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         device=device,
         elapsed_seconds=perf_counter() - started,
     )
+    if model_cfg["fine_matching"]["owner_mode"] != trained_owner_mode:
+        metadata["fine_score_ablation"] = True
     # rankings.pt remains sufficient when copied without sibling logs/configs.
     output["provenance"] = metadata
     directory = output_directory(cfg)

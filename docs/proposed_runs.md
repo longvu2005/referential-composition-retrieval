@@ -118,10 +118,11 @@ Remaining diversity slots draw overlap groups with probability proportional
 to `2^(r-1)`. Images
 containing every requested ID plus extra people remain identity positives.
 
-Mining refreshes at epochs 7, 11, 15 and 19. Base semantic and wrong-ID pools
-use H=0 with population normalization over their screened union. With context
-and rejection active, `train.sampling.rejection_mining_context_weight=0.005`
-also scores H on at most `pool_size=64` screened wrong-ID images per query.
+Mining refreshes at epochs 7, 11, 15, 19 and 23 in the supplied schedule. Base
+semantic and wrong-ID pools use H=0 with population normalization over their
+screened union. With context and rejection active,
+`train.sampling.rejection_mining_context_weight=0.005` also scores H on at most
+`pool_size=64` screened wrong-ID images per query.
 Population fusion on that same wrong-ID list is computed before filtering
 `C>0`. Up to two images that improve rank and enter the H top ten form the
 rejection context pool. Each row randomly draws one of them before two base
@@ -158,6 +159,8 @@ inference checkpoint.
 The saved `binding_shared` flag restores the module sharing and optimizer
 parameter order. Resume within joint training preserves the learned reasoning
 weights. A resumed warmup run splits at the configured boundary.
+`model.fine_matching.owner_mode` is part of the effective configuration for
+resume.
 
 ## Seeds and reproducibility
 
@@ -194,6 +197,43 @@ scores on CPU and exports a selected configuration for test.
 Test uses the validation-selected checkpoint and scoring settings. The runner
 checks checkpoint, dataset and cache compatibility before retrieval.
 
+## Compare Subject owner rules
+
+`model.fine_matching.owner_mode` defaults to `raw_logit`, including for older
+configs and inference checkpoints without this field. Run both modes on the
+same validation checkpoint with its selected scoring coefficients.
+
+```bash
+for owner_mode in raw_logit crop_log_softmax; do
+  diagnostic_dir="runs/owner-diagnostic-${owner_mode}"
+  .venv-proposed/bin/python tools/run.py retrieve \
+    --config runs/proposed/selected.yaml --split val \
+    --diagnostic-owner-mode "$owner_mode" --set "output.dir=${diagnostic_dir}"
+  .venv-proposed/bin/python tools/run.py evaluate \
+    --config runs/proposed/selected.yaml --split val \
+    --set "output.dir=${diagnostic_dir}"
+done
+```
+
+The diagnostic recomputes fine evidence using the same checkpoint and coarse
+shortlist. Compare by-case Full-mAP in `metrics.json`, especially DUAL and
+RELATIONAL. A diagnostic using a mode different from the checkpoint is marked
+as an ablation. Calibration uses artifacts from the checkpoint's trained mode.
+
+To compare the effect on learning, train each mode with the same seed and
+caches in its own run directory. Both runs use the method name `proposed`.
+
+```bash
+for owner_mode in raw_logit crop_log_softmax; do
+  .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+    --set "model.fine_matching.owner_mode=${owner_mode}" train.seed=0 \
+    "output.dir=runs/proposed-owner-${owner_mode}"
+done
+```
+
+`best.pt`, `last.pt`, `selected.yaml` and retrieval artifacts record the mode.
+Use the selected configuration from the corresponding run for test.
+
 ## Reading outputs
 
 Paths below are relative to the configured `output.dir`.
@@ -222,7 +262,6 @@ artifacts can be replayed without model weights or feature caches:
 Replay can vary supported score coefficients on the saved shortlist. Changes
 to the model, matching, query inputs or shortlist require fresh retrieval.
 Use validation to select coefficients under the benchmark protocol.
-The artifact schema is unchanged by the CLS context architecture. New retrieval
-stores raw `H` before its coefficient, so the existing CPU calibration/replay
-path remains available. Older artifacts can still replay their saved scores,
-but do not contain context scores from this architecture.
+Retrieval stores raw `H` before its coefficient. Replay uses the fine evidence
+already saved for that owner mode. Compatible artifacts from before the owner
+setting use `raw_logit`.
