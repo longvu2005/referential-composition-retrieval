@@ -115,9 +115,8 @@ optimization; use a separate output directory:
   --split val --set retrieval.prefetch_batches=1 output.dir=runs/eval-prefetch
 ```
 
-The evaluation input optimizations preserve model parameters, checkpoint
-architecture and score-artifact schema. Existing aligned CLS v4 inference
-checkpoints and compatible frozen caches remain usable.
+Serial and prefetched evaluation use the same checkpoint and score-artifact
+schema for both v5 and v4 inference.
 
 CPU/GPU boundaries are intentional and bounded as follows:
 
@@ -155,10 +154,9 @@ Packing can change floating-point accumulation through different GEMM shapes;
 old and new training trajectories are not promised bitwise identical. Serial and
 prefetched execution use the same numerical path and are tested against each other.
 
-The current synchronization/input changes preserve aligned CLS v4 inference
-weights and compatible frozen caches. Training resume also binds the source
-hash; retain the original implementation for an existing run, or use a new
-output directory with the updated training implementation:
+Training resume binds the architecture and source hash. Keep the original
+implementation to resume an existing run. To train with the updated model
+and compatible frozen caches, use a new output directory.
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \

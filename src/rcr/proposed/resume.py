@@ -18,7 +18,7 @@ import torch
 from rcr.common.data import split_fingerprint
 from rcr.common.io import atomic_write_text, sha256_file
 from rcr.evaluation.provenance import digest_json
-from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
+from rcr.proposed.contracts import ARCHITECTURE_VERSION, CALIBRATED_RETRIEVAL_KEYS
 
 RESUME_VERSION = 1
 
@@ -149,6 +149,10 @@ def load_resume(path: Path, output: Path) -> dict:
         )
     if state["version"] != RESUME_VERSION:
         raise ValueError("unsupported training checkpoint version")
+    if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
+        raise ValueError(
+            "resume requires the same architecture; train in a new output.dir"
+        )
     if (
         not isinstance(state["optimizer"], dict)
         or {"state", "param_groups"} - state["optimizer"].keys()

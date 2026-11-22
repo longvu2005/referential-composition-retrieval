@@ -29,6 +29,7 @@ from rcr.proposed.contracts import (
     ARCHITECTURE_VERSION,
     FIXED_FINE_KEYS,
     SELECTED_RETRIEVAL_KEYS,
+    SHARED_BINDING_ARCHITECTURE,
 )
 from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
@@ -108,7 +109,8 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         )
     if selected is not None and cfg.get("selected_background_logit", 0.0) != background:
         raise ValueError("background changed since val selection; rerun val retrieval")
-    if checkpoint.get("architecture_version") != ARCHITECTURE_VERSION:
+    architecture = checkpoint.get("architecture_version")
+    if architecture not in (ARCHITECTURE_VERSION, SHARED_BINDING_ARCHITECTURE):
         raise ValueError(
             "checkpoint architecture is incompatible; train in a new output directory"
         )
@@ -189,7 +191,21 @@ def retrieve(cfg: dict, *, max_queries: int | None = None) -> dict:
         person_input_dim=checkpoint["person_input_dim"],
         max_subjects=max_subjects,
     ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    state = checkpoint["model"]
+    if architecture == SHARED_BINDING_ARCHITECTURE:
+        # v4 used the grounding weights for both calls during inference.
+        if any(key.startswith("reasoning_binding.") for key in state):
+            raise ValueError(
+                "shared-binding checkpoint contains reasoning_binding weights"
+            )
+        state.update(
+            {
+                key.replace("grounding.binding.", "reasoning_binding.", 1): value
+                for key, value in state.items()
+                if key.startswith("grounding.binding.")
+            }
+        )
+    model.load_state_dict(state)
 
     output = retrieve_rankings(
         samples,

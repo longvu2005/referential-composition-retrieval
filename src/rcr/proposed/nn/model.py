@@ -1,6 +1,7 @@
 """RCR person identity/semantics over frozen, reference-free feature caches."""
 
 import math
+from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 
 import torch
@@ -161,6 +162,8 @@ class RCRModel(nn.Module):
         )
         binding = EvidenceBinding(dim, num_heads, mlp_ratio, geo_dim, dropout)
         self.grounding = SubjectGrounding(binding, dim)
+        # Match the shared model's initialization while allowing independent updates.
+        self.reasoning_binding = deepcopy(binding)
         self.composition = StructuredComposition(
             dim,
             num_heads,
@@ -460,7 +463,7 @@ class RCRModel(nn.Module):
             reference = reference.index_select(1, layout.reference_indices)
             mask = mask.index_select(1, layout.reference_indices)
             prior = prior.index_select(1, layout.reference_indices)
-        evidence = self.grounding.binding(
+        evidence = self.reasoning_binding(
             scene,
             gather_matched(semantic, indices),
             boxes,

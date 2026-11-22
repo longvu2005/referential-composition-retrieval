@@ -17,7 +17,10 @@ from rcr.evaluation.evaluate import evaluate_retrieval_output, selection_metrics
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, ranking, retrieve
 from rcr.proposed import train as training
-from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
+from rcr.proposed.contracts import (
+    CALIBRATED_RETRIEVAL_KEYS,
+    SHARED_BINDING_ARCHITECTURE,
+)
 from rcr.proposed.matching import PersonMatching
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
@@ -597,7 +600,7 @@ def test_aligned_evidence_is_bound_once_and_injected_into_the_assigned_slots():
             calls.append((persons.detach().clone(), boxes.detach().clone()))
             return persons
 
-    model.grounding.binding = Binding()
+    model.reasoning_binding = Binding()
     model.reasoner.register_forward_pre_hook(
         lambda module, args, kwargs: injected.append((args, kwargs)), with_kwargs=True
     )
@@ -1319,6 +1322,35 @@ def test_calibration_freezes_full_scoring_config_and_retrieves_selected(
                 "output_dir": str(tmp_path / "mixed"),
             }
         )
+
+
+def test_shared_binding_checkpoint_reproduces_tied_inference(saved_pipeline):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["config"]["model"]["fine_matching"].update(
+        identity_threshold=-1.0, selection_threshold=0.0001
+    )
+    state = checkpoint["model"]
+    # A fresh v5 checkpoint starts from the same weights on both paths.
+    torch.save(checkpoint, cfg["checkpoint"])
+    expected = retrieve.retrieve(cfg)
+    assert expected["context"].abs().max() > 0
+
+    checkpoint["model"] = {
+        k: v for k, v in state.items() if not k.startswith("reasoning_binding.")
+    }
+    torch.save(checkpoint, cfg["checkpoint"])
+    with pytest.raises(RuntimeError, match="reasoning_binding"):
+        retrieve.retrieve(cfg)
+
+    checkpoint["architecture_version"] = SHARED_BINDING_ARCHITECTURE
+    torch.save(checkpoint, cfg["checkpoint"])
+    digest = sha256_file(cfg["checkpoint"])
+    actual = retrieve.retrieve(cfg)
+    assert sha256_file(cfg["checkpoint"]) == digest
+    assert actual["provenance"]["architecture_version"] == SHARED_BINDING_ARCHITECTURE
+    for key in ("context", "fine_scores", "rankings"):
+        torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("obsolete", ["scorer", "architecture"])

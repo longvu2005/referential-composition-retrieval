@@ -23,6 +23,7 @@ from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve, sampling
 from rcr.proposed import train as training
 from rcr.proposed.batch import build_batch, build_supervision, prepare_visual_batch
+from rcr.proposed.contracts import SHARED_BINDING_ARCHITECTURE
 from rcr.proposed.losses import (
     _context_scores,
     compute_loss,
@@ -157,6 +158,17 @@ def test_each_objective_trains_its_intended_modules(objective_batch, component):
     total, parts = training.compute_loss(model, batch, (2, 2), **_only_loss(component))
     assert torch.isfinite(total)
     total.backward()
+    if component == "grounding":
+        assert _has_gradient(model.grounding.binding)
+    elif component == "coarse":
+        # With a single query person, normalized weighting can give zero gradient.
+        assert model.grounding.binding.norm_out.weight.grad is not None
+    else:
+        assert all(p.grad is None for p in model.grounding.binding.parameters())
+    if component == "context":
+        assert _has_gradient(model.reasoning_binding)
+    else:
+        assert all(p.grad is None for p in model.reasoning_binding.parameters())
     assert _has_gradient(model.identity_head) == (component in ("identity", "coarse"))
     if component not in ("identity", "coarse"):
         assert all(p.grad is None for p in model.identity_head.parameters())
@@ -180,6 +192,10 @@ def test_each_objective_trains_its_intended_modules(objective_batch, component):
 
 def test_joint_objective_learns_on_a_fixed_supervised_batch(objective_batch):
     model, batch = objective_batch
+    grounding_storage = {p.data_ptr() for p in model.grounding.binding.parameters()}
+    assert grounding_storage.isdisjoint(
+        p.data_ptr() for p in model.reasoning_binding.parameters()
+    )
     settings = training.loss_settings({})
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=1e-3
@@ -2166,6 +2182,20 @@ def test_legacy_checkpoint_rejected_without_overwriting(tiny_training_run):
         training.train(cfg, resume="auto")
     assert sha256_file(path) == digest
     assert list(output.iterdir()) == [path]
+
+
+def test_shared_binding_checkpoint_cannot_resume(tiny_training_run, monkeypatch):
+    cfg, _, _, _ = tiny_training_run
+    cfg["train"]["epochs"] = 2
+    _pause(cfg, monkeypatch)
+    path = Path(cfg["output"]["dir"]) / "last.pt"
+    saved = torch.load(path, weights_only=True)
+    saved["architecture_version"] = SHARED_BINDING_ARCHITECTURE
+    torch.save(saved, path)
+    digest = sha256_file(path)
+    with pytest.raises(ValueError, match="resume requires the same architecture"):
+        training.train(cfg, resume="auto")
+    assert sha256_file(path) == digest
 
 
 def test_rng_state_roundtrip_uses_safe_checkpoint_values(tmp_path):

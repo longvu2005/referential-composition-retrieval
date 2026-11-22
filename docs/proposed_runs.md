@@ -53,9 +53,11 @@ Use a fresh `output.dir` for each experiment. For example:
 Training performs scheduled validation, calibrates the configured scoring
 coefficients and saves the best selection. The selection criterion is defined
 in the [benchmark protocol](benchmark_protocol.md).
-The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v4`. Use a
-new run directory and train a new checkpoint; earlier reasoner checkpoints and
-resume states are incompatible. Compatible frozen feature caches are reusable.
+The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v5`.
+Start a fresh run to train its two bindings independently. A v4 checkpoint
+supports retrieval by loading its shared binding weights into both modules.
+Resuming a v4 training run requires its original implementation and optimizer
+state. Both architectures use the same frozen feature caches.
 
 With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semantic
 context, and epoch 7 onward also enables mining and rejection at weight `0.5`.

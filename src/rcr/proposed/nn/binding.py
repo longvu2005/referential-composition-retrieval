@@ -1,4 +1,4 @@
-"""Shared reference-conditioned evidence binding."""
+"""Reference-conditioned evidence binding for grounding and reasoning."""
 
 import torch
 from torch import Tensor, nn

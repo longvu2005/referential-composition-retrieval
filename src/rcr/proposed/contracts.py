@@ -1,6 +1,7 @@
 """Checkpoint names and validation selection fields; no model runtime imports."""
 
-ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v4"
+ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v5"
+SHARED_BINDING_ARCHITECTURE = "fafa-aligned-pair-cls-v4"
 
 FIXED_FINE_KEYS = (
     "pooling",

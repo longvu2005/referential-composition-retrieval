@@ -14,6 +14,10 @@ See the [feature contracts](feature_contracts.md) for compatibility requirements
 ## Grounding and composition
 
 Grounding associates Subject descriptions with people in the reference image.
+`grounding.binding` conditions reference-image patches on each Subject
+description. Each person token attends to those patches, and the grounding head
+scores the resulting token. The grounding loss supervises these logits, and
+the coarse identity loss uses their sigmoid values to weight query detections.
 A Subject may contain one or several people. Composition combines these
 representations with Subject roles and the requested change.
 
@@ -47,8 +51,11 @@ o_ik = LN_target(W_e e_k + W_g g(box_pi(k)))  when matched(i,k)
 X = LN_inject(R + Dropout([0_CLS, 0_text, {o_ik}]))
 ```
 
-`EvidenceBinding` reads the target scene once per aligned reference detection
-to produce `e_k`; its output is then routed into the Subject-person slots.
+`reasoning_binding` uses the same `EvidenceBinding` implementation with its
+own parameters. It conditions target patches on the composed query and produces
+`e_k` once per aligned reference detection. The model routes the result into
+the Subject-person slots. Both bindings start with identical parameter values
+so their initial outputs agree on identical inputs in evaluation mode.
 `TargetPersonBuilder` projects evidence and center/size geometry and normalizes
 their sum, following the aligned person design in `2221c4e`. `n_miss` is one
 learned vector shared by missing members and empty endpoint sets. Injection
@@ -156,9 +163,10 @@ valid pair, including queries with zero loss. Invalid values are masked before
 score differences. A batch without valid pairs returns a differentiable zero.
 `context_rejection_weight` multiplies the reduced rejection loss.
 Membership, assignment, `B` and `C` are detached in the context loss.
-Gradients through `H` reach the reasoner,
-composition and evidence path. Grounding, identity, coarse and global-state
-losses retain their existing weights and supervision.
+Gradients through `H` reach the reasoner, composition, target-side binding
+and shared feature projections. During context warmup, the query-side binding
+learns from grounding and coarse supervision. The target-side binding starts
+learning when context loss becomes active.
 
 The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
 weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
@@ -205,11 +213,10 @@ selection unchanged under the [benchmark protocol](benchmark_protocol.md).
 ## Configuration and checkpoints
 
 Model and experiment settings live in YAML. Checkpoints record the effective
-model configuration and feature provenance. This architecture is
-`fafa-aligned-pair-cls-v4`: start a fresh run and checkpoint. Weights and resume
-states from the earlier Subject/pair scalar architecture are incompatible.
-Compatible frozen feature caches can be reused. The score-artifact schema is
-unchanged; CPU replay still uses saved raw components without model weights.
-Changing to this reasoner requires fresh retrieval artifacts because `H` has
-changed. Use the [run guide](proposed_runs.md) for execution and the
+model configuration and feature provenance. Train `fafa-aligned-pair-cls-v5`
+in a fresh run directory using compatible frozen feature caches.
+For v4 inference, retrieval loads the saved shared weights into both bindings.
+After training v5, generate new retrieval artifacts to capture its learned `H`.
+CPU replay uses the raw components saved with each ranking.
+Use the [run guide](proposed_runs.md) for execution and the
 [cache guide](detection_cache.md) for feature preparation.
