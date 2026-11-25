@@ -193,7 +193,9 @@ def _add_gallery_image(cache, data, image_id, split):
         "image_id": image_id,
         "path": f"{split}/{image_id}.jpg",
     }
-    data.gt_head_boxes_by_image[image_id] = [{"identity_id": "p1"}]
+    data.gt_head_boxes_by_image[image_id] = [
+        {"identity_id": "p1", "x": 0.2, "y": 0.1, "width": 0.2, "height": 0.2}
+    ]
 
 
 def _fusion_example(source, context):

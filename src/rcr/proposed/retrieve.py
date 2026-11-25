@@ -37,6 +37,7 @@ from rcr.proposed.nn.encoders import (
     check_clip_config,
     load_text_encoder_state,
     load_text_modules,
+    text_lora_settings,
 )
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.ranking import (
@@ -84,6 +85,7 @@ def retrieve(
         **train_cfg["model"],
         "fine_matching": matching_settings(train_cfg["model"].get("fine_matching")),
     }
+    lora = text_lora_settings(model_cfg.get("text_lora"))
     background = model_cfg["fine_matching"]["background_logit"]
     trained_owner_mode = model_cfg["fine_matching"]["owner_mode"]
     settings = retrieval_settings(
@@ -198,6 +200,7 @@ def retrieve(
         tokenizer_source=tokenizer_path,
         revision=checkpoint.get("text_model_revision"),
         cache_mib=cfg.get("cache", {}).get("text_lru_mib", 0),
+        lora=lora,
     )
     load_text_encoder_state(text_encoder, tokenizer, checkpoint["text_encoder"])
 

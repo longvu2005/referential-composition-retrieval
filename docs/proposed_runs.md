@@ -64,8 +64,12 @@ its shared binding weights.
 Resuming a v4 training run requires its original implementation and optimizer
 state. Both architectures use the same frozen feature caches.
 
-With the supplied configuration, epochs 1–4 warm up, epochs 5–6 learn semantic
-context, and epoch 7 onward also enables mining and rejection at weight `0.5`.
+With the supplied configuration, epochs 1–4 train the base and CLIP text
+LoRA with context disabled. Epochs 5–6 add semantic context, and epoch 7 onward
+also enables mining and rejection at weight `0.5`. Text LoRA updates the
+query and value projections of the last two CLIP text blocks throughout the
+25-epoch run. The adapter group uses `optimizer.text_lora_lr=0.0001` and the
+same cosine schedule. The frozen CLIP prefix and visual caches can be reused.
 Context loss uses the original training coefficients `a_train=0.04` and
 `b_train=0.10`; validation calibration changes retrieval coefficients only.
 The supplied RCR experiment retains the name `proposed`, uses
@@ -75,8 +79,39 @@ preserving the baseline objective. The mode changes only the rejection term;
 candidate eligibility, quotas, mining schedule and calibration follow the same
 process in both modes.
 
-For the ablation, run both modes from the same source commit with seed `0` and
-the same caches/runtime. These commands retain rejection weight `0.5`,
+### Subject member verification ablation
+
+Run the two arms with the same seed, LoRA settings, warmup and mining schedule.
+The verification setting changes the semantic loss pairs. The scorer and
+rejection objective use the same settings in both arms.
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set loss.context_verify_members=false output.dir=runs/proposed-mask-control
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set loss.context_verify_members=true output.dir=runs/proposed-mask-verified
+```
+
+Joint epochs report `train_fine_full_pairs`, `train_fine_partial_pairs` and
+`train_fine_active_fraction` for the verified comparisons in both arms.
+The active fraction uses the number of sampled query rows as its denominator.
+Case suffixes include `_dual` and `_relational`. W&B tracks the same counters
+under `epoch/fine_*`.
+
+Compare `fine_unfiltered_pairs` (same-ID with positive coverage) to
+`fine_owner_pairs` (correctly owned query crops in each Subject) and
+`fine_matched_pairs` (each image verifies at least one member per Subject).
+The gap from those matched pairs to `fine_full_pairs + fine_partial_pairs`
+comes from unequal verified sets. A full pair verifies every annotated member
+on both images. The separate `fine_multi_head_query_crops` and
+`fine_multi_head_target_matches` counters flag labeled crops with multiple
+annotated heads inside the box. Compare them to the corresponding labeled-crop
+and labeled-match counts.
+
+### Rejection loss ablation
+
+For a comparison of rejection modes, run both from the same source commit with
+seed `0` and the same caches/runtime. These commands retain rejection weight `0.5`,
 temperature `0.1`, `retrieval.context_weight=0.10`, partial-ID quota `6` and
 mining context coefficient `0.005` from the supplied configuration.
 

@@ -104,6 +104,7 @@ def tiny_training_run(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init_wandb))
 
     cfg = _workflow_config()
+    cfg["model"]["text_lora"]["enabled"] = False
     cfg["data"] = {
         "final_dir": "unused",
         "image_root": "unused",
@@ -210,6 +211,7 @@ def saved_pipeline(tmp_path, monkeypatch):
     )
     cfg = _workflow_config()
     cfg["model"].update(dim=8, identity_dim=6, state_dim=4, num_heads=2, geo_dim=4)
+    cfg["model"]["text_lora"]["enabled"] = False
     cfg["retrieval"].update(
         top_m=2, fine_batch_size=1, identity_batch_size=2, coarse_batch_size=2
     )

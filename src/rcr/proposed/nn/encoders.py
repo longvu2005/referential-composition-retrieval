@@ -1,7 +1,9 @@
 """Shared encoders, query text preparation, and identity projection."""
 
+import math
 import re
 from collections import OrderedDict
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +15,26 @@ SUBJECT_MARKERS = {1: "Subject 1", 2: "Subject 2"}
 CLIP_MODEL = "openai/clip-vit-base-patch32"
 CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 CLIP_CONTEXT_LENGTH = 77
+TEXT_POLICY = {"context_length": CLIP_CONTEXT_LENGTH, "subjects": "native_spans"}
+
+
+def text_lora_settings(settings: dict | None = None) -> dict:
+    """Resolve the late-block text adapters, including frozen legacy configs."""
+    defaults = {"enabled": False, "last_layers": 2, "rank": 8, "alpha": 16}
+    if settings is None:
+        return defaults
+    if not isinstance(settings, dict) or settings.keys() - defaults.keys():
+        raise ValueError("model.text_lora accepts enabled, last_layers, rank and alpha")
+    result = {**defaults, **settings}
+    if type(result["enabled"]) is not bool:
+        raise ValueError("model.text_lora.enabled must be true or false")
+    for key in ("last_layers", "rank"):
+        if type(result[key]) is not int or result[key] < 1:
+            raise ValueError(f"model.text_lora.{key} must be a positive integer")
+    alpha = result["alpha"]
+    if type(alpha) not in (int, float) or not math.isfinite(alpha) or alpha <= 0:
+        raise ValueError("model.text_lora.alpha must be finite and positive")
+    return result
 
 
 def check_clip_config(cfg: dict) -> None:
@@ -59,6 +81,8 @@ def load_text_modules(
     tokenizer_source=None,
     revision: str | None = None,
     cache_mib: int = 0,
+    lora: dict | None = None,
+    train_amp: bool = False,
 ):
     """Load the text half of the same pinned CLIP checkpoint as the scene cache."""
     from transformers import CLIPTextModelWithProjection, CLIPTokenizerFast
@@ -79,26 +103,61 @@ def load_text_modules(
     )
     if backbone.config.max_position_embeddings != CLIP_CONTEXT_LENGTH:
         raise ValueError("CLIP text checkpoint must support exactly 77 positions")
-    return tokenizer, TextEncoder(backbone, dim, cache_mib=cache_mib).to(device)
+    encoder = TextEncoder(
+        backbone, dim, cache_mib=cache_mib, lora=lora, train_amp=train_amp
+    )
+    return tokenizer, encoder.to(device)
 
 
-def text_encoder_state(text_encoder: nn.Module, tokenizer) -> dict:
-    """Store only the learned projection and native-tokenizer policy."""
+def text_encoder_state(text_encoder: "TextEncoder", tokenizer) -> dict:
+    """Store the learned text weights and their encoding policy."""
     del tokenizer
-    return {
+    state = {
         "projection": text_encoder.proj.state_dict(),
-        "text_policy": {
-            "context_length": CLIP_CONTEXT_LENGTH,
-            "subjects": "native_spans",
-        },
+        "text_policy": dict(TEXT_POLICY),
     }
+    if text_encoder.lora["enabled"]:
+        state["lora"] = {
+            "settings": dict(text_encoder.lora),
+            "weights": {
+                name: param.detach()
+                for name, param in text_encoder.named_lora_parameters()
+            },
+        }
+    return state
 
 
-def load_text_encoder_state(text_encoder: nn.Module, tokenizer, state: dict) -> None:
-    expected = text_encoder_state(text_encoder, tokenizer)["text_policy"]
-    if state.get("text_policy") != expected:
+def load_text_encoder_state(
+    text_encoder: "TextEncoder", tokenizer, state: dict
+) -> None:
+    del tokenizer
+    if state.get("text_policy") != TEXT_POLICY:
         raise ValueError("text checkpoint is not compatible with native CLIP spans")
+    saved = state.get("lora")
+    parameters = dict(text_encoder.named_lora_parameters())
+    if text_encoder.lora["enabled"]:
+        if not isinstance(saved, dict) or saved.get("settings") != text_encoder.lora:
+            raise ValueError("CLIP text LoRA settings differ from the checkpoint")
+        weights = saved.get("weights")
+        if not isinstance(weights, dict) or weights.keys() != parameters.keys():
+            raise ValueError(
+                "CLIP text LoRA checkpoint has incompatible parameter keys"
+            )
+        for name, param in parameters.items():
+            value = weights[name]
+            if not isinstance(value, Tensor) or value.shape != param.shape:
+                raise ValueError(
+                    f"CLIP text LoRA checkpoint has invalid shape for {name}"
+                )
+    elif saved is not None:
+        raise ValueError(
+            "CLIP text LoRA is disabled but the checkpoint contains adapters"
+        )
     text_encoder.proj.load_state_dict(state["projection"])
+    if parameters:
+        with torch.no_grad():
+            for name, param in parameters.items():
+                param.copy_(weights[name])
 
 
 class QueryTextCache:
@@ -298,23 +357,77 @@ class ImageEncoder(nn.Module):
         return patches, output.image_embeds, patch_hw
 
 
-class TextEncoder(nn.Module):
-    """Frozen CLIP token projection followed by the learned context projection."""
+class _LoRALinear(nn.Module):
+    """Add a low-rank update to a frozen attention projection."""
 
-    def __init__(self, backbone: nn.Module, dim: int, *, cache_mib: int = 0) -> None:
+    def __init__(self, base: nn.Linear, rank: int, alpha: float) -> None:
+        super().__init__()
+        self.base = base
+        self.scaling = alpha / rank
+        # Initialize on CPU so adding adapters never changes the main model's RNG.
+        initial = torch.empty(rank, base.in_features, device="cpu", dtype=torch.float32)
+        nn.init.kaiming_uniform_(initial, a=math.sqrt(5))
+        self.lora_a = nn.Parameter(initial.to(base.weight))
+        self.lora_b = nn.Parameter(base.weight.new_zeros(base.out_features, rank))
+
+    def forward(self, value: Tensor) -> Tensor:
+        update = F.linear(F.linear(value, self.lora_a), self.lora_b)
+        return torch.add(self.base(value), update, alpha=self.scaling)
+
+
+class TextEncoder(nn.Module):
+    """Cache the frozen CLIP prefix and recompute the learned text path."""
+
+    def __init__(
+        self,
+        backbone: nn.Module,
+        dim: int,
+        *,
+        cache_mib: int = 0,
+        lora: dict | None = None,
+        train_amp: bool = False,
+    ) -> None:
         super().__init__()
         if type(cache_mib) is not int or cache_mib < 0:
             raise ValueError("cache.text_lru_mib must be a nonnegative integer")
-        self.backbone = backbone
-        self.backbone.requires_grad_(False)
-        self.backbone.eval()
-
+        self.backbone = backbone.requires_grad_(False).eval()
         self.global_dim = backbone.config.projection_dim
         self.proj = nn.Linear(self.global_dim, dim)
-        # Cache frozen CLIP tokens; recompute the learned projection for gradients.
+        self.lora = text_lora_settings(lora)
+        self.train_amp = train_amp
+        self._lora_start = None
+        if self.lora["enabled"]:
+            layers = backbone.text_model.encoder.layers
+            self._lora_start = len(layers) - self.lora["last_layers"]
+            if self._lora_start < 0:
+                raise ValueError("model.text_lora.last_layers exceeds CLIP text depth")
+            if self.lora["rank"] > backbone.config.hidden_size:
+                raise ValueError("model.text_lora.rank exceeds CLIP text width")
+            with torch.random.fork_rng(devices=[]):
+                for index in range(self._lora_start, len(layers)):
+                    attention = layers[index].self_attn
+                    for name in ("q_proj", "v_proj"):
+                        setattr(
+                            attention,
+                            name,
+                            _LoRALinear(
+                                getattr(attention, name),
+                                self.lora["rank"],
+                                self.lora["alpha"],
+                            ),
+                        )
+
+        # The LRU stores only states from layers with frozen weights.
         self._hidden: OrderedDict[tuple, Tensor] = OrderedDict()
         self._hidden_limit = cache_mib * 1024**2
         self._hidden_bytes = 0
+
+    def named_lora_parameters(self):
+        return (
+            (name, param)
+            for name, param in self.backbone.named_parameters()
+            if param.requires_grad
+        )
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -334,14 +447,25 @@ class TextEncoder(nn.Module):
         if input_ids.shape[1] > CLIP_CONTEXT_LENGTH:
             raise ValueError("CLIP text exceeds its 77-token position limit")
         device = self.proj.weight.device
-        if self._hidden_limit:
-            tokens = self._cached_backbone(input_ids, attention_mask)
+        valid = attention_mask.to(device, dtype=torch.bool, non_blocking=True)
+        if self._lora_start is None:
+            tokens = self._encode_frozen(input_ids, attention_mask)
         else:
-            with torch.no_grad():
-                tokens = self._backbone_tokens(
-                    input_ids.to(device, non_blocking=True),
-                    attention_mask.to(device, non_blocking=True),
+            # Share the same frozen prefix between AMP training and FP32 retrieval.
+            with torch.autocast(device.type, enabled=False):
+                hidden = self._encode_frozen(input_ids, attention_mask)
+            amp = self.train_amp and self.training and device.type == "cuda"
+            with torch.autocast("cuda", dtype=torch.float16) if amp else nullcontext():
+                text_model = self.backbone.text_model
+                hidden = self._run_clip_layers(
+                    hidden,
+                    valid,
+                    range(self._lora_start, len(text_model.encoder.layers)),
                 )
+                tokens = self.backbone.text_projection(
+                    text_model.final_layer_norm(hidden)
+                )
+            tokens = tokens.to(self.proj.weight.dtype)
         # CLIP's eos_token_id=2 convention pools the highest token ID in each row.
         if self.backbone.config.eos_token_id == 2:
             eot = input_ids.int().argmax(-1)
@@ -353,9 +477,47 @@ class TextEncoder(nn.Module):
         ]
         return (
             self.proj(tokens),
-            attention_mask.to(device, non_blocking=True).bool(),
+            valid,
             pooled.float(),
         )
+
+    @torch.no_grad()
+    def _encode_frozen(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        if self._hidden_limit:
+            return self._cached_backbone(input_ids, attention_mask)
+        device = self.proj.weight.device
+        return self._frozen_tokens(
+            input_ids.to(device, non_blocking=True),
+            attention_mask.to(device, non_blocking=True),
+        )
+
+    def _run_clip_layers(
+        self, hidden: Tensor, attention_mask: Tensor, indices: range
+    ) -> Tensor:
+        from transformers.modeling_attn_mask_utils import (
+            _create_4d_causal_attention_mask,
+            _prepare_4d_attention_mask,
+        )
+
+        # CLIP eager/SDPA add the same masks in every block. Combine them once.
+        mask = _prepare_4d_attention_mask(attention_mask, hidden.dtype)
+        causal = _create_4d_causal_attention_mask(
+            hidden.shape[:2], hidden.dtype, device=hidden.device
+        )
+        if causal is not None:
+            mask = mask + causal
+        layers = self.backbone.text_model.encoder.layers
+        for index in indices:
+            hidden = layers[index](
+                hidden, attention_mask=mask, causal_attention_mask=None
+            )[0]
+        return hidden
+
+    def _frozen_tokens(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        if self._lora_start is None:
+            return self._backbone_tokens(input_ids, attention_mask)
+        hidden = self.backbone.text_model.embeddings(input_ids=input_ids)
+        return self._run_clip_layers(hidden, attention_mask, range(self._lora_start))
 
     def _backbone_tokens(self, input_ids, attention_mask):
         hidden = self.backbone(
@@ -403,7 +565,7 @@ class TextEncoder(nn.Module):
             # Separate AMP/FP32 keys keep validation features at their own precision.
             ids_device = input_ids[indices].to(device, non_blocking=True)
             mask_device = attention_mask[indices].to(device, non_blocking=True)
-            hidden_device = self._backbone_tokens(
+            hidden_device = self._frozen_tokens(
                 ids_device,
                 mask_device,
             )
@@ -447,6 +609,8 @@ class TextEncoder(nn.Module):
             hits.append(key)
         if hits:
             uploaded = torch.stack(rows).to(device, non_blocking=True)
+            if len(hits) == len(keys):
+                return uploaded
             fresh.update(zip(hits, uploaded, strict=True))
         return torch.stack([fresh[key] for key in keys])
 

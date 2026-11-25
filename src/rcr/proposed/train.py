@@ -42,7 +42,7 @@ from rcr.proposed.calibration import (
 )
 from rcr.proposed.contracts import CALIBRATED_RETRIEVAL_KEYS
 from rcr.proposed.identity import IdentityCropSampler, identity_sampling_settings
-from rcr.proposed.losses import compute_loss, loss_settings
+from rcr.proposed.losses import FINE_COUNT_FIELDS, compute_loss, loss_settings
 from rcr.proposed.matching import matching_settings
 from rcr.proposed.nn.encoders import (
     QueryTextCache,
@@ -50,6 +50,7 @@ from rcr.proposed.nn.encoders import (
     load_text_encoder_state,
     load_text_modules,
     text_encoder_state,
+    text_lora_settings,
 )
 from rcr.proposed.nn.model import DEFAULT_COARSE_BETA, RCRModel
 from rcr.proposed.prefetch import OrderedPrefetch, VisualStager
@@ -82,6 +83,8 @@ from rcr.proposed.sampling import (
 )
 from rcr.proposed.scores import MINING_CONTEXT_WEIGHT
 from rcr.proposed.supervision import TrainSupervision
+
+DEFAULT_TEXT_LORA_LR = 1e-4
 
 
 def _wandb_run(cfg, output, cache, num_train_samples, num_val_samples, progress):
@@ -175,7 +178,7 @@ def _gradient_norm(*modules):
 
 
 def build_optimizer(model, text_encoder, config):
-    """Keep distinct model and text-projection learning rates."""
+    """Keep distinct rates for the model, text projection and text adapters."""
     groups = [
         {
             "params": [p for p in model.parameters() if p.requires_grad],
@@ -183,6 +186,14 @@ def build_optimizer(model, text_encoder, config):
         },
         {"params": text_encoder.proj.parameters(), "lr": config["text_lr"]},
     ]
+    lora_params = [param for _, param in text_encoder.named_lora_parameters()]
+    if lora_params:
+        groups.append(
+            {
+                "params": lora_params,
+                "lr": config.get("text_lora_lr", DEFAULT_TEXT_LORA_LR),
+            }
+        )
     return torch.optim.AdamW(groups, weight_decay=config["weight_decay"])
 
 
@@ -192,6 +203,31 @@ def split_reasoning_binding(model, optimizer):
         optimizer.param_groups[0]["params"].extend(
             p for p in model.reasoning_binding.parameters() if p.requires_grad
         )
+
+
+def _record_fine_counts(totals, rows, counts):
+    fields = ("fine_queries", *FINE_COUNT_FIELDS)
+    for row, query_counts in zip(rows, counts.tolist(), strict=True):
+        case = totals.setdefault(row["case_type"], dict.fromkeys(fields, 0))
+        for name, count in zip(fields, (1, *query_counts), strict=True):
+            case[name] += int(count)
+
+
+def _fine_epoch_metrics(totals):
+    if not totals:
+        return {}
+    overall = {
+        name: sum(row[name] for row in totals.values())
+        for name in ("fine_queries", *FINE_COUNT_FIELDS)
+    }
+    groups = {"": overall, **{f"_{case.lower()}": row for case, row in totals.items()}}
+    metrics = {}
+    for suffix, row in groups.items():
+        metrics.update({f"{name}{suffix}": value for name, value in row.items()})
+        metrics[f"fine_active_fraction{suffix}"] = (
+            row["fine_active_queries"] / row["fine_queries"]
+        )
+    return metrics
 
 
 def _evaluate(
@@ -300,12 +336,21 @@ def _make_checkpoint(
 
 def _training_config(cfg):
     check_clip_config(cfg)
+    lora = text_lora_settings(cfg["model"].get("text_lora"))
+    optimizer = cfg["optimizer"]
+    if lora["enabled"]:
+        lr = optimizer.get("text_lora_lr", DEFAULT_TEXT_LORA_LR)
+        if type(lr) not in (int, float) or not math.isfinite(lr) or lr <= 0:
+            raise ValueError("optimizer.text_lora_lr must be finite and positive")
+        optimizer = {**optimizer, "text_lora_lr": lr}
     cfg = {
         **cfg,
         "loss": loss_settings(cfg["loss"]),
+        "optimizer": optimizer,
         "checkpointing": checkpoint_settings(cfg.get("checkpointing", {})),
         "model": {
             **cfg["model"],
+            "text_lora": lora,
             "fine_matching": matching_settings(cfg["model"].get("fine_matching")),
         },
         "train": {
@@ -421,9 +466,9 @@ def _train(cfg, output, resumed):
     )
     supervision.prepare(
         train_samples,
-        all_train=use_extra_identities,
-        supplemental=use_extra_identities
-        and identity_settings["hard_negative_fraction"] > 0,
+        all_train=use_extra_identities or context_enabled,
+        supplemental=context_enabled
+        or (use_extra_identities and identity_settings["hard_negative_fraction"] > 0),
         include_direction_swaps=context_enabled
         and bool(cfg["loss"]["context_swap_weight"]),
     )
@@ -459,6 +504,7 @@ def _train(cfg, output, resumed):
     scene, people, *_ = cache.load(torch.tensor([0]))
     scene_dim, person_dim = scene.shape[-1], people.shape[-1]
     model_cfg = cfg["model"]
+    use_text_lora = model_cfg["text_lora"]["enabled"]
     dim = model_cfg.get("dim", scene_dim)
     tokenizer, text_encoder = load_text_modules(
         model_cfg["text_model"],
@@ -466,6 +512,8 @@ def _train(cfg, output, resumed):
         device,
         revision=cfg["image_encoder"]["revision"],
         cache_mib=cache_cfg.get("text_lru_mib", 0),
+        lora=model_cfg["text_lora"],
+        train_amp=amp,
         **({"tokenizer_source": output / "tokenizer"} if resumed is not None else {}),
     )
     if text_encoder.global_dim != cache.global_dim:
@@ -772,6 +820,7 @@ def _train(cfg, output, resumed):
                     crop_totals,
                     candidate_totals,
                 )
+                progress.fine_case_totals = {}
             if control.stopping:
                 progress.sampling_rng, progress.identity_rng = (
                     generator.get_state(),
@@ -792,6 +841,7 @@ def _train(cfg, output, resumed):
                 "fafa_pooling": fafa_pooling,
                 "defer_native_targets": True,
                 "load_target_context": fafa_pooling is not None,
+                "audit_context_members": fafa_pooling is not None,
                 "defer_target_scenes": fafa_pooling is not None,
                 "preserve_storage": device.type == "cuda",
                 "pack_target_persons": True,
@@ -945,9 +995,10 @@ def _train(cfg, output, resumed):
                         if key not in crop_totals
                     )
                     host_metrics = checks.cpu_values(metrics)
+                    fine_counts = host_metrics.pop("fine_pair_counts", None)
                     values = dict(
                         zip(
-                            metrics,
+                            host_metrics,
                             torch.stack(list(host_metrics.values())).tolist(),
                             strict=True,
                         )
@@ -961,19 +1012,21 @@ def _train(cfg, output, resumed):
                 )
                 if should_log:
                     scaler.unscale_(optimizer)
-                    norms = checks.cpu_values(
-                        {
-                            "model": _gradient_norm(model),
-                            "text": _gradient_norm(text_encoder.proj),
-                        }
-                    )
-                    model_gradient_norm, text_gradient_norm = torch.stack(
-                        list(norms.values())
-                    ).tolist()
-                    gradient_norm = math.hypot(model_gradient_norm, text_gradient_norm)
+                    norms = {
+                        "model": _gradient_norm(model),
+                        "text": _gradient_norm(text_encoder.proj),
+                    }
+                    if use_text_lora:
+                        norms["text_lora"] = _gradient_norm(text_encoder.backbone)
+                    gradient_norms = {
+                        key: value.item()
+                        for key, value in checks.cpu_values(norms).items()
+                    }
                 scaler.step(optimizer)
                 scaler.update()
 
+                if fine_counts is not None:
+                    _record_fine_counts(progress.fine_case_totals, rows, fine_counts)
                 for key in crop_totals:
                     crop_totals[key] += int(parts[key])
                 for name, value in values.items():
@@ -986,11 +1039,18 @@ def _train(cfg, output, resumed):
                             **{
                                 f"train/{name}": value for name, value in values.items()
                             },
-                            "train/gradient_norm": gradient_norm,
-                            "train/model_gradient_norm": model_gradient_norm,
-                            "train/text_gradient_norm": text_gradient_norm,
+                            "train/gradient_norm": math.hypot(*gradient_norms.values()),
+                            **{
+                                f"train/{key}_gradient_norm": value
+                                for key, value in gradient_norms.items()
+                            },
                             "train/model_lr": optimizer.param_groups[0]["lr"],
                             "train/text_lr": optimizer.param_groups[1]["lr"],
+                            **(
+                                {"train/text_lora_lr": optimizer.param_groups[2]["lr"]}
+                                if use_text_lora
+                                else {}
+                            ),
                             "train/context_weight": epoch_loss["context_weight"],
                             "train/context_rejection_weight": epoch_loss[
                                 "context_rejection_weight"
@@ -1024,6 +1084,7 @@ def _train(cfg, output, resumed):
             progress.state_pairs_epoch = (
                 int(state_pairs_epoch) if state_pairs_epoch is not None else 0
             )
+            fine_metrics = _fine_epoch_metrics(progress.fine_case_totals)
             epoch_log = {
                 "epoch": epoch,
                 "phase": phase,
@@ -1032,12 +1093,18 @@ def _train(cfg, output, resumed):
                 "context_swap_weight": epoch_loss["context_swap_weight"],
                 "model_lr": optimizer.param_groups[0]["lr"],
                 "text_lr": optimizer.param_groups[1]["lr"],
+                **(
+                    {"text_lora_lr": optimizer.param_groups[2]["lr"]}
+                    if use_text_lora
+                    else {}
+                ),
                 **{
                     f"train_{name}": value / len(train_samples)
                     for name, value in totals.items()
                 },
                 **{f"train_{name}": value for name, value in crop_totals.items()},
                 **{f"train_{name}": value for name, value in candidate_totals.items()},
+                **{f"train_{name}": value for name, value in fine_metrics.items()},
             }
             optimizer.zero_grad(set_to_none=True)
             is_best = False
@@ -1156,12 +1223,18 @@ def _train(cfg, output, resumed):
                     "epoch/warmup": in_warmup,
                     "epoch/model_lr": epoch_log["model_lr"],
                     "epoch/text_lr": epoch_log["text_lr"],
+                    **(
+                        {"epoch/text_lora_lr": epoch_log["text_lora_lr"]}
+                        if use_text_lora
+                        else {}
+                    ),
                     **{f"epoch/{name}": epoch_log[f"train_{name}"] for name in totals},
                     **{f"epoch/{name}": value for name, value in crop_totals.items()},
                     **{
                         f"epoch/{name}": value
                         for name, value in candidate_totals.items()
                     },
+                    **{f"epoch/{name}": value for name, value in fine_metrics.items()},
                 }
                 if should_evaluate:
                     tracked_epoch.update(

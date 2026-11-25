@@ -112,7 +112,7 @@ class RCRModel(nn.Module):
             **{
                 key: value
                 for key, value in config.items()
-                if key not in {"text_model", "dim", "representation"}
+                if key not in {"text_model", "text_lora", "dim", "representation"}
             },
         )
 

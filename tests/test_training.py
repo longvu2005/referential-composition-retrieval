@@ -17,6 +17,7 @@ import pytest
 import torch
 import yaml
 from torch import nn
+from transformers import CLIPTextConfig, CLIPTextModelWithProjection
 
 from rcr.common.config import override_config
 from rcr.common.io import sha256_file
@@ -52,6 +53,29 @@ from tests.helpers import (
 from tools.run import main
 
 # Objectives, warmup, validation and checkpoint selection.
+
+
+def _enable_text_lora(cfg, monkeypatch):
+    cfg["model"]["text_lora"].update(enabled=True, last_layers=2, rank=4)
+
+    def load(*args, **kwargs):
+        with torch.random.fork_rng(devices=[]):
+            torch.random.default_generator.manual_seed(41)
+            return CLIPTextModelWithProjection(
+                CLIPTextConfig(
+                    vocab_size=8,
+                    hidden_size=8,
+                    intermediate_size=16,
+                    projection_dim=8,
+                    num_hidden_layers=3,
+                    num_attention_heads=2,
+                    eos_token_id=2,
+                )
+            )
+
+    monkeypatch.setattr(
+        sys.modules["transformers"].CLIPTextModelWithProjection, "from_pretrained", load
+    )
 
 
 @pytest.mark.parametrize("empty", [False, True])
@@ -125,6 +149,10 @@ def test_training_warmup_and_validation_selected_checkpoint(
         "warmup" if value == 0 else "joint" for value in expected
     ]
     assert all("train_context_fda_error" in row for row in history)
+    assert all("train_fine_queries_dual" not in row for row in history[:warmup])
+    for row in history[warmup:]:
+        assert row["train_fine_queries_dual"] == 1
+        assert row["train_fine_active_fraction_dual"] == 0.0
     assert all("val_checkpoint_score" not in row for row in history[:warmup])
     best = max(
         (row for row in history if "val_checkpoint_score" in row),
@@ -152,7 +180,7 @@ def test_training_warmup_and_validation_selected_checkpoint(
     assert last["training_state"]["progress"]["phase"] == "epoch_end"
     cache_path = Path(cfg["cache"]["supervision_cache"])
     supplemental = json.loads(cache_path.read_text())["supplemental_identities"]
-    assert supplemental == {}
+    assert supplemental == {image: ["p1"] for image in ("q", "a", "n")}
     assert wandb_run.finished
 
 
@@ -508,10 +536,13 @@ def test_training_enables_identity_crop_mining_after_warmup(
         )
 
 
+@pytest.mark.parametrize("use_lora", [False, True])
 def test_training_validation_matches_run_with_the_same_parameters(
-    tiny_training_run, monkeypatch
+    tiny_training_run, monkeypatch, use_lora
 ):
     cfg, cache, _, _ = tiny_training_run
+    if use_lora:
+        _enable_text_lora(cfg, monkeypatch)
     cfg["candidate_ks"] = [1]
     checkpoint = training.train(cfg)
     data = training.load_rcr_data(None)
@@ -520,7 +551,12 @@ def test_training_validation_matches_run_with_the_same_parameters(
     monkeypatch.setattr(retrieve, "check_query_text_config", lambda *args: None)
     monkeypatch.setattr(retrieve, "check_cache_config", lambda *args: None)
     run = yaml.safe_load((checkpoint.parent / "selected.yaml").read_text())
-    retrieve.retrieve(run)
+    saved = torch.load(
+        checkpoint.parent / "selected/val/rankings.pt", weights_only=True
+    )
+    ranking_output = retrieve.retrieve(run)
+    for key in ("coarse_topm_scores", "context", "rankings"):
+        torch.testing.assert_close(ranking_output[key], saved[key])
     result = evaluate_run(run, data=data)
     trained = json.loads(
         (checkpoint.parent / "evaluation/epoch_001/val_metrics.json").read_text()
@@ -1290,13 +1326,17 @@ def test_partial_sampling_keeps_gt_masks_and_prefetch_mined_provenance(tiny_rank
     assert sampled.partial_id_count == 2
     options = dict(
         supervision=SimpleNamespace(
-            load_ids=lambda ids, width: [["A"] * width for _ in ids]
+            load_ids=lambda ids, width=None, supplemental=False: [
+                [None if supplemental and image == "n" else "A"] * (width or 1)
+                for image in ids
+            ]
         ),
         identity_image_ids=[set(identity)],
         hard_identity_image_ids=sampled.hard_identity_ids,
         fafa_pooling="subject_mean",
         defer_native_targets=True,
         defer_target_scenes=True,
+        audit_context_members=True,
     )
     visual = prepare_visual_batch([sample], sampled.images, cache, **options)
     batch = build_batch(
@@ -1315,6 +1355,11 @@ def test_partial_sampling_keeps_gt_masks_and_prefetch_mined_provenance(tiny_rank
         assert bool(batch["hard_identity_negative_mask"][0, col]) == (
             image in {"vq", "vn"}
         )
+        assert bool(batch["target_identity_mask"][0, col, 0]) == (image == "a")
+        assert (batch["context_target_identity_labels"][0, col, 0] >= 0) == (
+            image in {"a", "n"}
+        )
+        assert batch["context_target_multi_head_crops"][0, col, 0] == (image == "n")
     rejected = batch["context_layout"]["rejection_rows"].tolist()
     assert {sampled.images[0][i] for i in rejected} == {"a", "n", "vq", "vn"}
 
@@ -1729,6 +1774,103 @@ def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
     assert not binding.requires_grad and not coverage.requires_grad
 
 
+@pytest.mark.parametrize("mode", ["softplus", "hinge"])
+def test_verified_members_filter_only_semantic_loss_and_log_pair_counts(
+    objective_batch, monkeypatch, mode
+):
+    model, batch = objective_batch
+    roles = torch.tensor([[[1, 1, 1, 0], [0, 0, 0, 1]]] * 2).bool()
+    memberships = roles.clone()
+    memberships[1] = torch.tensor([[1, 1, 0, 1], [0, 0, 1, 0]])
+    query = SimpleNamespace(
+        logits=memberships.float(),
+        identity=torch.ones(2, 4, 8),
+        membership=memberships.float(),
+        subjects=torch.ones(2, 2, dtype=torch.bool),
+    )
+    monkeypatch.setattr(model, "encode_query", lambda *args, **kwargs: query)
+    raw = torch.tensor([[0.4, 0.6, 0.2, 0.3, 1.0, 1.2]] * 2, requires_grad=True)
+    # The two partial images match different crop slots of the same annotated ID.
+    assignment = torch.tensor(
+        [
+            [0, -1, -1, 2],
+            [0, -1, 1, 2],
+            [-1, 0, -1, 2],
+            [-1, 0, 1, 2],
+            [0, -1, 1, 3],
+            [0, -1, 1, 2],
+        ]
+    ).expand(2, -1, -1)
+    monkeypatch.setattr(
+        losses,
+        "_context_scores",
+        lambda *args, **kwargs: (
+            raw,
+            torch.ones_like(raw),
+            torch.zeros_like(raw),
+            assignment,
+        ),
+    )
+    multi_head = torch.zeros(2, 6, 4, dtype=torch.bool)
+    multi_head[0, 2, 0] = True
+    batch.update(
+        query_identity_labels=torch.tensor([[0, 0, 1, 2]] * 2),
+        grounding_targets=roles,
+        context_required_member_counts=torch.tensor([[2, 1]] * 2),
+        context_target_identity_labels=torch.tensor(
+            [[[0, 1, 2, 3]] * 5 + [[-1, -1, -1, -1]]] * 2
+        ),
+        context_query_multi_head_crops=torch.tensor(
+            [[False, True, False, False], [False] * 4]
+        ),
+        context_target_multi_head_crops=multi_head,
+        positive_mask=torch.tensor([[True, True, False, False, False, False]] * 2),
+        identity_positive_mask=torch.tensor(
+            [[True, True, True, True, True, False]] * 2
+        ),
+        hard_identity_negative_mask=torch.tensor(
+            [[False, False, False, False, False, True]] * 2
+        ),
+    )
+    settings = {
+        **_only_loss("context"),
+        "context_rejection_weight": 0.5,
+        "rejection_loss_mode": mode,
+    }
+    baseline, before = compute_loss(model, batch, (2, 2), **settings)
+    filtered, after = compute_loss(
+        model, batch, (2, 2), **{**settings, "context_verify_members": True}
+    )
+    expected = torch.nn.functional.softplus(raw[0, 2:4] - raw[0, :2]).mean()
+    torch.testing.assert_close(after["context_semantic"], expected)
+    assert before["context_active_fraction"] == 1
+    assert after["context_active_fraction"] == 0.5
+    torch.testing.assert_close(before["context_rejection"], after["context_rejection"])
+    baseline_grad = torch.autograd.grad(baseline, raw)[0]
+    filtered_grad = torch.autograd.grad(filtered, raw)[0]
+    torch.testing.assert_close(baseline_grad[:, 5], filtered_grad[:, 5])
+    assert (filtered_grad[:, 5] > 0).all()
+    assert (filtered_grad[:, 4] == 0).all()
+
+    torch.testing.assert_close(before["fine_pair_counts"], after["fine_pair_counts"])
+    totals = {}
+    training._record_fine_counts(
+        totals,
+        [{"case_type": "DUAL"}, {"case_type": "RELATIONAL"}],
+        after["fine_pair_counts"],
+    )
+    reported = training._fine_epoch_metrics(totals)
+    assert reported["fine_active_fraction"] == 0.5
+    assert reported["fine_active_fraction_dual"] == 1.0
+    assert reported["fine_active_fraction_relational"] == 0.0
+    assert reported["fine_unfiltered_pairs_dual"] == 6
+    assert reported["fine_matched_pairs_dual"] == 4
+    assert reported["fine_owner_pairs_relational"] == 0
+    assert reported["fine_full_pairs_dual"] == reported["fine_partial_pairs_dual"] == 1
+    assert reported["fine_multi_head_query_crops_dual"] == 1
+    assert reported["fine_multi_head_target_matches_dual"] == 1
+
+
 @pytest.mark.parametrize("rejection_loss_mode", ["softplus", "hinge"])
 def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
     tiny_training_run, monkeypatch, rejection_loss_mode
@@ -1746,7 +1888,9 @@ def test_context_schedule_warms_up_then_enables_semantic_and_rejection(
         image = f"extra{index}"
         _add_gallery_image(cache, data, image, "train")
         if index % 3 == 0:
-            data.gt_head_boxes_by_image[image].append({"identity_id": "p2"})
+            data.gt_head_boxes_by_image[image].append(
+                {**data.gt_head_boxes_by_image[image][0], "identity_id": "p2", "x": 0.7}
+            )
         elif index % 3 == 2:
             data.gt_head_boxes_by_image[image][0]["identity_id"] = "other"
     cfg["train"].update(epochs=20, context_warmup_epochs=4, candidates=32)
@@ -2059,6 +2203,7 @@ def _configure(cfg, data):
         "warmup_end",
         "joint_mining",
         "before_joint_step",
+        "lora_before_joint_step",
         "signal",
         "after_step",
         "validation",
@@ -2067,6 +2212,10 @@ def _configure(cfg, data):
 )
 def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, fault):
     cfg, _, wandb_run, _ = tiny_training_run
+    use_lora = fault == "lora_before_joint_step"
+    if use_lora:
+        _enable_text_lora(cfg, monkeypatch)
+        fault = "before_joint_step"
     if fault == "before_joint_step":
         cfg["model"]["fine_matching"]["owner_mode"] = "crop_log_softmax"
     data = training.load_rcr_data(None)
@@ -2195,6 +2344,16 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
         }[fault]
     )
     assert pending["binding_shared"] == (state["progress"]["epoch"] <= 1)
+    if use_lora:
+        # This checkpoint is taken before the first batch with Context enabled.
+        assert len(state["progress"]["history"]) == 1
+        assert state["progress"]["history"][0]["context_weight"] == 0
+        adapters = pending["text_encoder"]["lora"]["weights"]
+        assert any(
+            value.abs().sum() > 0
+            for key, value in adapters.items()
+            if key.endswith("lora_b")
+        )
     if fault in ("validation", "selection"):
         assert state["progress"]["phase"] == "validation"
     observations[:] = observations[:saved_step]
@@ -2252,7 +2411,13 @@ def test_resume_retains_partial_and_context_pools_batches_masks_and_rng(
             image = f"{prefix}{i}"
             _add_gallery_image(cache, data, image, "train")
             if prefix == "same":
-                data.gt_head_boxes_by_image[image].append({"identity_id": "p2"})
+                data.gt_head_boxes_by_image[image].append(
+                    {
+                        **data.gt_head_boxes_by_image[image][0],
+                        "identity_id": "p2",
+                        "x": 0.7,
+                    }
+                )
             elif prefix == "zero":
                 data.gt_head_boxes_by_image[image][0]["identity_id"] = "other"
     batches, mining = [], []
@@ -2438,7 +2603,8 @@ def test_incompatible_resume_leaves_run_untouched(
         ("train.sampling.partial_id_quota", 7),
         ("train.sampling.rejection_mining_context_weight", 0.006),
         ("loss.rejection_loss_mode", "softplus"),
-        ("model.fine_matching.owner_mode", "crop_log_softmax"),
+        ("loss.context_verify_members", False),
+        ("model.fine_matching.owner_mode", "raw_logit"),
     ],
 )
 def test_changed_training_settings_require_a_new_run(

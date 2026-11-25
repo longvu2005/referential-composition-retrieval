@@ -49,6 +49,20 @@ def build_supervision(identity_rows, subjects, vocabulary=None):
     return targets, labels
 
 
+def _multi_head_crops(image_ids, canonical_rows, conservative_ids):
+    """Flag labeled crops excluded by the existing single-head check."""
+    return torch.tensor(
+        [
+            [
+                identity is not None and conservative_ids[image_id][person] is None
+                for person, identity in enumerate(row)
+            ]
+            for image_id, row in zip(image_ids, canonical_rows, strict=True)
+        ],
+        dtype=torch.bool,
+    )
+
+
 def _deduplicated_masks(
     samples,
     candidates,
@@ -137,6 +151,7 @@ def prepare_visual_batch(
     fafa_pooling: str | None = None,
     defer_native_targets: bool = False,
     load_target_context: bool = True,
+    audit_context_members: bool = False,
     defer_target_scenes: bool = False,
     preserve_storage: bool = False,
     pack_target_persons: bool = False,
@@ -151,7 +166,7 @@ def prepare_visual_batch(
     """
     if fafa_pooling is not None and fafa_pooling not in POOLING_MODES:
         raise ValueError(f"unknown FAFA pooling: {fafa_pooling!r}")
-    if fafa_pooling is not None and not load_target_context:
+    if (fafa_pooling is not None or audit_context_members) and not load_target_context:
         raise ValueError("context training requires target scenes and boxes")
     if not samples or len(samples) != len(candidate_image_ids):
         raise ValueError("training requires matching non-empty query/candidate rows")
@@ -170,8 +185,9 @@ def prepare_visual_batch(
     query_indices = torch.tensor(
         [cache.by_id[image_id] for image_id in query_image_ids]
     )
+    target_image_ids = [image_id for row in candidate_image_ids for image_id in row]
     target_indices = torch.tensor(
-        [cache.by_id[image_id] for row in candidate_image_ids for image_id in row]
+        [cache.by_id[image_id] for image_id in target_image_ids]
     )
     query, target = load_visual_features(
         cache,
@@ -188,18 +204,23 @@ def prepare_visual_batch(
     positives = [set(row["positive_image_ids"]) for row in samples]
     q_ids = supervision.load_ids(query_image_ids, q_people.shape[1])
     t_ids = [[None] * t_people.shape[1] for _ in range(len(target_indices))]
-    positive_slots = [
+    context_ids = t_ids.copy() if audit_context_members else None
+    label_scope = identity_image_ids if audit_context_members else positives
+    labeled_slots = [
         (n * candidates_per_query + j, image_id)
         for n, image_ids in enumerate(candidate_image_ids)
         for j, image_id in enumerate(image_ids)
-        if image_id in positives[n]
+        if image_id in label_scope[n]
     ]
-    if positive_slots:
+    if labeled_slots:
         rows = supervision.load_ids(
-            [image_id for _, image_id in positive_slots], t_people.shape[1]
+            [image_id for _, image_id in labeled_slots], t_people.shape[1]
         )
-        for (index, _), identities in zip(positive_slots, rows, strict=True):
-            t_ids[index] = identities
+        for (index, image_id), identities in zip(labeled_slots, rows, strict=True):
+            if image_id in positives[index // candidates_per_query]:
+                t_ids[index] = identities
+            if context_ids is not None:
+                context_ids[index] = identities
 
     vocabulary: dict[str, int] = {}
     grounding_targets, query_labels = build_supervision(
@@ -230,14 +251,13 @@ def prepare_visual_batch(
         and identity_sampling["hard_negative_fraction"] > 0
     )
     safe_ids = {}
-    if mining:
-        image_ids = list(
-            dict.fromkeys(
-                query_image_ids
-                + [image_id for row in candidate_image_ids for image_id in row]
-                + [image_id for image_id, _, _ in identity_crops]
-            )
+    if mining or audit_context_members:
+        other_ids = (
+            target_image_ids + [image_id for image_id, _, _ in identity_crops]
+            if mining
+            else [image_id for _, image_id in labeled_slots]
         )
+        image_ids = list(dict.fromkeys(query_image_ids + other_ids))
         safe_ids = dict(
             zip(
                 image_ids,
@@ -382,6 +402,30 @@ def prepare_visual_batch(
             else t_scene.unflatten(0, (batch_size, candidates_per_query))
         )
         batch["target_boxes"] = t_boxes.unflatten(0, (batch_size, candidates_per_query))
+    if context_ids is not None:
+        # Keep extra Context labels out of the existing identity supervision.
+        shape = (batch_size, candidates_per_query)
+        batch.update(
+            context_target_identity_labels=_identity_labels(
+                context_ids, vocabulary
+            ).unflatten(0, shape),
+            context_required_member_counts=torch.tensor(
+                [
+                    [
+                        len(set(map(str, subject["identity_ids"])))
+                        for subject in row["subjects"]
+                    ]
+                    for row in samples
+                ],
+                dtype=torch.long,
+            ),
+            context_query_multi_head_crops=_multi_head_crops(
+                query_image_ids, q_ids, safe_ids
+            ),
+            context_target_multi_head_crops=_multi_head_crops(
+                target_image_ids, context_ids, safe_ids
+            ).unflatten(0, shape),
+        )
     batch["identity_positive_mask"] = torch.tensor(
         [
             [image_id in eligible for image_id in image_ids]
@@ -531,6 +575,7 @@ def build_batch(
     include_direction_swaps: bool = False,
     defer_native_targets: bool = False,
     load_target_context: bool = True,
+    audit_context_members: bool = False,
     defer_target_scenes: bool = False,
     preserve_storage: bool = False,
     pack_target_persons: bool = False,
@@ -554,6 +599,7 @@ def build_batch(
             fafa_pooling=fafa_pooling,
             defer_native_targets=defer_native_targets,
             load_target_context=load_target_context,
+            audit_context_members=audit_context_members,
             defer_target_scenes=defer_target_scenes,
             preserve_storage=preserve_storage,
             pack_target_persons=pack_target_persons,

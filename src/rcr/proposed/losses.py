@@ -11,6 +11,7 @@ from rcr.common.tensor_checks import check_tensor, checked
 from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.cache.store import SceneTargetBatch
 from rcr.proposed.identity import select_identity_observations
+from rcr.proposed.matching import gather_matched
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
@@ -18,6 +19,20 @@ from rcr.proposed.scores import (
     fafa_binding_scores,
     identity_scores_paired,
     linear_score_components,
+)
+
+FINE_COUNT_FIELDS = (
+    "fine_unfiltered_queries",
+    "fine_unfiltered_pairs",
+    "fine_owner_pairs",
+    "fine_matched_pairs",
+    "fine_full_pairs",
+    "fine_partial_pairs",
+    "fine_active_queries",
+    "fine_labeled_query_crops",
+    "fine_multi_head_query_crops",
+    "fine_labeled_target_matches",
+    "fine_multi_head_target_matches",
 )
 
 
@@ -28,6 +43,7 @@ def loss_settings(config: dict) -> dict:
         "identity_weight": 0.1,
         "coarse_weight": 1.0,
         "context_weight": 1.0,
+        "context_verify_members": False,
         "context_rejection_weight": 0.0,
         "rejection_loss_mode": "softplus",
         "context_swap_weight": 0.0,
@@ -41,6 +57,10 @@ def loss_settings(config: dict) -> dict:
         raise ValueError(f"unknown loss settings: {', '.join(sorted(unknown))}")
     settings = {**defaults, **config}
     for key, value in settings.items():
+        if key == "context_verify_members":
+            if type(value) is not bool:
+                raise ValueError("loss.context_verify_members must be a boolean")
+            continue
         if key == "rejection_loss_mode":
             if type(value) is not str or value not in ("softplus", "hinge"):
                 raise ValueError("loss.rejection_loss_mode must be softplus or hinge")
@@ -112,8 +132,18 @@ def identity_loss(identity: Tensor, labels: Tensor, temperature=0.1) -> Tensor:
     return per_anchor.masked_fill(~valid, 0).sum() / valid.sum().clamp_min(1)
 
 
+def _ranking_pairs(positive: Tensor, valid: Tensor) -> Tensor:
+    return (positive & valid)[:, :, None] & (~positive & valid)[:, None, :]
+
+
 @checked
-def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None = None):
+def retrieval_loss(
+    scores: Tensor,
+    positive: Tensor,
+    valid_mask: Tensor | None = None,
+    *,
+    pair_mask: Tensor | None = None,
+):
     """Mean pairwise softplus per query, then mean over queries with both labels.
 
     Every positive must outrank every eligible negative. Positives never compete
@@ -129,8 +159,9 @@ def retrieval_loss(scores: Tensor, positive: Tensor, valid_mask: Tensor | None =
     check_tensor(
         torch.isfinite(scores).all(), "ranking loss requires finite eligible scores"
     )
-    positive = positive.bool() & valid
-    pairs = positive[:, :, None] & (valid & ~positive)[:, None]
+    pairs = _ranking_pairs(positive.bool(), valid)
+    if pair_mask is not None:
+        pairs &= pair_mask
     difference = scores[:, None, :] - scores[:, :, None]
     pair_loss = F.softplus(difference).masked_fill(~pairs, 0)
     counts = pairs.sum((1, 2))
@@ -402,14 +433,76 @@ def _swap_loss(model, query, batch, patch_hw, context, assignments, host_matchin
     return F.softplus(wrong - context[rows, cols]).mean(), valid.sum() / len(context)
 
 
-def _fda_pair_error(binding: Tensor, positive: Tensor, valid: Tensor) -> Tensor:
+@torch.no_grad()
+def _verified_context_pairs(query, batch, assignments, valid, pairs):
+    """Filter by equal verified ID sets for every active Subject."""
+    query_ids = batch["query_identity_labels"]
+    annotations = torch.stack(
+        (
+            batch["context_target_identity_labels"],
+            batch["context_target_multi_head_crops"],
+        ),
+        dim=-1,
+    )
+    assigned = gather_matched(
+        annotations.flatten(0, 1), assignments.flatten(0, 1)
+    ).unflatten(0, valid.shape)
+    labeled_target = valid[:, :, None] & (assignments >= 0) & (assigned[..., 0] >= 0)
+    correct_id = labeled_target & (query_ids[:, None] == assigned[..., 0])
+
+    active = query.subjects.bool()
+    selected = (query.membership > 0) & active[..., None]
+    labeled_query = selected.any(1) & (query_ids >= 0)
+    owners = selected & batch["grounding_targets"].bool()
+    has_owners = (owners.any(-1) | ~active).all(-1) & active.any(-1)
+    owner_pairs = pairs & has_owners[:, None, None]
+
+    # Use the first crop slot of each ID as its representative, even when a
+    # different detection of that person was the crop that matched.
+    same_id = query_ids[:, :, None] == query_ids[:, None, :]
+    first = ~same_id.tril(-1).any(-1) & (query_ids >= 0)
+    representative = same_id & first[:, None, :]
+    verified = owners[:, None] & correct_id[:, :, None]
+    members = (verified[..., None] & representative[:, None, None]).any(-2)
+    counts = members.sum(-1)
+    supported = ((counts > 0) | ~active[:, None]).all(-1)
+    matched_pairs = owner_pairs & supported[:, :, None] & supported[:, None, :]
+
+    member_sets = members.flatten(2)
+    equal = (member_sets[:, :, None] == member_sets[:, None, :]).all(-1)
+    verified_pairs = matched_pairs & equal
+    complete = (
+        (counts == batch["context_required_member_counts"][:, None]) | ~active[:, None]
+    ).all(-1)
+    full_pairs = verified_pairs & complete[:, :, None] & complete[:, None, :]
+    diagnostics = {
+        "fine_unfiltered_queries": pairs.any((1, 2)),
+        "fine_unfiltered_pairs": pairs.sum((1, 2)),
+        "fine_owner_pairs": owner_pairs.sum((1, 2)),
+        "fine_matched_pairs": matched_pairs.sum((1, 2)),
+        "fine_full_pairs": full_pairs.sum((1, 2)),
+        "fine_partial_pairs": (verified_pairs & ~full_pairs).sum((1, 2)),
+        "fine_active_queries": verified_pairs.any((1, 2)),
+        "fine_labeled_query_crops": labeled_query.sum(1),
+        "fine_multi_head_query_crops": (
+            labeled_query & batch["context_query_multi_head_crops"]
+        ).sum(1),
+        "fine_labeled_target_matches": labeled_target.sum((1, 2)),
+        "fine_multi_head_target_matches": (
+            labeled_target & assigned[..., 1].bool()
+        ).sum((1, 2)),
+    }
+    return verified_pairs, torch.stack(
+        [diagnostics[key] for key in FINE_COUNT_FIELDS], dim=1
+    )
+
+
+def _fda_pair_error(binding: Tensor, pairs: Tensor) -> Tensor:
     """Share of eligible (positive, negative) pairs that FDA alone ranks wrong or ties.
 
     This is the headroom the context scorer can correct. It uses the same
     eligible pairs as the context ranking loss and carries no gradient.
     """
-    positive = positive.bool() & valid
-    pairs = positive[:, :, None] & (valid & ~positive)[:, None]
     wrong = (binding[:, None, :] >= binding[:, :, None]) & pairs
     return (wrong.sum() / pairs.sum().clamp_min(1)).detach()
 
@@ -430,6 +523,7 @@ def compute_loss(
     state_temperature: float,
     context_rejection_weight: float = 0.0,
     rejection_loss_mode: str = "softplus",
+    context_verify_members: bool = False,
     context_swap_weight: float = 0.0,
     context_temperature: float = 0.1,
     context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
@@ -445,6 +539,9 @@ def compute_loss(
             "context ranking requires native FAFA tokens in the batch; "
             "build it with fafa_pooling"
         )
+    audit_context = "context_target_identity_labels" in batch
+    if context_weight and context_verify_members and not audit_context:
+        raise ValueError("verified context requires context member annotations")
     if context_weight:
         query = model.encode_query(
             batch["query_scene"],
@@ -484,6 +581,7 @@ def compute_loss(
     ground, identity, coarse, context, state = [zero] * 5
     semantic = rejection = swap = zero
     context_active = rejection_active = swap_active = fda_error = zero.detach()
+    fine_counts = None
     hard_count = random_count = 0
     target_identity = None
     if identity_weight or coarse_weight:
@@ -641,14 +739,24 @@ def compute_loss(
             coverage_score_weight,
         )
         valid = identity_positive & (coverage > 0)
+        pairs = _ranking_pairs(positive.bool(), valid)
+        pair_options = {}
+        if audit_context:
+            verified_pairs, fine_counts = _verified_context_pairs(
+                query, batch, assignments, valid, pairs
+            )
+            if context_verify_members:
+                pairs = verified_pairs
+                pair_options["pair_mask"] = pairs
         semantic = retrieval_loss(
-            scores["context_contribution"] / context_temperature, positive, valid
+            scores["context_contribution"] / context_temperature,
+            positive,
+            valid,
+            **pair_options,
         )
         context = semantic
-        fda_error = _fda_pair_error(binding, positive, valid)
-        context_active = (
-            ((positive & valid).any(1) & (~positive & valid).any(1)).float().mean()
-        )
+        fda_error = _fda_pair_error(binding, pairs)
+        context_active = pairs.any((1, 2)).float().mean()
         if context_rejection_weight:
             hard = batch["hard_identity_negative_mask"].bool()
             check_tensor(
@@ -721,4 +829,5 @@ def compute_loss(
         "identity_hard_crops": hard_count,
         "identity_random_crops": random_count,
         "identity_supplemental_crops": hard_count + random_count,
+        **({"fine_pair_counts": fine_counts} if fine_counts is not None else {}),
     }

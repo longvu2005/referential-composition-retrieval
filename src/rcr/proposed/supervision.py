@@ -317,13 +317,12 @@ def prepare_train_supervision(cfg):
     use_extra = (
         settings["max_crops"] > 0 and cfg["loss"].get("identity_weight", 0.1) != 0
     )
+    context = bool(cfg["loss"].get("context_weight", 1.0))
     supervision.prepare(
         split_samples(data, "train"),
-        all_train=use_extra,
-        supplemental=use_extra and settings["hard_negative_fraction"] > 0,
-        include_direction_swaps=bool(
-            cfg["loss"].get("context_weight", 1.0)
-            and cfg["loss"].get("context_swap_weight", 0.0)
-        ),
+        all_train=use_extra or context,
+        supplemental=context or (use_extra and settings["hard_negative_fraction"] > 0),
+        include_direction_swaps=context
+        and bool(cfg["loss"].get("context_swap_weight")),
     )
     return supervision.cache_file

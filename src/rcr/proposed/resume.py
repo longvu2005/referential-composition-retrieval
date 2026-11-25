@@ -60,6 +60,7 @@ class TrainingProgress:
     totals: dict = field(default_factory=dict)
     crop_totals: dict = field(default_factory=dict)
     candidate_totals: dict = field(default_factory=dict)
+    fine_case_totals: dict = field(default_factory=dict)
     wandb_id: str | None = None
     wandb_project: str | None = None
 

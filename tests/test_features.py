@@ -23,8 +23,14 @@ from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache import build, fafa, person_encoder, scene
 from rcr.proposed.cache.store import GalleryCache
-from rcr.proposed.nn.encoders import ImageEncoder, TextEncoder
+from rcr.proposed.nn.encoders import (
+    ImageEncoder,
+    TextEncoder,
+    load_text_encoder_state,
+    text_encoder_state,
+)
 from tests.helpers import _sample
+from tools.profile_gpu import TransferAudit
 
 # Independent scene cache.
 
@@ -136,6 +142,126 @@ def test_native_text_eot_survives_padding_caching_and_context_projection():
     assert encoder.proj.weight.grad is not None
     assert all(p.grad is None for p in backbone.parameters())
     assert not native.requires_grad
+
+
+@pytest.mark.parametrize("cache_mib", [0, 1])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
+def test_lora_text_keeps_native_padding_and_reuses_only_frozen_states(
+    cache_mib, device
+):
+    backbone = CLIPTextModelWithProjection(
+        CLIPTextConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            projection_dim=8,
+            num_hidden_layers=3,
+            num_attention_heads=2,
+            max_position_embeddings=77,
+            eos_token_id=31,
+        )
+    )
+    rng = torch.get_rng_state()
+    frozen = TextEncoder(copy.deepcopy(backbone), dim=6).to(device).eval()
+    after_projection = torch.get_rng_state()
+    torch.set_rng_state(rng)
+    lora = {"enabled": True, "rank": 4}
+    adapted = TextEncoder(backbone, dim=6, cache_mib=cache_mib, lora=lora).to(device)
+    assert torch.equal(torch.get_rng_state(), after_projection)
+    adapters = dict(adapted.named_lora_parameters())
+    assert len(adapters) == 8
+    assert all(".layers.1." in key or ".layers.2." in key for key in adapters)
+    assert all(".q_proj." in key or ".v_proj." in key for key in adapters)
+    ids = torch.tensor([[1, 4, 31, 31, 31], [1, 5, 6, 7, 31], [0, 1, 0, 6, 31]])
+    mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1], [0, 1, 0, 1, 1]])
+    valid = mask.bool().to(device)
+    with torch.inference_mode():
+        ctx, _, expected = frozen(ids, mask)
+        context, actual_mask, initial = adapted.eval()(ids, mask)
+        torch.testing.assert_close(initial, expected)
+        torch.testing.assert_close(context[valid], ctx[valid])
+        assert torch.equal(actual_mask, valid)
+
+    prefix_calls = []
+    with backbone.text_model.encoder.layers[0].register_forward_hook(
+        lambda *args: prefix_calls.append(True)
+    ):
+        adapted.train()
+        optimizer = torch.optim.AdamW(adapters.values(), lr=1e-2)
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            with TransferAudit() as audit:
+                context, _, pooled = adapted(ids, mask)
+            (context[valid].square().mean() + pooled.square().mean()).backward()
+            optimizer.step()
+            if device == "cuda" and cache_mib:
+                assert audit.counts["cuda_to_cpu"] == 0
+                assert audit.counts["cuda_scalar_reads"] == 0
+        assert len(prefix_calls) == (0 if cache_mib else 2)
+    assert all(p.grad is not None and p.grad.norm() > 0 for p in adapters.values())
+    assert all(p.grad is None for p in backbone.parameters() if not p.requires_grad)
+    with torch.inference_mode():
+        _, _, learned = adapted.eval()(ids, mask)
+        assert not torch.allclose(learned, initial)
+        # Reuse the cached right-padded prefix with a shorter batch width.
+        torch.testing.assert_close(adapted(ids[:1, :3], mask[:1, :3])[2], learned[:1])
+    state = text_encoder_state(adapted, None)
+    assert state["lora"]["weights"].keys() == adapters.keys()
+    restored = TextEncoder(copy.deepcopy(frozen.backbone).cpu(), dim=6, lora=lora)
+    load_text_encoder_state(restored, None, state)
+    with torch.inference_mode():
+        torch.testing.assert_close(restored.to(device).eval()(ids, mask)[2], learned)
+    with pytest.raises(ValueError, match="LoRA settings"):
+        load_text_encoder_state(restored, None, text_encoder_state(frozen, None))
+    with pytest.raises(ValueError, match="disabled"):
+        load_text_encoder_state(frozen, None, state)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_lora_amp_keeps_fp32_outputs_and_shares_prefix_with_retrieval():
+    backbone = CLIPTextModelWithProjection(
+        CLIPTextConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            projection_dim=8,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            eos_token_id=31,
+        )
+    )
+    encoder = TextEncoder(
+        backbone,
+        dim=6,
+        cache_mib=1,
+        lora={"enabled": True, "last_layers": 1},
+        train_amp=True,
+    ).cuda()
+    ids = torch.tensor([[1, 4, 31], [1, 5, 31]])
+    mask = torch.ones_like(ids)
+    context, _, pooled = encoder(ids, mask)
+    assert context.dtype == pooled.dtype == torch.float32
+    (context.square().mean() + pooled.square().mean()).backward()
+    assert all(torch.isfinite(p.grad).all() for _, p in encoder.named_lora_parameters())
+    with (
+        torch.inference_mode(),
+        backbone.text_model.encoder.layers[0].register_forward_hook(
+            lambda *args: pytest.fail("FP32 retrieval reran the frozen AMP prefix")
+        ),
+    ):
+        _, _, reference = encoder.eval()(ids, mask)
+    torch.testing.assert_close(pooled, reference, atol=3e-3, rtol=3e-3)
 
 
 # Frozen person encoder assets and offline loading.

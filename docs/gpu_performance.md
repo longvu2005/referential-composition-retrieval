@@ -13,7 +13,7 @@ The supplied configuration enables these settings:
 | `retrieval.query_batch_size` | 8 | Batches query/text encoding and coarse scoring by Subject count. |
 | `retrieval.prefetch_batches` | 1 | Reads one future fine-scoring chunk on a CPU worker; zero selects serial evaluation. |
 | `retrieval.gpu_cache_mib` | 512 | Budget for resident gallery identity/mask/global projections. |
-| `cache.text_lru_mib` | 768 | CPU budget for frozen CLIP token states; learned projections still run each step. |
+| `cache.text_lru_mib` | 768 | CPU budget for frozen CLIP states. With LoRA, it caches the frozen prefix and recomputes the adapted blocks. |
 | `cache.native_lru_mib` | 256 | Independent CPU LRU for native shards; batch prefetch retains at most 128 MiB of target tokens. |
 
 Training uses the following input path:

@@ -120,6 +120,12 @@ def _inputs(cfg, queries, candidates, people, device):
         "target_mask": target_mask,
         "target_global": torch.randn(queries, candidates, global_dim),
         "target_identity_labels": target_labels,
+        "context_target_identity_labels": torch.where(
+            same[..., None], labels[:, None], -1
+        ),
+        "context_required_member_counts": membership.sum(-1).long(),
+        "context_query_multi_head_crops": torch.zeros_like(labels, dtype=torch.bool),
+        "context_target_multi_head_crops": torch.zeros_like(target_mask),
         "target_identity_mask": positive[..., None] & target_mask,
         "positive_mask": positive,
         "identity_positive_mask": same,

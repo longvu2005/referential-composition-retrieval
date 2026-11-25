@@ -6,9 +6,11 @@ images.
 
 ## Features
 
-Grounding DINO provides person detections. Frozen CLIP encoders represent scene
-and text inputs; frozen FAFA encodes person crops and text-conditioned person
-features. Learned modules consume these features during training and retrieval.
+Grounding DINO provides person detections. Frozen CLIP image features represent
+the scene. The pinned CLIP text tower supplies token and global features, with
+rank-8 LoRA on the query and value projections of its last two blocks in the
+supplied configuration. Frozen FAFA encodes person crops and text-conditioned
+person features.
 See the [feature contracts](feature_contracts.md) for compatibility requirements.
 
 ## Grounding and composition
@@ -151,15 +153,24 @@ pooling), matching coverage `C`, and raw context `H`:
 ```text
 F = model.binding_scale * B + a_train * C + b_train * H
 
-L_sem = retrieval_loss(b_train * H / tau_c, P, I & (C > 0))
+L_sem = retrieval_loss(b_train * H / tau_c, P, I & (C > 0), pair_mask)
 L_ctx = L_sem + rho_effective * L_rej
 ```
 
 `P` is Full Positives, `I` is identity positives, and `N` is hard identity
 negatives. `retrieval_loss(S,P,V)` uses every positive/negative pair within `V`
 and contributes `softplus(S_negative - S_positive)`. It averages pairs within
-each query, then queries with at least one valid pair. Semantic context always
-uses same-ID pairs with positive coverage.
+each query, then queries with at least one valid pair. Semantic context starts
+with same-ID pairs with positive coverage.
+
+With `loss.context_verify_members=true`, a predicted assignment verifies a
+member if the reference and target crops have the same annotated ID and the
+reference crop belongs to its predicted Subject. A pair must verify the same
+set of distinct member IDs in both images for every active Subject, with at
+least one member per Subject. This allows equal partial sets within a group.
+The labels filter the semantic loss pairs after matching. The reasoner still
+receives the predicted assignment. The control setting `false` uses the
+original same-ID and coverage criteria.
 
 `loss.rejection_loss_mode=softplus` retains the baseline rejection objective:
 
@@ -198,8 +209,8 @@ The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
 weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
 scale `1`, `B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic
 logit is `0.8`, and the baseline softplus rejection logit is `8.0`.
-Epochs 1–4 warm up without context;
-epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
+Epochs 1–4 warm up the base and text LoRA with context disabled.
+Epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
 with `rho_effective=0.5`; it is zero earlier. These settings are controlled by
 [configs/proposed.yaml](../configs/proposed.yaml).
 

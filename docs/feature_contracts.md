@@ -1,15 +1,15 @@
 # Feature and checkpoint contracts
 
-The proposed method uses frozen visual and text features with learned retrieval
-modules. Configuration and cache metadata identify the encoders and preprocessing
-used by each run.
+The proposed method uses frozen visual features and a pinned CLIP text tower
+with optional LoRA adapters. Configuration and cache metadata identify the
+encoders and preprocessing used by each run.
 
 ## Encoder features
 
 | Source | Features |
 | --- | --- |
 | CLIP image encoder | Scene patches and global image embeddings |
-| CLIP text encoder | Token and global text embeddings |
+| CLIP text encoder with optional LoRA | Token and global text embeddings |
 | FAFA image encoder | Pooled person features and native target tokens |
 | FAFA multimodal encoder | Text-conditioned query person features |
 
@@ -38,6 +38,9 @@ and source cache identities. Retrieval restores the trained matching and pooling
 settings. Validation-selected scoring coefficients are frozen for test together
 with the checkpoint and validation fingerprints. Matching records the Subject
 owner mode. Checkpoints without that field use `raw_logit` for retrieval.
+The text checkpoint records the learned projection and any LoRA settings and
+weights. Retrieval restores these from the checkpoint with the pinned CLIP base.
+Checkpoints with frozen CLIP text use the projection alone.
 
 Architecture or feature changes may require a fresh training run. Resume requires
 the compatible full training state in `last.pt`; `best.pt` is for inference.
