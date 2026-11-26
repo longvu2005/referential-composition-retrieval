@@ -861,6 +861,8 @@ def test_partial_diversity_weights_overlap_groups_instead_of_pool_sizes(monkeypa
     [
         ("semantic_context_quota", -1),
         ("semantic_context_quota", True),
+        ("semantic_top_quota", -1),
+        ("semantic_top_quota", True),
         ("partial_id_quota", -1),
         ("partial_id_quota", 1.5),
         ("partial_id_quota", True),
@@ -878,6 +880,7 @@ def test_new_sampling_settings_reject_invalid_values(key, value):
 
 def test_new_sampling_settings_preserve_old_config_defaults():
     defaults = sampling_settings({})
+    assert defaults["semantic_top_quota"] == 0
     assert defaults["semantic_context_quota"] == 0
     assert defaults["partial_id_quota"] == 0
     assert defaults["rejection_mining_context_weight"] == 0.0
@@ -986,8 +989,33 @@ def test_candidate_quotas_keep_provenance_after_shuffle_and_exclusions():
     assert not row & {"q", "disputed"}
 
 
+def test_top_quota_keeps_first_eligible_and_samples_within_original_window():
+    sample = _sample("train", "q", "p")
+    same = [f"s{i}" for i in range(30)]
+    index = CandidateIndex([sample], ["q", "p", *same], {"train": same})
+    pools = {"train": {"semantic": ["q", "s0", "p", "s0", "missing", *same[1:]]}}
+    selections = set()
+    for seed in range(12):
+        result = sample_candidates(
+            [sample],
+            8,
+            torch.Generator().manual_seed(seed),
+            index=index,
+            hard_pools=pools,
+            identity_fraction=1.0,
+            semantic_hard_fraction=1.0,
+            semantic_top_quota=2,
+        )
+        row = frozenset(result.images[0])
+        assert len(row) == 8 and result.semantic_hard_count == 7
+        assert {"p", "s0", "s1"} <= row <= {"p", *same[:14]}
+        selections.add(row)
+    assert len(selections) > 1
+
+
+@pytest.mark.parametrize("top_quota", [0, 2, 6, 7, 9])
 @pytest.mark.parametrize("available", [0, 1, 2])
-def test_context_slots_replace_only_base_same_id_draws(available):
+def test_context_slots_replace_only_base_same_id_draws(available, top_quota):
     sample = _sample("train", "q", "p")
     same = [f"s{i}" for i in range(80)]
     wrong = [f"w{i}" for i in range(80)]
@@ -997,6 +1025,7 @@ def test_context_slots_replace_only_base_same_id_draws(available):
         index=index,
         identity_fraction=0.45,
         semantic_hard_fraction=0.5,
+        semantic_top_quota=top_quota,
         hard_fraction=0.1,
         hard_pools=pools,
         identity_rejection=True,
@@ -1017,12 +1046,15 @@ def test_context_slots_replace_only_base_same_id_draws(available):
     pools["train"]["semantic_context"] = additions + ["p", "w0", *additions]
     result = draw(2)
     new = set(result.images[0])
-    assert new - old == result.semantic_context_ids[0] == set(additions)
+    expected_count = min(available, max(0, 7 - top_quota))
+    assert len(new - old) == expected_count
+    assert new - old == result.semantic_context_ids[0] <= set(additions)
+    assert set(same[: min(7, top_quota)]) <= new
     assert len(new) == 32 and old - new <= set(same[:14])
     assert result.semantic_hard_count == baseline.semantic_hard_count == 7
     assert result.hard_identity_ids == baseline.hard_identity_ids
     assert not result.hard_identity_ids[0].intersection(additions)
-    if not available:
+    if not expected_count:
         assert result == baseline
 
 

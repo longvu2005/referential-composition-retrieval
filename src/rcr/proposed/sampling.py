@@ -100,6 +100,7 @@ def sampling_settings(config):
         "identity_fraction": 0.5,
         "hard_fraction": 0.0,
         "semantic_hard_fraction": 0.0,
+        "semantic_top_quota": 0,
         "semantic_context_quota": 0,
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
@@ -125,7 +126,7 @@ def sampling_settings(config):
         raise ValueError("warmup_epochs must be nonnegative")
     if settings["refresh_every_epochs"] < 1 or settings["pool_size"] < 1:
         raise ValueError("hard-negative intervals and pool size must be positive")
-    for key in ("partial_id_quota", "semantic_context_quota"):
+    for key in ("partial_id_quota", "semantic_top_quota", "semantic_context_quota"):
         if type(settings[key]) is not int or settings[key] < 0:
             raise ValueError(f"{key} must be a nonnegative integer")
     weight = settings["rejection_mining_context_weight"]
@@ -293,6 +294,7 @@ def sample_candidates(
     hard_pools=None,
     hard_fraction=0.0,
     semantic_hard_fraction=0.0,
+    semantic_top_quota=0,
     semantic_context_quota=0,
     identity_rejection=False,
     partial_id_quota=0,
@@ -316,16 +318,18 @@ def sample_candidates(
         pools = (hard_pools or {}).get(sample["sample_id"], {})
         identity_set = set(identity_pool)
 
-        def draw(pool, count, *, hard=False, row=row, forbidden=forbidden):
+        def draw(
+            pool, count, *, hard=False, keep_first=0, row=row, forbidden=forbidden
+        ):
             pool = list(
                 dict.fromkeys(
                     i for i in pool if i in index.gallery_set and i not in forbidden
                 )
             )
-            # Draw from a small hardest window instead of repeating a fixed top-K.
             if hard:
                 pool = pool[: 2 * count]
-            chosen = _draw(pool, count, generator)
+            first = pool[: min(keep_first, count)]
+            chosen = first + _draw(pool[len(first) :], count - len(first), generator)
             row.extend(chosen)
             forbidden.update(chosen)
             return chosen
@@ -338,6 +342,7 @@ def sample_candidates(
                 [i for i in pools.get("semantic", ()) if i in identity_set],
                 semantic_quota,
                 hard=True,
+                keep_first=semantic_top_quota,
             )
         semantic_hard_count += len(semantic_hard)
         draw(identity_pool, identity_quota - len(semantic_hard))
@@ -388,9 +393,9 @@ def sample_candidates(
             )
         )
         partial_id_count += sum(i in index.partial[sample["sample_id"]] for i in row)
-        # Start from the completed base draw. Replace only mined same-ID slots
-        # with new images; preserve positives, random diversity and wrong-ID tags.
-        count = min(semantic_context_quota, len(semantic_hard))
+        # Optional context draws may replace only the randomly mined same-ID slots.
+        replaceable = semantic_hard[semantic_top_quota:]
+        count = min(semantic_context_quota, len(replaceable))
         window = pools.get("semantic_context", ())[: 2 * count]
         new_ids = [
             image
@@ -398,7 +403,7 @@ def sample_candidates(
             if image in identity_set and image not in row
         ]
         replacements = _draw(new_ids, count, generator)
-        for old, new in zip(reversed(semantic_hard), replacements, strict=False):
+        for old, new in zip(reversed(replaceable), replacements, strict=False):
             row[row.index(old)] = new
         semantic_context_ids.append(set(replacements))
         permutation = torch.randperm(num_candidates, generator=generator).tolist()

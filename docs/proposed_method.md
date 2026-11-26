@@ -230,14 +230,17 @@ backward recomputes the neural context path. The default prefetch depth remains
 one batch; `train.prefetch_batches=0` runs the serial control. See
 [GPU performance](gpu_performance.md) for profiling and runtime settings.
 
-Base mining uses `b=0` on the screened semantic/wrong-ID union. For one rejection
-slot, it also computes H on the screened wrong-ID group (including zero overlap
-and partial identity). For queries with more same-ID negatives than slots, the miner also ranks
-covered same-ID candidates by raw H. Both rankings reuse the same B and C. On the same wrong-ID list, it compares
+Base mining uses `b=0` on the screened semantic/wrong-ID union. The supplied
+sampler reserves the two highest-ranked eligible same-ID negatives when its
+mined quota permits, then samples the other mined slots from the same window.
+A positive `semantic_context_quota` optionally ranks covered same-ID negatives
+by raw H for replacement of randomly drawn mined slots.
+For one rejection slot, the miner computes H on the screened wrong-ID group
+(including zero overlap and partial identity). On that list it compares
 `z(B' + a*C) + eta*z(G)` with `z(B' + a*C + b_mine*H) + eta*z(G)`, where
 `B'=model.binding_scale*B` and `b_mine=0.005`. Population z-scores precede the
 `C>0` filter; ranks and the top-ten test follow it, with coarse order breaking
-ties. The two highest H-ranked candidates with improved rank form a pool for
+ties. The first two candidates with improved rank under this fusion form a pool for
 one random batch slot; the other hard slots use the base wrong-ID pool. See the
 [run guide](proposed_runs.md) for quotas, partial-ID sampling and refresh timing.
 The mining coefficient affects selection only. Validation collects raw `H`

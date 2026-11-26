@@ -496,14 +496,15 @@ def _train(cfg, output, resumed):
         excluded,
         partial_pools=partial_pools,
     )
-    # Small same-ID pools are already sampled in full.
+    # Raw H can replace a slot only when the base draw leaves random mined slots.
     semantic_context_queries = set()
     if semantic_hard and sampling["semantic_context_quota"]:
         size = cfg["train"]["candidates"]
         for sid, (positives, _, negatives) in candidate_index.rows.items():
             npos = min(sampling["positives_per_query"], len(positives), size - 1)
             quota = int((size - npos) * sampling["identity_fraction"])
-            if 0 < quota < len(negatives):
+            mined_quota = math.ceil(quota * sampling["semantic_hard_fraction"])
+            if quota < len(negatives) and mined_quota > sampling["semantic_top_quota"]:
                 semantic_context_queries.add(sid)
     del partial_pools
     identity_images = {
@@ -750,6 +751,7 @@ def _train(cfg, output, resumed):
                             "context_weight": MINING_CONTEXT_WEIGHT,
                         },
                         "screen_pool_size": sampling["pool_size"],
+                        "semantic_top_quota": sampling["semantic_top_quota"],
                         "semantic_context_quota": sampling["semantic_context_quota"],
                         "rejection_mining_context_weight": rejection_mining_weight,
                         "rejection_normalization": (
@@ -882,6 +884,7 @@ def _train(cfg, output, resumed):
                     hard_pools=hard_pools,
                     hard_fraction=sampling["hard_fraction"],
                     semantic_hard_fraction=sampling["semantic_hard_fraction"],
+                    semantic_top_quota=sampling["semantic_top_quota"],
                     semantic_context_quota=sampling["semantic_context_quota"],
                     identity_rejection=identity_rejection,
                     partial_id_quota=sampling["partial_id_quota"],

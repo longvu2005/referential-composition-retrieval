@@ -77,9 +77,10 @@ masked reasoner rows/keys before attention. Every selected GROUP member,
 missing-match member and active ordered pair remains present. Geometry is
 gathered on the same person slots. This is the same masked attention population
 with less matrix work; training keeps its full layout and dropout path.
-Validation still computes raw `H` when its coefficient is zero. Mining computes H on the screened same-ID shortlist for queries eligible
-for semantic context slots, and on screened wrong-ID candidates when rejection
-context mining is active. Each candidate uses one assignment and one binding
+Validation still computes raw `H` when its coefficient is zero. The supplied
+mining configuration computes H on screened wrong-ID candidates for rejection.
+Enabling same-ID context replacements also scores H on the screened same-ID
+shortlist for eligible queries. Each candidate uses one assignment and one binding
 pass. Set both `train.sampling.semantic_context_quota` and
 `train.sampling.rejection_mining_context_weight` to zero for base-only mining.
 

@@ -160,7 +160,7 @@ Mining refreshes at epochs 7, 11, 15, 19 and 23 in the supplied schedule. Base
 semantic and wrong-ID pools use H=0 with population normalization over their
 screened union. With context and rejection active,
 `train.sampling.rejection_mining_context_weight=0.005` also scores H on at most
-`pool_size=64` screened wrong-ID images per query.
+`pool_size=128` screened wrong-ID images per query.
 Population fusion on that same wrong-ID list is computed before filtering
 `C>0`. Up to two images that improve rank and enter the H top ten form the
 rejection context pool. Each row randomly draws one of them before two base
@@ -168,16 +168,25 @@ wrong-ID slots; unavailable slots return to the base pool, then random fallback.
 Only actual mined wrong-ID selections enter the rejection mask. Extra partial-ID
 and random selections retain their GT labels.
 
-With `train.sampling.semantic_context_quota=2`, a query with more same-ID
-negatives than its same-ID quota also ranks the screened, covered same-ID
-negatives by raw H. After the base draw, the sampler can replace two of its
-seven mined semantic negatives with new images drawn from the first four in
-that ranking. An occupied or unavailable slot keeps its base selection.
+With the supplied 32-candidate configuration, a query with more than 13 eligible
+same-ID negatives draws seven mined negatives when the pool is large enough.
+`train.sampling.semantic_top_quota=2` reserves the first two eligible images
+in the base ranking. The other five are sampled without replacement from ranks
+3–14. Short ranked lists contribute as many images as available. The remaining
+same-ID slots draw from the eligible identity pool. Queries with at most 13
+eligible negatives already include them all.
+
+`train.sampling.semantic_context_quota=0` disables same-ID replacements by raw
+H. A positive quota allows replacements among the randomly mined slots only.
+For example, with two replaceable slots and a quota of two, the sampler can add
+up to two new images from the first four in the H ranking. Configurations that
+omit `semantic_top_quota` sample the entire hard window randomly.
 `train_candidate_semantic_context` counts actual replacements.
 `train_candidate_semantic_context_used` counts replacements appearing in at
 least one semantic loss pair after the configured verification. The counters
-in `history.jsonl` are epoch totals. A missing or zero quota uses base sampling.
-Use a fresh output directory for this training experiment. Mid-epoch resume restores hard pools, including the rejection context
+in `history.jsonl` are epoch totals.
+Use a fresh output directory for this training experiment. Mid-epoch resume
+restores hard pools, including the rejection context
 pool, and committed RNG states without refreshing them. `hard_negatives.json`
 records the mining coefficient separately from training/inference weights.
 `history.jsonl` logs `train_candidate_partial_id` (all selected partial-ID images,
