@@ -496,6 +496,15 @@ def _train(cfg, output, resumed):
         excluded,
         partial_pools=partial_pools,
     )
+    # Small same-ID pools are already sampled in full.
+    semantic_context_queries = set()
+    if semantic_hard and sampling["semantic_context_quota"]:
+        size = cfg["train"]["candidates"]
+        for sid, (positives, _, negatives) in candidate_index.rows.items():
+            npos = min(sampling["positives_per_query"], len(positives), size - 1)
+            quota = int((size - npos) * sampling["identity_fraction"])
+            if 0 < quota < len(negatives):
+                semantic_context_queries.add(sid)
     del partial_pools
     identity_images = {
         sample_id: set(pool) for sample_id, pool in identity_pools.items()
@@ -720,6 +729,9 @@ def _train(cfg, output, resumed):
                     text_cache=text_cache,
                     identity_image_ids=identity_images,
                     semantic_hard=semantic_hard,
+                    semantic_context_queries=semantic_context_queries
+                    if epoch_loss["context_weight"]
+                    else (),
                     identity_rejection=identity_rejection,
                     rejection_mining_context_weight=rejection_mining_weight,
                 )
@@ -738,6 +750,7 @@ def _train(cfg, output, resumed):
                             "context_weight": MINING_CONTEXT_WEIGHT,
                         },
                         "screen_pool_size": sampling["pool_size"],
+                        "semantic_context_quota": sampling["semantic_context_quota"],
                         "rejection_mining_context_weight": rejection_mining_weight,
                         "rejection_normalization": (
                             "per_query_screened_wrong_id_population"
@@ -804,6 +817,8 @@ def _train(cfg, output, resumed):
             )
             candidate_totals = {
                 "candidate_semantic_hard": 0,
+                "candidate_semantic_context": 0,
+                "candidate_semantic_context_used": 0,
                 "candidate_identity_hard": 0,
                 "candidate_partial_id": 0,
                 "candidate_rejection_context": 0,
@@ -867,6 +882,7 @@ def _train(cfg, output, resumed):
                     hard_pools=hard_pools,
                     hard_fraction=sampling["hard_fraction"],
                     semantic_hard_fraction=sampling["semantic_hard_fraction"],
+                    semantic_context_quota=sampling["semantic_context_quota"],
                     identity_rejection=identity_rejection,
                     partial_id_quota=sampling["partial_id_quota"],
                     rejection_mining_context_weight=rejection_mining_weight,
@@ -962,6 +978,20 @@ def _train(cfg, output, resumed):
                     ),
                     **visual_options,
                 )
+                if any(sampled.semantic_context_ids):
+                    candidate_totals["candidate_semantic_context"] += sum(
+                        map(len, sampled.semantic_context_ids)
+                    )
+                    batch["semantic_context_mask"] = torch.tensor(
+                        [
+                            [image in chosen for image in images]
+                            for images, chosen in zip(
+                                candidates, sampled.semantic_context_ids, strict=True
+                            )
+                        ],
+                        dtype=torch.bool,
+                        device=device,
+                    )
                 if state_pairs_epoch is not None:
                     positives = (
                         batch["positive_mask"] & batch["identity_positive_mask"]
@@ -995,6 +1025,9 @@ def _train(cfg, output, resumed):
                         if key not in crop_totals
                     )
                     host_metrics = checks.cpu_values(metrics)
+                    used = host_metrics.pop("semantic_context_used", None)
+                    if used is not None:
+                        candidate_totals["candidate_semantic_context_used"] += int(used)
                     fine_counts = host_metrics.pop("fine_pair_counts", None)
                     values = dict(
                         zip(
@@ -1109,10 +1142,8 @@ def _train(cfg, output, resumed):
             optimizer.zero_grad(set_to_none=True)
             is_best = False
             validation = None
-            should_evaluate = (
-                not in_warmup
-                and evaluation.get("enabled", False)
-                and (epoch % evaluation["every_epochs"] == 0 or epoch == epochs)
+            should_evaluate = evaluation.get("enabled", False) and (
+                epoch % evaluation["every_epochs"] == 0 or epoch == epochs
             )
             if should_evaluate:
                 validation = _evaluate(

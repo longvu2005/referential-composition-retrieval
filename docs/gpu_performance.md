@@ -55,8 +55,8 @@ Prefetch retains inputs for one future batch, adding bounded CPU/pinned memory
 and CUDA input buffers. Set `train.prefetch_batches=0` when measuring the serial
 control or when that extra input batch exceeds the available VRAM.
 
-Retrieval preserves query output order and FP32 inference. Mining with context
-coefficient zero skips the reasoner and target scene loading in separated caches.
+Retrieval preserves query output order and FP32 inference. Mining skips the reasoner and target
+scene loading in separated caches for candidates that only need base scores.
 Fine scoring uses the same packed assigned-token path as training. Validation
 still collects context evidence for coefficient calibration. Gallery residency is
 used only when the projections fit both the configured budget and half the
@@ -77,12 +77,11 @@ masked reasoner rows/keys before attention. Every selected GROUP member,
 missing-match member and active ordered pair remains present. Geometry is
 gathered on the same person slots. This is the same masked attention population
 with less matrix work; training keeps its full layout and dropout path.
-Validation still computes raw `H` when its coefficient is zero. Base mining
-skips the reasoner for semantic candidates. Rejection context mining computes
-`H` only for the bounded wrong-ID shortlist and reuses its `B,C` in the base
-union, avoiding a second assignment or binding pass. Setting
-`train.sampling.rejection_mining_context_weight=0.0` skips the reasoner for all
-mining candidates.
+Validation still computes raw `H` when its coefficient is zero. Mining computes H on the screened same-ID shortlist for queries eligible
+for semantic context slots, and on screened wrong-ID candidates when rejection
+context mining is active. Each candidate uses one assignment and one binding
+pass. Set both `train.sampling.semantic_context_quota` and
+`train.sampling.rejection_mining_context_weight` to zero for base-only mining.
 
 Fine-scoring prefetch is bounded to one geometry/packed-person chunk. It runs
 no model forward or CUDA kernel on the worker. CUDA sources are pinned there;

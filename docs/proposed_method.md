@@ -77,8 +77,8 @@ produces `e_k` once per aligned reference detection. The model routes the
 result into the Subject-person slots.
 
 During the first `train.context_warmup_epochs` epochs, `grounding.binding` and
-`reasoning_binding` refer to the same `EvidenceBinding` instance. Any validation
-reasoning in this phase reads the warmed binding directly. At the start of the
+`reasoning_binding` refer to the same `EvidenceBinding` instance. Scheduled
+validation in warmup uses the warmed binding directly. At the start of the
 next epoch, before mining or training, the model copies its parameters and
 buffers into an independent `reasoning_binding`. Grounding retains its
 optimizer moments and step counters. Reasoning begins with fresh optimizer
@@ -232,8 +232,8 @@ one batch; `train.prefetch_batches=0` runs the serial control. See
 
 Base mining uses `b=0` on the screened semantic/wrong-ID union. For one rejection
 slot, it also computes H on the screened wrong-ID group (including zero overlap
-and partial identity). It reuses that group's B and C for the base union, while
-semantic candidates skip the reasoner. On the same wrong-ID list, it compares
+and partial identity). For queries with more same-ID negatives than slots, the miner also ranks
+covered same-ID candidates by raw H. Both rankings reuse the same B and C. On the same wrong-ID list, it compares
 `z(B' + a*C) + eta*z(G)` with `z(B' + a*C + b_mine*H) + eta*z(G)`, where
 `B'=model.binding_scale*B` and `b_mine=0.005`. Population z-scores precede the
 `C>0` filter; ranks and the top-ten test follow it, with coarse order breaking

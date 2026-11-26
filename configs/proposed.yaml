@@ -72,6 +72,7 @@ train:
     identity_fraction: 0.45
     hard_fraction: 0.10
     semantic_hard_fraction: 0.50
+    semantic_context_quota: 2
     warmup_epochs: 6
     refresh_every_epochs: 4
     pool_size: 64

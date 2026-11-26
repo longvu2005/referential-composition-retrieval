@@ -2,7 +2,7 @@
 
 import math
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -100,6 +100,7 @@ def sampling_settings(config):
         "identity_fraction": 0.5,
         "hard_fraction": 0.0,
         "semantic_hard_fraction": 0.0,
+        "semantic_context_quota": 0,
         "warmup_epochs": 1,
         "refresh_every_epochs": 2,
         "pool_size": 100,
@@ -124,9 +125,9 @@ def sampling_settings(config):
         raise ValueError("warmup_epochs must be nonnegative")
     if settings["refresh_every_epochs"] < 1 or settings["pool_size"] < 1:
         raise ValueError("hard-negative intervals and pool size must be positive")
-    quota = settings["partial_id_quota"]
-    if type(quota) is not int or quota < 0:
-        raise ValueError("partial_id_quota must be a nonnegative integer")
+    for key in ("partial_id_quota", "semantic_context_quota"):
+        if type(settings[key]) is not int or settings[key] < 0:
+            raise ValueError(f"{key} must be a nonnegative integer")
     weight = settings["rejection_mining_context_weight"]
     if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
         raise ValueError(
@@ -278,6 +279,7 @@ class SampledCandidates:
     identity_hard_count: int
     partial_id_count: int = 0
     rejection_context_count: int = 0
+    semantic_context_ids: list[set[str]] = field(default_factory=list)
 
 
 def sample_candidates(
@@ -291,6 +293,7 @@ def sample_candidates(
     hard_pools=None,
     hard_fraction=0.0,
     semantic_hard_fraction=0.0,
+    semantic_context_quota=0,
     identity_rejection=False,
     partial_id_quota=0,
     rejection_mining_context_weight=0.0,
@@ -300,7 +303,7 @@ def sample_candidates(
     Small same-ID pools are retained in full. Fallback images are never tagged
     as mined hard identity negatives, even if they happen to have a wrong ID.
     """
-    rows, hard_identity_ids = [], []
+    rows, hard_identity_ids, semantic_context_ids = [], [], []
     semantic_hard_count = identity_hard_count = 0
     partial_id_count = rejection_context_count = 0
     for sample in samples:
@@ -385,6 +388,19 @@ def sample_candidates(
             )
         )
         partial_id_count += sum(i in index.partial[sample["sample_id"]] for i in row)
+        # Start from the completed base draw. Replace only mined same-ID slots
+        # with new images; preserve positives, random diversity and wrong-ID tags.
+        count = min(semantic_context_quota, len(semantic_hard))
+        window = pools.get("semantic_context", ())[: 2 * count]
+        new_ids = [
+            image
+            for image in dict.fromkeys(window)
+            if image in identity_set and image not in row
+        ]
+        replacements = _draw(new_ids, count, generator)
+        for old, new in zip(reversed(semantic_hard), replacements, strict=False):
+            row[row.index(old)] = new
+        semantic_context_ids.append(set(replacements))
         permutation = torch.randperm(num_candidates, generator=generator).tolist()
         rows.append([row[position] for position in permutation])
     return SampledCandidates(
@@ -394,4 +410,5 @@ def sample_candidates(
         identity_hard_count,
         partial_id_count,
         rejection_context_count,
+        semantic_context_ids,
     )

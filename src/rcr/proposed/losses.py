@@ -579,6 +579,7 @@ def compute_loss(
     )
     zero = query_identity.new_zeros(())
     ground, identity, coarse, context, state = [zero] * 5
+    semantic_context_used = None
     semantic = rejection = swap = zero
     context_active = rejection_active = swap_active = fda_error = zero.detach()
     fine_counts = None
@@ -748,6 +749,10 @@ def compute_loss(
             if context_verify_members:
                 pairs = verified_pairs
                 pair_options["pair_mask"] = pairs
+        if "semantic_context_mask" in batch:
+            semantic_context_used = (
+                pairs.any(1) & batch["semantic_context_mask"]
+            ).sum()
         semantic = retrieval_loss(
             scores["context_contribution"] / context_temperature,
             positive,
@@ -829,5 +834,10 @@ def compute_loss(
         "identity_hard_crops": hard_count,
         "identity_random_crops": random_count,
         "identity_supplemental_crops": hard_count + random_count,
+        **(
+            {"semantic_context_used": semantic_context_used}
+            if semantic_context_used is not None
+            else {}
+        ),
         **({"fine_pair_counts": fine_counts} if fine_counts is not None else {}),
     }

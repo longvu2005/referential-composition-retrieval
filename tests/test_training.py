@@ -99,12 +99,16 @@ def test_bulk_supervision_preserves_member_labels_and_vocabulary_order(empty):
         assert vocabulary == {"B": 0, "A": 1, "C": 2, "D": 3}
 
 
-@pytest.mark.parametrize("warmup", [0, 1])
+@pytest.mark.parametrize(
+    ("warmup", "every_epochs", "evaluated_epochs"),
+    [(0, 1, [1, 2, 3]), (1, 1, [1, 2, 3]), (2, 2, [2, 3])],
+)
 def test_training_warmup_and_validation_selected_checkpoint(
-    tiny_training_run, monkeypatch, warmup
+    tiny_training_run, monkeypatch, warmup, every_epochs, evaluated_epochs
 ):
     cfg, cache, wandb_run, _ = tiny_training_run
     cfg["train"].update(epochs=3, context_warmup_epochs=warmup)
+    cfg["evaluation"]["every_epochs"] = every_epochs
     cfg["train"]["identity_sampling"]["max_crops"] = 0
     cfg["retrieval"]["context_weight"] = 0.23
     cfg["model"]["fine_matching"]["owner_mode"] = "crop_log_softmax"
@@ -153,11 +157,15 @@ def test_training_warmup_and_validation_selected_checkpoint(
     for row in history[warmup:]:
         assert row["train_fine_queries_dual"] == 1
         assert row["train_fine_active_fraction_dual"] == 0.0
-    assert all("val_checkpoint_score" not in row for row in history[:warmup])
-    best = max(
-        (row for row in history if "val_checkpoint_score" in row),
-        key=lambda row: row["val_checkpoint_score"],
-    )
+    evaluated = [row for row in history if "val_checkpoint_score" in row]
+    assert [row["epoch"] for row in evaluated] == evaluated_epochs
+    assert [
+        row["epoch"] for row in wandb_run.logs if "val/checkpoint_score" in row
+    ] == evaluated_epochs
+    for epoch in evaluated_epochs:
+        directory = checkpoint.parent / "evaluation" / f"epoch_{epoch:03d}"
+        assert (directory / "val_metrics.json").is_file()
+    best = max(evaluated, key=lambda row: row["val_checkpoint_score"])
     saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
     last = torch.load(
         checkpoint.parent / "last.pt", map_location="cpu", weights_only=True
@@ -572,7 +580,7 @@ def test_training_selects_checkpoint_after_calibration_without_feedback(
     from rcr.evaluation.report import load_run
 
     cfg, cache, wandb_run, _ = tiny_training_run
-    cfg["train"].update(epochs=2)
+    cfg["train"].update(epochs=2, context_warmup_epochs=1)
     cfg["retrieval"]["top_m"] = 3
     data = training.load_rcr_data(None)
     _add_gallery_image(cache, data, "vx", "val")
@@ -600,6 +608,7 @@ def test_training_selects_checkpoint_after_calibration_without_feedback(
     assert [row["val_fine_coarse_weight"] for row in history] == [0.25, 0.15]
     assert best["epoch"] == best["best_epoch"] == 1
     assert last["epoch"] == 2 and last["best_epoch"] == 1
+    assert best["binding_shared"] is True and last["binding_shared"] is False
     assert best["validation"]["fine_coarse_weight"] == 0.25
     assert last["validation"]["fine_coarse_weight"] == 0.15
     assert best["best_fine_coarse_weight"] == last["best_fine_coarse_weight"] == 0.25
@@ -850,6 +859,8 @@ def test_partial_diversity_weights_overlap_groups_instead_of_pool_sizes(monkeypa
 @pytest.mark.parametrize(
     "key,value",
     [
+        ("semantic_context_quota", -1),
+        ("semantic_context_quota", True),
         ("partial_id_quota", -1),
         ("partial_id_quota", 1.5),
         ("partial_id_quota", True),
@@ -867,6 +878,7 @@ def test_new_sampling_settings_reject_invalid_values(key, value):
 
 def test_new_sampling_settings_preserve_old_config_defaults():
     defaults = sampling_settings({})
+    assert defaults["semantic_context_quota"] == 0
     assert defaults["partial_id_quota"] == 0
     assert defaults["rejection_mining_context_weight"] == 0.0
     assert sampling_settings({"partial_id_quota": 6})["partial_id_quota"] == 6
@@ -972,6 +984,76 @@ def test_candidate_quotas_keep_provenance_after_shuffle_and_exclusions():
     assert first.hard_identity_ids[0] <= row & set(wrong[:6])
     assert len(first.hard_identity_ids[0]) == 3
     assert not row & {"q", "disputed"}
+
+
+@pytest.mark.parametrize("available", [0, 1, 2])
+def test_context_slots_replace_only_base_same_id_draws(available):
+    sample = _sample("train", "q", "p")
+    same = [f"s{i}" for i in range(80)]
+    wrong = [f"w{i}" for i in range(80)]
+    index = CandidateIndex([sample], ["q", "p", *same, *wrong], {"train": same})
+    pools = {"train": {"semantic": same, "identity": wrong}}
+    options = dict(
+        index=index,
+        identity_fraction=0.45,
+        semantic_hard_fraction=0.5,
+        hard_fraction=0.1,
+        hard_pools=pools,
+        identity_rejection=True,
+    )
+
+    def draw(quota):
+        return sample_candidates(
+            [sample],
+            32,
+            torch.Generator().manual_seed(21),
+            semantic_context_quota=quota,
+            **options,
+        )
+
+    baseline = draw(0)
+    old = set(baseline.images[0])
+    additions = [i for i in reversed(same) if i not in old][:available]
+    pools["train"]["semantic_context"] = additions + ["p", "w0", *additions]
+    result = draw(2)
+    new = set(result.images[0])
+    assert new - old == result.semantic_context_ids[0] == set(additions)
+    assert len(new) == 32 and old - new <= set(same[:14])
+    assert result.semantic_hard_count == baseline.semantic_hard_count == 7
+    assert result.hard_identity_ids == baseline.hard_identity_ids
+    assert not result.hard_identity_ids[0].intersection(additions)
+    if not available:
+        assert result == baseline
+
+
+def test_training_logs_replaced_and_verified_context_negatives(tiny_training_run):
+    cfg, cache, _, _ = tiny_training_run
+    data = training.load_rcr_data(None)
+    for n in range(40):
+        _add_gallery_image(cache, data, f"s{n}", "train")
+    cfg["train"].update(epochs=2, candidates=8)
+    cfg["train"]["sampling"].update(
+        warmup_epochs=0,
+        refresh_every_epochs=1,
+        identity_fraction=0.75,
+        hard_fraction=0.0,
+        semantic_hard_fraction=0.8,
+        semantic_context_quota=2,
+    )
+    cfg["model"]["fine_matching"].update(
+        selection_threshold=0.0001, background_logit=-20, identity_threshold=-1
+    )
+    directory = training.train(cfg).parent
+    pool = json.loads((directory / "hard_negatives.json").read_text())["pools"]["train"]
+    assert set(pool["semantic_context"]) == set(pool["semantic"])
+    history = [
+        json.loads(s) for s in (directory / "history.jsonl").read_text().splitlines()
+    ]
+    selected = sum(row["train_candidate_semantic_context"] for row in history)
+    assert selected > 0
+    assert (
+        sum(row["train_candidate_semantic_context_used"] for row in history) == selected
+    )
 
 
 def test_rejection_adds_wrong_id_gradient_without_changing_other_targets(
@@ -1088,6 +1170,23 @@ def test_fine_mining_uses_common_union_filters_and_restores_modes(
         assert pools["semantic"] == ["vq", "n"]
         assert pools["identity"] == ["vn"]  # High FDA with zero coverage is excluded.
     assert model.training and not text.training
+
+    # Only the first query has a replaceable same-ID pool. With negative
+    # context_sign, raw H reverses its base ranking on exactly those two images.
+    mined = ranking.mine_hard_negatives(
+        samples,
+        cache,
+        Tokenizer(),
+        text,
+        model,
+        torch.device("cpu"),
+        retrieval={**settings, "coarse_beta": 0},
+        semantic_context_queries={"train"},
+        **options,
+    )
+    assert mined["train"]["semantic_context"] == ["n", "vq"]
+    assert mined["train"]["semantic"] == mined["train2"]["semantic"] == ["vq", "n"]
+    assert "semantic_context" not in mined["train2"]
 
     scored.clear()
     empty = ranking.mine_hard_negatives(
@@ -1832,6 +1931,9 @@ def test_verified_members_filter_only_semantic_loss_and_log_pair_counts(
             [[False, False, False, False, False, True]] * 2
         ),
     )
+    batch["semantic_context_mask"] = torch.tensor(
+        [[False, False, True, True, True, False]] * 2
+    )
     settings = {
         **_only_loss("context"),
         "context_rejection_weight": 0.5,
@@ -1852,6 +1954,8 @@ def test_verified_members_filter_only_semantic_loss_and_log_pair_counts(
     assert (filtered_grad[:, 5] > 0).all()
     assert (filtered_grad[:, 4] == 0).all()
 
+    assert before["semantic_context_used"].item() == 6
+    assert after["semantic_context_used"].item() == 2
     torch.testing.assert_close(before["fine_pair_counts"], after["fine_pair_counts"])
     totals = {}
     training._record_fine_counts(
@@ -2339,8 +2443,8 @@ def test_resume_matches_uninterrupted_training(tiny_training_run, monkeypatch, f
             "before_joint_step": 3,
             "signal": 5,
             "after_step": 4,
-            "validation": 6,
-            "selection": 6,
+            "validation": 3,
+            "selection": 3,
         }[fault]
     )
     assert pending["binding_shared"] == (state["progress"]["epoch"] <= 1)

@@ -50,9 +50,11 @@ Use a fresh `output.dir` for each experiment. For example:
   --set train.seed=1 output.dir=runs/proposed-seed1
 ```
 
-Training performs scheduled validation, calibrates the configured scoring
-coefficients and saves the best selection. The selection criterion is defined
-in the [benchmark protocol](benchmark_protocol.md).
+When enabled, validation runs at the `evaluation.every_epochs` interval during
+warmup and joint training, and at the final epoch. Each validation calibrates
+the configured scoring coefficients and can select `best.pt` under the
+[benchmark protocol](benchmark_protocol.md).
+
 The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v5`.
 Start a fresh run to use this schedule. Grounding and context
 reasoning share one binding for `train.context_warmup_epochs` epochs, including
@@ -65,11 +67,12 @@ Resuming a v4 training run requires its original implementation and optimizer
 state. Both architectures use the same frozen feature caches.
 
 With the supplied configuration, epochs 1–4 train the base and CLIP text
-LoRA with context disabled. Epochs 5–6 add semantic context, and epoch 7 onward
-also enables mining and rejection at weight `0.5`. Text LoRA updates the
-query and value projections of the last two CLIP text blocks throughout the
-25-epoch run. The adapter group uses `optimizer.text_lora_lr=0.0001` and the
-same cosine schedule. The frozen CLIP prefix and visual caches can be reused.
+LoRA with context loss disabled. Validation runs at epochs 2 and 4. Epochs
+5–6 add semantic context, and epoch 7 onward also enables mining and rejection
+at weight `0.5`. Text LoRA updates the query and value projections of the last
+two CLIP text blocks throughout the 25-epoch run. The adapter group uses
+`optimizer.text_lora_lr=0.0001` and the same cosine schedule. The frozen CLIP
+prefix and visual caches can be reused.
 Context loss uses the original training coefficients `a_train=0.04` and
 `b_train=0.10`; validation calibration changes retrieval coefficients only.
 The supplied RCR experiment retains the name `proposed`, uses
@@ -165,10 +168,16 @@ wrong-ID slots; unavailable slots return to the base pool, then random fallback.
 Only actual mined wrong-ID selections enter the rejection mask. Extra partial-ID
 and random selections retain their GT labels.
 
-Old configurations resolve the two new sampling keys to `0` and `0.0`, preserving
-base sampling and its RNG sequence. Changing either setting requires a new
-`output.dir`; resume compatibility checks retain the existing source/config
-contract. Mid-epoch resume restores hard pools, including the rejection context
+With `train.sampling.semantic_context_quota=2`, a query with more same-ID
+negatives than its same-ID quota also ranks the screened, covered same-ID
+negatives by raw H. After the base draw, the sampler can replace two of its
+seven mined semantic negatives with new images drawn from the first four in
+that ranking. An occupied or unavailable slot keeps its base selection.
+`train_candidate_semantic_context` counts actual replacements.
+`train_candidate_semantic_context_used` counts replacements appearing in at
+least one semantic loss pair after the configured verification. The counters
+in `history.jsonl` are epoch totals. A missing or zero quota uses base sampling.
+Use a fresh output directory for this training experiment. Mid-epoch resume restores hard pools, including the rejection context
 pool, and committed RNG states without refreshing them. `hard_negatives.json`
 records the mining coefficient separately from training/inference weights.
 `history.jsonl` logs `train_candidate_partial_id` (all selected partial-ID images,

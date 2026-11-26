@@ -868,6 +868,7 @@ def mine_hard_negatives(
     text_cache=None,
     identity_image_ids=None,
     semantic_hard=False,
+    semantic_context_queries=(),
     identity_rejection=False,
     rejection_mining_context_weight=0.0,
 ):
@@ -876,8 +877,8 @@ def mine_hard_negatives(
     Coarse filters each requested group to ``pool_size`` images. Base pools use
     binding, coverage and coarse fusion over their union at H=0.
     The optional rejection slot compares ranks with/without H on the same
-    wrong-ID shortlist. Only that group runs context; its evidence is reused
-    in the base union. Labels classify pools outside the scorer.
+    wrong-ID shortlist. Requested same-ID shortlists also rank by raw H.
+    Both rankings reuse the base assignment. Labels stay outside the scorer.
     """
     from rcr.proposed.nn.encoders import QueryTextCache, encode_query_text
 
@@ -1051,6 +1052,11 @@ def mine_hard_negatives(
                     pools[sample_id].update({name: [] for name in negative_groups})
                     if context_mining:
                         pools[sample_id]["rejection_context"] = []
+                    semantic_context = (
+                        semantic_hard and sample_id in semantic_context_queries
+                    )
+                    if semantic_context:
+                        pools[sample_id]["semantic_context"] = []
                     if not shortlist.numel():
                         continue
                     wrong = (
@@ -1058,14 +1064,14 @@ def mine_hard_negatives(
                         if identity_rejection
                         else torch.zeros_like(shortlist, dtype=torch.bool)
                     )
-                    groups = (
-                        [(wrong, True), (~wrong, False)]
-                        if context_mining
-                        else [(torch.ones_like(shortlist, dtype=torch.bool), False)]
+                    needs_context = (wrong & context_mining) | (
+                        ~wrong & semantic_context
                     )
                     components = {}
-                    for membership, compute_context in groups:
-                        positions = membership.nonzero().flatten()
+                    for compute_context in (True, False):
+                        positions = (
+                            (needs_context == compute_context).nonzero().flatten()
+                        )
                         if not len(positions):
                             continue
                         evidence = _score_target_components(
@@ -1107,6 +1113,14 @@ def mine_hard_negatives(
                         pools[sample_id][name] = [
                             gallery_ids[i]
                             for i in shortlist[ranked[keep[ranked]]].tolist()
+                        ]
+                    if semantic_context:
+                        same = (covered & ~wrong).nonzero().flatten()
+                        by_h = components["context"][same].argsort(
+                            descending=True, stable=True
+                        )
+                        pools[sample_id]["semantic_context"] = [
+                            gallery_ids[i] for i in shortlist[same[by_h]].tolist()
                         ]
                     if context_mining and wrong.any():
                         # Fuse before C>0 filtering: both ranks use the complete
