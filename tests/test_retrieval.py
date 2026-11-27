@@ -1375,6 +1375,7 @@ def test_standalone_retrieve_save_evaluate_and_ranking_only_evaluation(
     torch.use_deterministic_algorithms(False)
     output = retrieve.retrieve(cfg)
     assert torch.are_deterministic_algorithms_enabled()
+    assert not torch.is_deterministic_algorithms_warn_only_enabled()
     directory = Path(cfg["output"]["dir"]) / "val"
     saved = torch.load(directory / "rankings.pt", weights_only=True)
     assert saved["binding_scale"] == scale == 1.0

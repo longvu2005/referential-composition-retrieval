@@ -38,8 +38,8 @@ def derived_generator(seed: int, stream: str, index: int = 0) -> torch.Generator
 def configure_determinism(deterministic: bool = True) -> None:
     """Request reproducible PyTorch kernels, shared by training and retrieval.
 
-    An operation that has no deterministic implementation only warns, so a run is
-    never aborted. ``deterministic=False`` leaves the backend settings untouched.
+    Raise if an operation has no deterministic implementation.
+    ``deterministic=False`` leaves the backend settings untouched.
     """
     if not deterministic:
         return
@@ -47,7 +47,7 @@ def configure_determinism(deterministic: bool = True) -> None:
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", CUBLAS_WORKSPACE_CONFIG)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.use_deterministic_algorithms(True, warn_only=False)
 
 
 def seed_everything(seed: int, *, deterministic: bool = True) -> None:
