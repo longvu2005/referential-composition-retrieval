@@ -117,7 +117,7 @@ candidate_ks:
 - 500
 evaluation:
   enabled: true
-  every_epochs: 2
+  every_epochs: 6
   calibration:
     # First tuple is the reference from the previous top-two, pool-128 checkpoint.
     coverage_weights: [0.045, 0.0, 0.02, 0.04, 0.06, 0.08, 0.09, 0.12]
