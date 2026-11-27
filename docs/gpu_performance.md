@@ -248,7 +248,7 @@ There is no DataLoader; adding an unrelated `num_workers` setting has no effect.
 
 Remaining stage-specific constraints include CPU SciPy assignment per chunk,
 individual image/crop processing during build-cache, and CPU calibration of the
-configured 576 coefficient combinations. GPU inactivity during calibration is
+configured coefficient combinations. GPU inactivity during calibration is
 expected. Further changes to assignment, precision, compilation or batch sizes
 should be guided by a trace on the actual RTX 5060 rather than utilization alone.
 

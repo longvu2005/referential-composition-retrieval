@@ -73,7 +73,7 @@ train:
     hard_fraction: 0.10
     semantic_hard_fraction: 0.50
     semantic_top_quota: 2
-    semantic_context_quota: 2
+    semantic_context_quota: 0
     warmup_epochs: 6
     refresh_every_epochs: 4
     pool_size: 128
@@ -119,35 +119,10 @@ evaluation:
   enabled: true
   every_epochs: 2
   calibration:
-    coverage_weights:
-    - 0.0
-    - 0.02
-    - 0.04
-    - 0.06
-    - 0.08
-    - 0.09
-    - 0.12
-    - 0.16
-    context_weights:
-    - 0.0
-    - 0.005
-    - 0.01
-    - 0.0125
-    - 0.015
-    - 0.0175
-    - 0.02
-    - 0.03
-    - 0.04
-    - 0.06
-    - 0.1
-    - 0.2
-    fine_coarse_weights:
-    - 0.1
-    - 0.125
-    - 0.1375
-    - 0.15
-    - 0.175
-    - 0.2
+    # First tuple is the reference from the previous top-two, pool-128 checkpoint.
+    coverage_weights: [0.045, 0.0, 0.02, 0.04, 0.06, 0.08, 0.09, 0.12]
+    context_weights: [0.02375, 0.0, 0.0025, 0.005, 0.01, 0.0125, 0.015, 0.02, 0.04, 0.1]
+    fine_coarse_weights: [0.10625, 0.0875, 0.1, 0.125, 0.1375, 0.15, 0.175]
 wandb:
   enabled: true
   project: referential-composition-retrieval

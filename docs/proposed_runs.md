@@ -73,8 +73,16 @@ at weight `0.5`. Text LoRA updates the query and value projections of the last
 two CLIP text blocks throughout the 25-epoch run. The adapter group uses
 `optimizer.text_lora_lr=0.0001` and the same cosine schedule. The frozen CLIP
 prefix and visual caches can be reused.
-Context loss uses the original training coefficients `a_train=0.04` and
-`b_train=0.10`; validation calibration changes retrieval coefficients only.
+The semantic loss ranks verified same-ID pairs by their fine-score margin,
+with binding and coverage detached. Training uses `a_train=0.04`,
+`b_train=0.10` and `context_temperature=0.10`. The sampler uses two reserved
+base negatives, a pool of 128 and zero raw-context replacements.
+
+At each validation the first grid entry, `(a,b,eta)=(0.045,0.02375,0.10625)`,
+is the reference measured on the previous pool-128 checkpoint at epoch 10.
+Calibration compares all 560 triples by checkpoint score. The winner for each
+epoch is recorded in its selection file, and `selected.yaml` freezes the
+winner for the best checkpoint.
 The supplied RCR experiment retains the name `proposed`, uses
 `loss.rejection_loss_mode=hinge` and writes to `runs/proposed`.
 Configurations missing this key resolve to `softplus`,
@@ -238,7 +246,10 @@ Optional offline calibration searches saved validation scores:
 
 Configure validation artifacts in
 [configs/calibration.yaml](../configs/calibration.yaml). Calibration reuses saved
-scores on CPU and exports a selected configuration for test.
+scores on CPU and exports a selected configuration for test. The supplied
+offline grid matches the training validation grid, including when the saved
+artifact came from an older run. The default output is
+`runs/proposed-calibration/selected.yaml`.
 
 ## Run test
 

@@ -753,8 +753,11 @@ def compute_loss(
             semantic_context_used = (
                 pairs.any(1) & batch["semantic_context_mask"]
             ).sum()
+        # Train H against the binding and coverage margin of each verified pair.
+        with torch.no_grad():
+            base = binding_scale.float() * binding.float() + scores["coverage_bonus"]
         semantic = retrieval_loss(
-            scores["context_contribution"] / context_temperature,
+            (base + scores["context_contribution"]) / context_temperature,
             positive,
             valid,
             **pair_options,
@@ -776,11 +779,6 @@ def compute_loss(
                     rejection_valid,
                 )
             elif rejection_loss_mode == "hinge":
-                with torch.no_grad():
-                    base = (
-                        binding_scale.float() * binding.float()
-                        + scores["coverage_bonus"]
-                    )
                 rejection = rejection_hinge_loss(
                     base,
                     scores["context_contribution"],

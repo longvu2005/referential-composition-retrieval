@@ -49,7 +49,8 @@ Continue an interrupted training run with its saved configuration:
 Outputs are written under `output.dir`. `best.pt` and `selected.yaml` describe
 the validation-selected model; `last.pt` supports training resume.
 The supplied RCR configuration starts CLIP text LoRA in the base warmup and
-uses verified Subject-member pairs for the semantic context loss. It uses hinge
+trains context on the fine-score margin of verified Subject-member pairs.
+Binding and coverage are detached in this loss. It uses hinge
 rejection and writes the `proposed` experiment to `runs/proposed`.
 The `fafa-aligned-pair-cls-v5` architecture shares one binding during warmup,
 then clones its warmed weights for independent target reasoning before the

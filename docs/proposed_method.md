@@ -151,9 +151,10 @@ The shared linear scorer combines native FAFA binding `B` (with the configured
 pooling), matching coverage `C`, and raw context `H`:
 
 ```text
-F = model.binding_scale * B + a_train * C + b_train * H
+D = model.binding_scale * B + a_train * C
+F = D + b_train * H
 
-L_sem = retrieval_loss(b_train * H / tau_c, P, I & (C > 0), pair_mask)
+L_sem = retrieval_loss((stopgrad(D) + b_train * H) / tau_c, P, I & (C > 0), pair_mask)
 L_ctx = L_sem + rho_effective * L_rej
 ```
 
@@ -161,7 +162,8 @@ L_ctx = L_sem + rho_effective * L_rej
 negatives. `retrieval_loss(S,P,V)` uses every positive/negative pair within `V`
 and contributes `softplus(S_negative - S_positive)`. It averages pairs within
 each query, then queries with at least one valid pair. Semantic context starts
-with same-ID pairs with positive coverage.
+with same-ID pairs with positive coverage. At equal raw context margins, a
+negative with a larger base advantage induces a larger gradient through H.
 
 With `loss.context_verify_members=true`, a predicted assignment verifies a
 member if the reference and target crops have the same annotated ID and the
@@ -207,8 +209,8 @@ supervision continue to train the query-side binding.
 
 The supplied configuration uses `context_weight=1.0`, `tau_c=0.1`, rejection
 weight `0.5`, swap weight `0.0`, `a_train=0.04`, and `b_train=0.10`. With binding
-scale `1`, `B=0.7`, `C=0.5`, `H=0.8`, the fine score is `0.80`, the semantic
-logit is `0.8`, and the baseline softplus rejection logit is `8.0`.
+scale `1`, `B=0.7`, `C=0.5`, and `H=0.8`, the detached base is `0.72`,
+the fine score is `0.80` and the semantic logit is `8.0`.
 Epochs 1–4 warm up the base and text LoRA with context disabled.
 Epochs 5–6 enable semantic context. From epoch 7, mining and rejection start
 with `rho_effective=0.5`; it is zero earlier. These settings are controlled by

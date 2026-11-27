@@ -1704,6 +1704,40 @@ def test_loss_settings_reject_invalid_rejection_modes(mode):
         losses.loss_settings({"rejection_loss_mode": mode})
 
 
+def test_semantic_gradient_uses_detached_base_margin(objective_batch, monkeypatch):
+    model, batch = objective_batch
+    # Raw H prefers the positive. Its same-ID negative wins on binding and coverage.
+    context = torch.tensor([[0.8, 0.3, 1.0]], requires_grad=True)
+    binding = torch.tensor([[0.2, 0.5, 0.7]], requires_grad=True)
+    coverage = torch.tensor([[0.5, 1.0, 0.0]], requires_grad=True)
+    with torch.no_grad():
+        model.binding_log_scale.fill_(math.log(math.expm1(2)))
+    model.binding_log_scale.requires_grad_(True)
+    monkeypatch.setattr(
+        losses,
+        "_context_scores",
+        lambda *args, **kwargs: (context, coverage, binding, torch.full((1, 3, 1), -1)),
+    )
+    value, parts = compute_loss(
+        model,
+        batch,
+        (2, 2),
+        **{**_only_loss("context"), "context_temperature": 0.2},
+        context_score_weight=0.1,
+        coverage_score_weight=0.04,
+    )
+    gap = torch.tensor((2 * (0.5 - 0.2) + 0.04 * (1 - 0.5) + 0.1 * (0.3 - 0.8)) / 0.2)
+    torch.testing.assert_close(
+        parts["context_semantic"], torch.nn.functional.softplus(gap)
+    )
+    value.backward()
+    torch.testing.assert_close(
+        context.grad, gap.sigmoid() * torch.tensor([[-0.5, 0.5, 0.0]])
+    )
+    assert binding.grad is None and coverage.grad is None
+    assert model.binding_log_scale.grad is None
+
+
 def test_legacy_rejection_mode_matches_explicit_softplus(objective_batch):
     model, batch = objective_batch
     batch["hard_identity_negative_mask"][0, 2] = True
@@ -1770,8 +1804,9 @@ def test_context_hinge_reuses_scores_and_detaches_binding_and_coverage(
         calls[0]["eligible"],
         batch["identity_positive_mask"] | batch["hard_identity_negative_mask"],
     )
+    semantic_gap = 2 * (9.0 - 0.02) + 0.07 * (0.25 - 0.75) + weight * (9.0 - 0.8)
     semantic = (
-        torch.nn.functional.softplus(torch.tensor(weight * (9.0 - 0.8) / temperature))
+        torch.nn.functional.softplus(torch.tensor(semantic_gap / temperature))
         if covered != "hard_only"
         else torch.tensor(0.0)
     )
@@ -1832,9 +1867,7 @@ def test_context_loss_uses_scaled_context_and_full_score_for_rejection(
         coverage_score_weight=0.07,
     )
     valid = batch["identity_positive_mask"] & (coverage > 0)
-    semantic = retrieval_loss(
-        weight * raw_context / temperature, batch["positive_mask"], valid
-    )
+    semantic = retrieval_loss(full_score / temperature, batch["positive_mask"], valid)
     rejection_valid = (
         batch["positive_mask"] | batch["hard_identity_negative_mask"]
     ) & (coverage > 0)
@@ -1885,12 +1918,12 @@ def test_context_losses_receive_the_exact_semantic_and_rejection_logits(
         coverage_score_weight=0.04,
     )
     assert len(observed) == 2
-    assert observed[0][0][0, 0].item() == pytest.approx(0.8)
+    torch.testing.assert_close(observed[0][0], observed[1][0])
     assert observed[1][0][0, 0].item() == pytest.approx(8.0)
     assert (observed[1][0][0, 0] * 0.1).item() == pytest.approx(0.80)
     assert observed[0][1].tolist() == [[True, True, False]]
     assert observed[1][1].tolist() == [[True, False, covered_hard]]
-    semantic = torch.nn.functional.softplus(torch.tensor(0.3 - 0.8))
+    semantic = torch.nn.functional.softplus(torch.tensor(2.5 - 8.0))
     rejection = (
         torch.nn.functional.softplus(torch.tensor(0.8 - 8.0))
         if covered_hard

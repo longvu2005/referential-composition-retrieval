@@ -1077,6 +1077,13 @@ def test_replay_rejects_settings_that_change_the_shortlist(tiny_ranker):
     assert torch.equal(unchanged["rankings"], source["rankings"])
 
 
+def test_supplied_offline_grid_matches_training_validation():
+    grid = load_config("configs/proposed.yaml")["evaluation"]["calibration"]
+    offline = load_config("configs/calibration.yaml")
+    _, _, _, offline_grid = calibration._read_settings(offline)
+    assert offline_grid == grid
+
+
 def test_offline_calibration_selects_and_freezes_without_checkpoint_or_caches(
     saved_pipeline, tmp_path, monkeypatch
 ):
