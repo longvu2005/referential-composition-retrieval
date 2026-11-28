@@ -130,7 +130,7 @@ CPU/GPU boundaries are intentional and bounded as follows:
 | Coarse retrieval/mining | Identity and state scores share one read per query batch; both use the same CPU shortlist/fusion convention. |
 | Fine retrieval/mining | H, C, all native poolings and pending numerical checks share one read per query. |
 | Gallery projection | Residency is decided from CPU masks and the VRAM budget before projection. Resident outputs stay on GPU; the fallback reads identity/state together per chunk. |
-| Frozen text cache | Misses write CPU cache rows once while current states stay on GPU; hits upload only unique cached rows in one batch. CPU token IDs stay on CPU for cache keys. |
+| Frozen text cache | The frozen CLIP text layers encode each distinct uncached row at a fixed shape of one sequence by 77 positions, with autocast disabled. Training, mining and retrieval use this path even when the LRU is disabled. Misses share a batched transfer and hits upload unique cached rows together. |
 | Checkpoints | Commit the consumed training stream, without fencing the independent producer copy stream. Tensor serialization still performs its required state copies. |
 
 CPU annotation layouts replace CUDA boolean-index operations whose output size

@@ -3,3 +3,6 @@ rankings:
   - runs/proposed/selected/val/rankings.pt
 output_dir: runs/proposed-calibration
 selection_metric: checkpoint_score  # Mean of overall and macro-case Full-mAP.
+coverage_weights: [0.045, 0.0, 0.02, 0.04, 0.06, 0.08, 0.09, 0.12]
+context_weights: [0.02375, 0.0, 0.0025, 0.005, 0.01, 0.0125, 0.015, 0.02, 0.04, 0.1]
+fine_coarse_weights: [0.10625, 0.0875, 0.1, 0.125, 0.1375, 0.15, 0.175]

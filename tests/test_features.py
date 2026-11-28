@@ -24,6 +24,7 @@ from rcr.common.geometry import boxes_to_scene
 from rcr.proposed.cache import build, fafa, person_encoder, scene
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import (
+    CLIP_CONTEXT_LENGTH,
     ImageEncoder,
     TextEncoder,
     load_text_encoder_state,
@@ -208,7 +209,7 @@ def test_lora_text_keeps_native_padding_and_reuses_only_frozen_states(
             if device == "cuda" and cache_mib:
                 assert audit.counts["cuda_to_cpu"] == 0
                 assert audit.counts["cuda_scalar_reads"] == 0
-        assert len(prefix_calls) == (0 if cache_mib else 2)
+        assert len(prefix_calls) == (0 if cache_mib else 2 * len(ids))
     assert all(p.grad is not None and p.grad.norm() > 0 for p in adapters.values())
     assert all(p.grad is None for p in backbone.parameters() if not p.requires_grad)
     with torch.inference_mode():
@@ -226,6 +227,70 @@ def test_lora_text_keeps_native_padding_and_reuses_only_frozen_states(
         load_text_encoder_state(restored, None, text_encoder_state(frozen, None))
     with pytest.raises(ValueError, match="disabled"):
         load_text_encoder_state(frozen, None, state)
+
+
+@pytest.mark.parametrize("use_lora", [False, True])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
+def test_frozen_text_extraction_is_independent_of_validation_cache(use_lora, device):
+    backbone = CLIPTextModelWithProjection(
+        CLIPTextConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            projection_dim=8,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            eos_token_id=31,
+        )
+    )
+    lora = {"enabled": use_lora, "last_layers": 1}
+    uncached = TextEncoder(copy.deepcopy(backbone), dim=6, lora=lora).to(device)
+    encoder = TextEncoder(backbone, dim=6, cache_mib=1, lora=lora).to(device)
+    uncached.load_state_dict(encoder.state_dict())
+
+    # The query is row 3 in validation (8 x 27) and the only train miss (1 x 43).
+    ids = torch.full((8, 27), 31)
+    mask = torch.zeros_like(ids)
+    ids[:, :20] = torch.arange(20)
+    ids[:, 1] = torch.arange(8)
+    ids[:, 19] = 31
+    mask[:, :20] = 1
+    mask[0, :] = 1
+    train_ids = torch.zeros(1, 43, dtype=torch.long)
+    train_mask = torch.zeros_like(train_ids)
+    train_ids[0, :20] = ids[3, :20]
+    train_mask[0, :20] = 1
+
+    shapes = []
+    embedding = backbone.text_model.embeddings.token_embedding
+    with (
+        embedding.register_forward_pre_hook(
+            lambda module, args: shapes.append(tuple(args[0].shape))
+        ),
+        torch.inference_mode(),
+    ):
+        first = encoder.eval()._encode_frozen(ids, mask)
+    assert shapes == [(1, CLIP_CONTEXT_LENGTH)] * len(ids)
+
+    with torch.autocast(device):
+        hit = encoder.train()._encode_frozen(train_ids, train_mask)
+        cold = uncached.train()._encode_frozen(train_ids, train_mask)
+    assert cold.dtype == torch.float32
+    assert torch.equal(first[3, :20], cold[0, :20])
+    assert torch.equal(hit, cold)
+    assert torch.count_nonzero(cold[:, 20:]) == 0
+    assert not uncached._hidden
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

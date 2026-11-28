@@ -574,6 +574,42 @@ def test_training_validation_matches_run_with_the_same_parameters(
         assert trained["overall"][key] == pytest.approx(value, abs=1e-12), key
 
 
+def test_training_is_independent_of_validation_frequency(
+    tiny_training_run, tmp_path, monkeypatch
+):
+    cfg, _, _, _ = tiny_training_run
+    _enable_text_lora(cfg, monkeypatch)
+    cfg["train"].update(epochs=6, context_warmup_epochs=4)
+    cfg["train"]["sampling"]["warmup_epochs"] = 6
+
+    def train_with_validation(every):
+        run_dir = tmp_path / f"val-every-{every}"
+        cfg["output"]["dir"] = str(run_dir)
+        cfg["evaluation"]["every_epochs"] = every
+        training.train(cfg)
+        last = torch.load(run_dir / "last.pt", weights_only=True)
+        history = [
+            json.loads(row)
+            for row in (run_dir / "history.jsonl").read_text().splitlines()
+        ]
+        assert [row["epoch"] for row in history if "val_full_map" in row] == list(
+            range(every, 7, every)
+        )
+        return last, history
+
+    frequent, frequent_history = train_with_validation(2)
+    sparse, sparse_history = train_with_validation(6)
+    for key in ("model", "text_encoder"):
+        _equal(frequent[key], sparse[key])
+    _equal(
+        frequent["training_state"]["optimizer"], sparse["training_state"]["optimizer"]
+    )
+    assert [row["train_loss"] for row in frequent_history] == [
+        row["train_loss"] for row in sparse_history
+    ]
+    assert frequent_history[-1]["val_full_map"] == sparse_history[-1]["val_full_map"]
+
+
 def test_training_selects_checkpoint_after_calibration_without_feedback(
     tiny_training_run, monkeypatch
 ):

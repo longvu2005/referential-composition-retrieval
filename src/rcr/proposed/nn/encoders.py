@@ -51,28 +51,6 @@ def check_clip_config(cfg: dict) -> None:
         raise ValueError("CLIP ViT-B/32 scene_size must be [224, 224]")
 
 
-def _autocast_dtype(device_type: str):
-    """Return the active AMP dtype across supported PyTorch APIs."""
-    try:
-        enabled = torch.is_autocast_enabled(device_type)
-    except TypeError:
-        if device_type == "cuda":
-            enabled = torch.is_autocast_enabled()
-        elif device_type == "cpu":
-            enabled = getattr(torch, "is_autocast_cpu_enabled", lambda: False)()
-        else:
-            enabled = False
-    if not enabled:
-        return None
-
-    try:
-        return torch.get_autocast_dtype(device_type)
-    except (AttributeError, TypeError):
-        suffix = "gpu" if device_type == "cuda" else device_type
-        getter = getattr(torch, f"get_autocast_{suffix}_dtype", None)
-        return getter() if getter is not None else None
-
-
 def load_text_modules(
     model_name: str,
     dim: int,
@@ -448,17 +426,13 @@ class TextEncoder(nn.Module):
             raise ValueError("CLIP text exceeds its 77-token position limit")
         device = self.proj.weight.device
         valid = attention_mask.to(device, dtype=torch.bool, non_blocking=True)
-        if self._lora_start is None:
-            tokens = self._encode_frozen(input_ids, attention_mask)
-        else:
-            # Share the same frozen prefix between AMP training and FP32 retrieval.
-            with torch.autocast(device.type, enabled=False):
-                hidden = self._encode_frozen(input_ids, attention_mask)
+        tokens = self._encode_frozen(input_ids, attention_mask)
+        if self._lora_start is not None:
             amp = self.train_amp and self.training and device.type == "cuda"
             with torch.autocast("cuda", dtype=torch.float16) if amp else nullcontext():
                 text_model = self.backbone.text_model
                 hidden = self._run_clip_layers(
-                    hidden,
+                    tokens,
                     valid,
                     range(self._lora_start, len(text_model.encoder.layers)),
                 )
@@ -481,15 +455,15 @@ class TextEncoder(nn.Module):
             pooled.float(),
         )
 
-    @torch.no_grad()
     def _encode_frozen(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        if self._hidden_limit:
-            return self._cached_backbone(input_ids, attention_mask)
         device = self.proj.weight.device
-        return self._frozen_tokens(
-            input_ids.to(device, non_blocking=True),
-            attention_mask.to(device, non_blocking=True),
-        )
+        # Both training and retrieval run the frozen prefix in the same mode.
+        with (
+            torch.inference_mode(False),
+            torch.no_grad(),
+            torch.autocast(device.type, enabled=False),
+        ):
+            return self._cached_backbone(input_ids, attention_mask)
 
     def _run_clip_layers(
         self, hidden: Tensor, attention_mask: Tensor, indices: range
@@ -527,92 +501,69 @@ class TextEncoder(nn.Module):
 
     @torch.no_grad()
     def _cached_backbone(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        # Right padding does not change CLIP's causal token states. Canonicalize
-        # that common case while retaining complete rows for left/irregular masks.
         device = self.proj.weight.device
-        precision = _autocast_dtype(device.type)
         backbone_dtype = next(self.backbone.parameters()).dtype
-        input_ids = input_ids.detach().cpu()
-        attention_mask = attention_mask.detach().cpu()
-        id_rows = input_ids.tolist()
-        mask_rows = attention_mask.tolist()
-        keys, canonical = [], {}
-        for ids, mask in zip(id_rows, mask_rows, strict=True):
+        width = input_ids.shape[1]
+        keys = []
+        for ids, mask in zip(input_ids.tolist(), attention_mask.tolist(), strict=True):
             length = sum(bool(value) for value in mask)
-            right_padded = length > 0 and all(mask[:length]) and not any(mask[length:])
-            if right_padded:
+            # Preserve positions and masked interior IDs for left/irregular masks.
+            if length and all(mask[:length]) and not any(mask[length:]):
                 ids, mask = ids[:length], mask[:length]
-            keys.append(
-                (
-                    str(device),
-                    backbone_dtype,
-                    precision,
-                    tuple(ids),
-                    tuple(mask),
-                )
-            )
-            canonical[keys[-1]] = right_padded
-        values, missing = {}, {}
-        for n, key in enumerate(keys):
+            keys.append((device, backbone_dtype, tuple(ids), tuple(mask)))
+
+        hits, missing = {}, {}
+        for key in keys:
             if key in self._hidden:
-                value = self._hidden.pop(key)
-                self._hidden[key] = values[key] = value
+                self._hidden.move_to_end(key)
+                hits[key] = self._hidden[key]
             else:
-                missing.setdefault(key, n)
-        fresh = {}
+                missing[key] = None
+
+        values = {}
         if missing:
-            indices = torch.tensor(list(missing.values()))
-            # Separate AMP/FP32 keys keep validation features at their own precision.
-            ids_device = input_ids[indices].to(device, non_blocking=True)
-            mask_device = attention_mask[indices].to(device, non_blocking=True)
-            hidden_device = self._frozen_tokens(
-                ids_device,
-                mask_device,
-            )
-            if all(canonical[key] for key in missing):
-                keep = mask_device.bool()
-            else:
-                keep = (
-                    torch.arange(input_ids.shape[1])[None]
-                    < torch.tensor([len(key[-2]) for key in missing])[:, None]
-                )
-                keep = keep.to(device, non_blocking=True)
-            current = hidden_device.masked_fill(~keep[..., None], 0)
-            # Persist CPU cache rows, but reuse fresh device states for this
-            # forward instead of immediately uploading those same states again.
-            hidden = hidden_device.cpu()
-            fresh.update(zip(missing, current, strict=True))
-            for key, row in zip(missing, hidden, strict=True):
-                value = row[: len(key[-2])].clone()
-                values[key] = value
-                size = value.numel() * value.element_size()
-                if size <= self._hidden_limit:
-                    while (
-                        self._hidden and self._hidden_bytes + size > self._hidden_limit
-                    ):
-                        _, removed = self._hidden.popitem(last=False)
-                        self._hidden_bytes -= removed.numel() * removed.element_size()
-                    self._hidden[key] = value
-                    self._hidden_bytes += size
-        length = input_ids.shape[1]
-        hits, rows = [], []
-        for key in dict.fromkeys(keys):
-            if key in fresh:
-                continue
-            value = values[key]
-            if value.shape[0] == length:
-                rows.append(value)
-            else:
-                row = value.new_zeros(length, value.shape[-1])
-                row[: value.shape[0]] = value
-                rows.append(row)
-            hits.append(key)
+            # Batch the transfers, but give every frozen forward identical geometry.
+            def padded(rows):
+                return torch.tensor(
+                    [row + (0,) * (CLIP_CONTEXT_LENGTH - len(row)) for row in rows],
+                    dtype=torch.long,
+                ).to(device, non_blocking=True)
+
+            ids = padded(key[-2] for key in missing)
+            masks = padded(key[-1] for key in missing)
+            rows = []
+            for i, key in enumerate(missing):
+                length = len(key[-1])
+                states = self._frozen_tokens(ids[i : i + 1], masks[i : i + 1])
+                row = states[0, :length]
+                rows.append(F.pad(row, (0, 0, 0, width - length)))
+            fresh = torch.stack(rows)
+            if self._hidden_limit:
+                for key, row in zip(missing, fresh.cpu(), strict=True):
+                    row = row[: len(key[-1])]
+                    size = row.numel() * row.element_size()
+                    if size <= self._hidden_limit:
+                        while self._hidden_bytes + size > self._hidden_limit:
+                            _, removed = self._hidden.popitem(last=False)
+                            self._hidden_bytes -= (
+                                removed.numel() * removed.element_size()
+                            )
+                        self._hidden[key] = row.clone()
+                        self._hidden_bytes += size
+            if len(missing) == len(keys):
+                return fresh
+            values.update(zip(missing, fresh, strict=True))
+
         if hits:
+            rows = [
+                row if len(row) == width else F.pad(row, (0, 0, 0, width - len(row)))
+                for row in hits.values()
+            ]
             uploaded = torch.stack(rows).to(device, non_blocking=True)
             if len(hits) == len(keys):
                 return uploaded
-            fresh.update(zip(hits, uploaded, strict=True))
-        return torch.stack([fresh[key] for key in keys])
+            values.update(zip(hits, uploaded, strict=True))
+        return torch.stack([values[key] for key in keys])
 
 
 class IdentityHead(nn.Module):
