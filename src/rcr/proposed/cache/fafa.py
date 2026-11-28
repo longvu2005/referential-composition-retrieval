@@ -11,7 +11,11 @@ from tqdm import tqdm
 from rcr.common.data import load_rcr_inputs
 from rcr.common.detection import DetectionCache
 from rcr.common.io import sha256_file
-from rcr.common.runtime import resolve_device
+from rcr.common.runtime import (
+    numerical_runtime,
+    resolve_device,
+    seed_feature_extraction,
+)
 from rcr.common.torch_io import require_disk_space, save_torch
 from rcr.proposed.cache.build import (
     cache_paths,
@@ -91,6 +95,10 @@ class _Extractor:
         self.native_cfg = load_fafa_config(cfg)
         self.text_policy = text_policy(self.native_cfg)
         self.device = resolve_device(cfg)
+        self.build_settings = {
+            **numerical_runtime(self.device),
+            "batch_size": self.batch_size,
+        }
         self.signature = {
             "detection_cache_id": source.cache_id,
             "spec": fafa_spec(self.native_cfg),
@@ -140,7 +148,7 @@ def _build_images(cfg, root, extractor):
         raise ValueError("storage_dtype must be float32 or float16")
     dtype = getattr(torch, storage)
     signature = {**extractor.signature, "storage_dtype": storage}
-    cache_id = _begin(root, signature)
+    cache_id = _begin(root, {**signature, "runtime": extractor.build_settings})
     for group in ("targets", ".persons"):
         (root / group).mkdir(exist_ok=True)
     extractor.load()
@@ -275,13 +283,11 @@ def _build_queries(root, extractor):
     ):
         print(f"Using existing FAFA query cache: {root}", flush=True)
         return
-    # The default-policy signature remains readable. Text limits affect query
-    # extraction only, so image indices and target shards never change.
-    build_signature = (
-        signature
-        if policy == text_policy({})
-        else {"encoder": signature, "text_policy": policy}
-    )
+    build_signature = {
+        "encoder": signature,
+        "text_policy": policy,
+        "runtime": extractor.build_settings,
+    }
     cache_id = _begin(
         root, build_signature, cache_id=previous["cache_id"] if same_policy else None
     )
@@ -389,6 +395,7 @@ def finish_fafa_cache(cfg: dict, *, stage: str = "fafa") -> None:
         ):
             print(f"Using existing FAFA query cache: {query_root}", flush=True)
             return
+    seed_feature_extraction(cfg)
     extractor = _Extractor(cfg, source, data)
     if image is not None and image.feature_signature != extractor.signature:
         raise ValueError("FAFA query encoder/precision differs from image cache")

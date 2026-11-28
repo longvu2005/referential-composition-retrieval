@@ -25,12 +25,14 @@ from rcr.proposed.cache import build, fafa, person_encoder, scene
 from rcr.proposed.cache.store import GalleryCache
 from rcr.proposed.nn.encoders import (
     CLIP_CONTEXT_LENGTH,
+    CLIP_MODEL,
     ImageEncoder,
     TextEncoder,
     load_text_encoder_state,
+    load_text_modules,
     text_encoder_state,
 )
-from tests.helpers import _sample
+from tests.helpers import TextBackbone, Tokenizer, _sample
 from tools.profile_gpu import TransferAudit
 
 # Independent scene cache.
@@ -475,6 +477,89 @@ class FakeFAFA(nn.Module):
         return SimpleNamespace(multimodal_embeds=torch.ones(count, 2))
 
 
+def test_frozen_detector_and_scene_start_from_independent_seeds(inputs, monkeypatch):
+    cfg, data = inputs
+    monkeypatch.setattr(build, "load_rcr_inputs", lambda *args: data)
+    draws = []
+
+    def record(*args, **kwargs):
+        assert torch.are_deterministic_algorithms_enabled()
+        draws.append(torch.rand(4))
+
+    # Exercise the normal all-stage path up to the independent FAFA worker.
+    source = detect_inputs(cfg, data, monkeypatch)
+    monkeypatch.setattr(build, "build_detection_cache", record)
+    monkeypatch.setattr(build, "_prepare_scene", record)
+    monkeypatch.setattr(build, "existing_cache", lambda *a, **kw: source)
+    monkeypatch.setattr(build, "query_cache_ready", lambda *a: True)
+    build.prepare_cache(cfg)
+    cfg["train"]["seed"] += 1
+    torch.manual_seed(91)
+    build.prepare_cache(cfg, stage="scene")
+    assert len(draws) == 3
+    assert torch.equal(draws[0], draws[1]) and torch.equal(draws[1], draws[2])
+
+
+@pytest.mark.parametrize("revision", [None, "explicit-snapshot"])
+def test_detector_pins_weights_and_processor(inputs, monkeypatch, revision):
+    cfg, data = inputs
+    spec = dict(cfg["detector"])
+    if revision is not None:
+        spec["revision"] = revision
+    observed = []
+
+    def load(name, *, revision):
+        observed.append((name, revision))
+        return nn.Identity()
+
+    factory = SimpleNamespace(from_pretrained=load)
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoModelForZeroShotObjectDetection=factory,
+            AutoProcessor=factory,
+        ),
+    )
+    monkeypatch.setattr(detection, "detect_persons", lambda *args: torch.empty(0, 4))
+    root = Path(cfg["data"]["detection_cache"])
+    build_detection_cache(
+        data.gallery_ids, [data.image_path(i) for i in data.gallery_ids], root, spec
+    )
+    expected = revision or detection.GROUNDING_DINO_REVISION
+    assert observed == [(spec["model"], expected)] * 2
+    assert (
+        torch.load(root / "index.pt", weights_only=True)["model_revision"] == expected
+    )
+    DetectionCache(root).check_config(spec)
+
+
+def test_loading_frozen_clip_preserves_learned_initialization(monkeypatch):
+    tokenizer = Tokenizer()
+    monkeypatch.setattr(
+        sys.modules["transformers"],
+        "CLIPTokenizerFast",
+        SimpleNamespace(from_pretrained=lambda *a, **kw: tokenizer),
+    )
+    models = []
+    for draws in (0, 51):
+
+        def load(*args, draws=draws, **kwargs):
+            torch.rand(draws)
+            return TextBackbone()
+
+        monkeypatch.setattr(
+            sys.modules["transformers"],
+            "CLIPTextModelWithProjection",
+            SimpleNamespace(from_pretrained=load),
+        )
+        torch.manual_seed(17)
+        _, encoder = load_text_modules(CLIP_MODEL, 8, "cpu")
+        models.append((encoder.proj.weight.detach(), torch.get_rng_state()))
+    for first, second in zip(*models, strict=True):
+        assert torch.equal(first, second)
+
+
 def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
     inputs, monkeypatch, tmp_path
 ):
@@ -487,16 +572,33 @@ def test_fafa_and_queries_are_independent_of_scene_but_bind_exact_detections(
     monkeypatch.setattr(fafa, "load_fafa_config", lambda _: native)
     monkeypatch.setattr(build, "load_fafa_config", lambda _: native)
     monkeypatch.setattr(fafa, "load_rcr_inputs", lambda *a: data)
-    monkeypatch.setattr(
-        fafa,
-        "load_fafa",
-        lambda *a: (
+
+    def load(*args):
+        assert torch.are_deterministic_algorithms_enabled()
+        assert torch.initial_seed() == 0
+        return (
             FakeFAFA(),
             {"eval": lambda text: text},
             lambda image: torch.zeros(3, 4, 4),
             {},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(fafa, "load_fafa", load)
+    torch.use_deterministic_algorithms(False)
+    torch.manual_seed(91)
+    # An interrupted build cannot mix shards extracted with different batch shapes.
+    with monkeypatch.context() as interrupted:
+
+        def stop(*args):
+            raise InterruptedError
+
+        interrupted.setattr(fafa, "_write", stop)
+        with pytest.raises(InterruptedError):
+            fafa.finish_fafa_cache(cfg, stage="fafa-image")
+    changed = copy.deepcopy(cfg)
+    changed["person_encoder"]["batch_size"] += 1
+    with pytest.raises(ValueError, match="unfinished FAFA cache settings differ"):
+        fafa.finish_fafa_cache(changed, stage="fafa-image")
     # Real cache orchestration runs with no scene files present.
     fafa.finish_fafa_cache(cfg)
     image_root = Path(cfg["data"]["fafa_image_cache"])

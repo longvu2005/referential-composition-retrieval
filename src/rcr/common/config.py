@@ -96,8 +96,8 @@ def validate_training_schedule(cfg: dict) -> None:
         if type(value) is not int or value < 1:
             raise ValueError(f"train.{key} must be a positive integer")
     seed = cfg["train"].get("seed")
-    if seed is not None and (type(seed) is not int or seed < 0):
-        raise ValueError("train.seed must be a non-negative integer")
+    if type(seed) is not int or not 0 <= seed < 2**64:
+        raise ValueError("train.seed must be an integer in [0, 2**64)")
     deterministic = cfg.get("runtime", {}).get("deterministic", True)
     if type(deterministic) is not bool:
         raise ValueError("runtime.deterministic must be true or false")

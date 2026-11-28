@@ -8,7 +8,7 @@ from rcr.common.config import load_config, save_config
 from rcr.common.data import load_rcr_inputs
 from rcr.common.detection import DetectionCache, build_detection_cache
 from rcr.common.io import sha256_file
-from rcr.common.runtime import resolve_device
+from rcr.common.runtime import resolve_device, seed_feature_extraction
 from rcr.proposed.cache.native import NATIVE_VERSION, NativeQueryCache
 from rcr.proposed.cache.person_encoder import text_policy
 from rcr.proposed.cache.scene import SceneCache, _prepare_scene
@@ -171,6 +171,7 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     data_cfg = cfg["data"]
     data = load_rcr_inputs(data_cfg["final_dir"], data_cfg["image_root"])
     if stage in ("all", "detections"):
+        seed_feature_extraction(cfg)
         build_detection_cache(
             data.gallery_ids,
             [data.image_path(i) for i in data.gallery_ids],
@@ -181,6 +182,7 @@ def prepare_cache(cfg: dict, *, stage: str = "all") -> None:
     if stage == "detections":
         return
     if stage in ("all", "scene"):
+        seed_feature_extraction(cfg)
         _prepare_scene(cfg, data, root)
     if stage == "scene":
         return

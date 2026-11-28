@@ -225,10 +225,67 @@ resume.
 
 ## Seeds and reproducibility
 
-`train.seed` controls random initialization and sampling.
-`runtime.deterministic` requests reproducible kernels. Record the source
-revision, effective configuration, runtime and data/cache identities with each
-experiment; hardware and software changes can affect numerical results.
+For two independent runs, use the same physical GPU, driver, Python environment,
+source revision, finalized data and completed cache directories. Keep the seed,
+batch sizes, AMP setting and CPU thread count fixed. Give each run a fresh
+`output.dir`. Compare model and LoRA tensors, validation scores, rankings and
+`history.jsonl`. Run paths, W&B IDs and timings can differ.
+
+`runtime.deterministic: true` selects strict PyTorch kernels. The detector, CLIP
+scene encoder and isolated FAFA worker each start at seed zero, independently of
+`train.seed` and the order in which cache stages run. The default Grounding DINO
+weights and processor use the same pinned revision. Completed feature caches
+remain readable. Finish pre-patch partial builds with their original code, or
+start a new build in fresh directories. Exact training resume also requires the
+original source and query cache.
+
+The following regression runs a small CLIP model with LoRA, dropout, CUDA AMP
+and prefetch. It compares two fresh training sessions and an interrupted session
+resumed in a new process. All checkpoint tensors and selected validation score
+tensors are compared with zero tolerance. It requires pytest and no model downloads.
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+.venv-proposed/bin/python -m pytest -q \
+  'tests/test_training.py::test_resume_survives_a_new_process_and_hash_seed[cuda]'
+```
+
+For a comparison on the full dataset with the shipped schedule and prepared caches:
+
+```bash
+(
+set -e
+for run in repeat-a repeat-b; do
+  .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+    --set train.seed=0 runtime.deterministic=true wandb.enabled=false "output.dir=runs/$run"
+done
+cmp runs/repeat-a/history.jsonl runs/repeat-b/history.jsonl
+.venv-proposed/bin/python - <<'PYTHON'
+from pathlib import Path
+import torch
+
+def load_pair(filename):
+    return [torch.load(Path("runs") / run / filename, map_location="cpu", weights_only=True)
+            for run in ("repeat-a", "repeat-b")]
+
+def weights(checkpoint):
+    text = checkpoint["text_encoder"]
+    return checkpoint["model"], text["projection"], text.get("lora", {}).get("weights", {})
+
+for filename in ("last.pt", "best.pt"):
+    left, right = load_pair(filename)
+    torch.testing.assert_close(weights(left), weights(right), rtol=0, atol=0)
+left, right = load_pair("selected/val/rankings.pt")
+for key in ("sample_ids", "gallery_ids"):
+    assert left[key] == right[key], key
+for key, value in left.items():
+    if isinstance(value, torch.Tensor):
+        torch.testing.assert_close(value, right[key], rtol=0, atol=0, msg=key)
+print("Model weights, text weights, validation scores and rankings match exactly.")
+PYTHON
+)
+```
 
 ## Inspect validation and optional calibration
 

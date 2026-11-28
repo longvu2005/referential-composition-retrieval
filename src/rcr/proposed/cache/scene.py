@@ -8,7 +8,7 @@ import torch
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
-from rcr.common.runtime import resolve_device
+from rcr.common.runtime import numerical_runtime, resolve_device
 from rcr.common.torch_io import save_torch
 from rcr.proposed.nn.encoders import ImageEncoder
 
@@ -115,6 +115,7 @@ def build_cache(
         "image_encoder": image_config,
         "storage_dtype": storage_dtype,
         "layout": "clip-scene-v1",
+        "runtime": numerical_runtime(device),
     }
     manifest_path = root / ".build.pt"
     if manifest_path.is_file():

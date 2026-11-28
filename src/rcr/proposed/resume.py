@@ -17,6 +17,7 @@ import torch
 
 from rcr.common.data import split_fingerprint
 from rcr.common.io import atomic_write_text, sha256_file
+from rcr.common.runtime import numerical_runtime
 from rcr.evaluation.provenance import digest_json
 from rcr.proposed.contracts import ARCHITECTURE_VERSION, CALIBRATED_RETRIEVAL_KEYS
 
@@ -111,6 +112,7 @@ def resume_signature(cfg, data, cache, device, amp) -> dict:
             packages[name] = version(name)
         except PackageNotFoundError:
             packages[name] = None
+    query_cache = getattr(cache.native, "query_cache", None)
     return {
         "config": config,
         "source_sha256": digest_json(files),
@@ -122,18 +124,15 @@ def resume_signature(cfg, data, cache, device, amp) -> dict:
             "scene_cache_id": cache.scene_cache_id,
             "detection_cache_id": cache.detection_cache_id,
             "native_cache": cache.native.metadata,
+            "query_cache_id": query_cache.cache_id if query_cache is not None else None,
             "encoder_metadata": cache.encoder_metadata,
         },
         "runtime": {
             "python": sys.version.split()[0],
             "packages": packages,
-            "device": str(device),
+            **numerical_runtime(device),
             "amp": amp,
-            "cuda": torch.version.cuda if device.type == "cuda" else None,
             "cuda_devices": torch.cuda.device_count() if device.type == "cuda" else 0,
-            "gpu": torch.cuda.get_device_name(device)
-            if device.type == "cuda"
-            else None,
         },
     }
 

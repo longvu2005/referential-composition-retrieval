@@ -12,9 +12,11 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
+from rcr.common.runtime import numerical_runtime
 from rcr.common.torch_io import save_torch
 
 DETECTION_LAYOUT = "person-detections-v1"
+GROUNDING_DINO_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
 
 
 @torch.inference_mode()
@@ -159,8 +161,17 @@ def build_detection_cache(
         "image_paths": [str(Path(p).resolve()) for p in image_paths],
         "detector": detector_config,
         "prompt": "person",
-        "import_cache_id": None,  # Keep unfinished native builds resumable.
+        "runtime": numerical_runtime(device),
     }
+    revision = detector_config.get("revision")
+    if model is None:
+        if (
+            revision is None
+            and detector_config["model"] == "IDEA-Research/grounding-dino-tiny"
+        ):
+            revision = GROUNDING_DINO_REVISION
+        if revision is not None:
+            signature["model_revision"] = revision
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / ".build.pt"
     if manifest_path.is_file():
@@ -178,11 +189,7 @@ def build_detection_cache(
     if model is None:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-        kwargs = (
-            {"revision": detector_config["revision"]}
-            if "revision" in detector_config
-            else {}
-        )
+        kwargs = {"revision": revision} if revision is not None else {}
         processor = AutoProcessor.from_pretrained(detector_config["model"], **kwargs)
         model = AutoModelForZeroShotObjectDetection.from_pretrained(
             detector_config["model"], **kwargs
@@ -250,6 +257,8 @@ def build_detection_cache(
         "offsets": torch.cat((torch.zeros(1, dtype=torch.int64), counts.cumsum(0))),
         "boxes_pixel": torch.cat(rows),
     }
+    if "model_revision" in signature:
+        index["model_revision"] = revision
     index["cache_id"] = _cache_id(index)
     save_torch(index, root / "index.pt")
     (root / ".building").unlink()

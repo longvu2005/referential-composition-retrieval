@@ -563,11 +563,7 @@ def _train(cfg, output, resumed):
     write_json(
         output / "runtime.json",
         {
-            "device": str(device),
-            "gpu": (
-                torch.cuda.get_device_name(device) if device.type == "cuda" else None
-            ),
-            "amp": amp,
+            **signature["runtime"],
             "seed": seed,
             "deterministic": deterministic,
             "scene_dim": scene_dim,

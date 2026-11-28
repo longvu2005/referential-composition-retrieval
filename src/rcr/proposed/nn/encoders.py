@@ -76,9 +76,13 @@ def load_text_modules(
     )
     if tokenizer.padding_side != "right":
         raise ValueError("CLIP requires right-padded native text")
-    backbone = CLIPTextModelWithProjection.from_pretrained(
-        model_name, revision=revision
-    )
+    # Loading the frozen CPU backbone must not advance initialization of RCR
+    # projections or adapters, even when the loader initializes temporary weights.
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(0)
+        backbone = CLIPTextModelWithProjection.from_pretrained(
+            model_name, revision=revision
+        )
     if backbone.config.max_position_embeddings != CLIP_CONTEXT_LENGTH:
         raise ValueError("CLIP text checkpoint must support exactly 77 positions")
     encoder = TextEncoder(

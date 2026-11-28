@@ -19,8 +19,9 @@ import yaml
 from torch import nn
 from transformers import CLIPTextConfig, CLIPTextModelWithProjection
 
-from rcr.common.config import override_config
+from rcr.common.config import override_config, validate_training_schedule
 from rcr.common.io import sha256_file
+from rcr.common.runtime import configure_determinism, resolve_device
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import losses, ranking, retrieve, sampling
 from rcr.proposed import train as training
@@ -2776,6 +2777,40 @@ def test_rng_state_roundtrip_uses_safe_checkpoint_values(tmp_path):
     _equal(actual, expected)
 
 
+@pytest.mark.parametrize("seed", [None, True, -1, 2**64])
+def test_seed_must_fit_torch_generator(seed):
+    with pytest.raises(ValueError, match="train.seed"):
+        validate_training_schedule(
+            {"train": {"seed": seed, "epochs": 1, "batch_size": 1}}
+        )
+
+
+def test_deterministic_cuda_workspace_before_model_load(monkeypatch):
+    cfg = {"runtime": {"device": "cuda"}}
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    configure_determinism()
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+    configure_determinism()
+    assert str(resolve_device(cfg)) == "cuda"
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":0:0")
+    with pytest.raises(ValueError, match="CUBLAS_WORKSPACE_CONFIG"):
+        resolve_device(cfg)
+    assert str(resolve_device({"runtime": {"device": "cpu"}})) == "cpu"
+    cfg["runtime"]["deterministic"] = False
+    assert str(resolve_device(cfg)) == "cuda"
+
+
+def test_resume_checks_independent_query_cache(tiny_training_run, monkeypatch):
+    cfg, cache, _, _ = tiny_training_run
+    cache.native.query_cache = SimpleNamespace(cache_id="original")
+    _pause(cfg, monkeypatch)
+    cache.native.query_cache.cache_id = "rebuilt"
+    with pytest.raises(ValueError, match="inputs"):
+        training.train(cfg, resume="auto")
+
+
 @pytest.mark.parametrize("change", ["config", "inputs", "source_sha256", "runtime"])
 def test_incompatible_resume_leaves_run_untouched(
     tiny_training_run, monkeypatch, change
@@ -2849,7 +2884,19 @@ def test_training_lock_rejects_another_writer_and_releases_after_failure(tmp_pat
         pass
 
 
-def test_resume_survives_a_new_process_and_hash_seed(tmp_path):
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
+def test_resume_survives_a_new_process_and_hash_seed(tmp_path, device):
     from rcr.common.config import load_config
 
     root = Path(__file__).resolve().parents[1]
@@ -2863,11 +2910,10 @@ import sys
 from pathlib import Path
 from pytest import MonkeyPatch
 from tests import conftest
-from tests.test_training import _configure
+from tests.test_training import _configure, _enable_text_lora
 from rcr.proposed import train as training
-from rcr.proposed.batch import build_batch
 
-phase, directory, base = sys.argv[1:]
+phase, directory, base, device = sys.argv[1:]
 directory = Path(directory)
 directory.mkdir(parents=True, exist_ok=True)
 base = json.loads(Path(base).read_text())
@@ -2875,6 +2921,13 @@ with MonkeyPatch.context() as patch:
     patch.setattr(conftest, '_workflow_config', lambda: copy.deepcopy(base))
     cfg, _, _, _ = conftest.tiny_training_run.__wrapped__(directory, patch)
     _configure(cfg, training.load_rcr_data(None))
+    _enable_text_lora(cfg, patch)
+    cfg['runtime']['device'] = device
+    cfg['train']['amp'] = device == 'cuda'
+    cfg['train']['context_batch_size'] = 1
+    cfg['model']['fine_matching'].update(
+        selection_threshold=0.001, identity_threshold=-1,
+    )
     cfg['wandb']['enabled'] = False
     if phase == 'pause':
         compute = training.compute_loss
@@ -2890,6 +2943,7 @@ with MonkeyPatch.context() as patch:
 """
     for phase, name, seed in (
         ("full", "reference", "11"),
+        ("full", "repeat", "17"),
         ("pause", "split", "23"),
         ("resume", "split", "37"),
     ):
@@ -2902,6 +2956,7 @@ with MonkeyPatch.context() as patch:
                 phase,
                 str(tmp_path / name),
                 str(base),
+                device,
             ],
             cwd=root,
             capture_output=True,
@@ -2914,17 +2969,33 @@ with MonkeyPatch.context() as patch:
                 "MKL_NUM_THREADS": "1",
             },
         )
-        (tmp_path / f"{phase}.log").write_text(result.stdout + result.stderr)
+        (tmp_path / f"{name}-{phase}.log").write_text(result.stdout + result.stderr)
         assert result.returncode == 0, result.stderr[-4000:]
-    reference = torch.load(tmp_path / "reference/run/last.pt", weights_only=True)
-    actual = torch.load(tmp_path / "split/run/last.pt", weights_only=True)
-    for key in ("model", "text_encoder", "best_epoch", "best_score"):
-        _equal(actual[key], reference[key])
-    for key in ("optimizer", "scaler", "rng"):
-        _equal(actual["training_state"][key], reference["training_state"][key])
-    assert (tmp_path / "split/run/history.jsonl").read_text() == (
-        tmp_path / "reference/run/history.jsonl"
-    ).read_text()
+    reference = tmp_path / "reference/run"
+    for name in ("repeat", "split"):
+        actual = tmp_path / name / "run"
+        for filename in ("best.pt", "last.pt"):
+            left = torch.load(actual / filename, map_location="cpu", weights_only=True)
+            right = torch.load(
+                reference / filename, map_location="cpu", weights_only=True
+            )
+            for key in ("model", "text_encoder", "best_epoch", "best_score"):
+                _equal(left[key], right[key])
+            if filename == "last.pt":
+                for key in ("optimizer", "scaler", "rng", "progress"):
+                    _equal(left["training_state"][key], right["training_state"][key])
+        path = "selected/val/rankings.pt"
+        left = torch.load(actual / path, weights_only=True)
+        right = torch.load(reference / path, weights_only=True)
+        _equal(
+            {k: v for k, v in left.items() if isinstance(v, torch.Tensor)},
+            {k: v for k, v in right.items() if isinstance(v, torch.Tensor)},
+        )
+        assert left["sample_ids"] == right["sample_ids"]
+        assert left["gallery_ids"] == right["gallery_ids"]
+        assert (actual / "history.jsonl").read_bytes() == (
+            reference / "history.jsonl"
+        ).read_bytes()
 
 
 @pytest.mark.parametrize(
