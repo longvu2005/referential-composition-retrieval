@@ -2,6 +2,7 @@
 
 import copy
 import json
+from dataclasses import replace
 from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,8 +18,10 @@ from rcr.evaluation.evaluate import evaluate_retrieval_output, selection_metrics
 from rcr.evaluation.runner import evaluate_run
 from rcr.proposed import calibration, ranking, retrieve
 from rcr.proposed import train as training
+from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
 from rcr.proposed.contracts import (
     CALIBRATED_RETRIEVAL_KEYS,
+    POOLED_PERSON_ARCHITECTURE,
     SHARED_BINDING_ARCHITECTURE,
 )
 from rcr.proposed.matching import (
@@ -27,7 +30,7 @@ from rcr.proposed.matching import (
     matching_settings,
 )
 from rcr.proposed.nn.grounding import SubjectGrounding
-from rcr.proposed.nn.model import RCRModel
+from rcr.proposed.nn.model import QueryEncoding, RCRModel
 from rcr.proposed.nn.reasoning import FineReasoner, TargetPersonBuilder
 from rcr.proposed.ranking import SCORE_SCHEMA_VERSION
 from rcr.proposed.replay import replay_rankings
@@ -796,6 +799,168 @@ def test_pair_condition_is_cached_per_query_and_recondition_uses_marker_fallback
     )
 
 
+def _person_token_case():
+    torch.manual_seed(37)
+    model = RCRModel(
+        dim=8,
+        identity_dim=6,
+        num_heads=2,
+        context_person_tokens=True,
+        native_input_dim=5,
+        fine_matching={"identity_threshold": -1.0},
+    ).eval()
+    persons = torch.randn(1, 3, 8)
+    boxes = torch.tensor([[[0.0, 0, 0.2, 1], [0.4, 0, 0.6, 1], [0.8, 0, 1, 1]]])
+    membership = torch.tensor([[[0.8, 0.7, 0], [0, 0, 0.9]]])
+    subjects = torch.ones(1, 2, dtype=torch.bool)
+    reference, mask, prior, condition, subject_condition = model._encode_condition(
+        model.encode_semantic(persons),
+        membership,
+        subjects,
+        torch.randn(1, 4, 8),
+        torch.tensor([[0, 2]]),
+        None,
+        None,
+        None,
+    )
+    query = QueryEncoding(
+        logits=torch.ones_like(membership),
+        identity=model.encode_identity(persons),
+        reference=reference,
+        mask=mask,
+        prior=prior,
+        condition=condition,
+        fafa=torch.randn(1, 2, 3, 5),
+        membership=membership,
+        subjects=subjects,
+        subject_condition=subject_condition,
+    )
+    target = dict(
+        scene=torch.randn(1, 4, 8),
+        persons=persons,
+        boxes=boxes,
+        patch_hw=(2, 2),
+        person_mask=torch.ones(1, 3, dtype=torch.bool),
+        fafa_targets=torch.randn(1, 3, 4, 5, requires_grad=True),
+    )
+    return model, query, target
+
+
+def test_person_token_residual_starts_at_baseline_and_only_changes_context():
+    model, query, target = _person_token_case()
+    baseline = copy.deepcopy(model)
+    baseline.context_person_tokens = False
+    expected = baseline.score_target(query, **target, return_details=True)
+    initialized = model.score_target(query, **target, return_details=True)
+    for key in expected:
+        torch.testing.assert_close(initialized[key], expected[key], rtol=0, atol=0)
+
+    # The zero-initialized residual has a live learning signal on its first step.
+    initialized["context"].sum().backward(retain_graph=True)
+    assert model.context_token_output.weight.grad.abs().sum() > 0
+    assert target["fafa_targets"].grad is None
+    model.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        model.context_token_output.weight.normal_(std=0.4)
+    trained = model.score_target(query, **target, return_details=True)
+    assert not torch.equal(trained["context"], expected["context"])
+    for key in ("binding", "coverage", "subject_coverage", "matched_indices"):
+        torch.testing.assert_close(trained[key], expected[key], rtol=0, atol=0)
+    torch.testing.assert_close(
+        model.encode_identity(target["persons"]),
+        baseline.encode_identity(target["persons"]),
+        rtol=0,
+        atol=0,
+    )
+    trained["context"].sum().backward()
+    assert model.context_token_query.weight.grad.abs().sum() > 0
+    assert target["fafa_targets"].grad is None
+
+
+def test_person_token_read_follows_subject_owner_and_keeps_group_members():
+    model, query, target = _person_token_case()
+    with torch.no_grad():
+        model.context_token_query.weight.copy_(torch.eye(5, 8))
+        model.context_token_output.weight.copy_(torch.eye(8, 5))
+    query = replace(query, subject_condition=torch.eye(8)[:2][None])
+    target["fafa_targets"] = torch.eye(5)[:3].expand(1, 3, -1, -1).clone()
+    observed = []
+    hook = model.reasoning_binding.register_forward_pre_hook(
+        lambda _module, args: observed.append(args[1].detach().clone())
+    )
+    model.score_target(query, **target)
+    changed = replace(query, subject_condition=query.subject_condition.flip(1))
+    model.score_target(changed, **target)
+    hook.remove()
+    semantic = model.encode_semantic(target["persons"])
+    first, second = (row - semantic for row in observed)
+    torch.testing.assert_close(first[:, 0], first[:, 1])
+    assert not torch.allclose(first[:, 0], first[:, 2])
+    torch.testing.assert_close(first[:, 0], second[:, 2])
+    torch.testing.assert_close(first[:, 2], second[:, 0])
+    assert not torch.allclose(observed[0][:, 0], observed[0][:, 1])
+
+
+def test_person_tokens_dense_and_packed_agree_and_skip_null_padding():
+    model, query, target = _person_token_case()
+    native = target["fafa_targets"].detach()
+    reads = []
+
+    def load_matched(images, indices, *, prepared):
+        reads.append(indices.clone())
+        selected = native[images]
+        positions = (indices >= 0).flatten().nonzero().flatten()
+        aligned = selected.gather(
+            1, indices.clamp_min(0)[..., None, None].expand(-1, -1, 4, 5)
+        )
+        return MatchedTargetTokens(
+            aligned.flatten(0, 1)[positions], positions, tuple(indices.shape)
+        )
+
+    deferred = NativeTargetBatch(
+        SimpleNamespace(native_matched_targets=load_matched), torch.tensor([0]), 3
+    )
+    with torch.no_grad():
+        model.context_token_output.weight.normal_(std=0.2)
+    dense = model.score_target(query, **target, return_details=True)
+    packed = model.score_target(
+        query, **{**target, "fafa_targets": deferred}, return_details=True
+    )
+    assert len(reads) == 1  # Context and FDA share the same matched token load.
+    for key in dense:
+        torch.testing.assert_close(packed[key], dense[key])
+
+    indices = torch.tensor([[1, -1, 0]])
+    native[:, 2].fill_(torch.nan)
+    dense_tokens = model.load_context_tokens(native, indices, "cpu")
+    packed_tokens = model.load_context_tokens(deferred, indices, "cpu")
+    torch.testing.assert_close(packed_tokens, dense_tokens)
+    assert torch.isfinite(dense_tokens).all() and not dense_tokens[:, 1].any()
+    empty = model.load_context_tokens(
+        native[:, :0], torch.full_like(indices, -1), "cpu"
+    )
+    assert empty.shape == (1, 3, 4, 5) and not empty.any()
+
+
+def test_subject_token_condition_supports_single_subject_and_repeated_mentions():
+    model, _, _ = _person_token_case()
+    membership = torch.ones(1, 1, 2)
+    mentions = torch.tensor([[[True, False, True, True]]])
+    change_mask = torch.tensor([[True, True, True, False]])
+    reference, _, _, pairs, subjects = model._encode_condition(
+        torch.randn(1, 2, 8),
+        membership,
+        torch.ones(1, 1, dtype=torch.bool),
+        torch.randn(1, 4, 8),
+        torch.tensor([[0]]),
+        change_mask,
+        mentions,
+        torch.tensor([[1]]),
+    )
+    assert pairs.shape == (1, 0, 8) and subjects.shape == (1, 1, 8)
+    torch.testing.assert_close(subjects[:, 0], reference[:, [1, 3]].mean(1))
+
+
 # Configured calibration grid and frozen coefficients.
 
 
@@ -1516,9 +1681,15 @@ def test_shared_binding_checkpoint_reproduces_tied_inference(
     checkpoint["config"]["model"]["fine_matching"].update(
         identity_threshold=-1.0, selection_threshold=0.0001
     )
+    checkpoint["config"]["model"]["context_person_tokens"] = False
+    checkpoint["model"] = {
+        key: value
+        for key, value in checkpoint["model"].items()
+        if not key.startswith(("context_token_query.", "context_token_output."))
+    }
     state = checkpoint["model"]
     checkpoint["binding_shared"] = shared
-    # A fresh v5 checkpoint starts from the same weights on both paths.
+    # The legacy architecture starts from the same weights on both paths.
     rank = retrieve.retrieve_rankings
     models = []
 
@@ -1541,6 +1712,7 @@ def test_shared_binding_checkpoint_reproduces_tied_inference(
         retrieve.retrieve(cfg)
 
     checkpoint["architecture_version"] = SHARED_BINDING_ARCHITECTURE
+    checkpoint.pop("native_input_dim", None)
     torch.save(checkpoint, cfg["checkpoint"])
     digest = sha256_file(cfg["checkpoint"])
     actual = retrieve.retrieve(cfg)
@@ -1549,6 +1721,75 @@ def test_shared_binding_checkpoint_reproduces_tied_inference(
     assert actual["provenance"]["architecture_version"] == SHARED_BINDING_ARCHITECTURE
     for key in ("context", "fine_scores", "rankings"):
         torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+
+
+def test_pooled_person_checkpoint_keeps_its_split_binding_and_original_scores(
+    saved_pipeline,
+):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["config"]["model"]["context_person_tokens"] = False
+    checkpoint["config"]["model"]["fine_matching"].update(
+        identity_threshold=-1.0, selection_threshold=0.0001
+    )
+    checkpoint["model"] = {
+        key: value
+        for key, value in checkpoint["model"].items()
+        if not key.startswith(("context_token_query.", "context_token_output."))
+    }
+    # Represent a trained split binding, rather than only its identical initializer.
+    key = next(
+        key for key in checkpoint["model"] if key.startswith("reasoning_binding.")
+    )
+    checkpoint["model"][key].add_(0.25)
+    torch.save(checkpoint, cfg["checkpoint"])
+    expected = retrieve.retrieve(cfg)
+    checkpoint["architecture_version"] = POOLED_PERSON_ARCHITECTURE
+    checkpoint["config"]["model"].pop("context_person_tokens")
+    checkpoint.pop("native_input_dim", None)
+    torch.save(checkpoint, cfg["checkpoint"])
+    actual = retrieve.retrieve(cfg)
+    for key in ("context", "fine_scores", "rankings"):
+        torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+
+
+def test_token_checkpoint_rejects_native_dimension_mismatch_before_text(
+    saved_pipeline, monkeypatch
+):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["native_input_dim"] += 1
+    torch.save(checkpoint, cfg["checkpoint"])
+    monkeypatch.setattr(
+        retrieve,
+        "load_text_modules",
+        lambda *args, **kwargs: pytest.fail(
+            "loaded text for incompatible native tokens"
+        ),
+    )
+    with pytest.raises(ValueError, match="native token dimensions"):
+        retrieve.retrieve(cfg)
+
+
+@pytest.mark.parametrize(
+    "architecture", [POOLED_PERSON_ARCHITECTURE, SHARED_BINDING_ARCHITECTURE]
+)
+def test_legacy_checkpoint_cannot_claim_person_token_pooling(
+    saved_pipeline, monkeypatch, architecture
+):
+    cfg, _, _ = saved_pipeline
+    checkpoint = torch.load(cfg["checkpoint"], weights_only=True)
+    checkpoint["architecture_version"] = architecture
+    torch.save(checkpoint, cfg["checkpoint"])
+    monkeypatch.setattr(
+        retrieve,
+        "load_text_modules",
+        lambda *args, **kwargs: pytest.fail(
+            "loaded text for incompatible architecture"
+        ),
+    )
+    with pytest.raises(ValueError, match="legacy checkpoint architecture"):
+        retrieve.retrieve(cfg)
 
 
 @pytest.mark.parametrize("obsolete", ["scorer", "architecture"])

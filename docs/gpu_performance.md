@@ -44,7 +44,14 @@ Training uses the following input path:
 5. Native FAFA tokens are gathered using the CPU assignment already computed by
    matching. Only assigned token rows and their positions cross PCIe; null rows
    and person padding are reconstructed on the device before FP32 FDA scoring.
+   When enabled, the context token reader reuses those same aligned token rows.
    Backward checkpointing recomputes only the neural context path.
+
+Verified member recovery adds a separate, chunked training context pass for
+the candidates of recovered pairs. Its reference membership and target
+assignments are rebuilt from conservative train annotations. It can reuse the
+native cache, but still adds transfer and compute work for that route; measure
+the enabled configuration when estimating training memory and throughput.
 
 Each prefetched batch carries the sampling/identity generator states following
 that batch. Checkpoints commit the states of the consumed batch, even when the
@@ -116,7 +123,7 @@ optimization; use a separate output directory:
 ```
 
 Serial and prefetched evaluation use the same checkpoint and score-artifact
-schema for both v5 and v4 inference.
+schema for v6, v5 and v4 inference.
 
 CPU/GPU boundaries are intentional and bounded as follows:
 

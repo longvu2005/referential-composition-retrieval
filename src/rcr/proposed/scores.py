@@ -258,8 +258,13 @@ def fafa_binding_scores(
     missing_penalty: float = 1.1,
     pooling: str = "penalized",
     return_poolings: bool = False,
+    aligned_targets: Tensor | None = None,
 ) -> Tensor | dict[str, Tensor]:
-    """Compute native FDA once and pool the assigned person pairs."""
+    """Compute native FDA once and pool the assigned person pairs.
+
+    ``aligned_targets`` reuses the frozen token rows already gathered for context;
+    its second axis follows reference detections, including null assignments.
+    """
     from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
 
     if pooling not in POOLING_MODES:
@@ -268,8 +273,10 @@ def fafa_binding_scores(
         raise ValueError("missing_penalty must exceed 1 for normalized FDA scores")
     if type(k) is not int or k < 1:
         raise ValueError("fda_k must be a positive integer")
-    prealigned = isinstance(targets, NativeTargetBatch)
-    if prealigned:
+    prealigned = aligned_targets is not None or isinstance(targets, NativeTargetBatch)
+    if aligned_targets is not None:
+        targets = aligned_targets
+    elif prealigned:
         indices = matching.indices_cpu
         if indices is None:
             indices = matching.indices.detach().cpu()
@@ -301,6 +308,7 @@ def fafa_binding_scores(
             .float()
             .reshape(targets.shape[0], query.shape[2], length, dim)
         )
+        aligned = aligned.masked_fill(~matching.matched[..., None, None], 0)
         query = query.detach().float().masked_fill(~selected[..., None], 0)
         similarity = torch.einsum(
             "bsqd,bqld->bsql",

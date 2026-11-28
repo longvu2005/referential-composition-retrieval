@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from rcr.proposed.cache.native import NativeTargetBatch
+from rcr.proposed.cache.native import MatchedTargetTokens, NativeTargetBatch
 from rcr.proposed.contracts import ARCHITECTURE_VERSION
 from rcr.proposed.matching import (
     PersonMatching,
@@ -49,6 +49,7 @@ class QueryEncoding:
     fafa: Tensor | None
     membership: Tensor
     subjects: Tensor
+    subject_condition: Tensor | None = None
 
     def select(self, index: int) -> "QueryEncoding":
         """Keep one query's batch axis for per-query candidate scoring."""
@@ -96,6 +97,7 @@ class RCRModel(nn.Module):
         *,
         input_dim: int,
         person_input_dim: int,
+        native_input_dim: int | None = None,
         global_dim: int | None = None,
         max_subjects: int = len(SUBJECT_MARKERS),
         shared_binding: bool = False,
@@ -106,6 +108,7 @@ class RCRModel(nn.Module):
             dim=dim,
             input_dim=input_dim,
             person_input_dim=person_input_dim,
+            native_input_dim=native_input_dim,
             global_dim=global_dim,
             max_subjects=max_subjects,
             shared_binding=shared_binding,
@@ -133,6 +136,8 @@ class RCRModel(nn.Module):
         fine_matching: dict | None = None,
         fda_k: int = 6,
         shared_binding: bool = False,
+        context_person_tokens: bool = False,
+        native_input_dim: int | None = None,
     ) -> None:
         super().__init__()
         input_dim = dim if input_dim is None else input_dim
@@ -146,6 +151,16 @@ class RCRModel(nn.Module):
         if type(fda_k) is not int or fda_k < 1:
             raise ValueError("fda_k must be a positive integer")
         self.fda_k = fda_k
+        if type(context_person_tokens) is not bool:
+            raise ValueError("context_person_tokens must be a boolean")
+        if context_person_tokens and (
+            type(native_input_dim) is not int or native_input_dim < 1
+        ):
+            raise ValueError(
+                "context_person_tokens requires a positive native_input_dim"
+            )
+        self.context_person_tokens = context_person_tokens
+        self.native_input_dim = native_input_dim
         # Scene tokens have their own context projection; globals stay in CLIP space.
         self.visual_proj = (
             nn.Identity() if input_dim == dim else nn.Linear(input_dim, dim)
@@ -176,6 +191,13 @@ class RCRModel(nn.Module):
         self.target_builder = TargetPersonBuilder(dim)
         self.reasoner = FineReasoner(dim, num_heads, mlp_ratio, dropout)
         self.null_person = nn.Parameter(torch.zeros(dim))
+        # Keep existing parameter initialization unchanged when enabling this read.
+        # FAFA query tokens are semantic tokens, not spatial scene patches.
+        self.context_token_query = self.context_token_output = None
+        if context_person_tokens:
+            self.context_token_query = nn.Linear(dim, native_input_dim, bias=False)
+            self.context_token_output = nn.Linear(native_input_dim, dim, bias=False)
+            nn.init.zeros_(self.context_token_output.weight)
 
     @property
     def binding_scale(self) -> Tensor:
@@ -313,22 +335,27 @@ class RCRModel(nn.Module):
             duplicate_iou=self.fine_matching["duplicate_iou"],
             owner_mode=self.fine_matching["owner_mode"],
         )
-        return QueryEncoding(
-            logits,
-            identity,
-            *self._encode_condition(
-                semantic,
-                membership,
-                subjects,
-                change,
-                subject_pos,
-                change_mask,
-                subject_token_mask,
-                subject_ids,
-            ),
-            None if fafa_query is None else fafa_query.detach(),
+        reference, mask, prior, condition, subject_condition = self._encode_condition(
+            semantic,
             membership,
             subjects,
+            change,
+            subject_pos,
+            change_mask,
+            subject_token_mask,
+            subject_ids,
+        )
+        return QueryEncoding(
+            logits=logits,
+            identity=identity,
+            reference=reference,
+            mask=mask,
+            prior=prior,
+            condition=condition,
+            fafa=None if fafa_query is None else fafa_query.detach(),
+            membership=membership,
+            subjects=subjects,
+            subject_condition=subject_condition,
         )
 
     def _encode_condition(
@@ -361,10 +388,19 @@ class RCRModel(nn.Module):
         if mentions is None:
             positions = torch.arange(change.shape[1], device=change.device)
             mentions = subject_pos[..., None] == positions
+        text = reference[:, 1 : 1 + change.shape[1]]
         condition = self.reasoner.encode_condition(
-            reference[:, 1 : 1 + change.shape[1]], change_mask, mentions, subjects
+            text, change_mask, mentions, subjects
         )
-        return reference, mask, prior, condition
+        subject_condition = None
+        if self.context_person_tokens:
+            mentions = mentions.bool() & subjects[..., None]
+            if change_mask is not None:
+                mentions = mentions & change_mask[:, None].bool()
+                text = text.masked_fill(~change_mask[..., None].bool(), 0)
+            weights = mentions.float() / mentions.sum(-1, keepdim=True).clamp_min(1)
+            subject_condition = weights.to(text.dtype) @ text
+        return reference, mask, prior, condition, subject_condition
 
     def recondition_query(
         self,
@@ -379,12 +415,50 @@ class RCRModel(nn.Module):
         subject_ids,
     ):
         """Read new conditions using the original grounding and identity features."""
-        semantic = self.encode_semantic(
-            query_persons.masked_fill(~person_mask[..., None], 0)
+        return replace(
+            self.reassign_query(
+                query,
+                query_persons,
+                person_mask,
+                query.membership,
+                change=change,
+                subject_pos=subject_pos,
+                change_mask=change_mask,
+                subject_token_mask=subject_token_mask,
+                subject_ids=subject_ids,
+            ),
+            fafa=None,
         )
-        reference, mask, prior, condition = self._encode_condition(
+
+    def reassign_query(
+        self,
+        query,
+        query_persons,
+        person_mask,
+        membership,
+        *,
+        change,
+        subject_pos,
+        change_mask,
+        subject_token_mask,
+        subject_ids,
+    ):
+        """Rebuild all composed evidence for an explicitly supplied membership.
+
+        Training supplies verified detections here; ordinary retrieval keeps
+        predicted ownership. Native query features retain their public Subject
+        and reference-crop indexing, so FDA can use the same reassignment.
+        """
+        if membership.shape != query.membership.shape:
+            raise ValueError("replacement membership must match query membership")
+        membership = membership.detach().masked_fill(~query.subjects[..., None], 0)
+        if person_mask is not None:
+            query_persons = query_persons.masked_fill(~person_mask[..., None], 0)
+            membership = membership.masked_fill(~person_mask[:, None], 0)
+        semantic = self.encode_semantic(query_persons)
+        reference, mask, prior, condition, subject_condition = self._encode_condition(
             semantic,
-            query.membership,
+            membership,
             query.subjects,
             change,
             subject_pos,
@@ -398,7 +472,8 @@ class RCRModel(nn.Module):
             mask=mask,
             prior=prior,
             condition=condition,
-            fafa=None,
+            subject_condition=subject_condition,
+            membership=membership,
         )
 
     def encode_grounded_identity(
@@ -430,12 +505,36 @@ class RCRModel(nn.Module):
         boxes: Tensor,
         patch_hw: tuple[int, int],
         person_mask: Tensor | None = None,
+        *,
+        fafa_targets: Tensor | NativeTargetBatch | None = None,
     ) -> tuple[Tensor, PersonMatching]:
         """Learnable context path shared by training and fine inference.
 
         Selection/assignment stay prediction-based and detached. The caller
         combines raw context with frozen native FDA using the shared scorer.
         """
+        semantic, boxes, matching = self._encode_context_target(
+            query, persons, boxes, person_mask
+        )
+        token_options = {}
+        if self.context_person_tokens:
+            token_options["aligned_tokens"] = self.load_context_tokens(
+                fafa_targets,
+                matching.indices,
+                semantic.device,
+                indices_cpu=matching.indices_cpu,
+            )
+        return self.score_aligned_context(
+            query,
+            scene,
+            semantic,
+            boxes,
+            matching.indices,
+            patch_hw,
+            **token_options,
+        ), matching
+
+    def _encode_context_target(self, query, persons, boxes, person_mask):
         if person_mask is not None:
             persons = persons.masked_fill(~person_mask[..., None], 0)
             boxes = boxes.masked_fill(~person_mask[..., None], 0)
@@ -444,9 +543,65 @@ class RCRModel(nn.Module):
         with torch.no_grad():
             target_identity = self.identity_head(semantic)
         matching = self.match_target(query, target_identity, boxes, person_mask)
-        return self.score_aligned_context(
-            query, scene, semantic, boxes, matching.indices, patch_hw
-        ), matching
+        return semantic, boxes, matching
+
+    @staticmethod
+    def load_context_tokens(fafa_targets, indices, device, *, indices_cpu=None):
+        """Load only assigned frozen native tokens, reusable by both FDA and H."""
+        if isinstance(fafa_targets, NativeTargetBatch):
+            if len(fafa_targets.image_indices) != indices.shape[0]:
+                raise ValueError("native FAFA targets must match candidate images")
+            if indices_cpu is None:
+                indices_cpu = indices.detach().cpu()
+            fafa_targets = fafa_targets.load_matched(indices_cpu)
+            if isinstance(fafa_targets, MatchedTargetTokens):
+                return fafa_targets.to_aligned(device).detach()
+            return fafa_targets.to(device, non_blocking=True).detach()
+        if isinstance(fafa_targets, MatchedTargetTokens):
+            return fafa_targets.to_aligned(device).detach()
+        if not isinstance(fafa_targets, Tensor) or fafa_targets.ndim != 4:
+            raise ValueError(
+                "context person pooling requires native FAFA target tokens"
+            )
+        if fafa_targets.shape[0] != indices.shape[0]:
+            raise ValueError("native FAFA targets must match candidate images")
+        # Gather on the cache tensor's device before transfer; padded detections
+        # (including non-finite placeholders) cannot contaminate the token read.
+        aligned = gather_matched(
+            fafa_targets.detach().flatten(2), indices.to(fafa_targets.device)
+        ).reshape(*indices.shape, *fafa_targets.shape[2:])
+        return aligned.to(device, non_blocking=True)
+
+    def _read_person_tokens(self, query, semantic, indices, tokens):
+        if query.subject_condition is None:
+            raise ValueError(
+                "context person pooling requires encoded Subject conditions"
+            )
+        if (
+            tokens.ndim != 4
+            or tokens.shape[:2] != indices.shape
+            or tokens.shape[2] < 1
+            or tokens.shape[-1] != self.native_input_dim
+        ):
+            raise ValueError("aligned native tokens must be [B,Kq,L,D_fafa]")
+        selected = query.subjects[..., None] & (query.membership > 0)
+        present = selected.any(1) & (indices >= 0)
+        conditions = query.subject_condition.masked_fill(~query.subjects[..., None], 0)
+        condition = selected.transpose(1, 2).to(conditions.dtype) @ conditions
+        token_query = self.context_token_query(condition)
+        with torch.autocast(semantic.device.type, enabled=False):
+            values = tokens.detach().float().masked_fill(~present[..., None, None], 0)
+            values = F.normalize(values, dim=-1)
+            token_query = F.normalize(token_query.float(), dim=-1)
+            logits = torch.einsum("bkd,bkld->bkl", token_query, values)
+            weights = (logits * math.sqrt(values.shape[-1])).softmax(-1)
+            pooled = torch.einsum("bkl,bkld->bkd", weights, values)
+        update = self.context_token_output(
+            pooled.to(self.context_token_output.weight.dtype)
+        ).to(semantic.dtype)
+        # No post-residual normalization: zero initialization exactly preserves
+        # the old person evidence, while identity and native FDA bypass this read.
+        return semantic + update.masked_fill(~present[..., None], 0)
 
     @torch.no_grad()
     def match_target(
@@ -466,12 +621,33 @@ class RCRModel(nn.Module):
         )
 
     def score_aligned_context(
-        self, query, scene, semantic, boxes, indices, patch_hw, *, layout=None
+        self,
+        query,
+        scene,
+        semantic,
+        boxes,
+        indices,
+        patch_hw,
+        *,
+        layout=None,
+        fafa_targets=None,
+        aligned_tokens=None,
     ):
         """Score a condition on a fixed person assignment."""
         selected = query.subjects[..., None] & (query.membership > 0)
         matched = selected & (indices >= 0)[:, None]
         boxes = gather_matched(boxes, indices)
+        semantic = gather_matched(semantic, indices)
+        if self.context_person_tokens:
+            if aligned_tokens is not None and fafa_targets is not None:
+                raise ValueError("pass native targets or aligned tokens, not both")
+            if aligned_tokens is None:
+                aligned_tokens = self.load_context_tokens(
+                    fafa_targets, indices, semantic.device
+                )
+            semantic = self._read_person_tokens(
+                query, semantic, indices, aligned_tokens
+            )
         scene = self.visual_proj(scene)
         reference, mask, prior = query.reference, query.mask, query.prior
         if layout is not None:
@@ -480,7 +656,7 @@ class RCRModel(nn.Module):
             prior = prior.index_select(1, layout.reference_indices)
         evidence = self.reasoning_binding(
             scene,
-            gather_matched(semantic, indices),
+            semantic,
             boxes,
             reference,
             patch_hw,
@@ -530,9 +706,35 @@ class RCRModel(nn.Module):
         """
         if query.fafa is None:
             raise ValueError("fine retrieval requires native FAFA query features")
+        if isinstance(fafa_targets, NativeTargetBatch):
+            if len(fafa_targets.image_indices) != len(persons):
+                raise ValueError("deferred FAFA targets must match candidate images")
+        elif fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
+            raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
+        aligned_tokens = None
         if compute_context:
-            context, matching = self.score_context(
-                query, scene, persons, boxes, patch_hw, person_mask
+            semantic, boxes, matching = self._encode_context_target(
+                query, persons, boxes, person_mask
+            )
+            if self.context_person_tokens:
+                aligned_tokens = self.load_context_tokens(
+                    fafa_targets,
+                    matching.indices,
+                    semantic.device,
+                    indices_cpu=matching.indices_cpu,
+                )
+            context = self.score_aligned_context(
+                query,
+                scene,
+                semantic,
+                boxes,
+                matching.indices,
+                patch_hw,
+                **(
+                    {"aligned_tokens": aligned_tokens}
+                    if aligned_tokens is not None
+                    else {}
+                ),
             )
         else:
             if context_weight != 0:
@@ -543,11 +745,6 @@ class RCRModel(nn.Module):
             )
             matching = self.match_target(query, identity, boxes, person_mask)
             context = torch.zeros_like(matching.coverage)
-        if isinstance(fafa_targets, NativeTargetBatch):
-            if len(fafa_targets.image_indices) != len(persons):
-                raise ValueError("deferred FAFA targets must match candidate images")
-        elif fafa_targets.ndim != 4 or fafa_targets.shape[:2] != persons.shape[:2]:
-            raise ValueError("fafa_targets must be [B,Kt,L,D_fafa]")
         poolings = fafa_binding_scores(
             query.fafa,
             fafa_targets,
@@ -556,6 +753,11 @@ class RCRModel(nn.Module):
             missing_penalty=self.fine_matching["missing_penalty"],
             pooling=pooling,
             return_poolings=True,
+            **(
+                {"aligned_targets": aligned_tokens}
+                if aligned_tokens is not None
+                else {}
+            ),
         )
         binding = poolings[pooling]
         scored = linear_score_components(

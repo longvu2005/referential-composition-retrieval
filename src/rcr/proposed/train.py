@@ -227,6 +227,10 @@ def _fine_epoch_metrics(totals):
         metrics[f"fine_active_fraction{suffix}"] = (
             row["fine_active_queries"] / row["fine_queries"]
         )
+        for stage in ("recovered", "effective"):
+            metrics[f"fine_{stage}_fraction{suffix}"] = (
+                row[f"fine_{stage}_queries"] / row["fine_queries"]
+            )
     return metrics
 
 
@@ -310,11 +314,13 @@ def _make_checkpoint(
             "model": {
                 **cfg["model"],
                 "fine_matching": dict(model.fine_matching),
+                "context_person_tokens": model.context_person_tokens,
             },
         },
         "dim": dim,
         "input_dim": scene_dim,
         "person_input_dim": person_dim,
+        "native_input_dim": model.native_input_dim,
         "global_dim": model.global_dim,
         "encoder_metadata": cache.encoder_metadata,
         "cache_id": cache.cache_id,
@@ -537,6 +543,9 @@ def _train(cfg, output, resumed):
         input_dim=scene_dim,
         global_dim=cache.global_dim,
         person_input_dim=person_dim,
+        native_input_dim=(
+            cache.native.dim if model_cfg.get("context_person_tokens", False) else None
+        ),
         shared_binding=True,
     ).to(device)
 

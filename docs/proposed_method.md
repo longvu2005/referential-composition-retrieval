@@ -11,6 +11,8 @@ the scene. The pinned CLIP text tower supplies token and global features, with
 rank-8 LoRA on the query and value projections of its last two blocks in the
 supplied configuration. Frozen FAFA encodes person crops and text-conditioned
 person features.
+Scene extraction remains CLIP ViT-B/32 at 224 by 224, with the same 49 patches.
+Native FAFA target tokens are learned Q-Former query tokens, not spatial patches.
 See the [feature contracts](feature_contracts.md) for compatibility requirements.
 
 ## Grounding and composition
@@ -75,6 +77,23 @@ X = LN_inject(R + Dropout([0_CLS, 0_text, {o_ik}]))
 `reasoning_binding` conditions target patches on the composed query and
 produces `e_k` once per aligned reference detection. The model routes the
 result into the Subject-person slots.
+
+With `model.context_person_tokens=true`, the context path also reads the native
+FAFA target tokens already used for FDA. It averages the composed text states
+at each Subject's marked mentions to obtain a condition `a_s`, then uses the
+owner of reference crop `k` to attend over its matched target's native tokens.
+The attention is a scaled cosine read; a learned projection maps the result
+back into the semantic feature space and adds it to the existing pooled person
+feature before `reasoning_binding`. The output projection starts at zero, so
+this addition initially preserves the original context input. There are two
+bias-free projection matrices and no extra reasoner or scene encoder.
+
+The pooled hidden feature and native projected tokens may have different
+dimensions. The native dimension comes from the cache and is recorded in the
+checkpoint. Null, unselected and padded person slots do not contribute tokens.
+The same per-Subject read supports one-Subject queries and individual GROUP
+members. Identity encoding, hard matching and native FDA retain their existing
+features and formulas. Setting the option to `false` removes the token reader.
 
 During the first `train.context_warmup_epochs` epochs, `grounding.binding` and
 `reasoning_binding` refer to the same `EvidenceBinding` instance. Scheduled
@@ -170,9 +189,25 @@ member if the reference and target crops have the same annotated ID and the
 reference crop belongs to its predicted Subject. A pair must verify the same
 set of distinct member IDs in both images for every active Subject, with at
 least one member per Subject. This allows equal partial sets within a group.
-The labels filter the semantic loss pairs after matching. The reasoner still
-receives the predicted assignment. The control setting `false` uses the
-original same-ID and coverage criteria.
+Those pairs use the predicted assignment. The control setting `false` uses the
+original same-ID and coverage criteria and requires recovery to be disabled.
+
+With `loss.context_recover_members=true`, the loss can recover additional
+same-ID positive/negative pairs rejected by that predicted route, including
+pairs with zero predicted coverage. Recovery requires complete reference
+membership and complete target correspondence for both images using existing
+train detections. Unknown labels, multi-head crops, ambiguous duplicate
+correspondences, overlapping Subject ownership and incomplete GROUP membership
+are excluded. It never creates boxes or reads validation/test annotations.
+
+Recovery rebuilds the reference membership, composed query, masks, priors and
+Subject conditions, then recomputes `B`, `C` and `H` using that same verified
+assignment. Each pair belongs to exactly one route. The loss sums both routes'
+pair losses, divides by their combined pair count within each query, and then
+averages active queries. It does not add two separately normalized losses.
+Rejection and optional direction swaps retain predicted assignments. Ordinary
+retrieval and mining also retain predicted ownership and matching. Recovery
+therefore addresses missing training comparisons, not inference matching errors.
 
 `loss.rejection_loss_mode=softplus` retains the baseline rejection objective:
 
@@ -227,8 +262,10 @@ fixed-shape tensor operations with deferred numerical checks. It introduces no
 device scalar reads, dynamic boolean indexing or extra scorer/cache calls.
 The GPU input path keeps sparse eligible rows from `context_layout`, chunked
 `SceneTargetBatch` scene loads and assignment-based `NativeTargetBatch.load_matched`
-FAFA loads. Matching and cache I/O stay outside activation checkpointing;
-backward recomputes the neural context path. The default prefetch depth remains
+FAFA loads. Each route shares its gathered native tokens between FDA and context.
+Matching and cache I/O stay outside activation checkpointing;
+backward recomputes the neural context path. Recovery adds a context pass only
+for candidates participating in recoverable pairs. The default prefetch depth remains
 one batch; `train.prefetch_batches=0` runs the serial control. See
 [GPU performance](gpu_performance.md) for profiling and runtime settings.
 
@@ -255,13 +292,15 @@ selection unchanged under the [benchmark protocol](benchmark_protocol.md).
 ## Configuration and checkpoints
 
 Model and experiment settings live in YAML. Checkpoints record the effective
-model configuration and feature provenance. Train `fafa-aligned-pair-cls-v5`
+model configuration and feature provenance. Train `fafa-aligned-pair-cls-v6`
 in a fresh run directory using compatible frozen feature caches.
 Checkpoints record `binding_shared` to restore the binding phase during
 retrieval and resume. Joint-phase resume restores both learned bindings and
 their optimizer states. Warmup resume retains sharing until the split epoch.
-For v4 inference, retrieval restores its shared binding.
-After training v5, generate new retrieval artifacts to capture its learned `H`.
+Retrieval restores v5 checkpoints without the native token reader and restores
+shared binding for v4 checkpoints. These checkpoints cannot resume v6 training.
+All three versions reuse compatible frozen feature caches.
+After training v6, generate new retrieval artifacts to capture its learned `H`.
 CPU replay uses the raw components saved with each ranking.
 Use the [run guide](proposed_runs.md) for execution and the
 [cache guide](detection_cache.md) for feature preparation.

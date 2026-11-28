@@ -590,6 +590,16 @@ def _score_packed_targets(
             indices_cpu.index_select(0, rows),
         )
     native = NativeTargetBatch(cache, targets[rows], mask.shape[1])
+    aligned_tokens = (
+        model.load_context_tokens(
+            native,
+            chosen_matching.indices,
+            device,
+            indices_cpu=chosen_matching.indices_cpu,
+        )
+        if compute_context and model.context_person_tokens
+        else None
+    )
     poolings = fafa_binding_scores(
         chosen.fafa,
         native,
@@ -597,6 +607,7 @@ def _score_packed_targets(
         k=model.fda_k,
         missing_penalty=model.fine_matching["missing_penalty"],
         return_poolings=True,
+        aligned_targets=aligned_tokens,
     )
     for mode, values in poolings.items():
         components[f"binding_{mode}"].index_copy_(0, selected, values)
@@ -612,6 +623,7 @@ def _score_packed_targets(
             chosen_matching.indices,
             cache.patch_hw,
             layout=state.layout,
+            aligned_tokens=aligned_tokens,
         )
         components["context"].index_copy_(0, selected, context)
     return components

@@ -8,7 +8,9 @@ that change.
 The proposed RCR model injects aligned target evidence into individual person
 tokens and reasons jointly with ordered Subject-pair tokens. One CLS readout
 provides the context score; native FAFA binding and identity coverage complete
-the fine score. See the [method and formulas](docs/proposed_method.md).
+the fine score. Context reads the existing native person tokens using the
+composed Subject condition. The CLIP scene stays at 49 patches. See the
+[method and formulas](docs/proposed_method.md).
 
 ```text
 dataset -> feature caches -> training -> retrieval -> evaluation
@@ -50,12 +52,15 @@ Outputs are written under `output.dir`. `best.pt` and `selected.yaml` describe
 the validation-selected model; `last.pt` supports training resume.
 The supplied RCR configuration starts CLIP text LoRA in the base warmup and
 trains context on the fine-score margin of verified Subject-member pairs.
+Rejected pairs can be recovered during training when the existing detections
+unambiguously cover every annotated member in the reference and both targets.
+Binding, coverage and context use the same assignment within each loss pair.
 Binding and coverage are detached in this loss. It uses hinge
 rejection and writes the `proposed` experiment to `runs/proposed`.
-The `fafa-aligned-pair-cls-v5` architecture shares one binding during warmup,
+The `fafa-aligned-pair-cls-v6` architecture shares one binding during warmup,
 then clones its warmed weights for independent target reasoning before the
 first joint epoch. Train this schedule in a fresh run directory.
-Retrieval also supports v4 checkpoints trained with shared binding weights.
+Retrieval also supports v5 pooled-person and v4 shared-binding checkpoints.
 See the [run guide](docs/proposed_runs.md) for stages, outputs and the
 comparison of Subject owner rules.
 

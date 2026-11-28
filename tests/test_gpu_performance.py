@@ -1006,8 +1006,9 @@ def test_sparse_eval_retrieval_preserves_topm_artifacts_and_cpu_replay(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("prefetch", [0, 1])
 @pytest.mark.parametrize("case", ["mixed", "missing", "mining"])
+@pytest.mark.parametrize("person_tokens", [False, True])
 def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
-    device, prefetch, case, monkeypatch
+    device, prefetch, case, person_tokens, monkeypatch
 ):
     torch.manual_seed(1812)
     cache = TinyCache()
@@ -1025,15 +1026,20 @@ def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
             dim=8,
             identity_dim=6,
             num_heads=2,
+            context_person_tokens=person_tokens,
+            native_input_dim=cache.native.dim,
             fine_matching={"identity_threshold": 1.0 if case == "missing" else -1.0},
         )
         .eval()
         .to(device)
     )
+    if person_tokens:
+        with torch.no_grad():
+            model.context_token_output.weight.normal_(std=0.2)
     semantic = model.encode_semantic(cache.persons[:1, :3].to(device).float())
     membership = torch.tensor([[[0.8, 0.6, 0], [0, 0, 0.7]]], device=device)
     subjects = torch.ones(1, 2, device=device, dtype=torch.bool)
-    reference, mask, prior, condition = model._encode_condition(
+    reference, mask, prior, condition, subject_condition = model._encode_condition(
         semantic,
         membership,
         subjects,
@@ -1053,6 +1059,7 @@ def test_eval_packs_people_and_skips_unmatched_evidence_without_changing_scores(
         torch.randn(1, 2, 3, 5, device=device),
         membership,
         subjects,
+        subject_condition,
     )
     targets = torch.tensor([4, 1, 2, 3, 5, 1])  # Repeated images and non-count order.
     context = case != "mining"

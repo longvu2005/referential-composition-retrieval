@@ -83,7 +83,7 @@ class TinyCache:
             "person_encoder": None,
             "detector": None,
         }
-        self.native = SimpleNamespace(metadata={"version": "tiny"})
+        self.native = SimpleNamespace(dim=5, metadata={"version": "tiny", "dim": 5})
 
     def validate_gallery(self, _ids):
         pass

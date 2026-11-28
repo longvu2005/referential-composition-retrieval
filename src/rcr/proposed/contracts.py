@@ -1,6 +1,7 @@
 """Checkpoint names and validation selection fields; no model runtime imports."""
 
-ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v5"
+ARCHITECTURE_VERSION = "fafa-aligned-pair-cls-v6"
+POOLED_PERSON_ARCHITECTURE = "fafa-aligned-pair-cls-v5"
 SHARED_BINDING_ARCHITECTURE = "fafa-aligned-pair-cls-v4"
 
 DEFAULT_OWNER_MODE = "raw_logit"

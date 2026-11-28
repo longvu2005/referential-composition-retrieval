@@ -219,7 +219,9 @@ def saved_pipeline(tmp_path, monkeypatch):
     cfg["candidate_ks"] = [1, 2]
     cfg["output"]["dir"] = str(tmp_path / "run")
     cfg["checkpoint"] = str(tmp_path / "checkpoint.pt")
-    model = RCRModel.from_config(cfg["model"], input_dim=8, person_input_dim=8)
+    model = RCRModel.from_config(
+        cfg["model"], input_dim=8, person_input_dim=8, native_input_dim=cache.native.dim
+    )
     text = TextEncoder(TextBackbone(), dim=8)
     checkpoint = _make_checkpoint(
         epoch=2,

@@ -39,6 +39,7 @@ model:
   dropout: 0.1
   identity_dim: 128
   fda_k: 6
+  context_person_tokens: true
   state_dim: 512
   coarse_beta: 0.4
   num_heads: 6
@@ -93,6 +94,7 @@ loss:
   coarse_temperature: 0.1
   context_weight: 1.0
   context_verify_members: true
+  context_recover_members: true
   context_temperature: 0.1
   context_rejection_weight: 0.5
   rejection_loss_mode: hinge

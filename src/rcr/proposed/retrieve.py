@@ -29,6 +29,7 @@ from rcr.proposed.contracts import (
     ARCHITECTURE_VERSION,
     DEFAULT_OWNER_MODE,
     FIXED_FINE_KEYS,
+    POOLED_PERSON_ARCHITECTURE,
     SELECTED_RETRIEVAL_KEYS,
     SHARED_BINDING_ARCHITECTURE,
 )
@@ -130,9 +131,19 @@ def retrieve(
             {**model_cfg["fine_matching"], "owner_mode": diagnostic_owner_mode}
         )
     architecture = checkpoint.get("architecture_version")
-    if architecture not in (ARCHITECTURE_VERSION, SHARED_BINDING_ARCHITECTURE):
+    if architecture not in (
+        ARCHITECTURE_VERSION,
+        POOLED_PERSON_ARCHITECTURE,
+        SHARED_BINDING_ARCHITECTURE,
+    ):
         raise ValueError(
             "checkpoint architecture is incompatible; train in a new output directory"
+        )
+    if architecture != ARCHITECTURE_VERSION and model_cfg.get(
+        "context_person_tokens", False
+    ):
+        raise ValueError(
+            "legacy checkpoint architecture cannot use context person tokens"
         )
     check_clip_config(train_cfg)
     check_clip_config(cfg)
@@ -184,6 +195,10 @@ def retrieve(
             raise ValueError(f"retrieval {key} differs from training")
     if cache.global_dim != checkpoint.get("global_dim"):
         raise ValueError("retrieval CLIP global dimensions differ from training")
+    if model_cfg.get("context_person_tokens", False) and (
+        checkpoint.get("native_input_dim") != cache.native.dim
+    ):
+        raise ValueError("retrieval native token dimensions differ from training")
     if (cache.scene_dim, cache.person_dim) != (
         checkpoint.get("input_dim", dim),
         checkpoint["person_input_dim"],
@@ -210,6 +225,7 @@ def retrieve(
         input_dim=checkpoint.get("input_dim", dim),
         global_dim=checkpoint["global_dim"],
         person_input_dim=checkpoint["person_input_dim"],
+        native_input_dim=checkpoint.get("native_input_dim"),
         max_subjects=max_subjects,
         shared_binding=(
             architecture == SHARED_BINDING_ARCHITECTURE

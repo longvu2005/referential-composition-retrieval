@@ -29,6 +29,11 @@ Visual caches contain label-free features. Train annotation alignment is stored
 separately and used for supervised learning. Completed compatible caches support
 training and retrieval without loading the native FAFA model.
 
+The context token reader reuses the existing FAFA target-token cache; it does
+not change cache formats or require re-extraction. The scene remains the same
+224 by 224 CLIP ViT-B/32 input and 49 patches. Frozen pooled hidden features and
+projected native tokens are separate representations with separate dimensions.
+
 See the [cache guide](detection_cache.md) for construction and reuse.
 
 ## Checkpoint compatibility
@@ -41,6 +46,13 @@ owner mode. Checkpoints without that field use `raw_logit` for retrieval.
 The text checkpoint records the learned projection and any LoRA settings and
 weights. Retrieval restores these from the checkpoint with the pinned CLIP base.
 Checkpoints with frozen CLIP text use the projection alone.
+
+Architecture `fafa-aligned-pair-cls-v6` records `context_person_tokens` and the
+native token input dimension. Retrieval checks that dimension against the cache.
+The model configuration saved in the checkpoint controls this architecture;
+a retrieval YAML cannot enable the token reader on a checkpoint trained without
+it. Pooled-person v5 and shared-binding v4 checkpoints remain usable for
+retrieval with their original computation, but cannot resume v6 training.
 
 Architecture or feature changes may require a fresh training run. Resume requires
 the compatible full training state in `last.pt`; `best.pt` is for inference.

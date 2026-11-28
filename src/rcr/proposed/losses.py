@@ -11,7 +11,7 @@ from rcr.common.tensor_checks import check_tensor, checked
 from rcr.proposed.cache.native import NativeTargetBatch
 from rcr.proposed.cache.store import SceneTargetBatch
 from rcr.proposed.identity import select_identity_observations
-from rcr.proposed.matching import gather_matched
+from rcr.proposed.matching import PersonMatching, gather_matched
 from rcr.proposed.nn.model import RCRModel
 from rcr.proposed.scores import (
     DEFAULT_CONTEXT_WEIGHT,
@@ -33,6 +33,10 @@ FINE_COUNT_FIELDS = (
     "fine_multi_head_query_crops",
     "fine_labeled_target_matches",
     "fine_multi_head_target_matches",
+    "fine_recovered_pairs",
+    "fine_recovered_queries",
+    "fine_effective_pairs",
+    "fine_effective_queries",
 )
 
 
@@ -44,6 +48,7 @@ def loss_settings(config: dict) -> dict:
         "coarse_weight": 1.0,
         "context_weight": 1.0,
         "context_verify_members": False,
+        "context_recover_members": False,
         "context_rejection_weight": 0.0,
         "rejection_loss_mode": "softplus",
         "context_swap_weight": 0.0,
@@ -57,9 +62,9 @@ def loss_settings(config: dict) -> dict:
         raise ValueError(f"unknown loss settings: {', '.join(sorted(unknown))}")
     settings = {**defaults, **config}
     for key, value in settings.items():
-        if key == "context_verify_members":
+        if key in ("context_verify_members", "context_recover_members"):
             if type(value) is not bool:
-                raise ValueError("loss.context_verify_members must be a boolean")
+                raise ValueError(f"loss.{key} must be a boolean")
             continue
         if key == "rejection_loss_mode":
             if type(value) is not str or value not in ("softplus", "hinge"):
@@ -74,6 +79,10 @@ def loss_settings(config: dict) -> dict:
                 f"invalid loss.{key}: weights must be nonnegative "
                 "and temperatures positive"
             )
+    if settings["context_recover_members"] and not settings["context_verify_members"]:
+        raise ValueError(
+            "loss config: context_recover_members requires context_verify_members"
+        )
     if not any(
         value
         for key, value in settings.items()
@@ -170,6 +179,28 @@ def retrieval_loss(
 
 
 @checked
+def _routed_retrieval_loss(scores, pairs, recovered_scores, recovered_pairs):
+    """Average disjoint prediction/recovery pairs once within each query.
+
+    A candidate may occur under both correspondences. Its score stays with its
+    route; mixing candidate-level scores would change otherwise valid pairs.
+    """
+    check_tensor(~(pairs & recovered_pairs).any(), "context routes must be disjoint")
+    sums = []
+    for values, mask in ((scores, pairs), (recovered_scores, recovered_pairs)):
+        valid = mask.any(1) | mask.any(2)
+        values = values.float().masked_fill(~valid, 0)
+        check_tensor(
+            torch.isfinite(values).all(), "ranking loss requires finite eligible scores"
+        )
+        difference = values[:, None, :] - values[:, :, None]
+        sums.append(F.softplus(difference).masked_fill(~mask, 0).sum((1, 2)))
+    counts = pairs.sum((1, 2)) + recovered_pairs.sum((1, 2))
+    per_query = (sums[0] + sums[1]) / counts.clamp_min(1)
+    return per_query.sum() / (counts > 0).sum().clamp_min(1)
+
+
+@checked
 def rejection_hinge_loss(
     base_scores: Tensor,
     context_contribution: Tensor,
@@ -211,8 +242,13 @@ def _context_scores(
     target_identity=None,
     positions_cpu=None,
     host_matching=None,
+    assignments=None,
 ):
-    """Score eligible pairs; transfer native features only for the current chunk."""
+    """Score candidate rows on predicted or train-verified correspondences.
+
+    The fixed-assignment route uses the supplied query membership for every
+    score component. It is called only by the train-only recovery objective.
+    """
     queries, candidates = batch["positive_mask"].shape
     pairs = queries * candidates
     names = [
@@ -251,8 +287,12 @@ def _context_scores(
     identity = (
         None if target_identity is None else target_identity.detach().flatten(0, 1)
     )
+    fixed_assignments = (
+        None if assignments is None else assignments.detach().flatten(0, 1)
+    )
+    fixed_cpu = None if assignments is None else fixed_assignments.cpu()
 
-    def score_pairs(indices, scene, persons, boxes, mask, assignment):
+    def score_pairs(indices, scene, persons, boxes, mask, assignment, tokens):
         selected = query.index_select(indices)
         padding = ~mask[..., None]
         semantic = model.encode_semantic(persons.masked_fill(padding, 0))
@@ -263,9 +303,10 @@ def _context_scores(
             boxes.masked_fill(padding, 0),
             assignment,
             patch_hw,
+            **({"aligned_tokens": tokens} if tokens is not None else {}),
         )
 
-    context, coverage, binding, assignments = [], [], [], []
+    context, coverage, binding, assignment_chunks = [], [], [], []
     for start in range(0, len(positions_cpu), batch_size):
         cpu_rows = positions_cpu[start : start + batch_size]
         rows = positions[start : start + batch_size]
@@ -287,18 +328,37 @@ def _context_scores(
         indices = rows // candidates
         selected = query.index_select(indices)
         with torch.no_grad():
-            projected = (
-                model.encode_identity(persons.masked_fill(~mask[..., None], 0))
-                if identity is None
-                else identity[:, :width].index_select(0, rows)
-            )
-            matching = model.match_target(
-                selected,
-                projected,
-                boxes,
-                mask,
-                **({"capture_context": True} if host_matching is not None else {}),
-            )
+            if fixed_assignments is None:
+                projected = (
+                    model.encode_identity(persons.masked_fill(~mask[..., None], 0))
+                    if identity is None
+                    else identity[:, :width].index_select(0, rows)
+                )
+                matching = model.match_target(
+                    selected,
+                    projected,
+                    boxes,
+                    mask,
+                    **({"capture_context": True} if host_matching is not None else {}),
+                )
+            else:
+                assigned = fixed_assignments.index_select(0, rows)
+                member = selected.membership.float().masked_fill(
+                    ~selected.subjects[..., None], 0
+                )
+                weights = member / member.sum(-1, keepdim=True).clamp_min(1e-6)
+                subject_coverage = (weights * (assigned >= 0)[:, None]).sum(-1)
+                total_coverage = subject_coverage.sum(-1) / selected.subjects.sum(
+                    -1
+                ).clamp_min(1)
+                matching = PersonMatching(
+                    assigned,
+                    member,
+                    selected.subjects,
+                    subject_coverage,
+                    total_coverage,
+                    fixed_cpu.index_select(0, cpu_rows),
+                )
         if host_matching is not None:
             if not host_matching:
                 host_matching["assignments"] = torch.full(
@@ -317,17 +377,28 @@ def _context_scores(
                 host_matching["selected"].index_copy_(
                     0, cpu_rows // candidates, selected_cpu
                 )
+        tokens = (
+            model.load_context_tokens(
+                native_chunk,
+                matching.indices,
+                device,
+                indices_cpu=matching.indices_cpu,
+            )
+            if model.context_person_tokens
+            else None
+        )
         offset = fafa_binding_scores(
             selected.fafa,
             native_chunk
-            if isinstance(native_chunk, NativeTargetBatch)
+            if isinstance(native_chunk, NativeTargetBatch) or tokens is not None
             else native_chunk.to(device, non_blocking=True),
             matching=matching,
             k=model.fda_k,
             missing_penalty=model.fine_matching["missing_penalty"],
             pooling=pooling,
+            **({"aligned_targets": tokens} if tokens is not None else {}),
         )
-        inputs = (indices, scene, persons, boxes, mask, matching.indices)
+        inputs = (indices, scene, persons, boxes, mask, matching.indices, tokens)
         if len(positions_cpu) > batch_size and torch.is_grad_enabled():
             values = checkpoint(score_pairs, *inputs, use_reentrant=False)
         else:
@@ -335,7 +406,7 @@ def _context_scores(
         context.append(values)
         coverage.append(matching.coverage)
         binding.append(offset)
-        assignments.append(matching.indices)
+        assignment_chunks.append(matching.indices)
     shape = (queries, candidates)
     if not context:
         zero = query.reference.sum() * 0
@@ -355,7 +426,7 @@ def _context_scores(
         scatter(context),
         scatter(coverage),
         scatter(binding),
-        scatter(assignments, -1),
+        scatter(assignment_chunks, -1),
     )
 
 
@@ -422,6 +493,17 @@ def _swap_loss(model, query, batch, patch_hw, context, assignments, host_matchin
         scene = scene.load(positions).to(persons.device, non_blocking=True).float()
     else:
         scene = scene[rows, cols]
+    native = batch["fafa_targets"]
+    if model.context_person_tokens:
+        flat_rows = rows * batch["positive_mask"].shape[1] + cols
+        native = (
+            native.select(flat_rows.detach().cpu(), persons.shape[1])
+            if isinstance(native, NativeTargetBatch)
+            else native[rows.to(native.device), cols.to(native.device)]
+        )
+        tokens = model.load_context_tokens(native, indices, device)
+    else:
+        tokens = None
     wrong = model.score_aligned_context(
         alternative,
         scene,
@@ -429,6 +511,7 @@ def _swap_loss(model, query, batch, patch_hw, context, assignments, host_matchin
         boxes.masked_fill(padding, 0),
         indices,
         patch_hw,
+        **({"aligned_tokens": tokens} if tokens is not None else {}),
     )
     return F.softplus(wrong - context[rows, cols]).mean(), valid.sum() / len(context)
 
@@ -491,10 +574,82 @@ def _verified_context_pairs(query, batch, assignments, valid, pairs):
         "fine_multi_head_target_matches": (
             labeled_target & assigned[..., 1].bool()
         ).sum((1, 2)),
+        "fine_recovered_pairs": torch.zeros_like(verified_pairs.sum((1, 2))),
+        "fine_recovered_queries": torch.zeros_like(verified_pairs.any((1, 2))),
+        "fine_effective_pairs": verified_pairs.sum((1, 2)),
+        "fine_effective_queries": verified_pairs.any((1, 2)),
     }
     return verified_pairs, torch.stack(
         [diagnostics[key] for key in FINE_COUNT_FIELDS], dim=1
     )
+
+
+@torch.no_grad()
+def _recovered_context_members(query, batch):
+    """Recover complete train correspondences from conservative crop labels.
+
+    The reference must contain every annotated member exactly once, with one
+    Subject owner. Each target must contain one unambiguous single-head crop for
+    each such identity. An absent, padded, unknown, multi-head or duplicate-ID
+    observation never becomes a teacher match. No box is added or moved.
+    """
+    required = {
+        "query_identity_labels",
+        "query_person_mask",
+        "grounding_targets",
+        "context_required_member_counts",
+        "context_query_multi_head_crops",
+        "context_target_identity_labels",
+        "context_target_multi_head_crops",
+        "target_mask",
+    }
+    if missing := required - batch.keys():
+        raise ValueError(
+            "context recovery requires complete member annotations: "
+            + ", ".join(sorted(missing))
+        )
+    device = query.membership.device
+    labels = batch["query_identity_labels"].to(device)
+    target_labels = batch["context_target_identity_labels"].to(device)
+    subjects = query.subjects.bool()
+    safe = (
+        batch["query_person_mask"].to(device).bool()
+        & (labels >= 0)
+        & ~batch["context_query_multi_head_crops"].to(device).bool()
+    )
+    # A duplicate observed ID or overlapping annotated Subject cannot supply a
+    # unique physical member. Reject it rather than pick an arbitrary crop/role.
+    same_id = labels[:, :, None] == labels[:, None, :]
+    unique = (same_id & safe[:, None]).sum(-1) == 1
+    annotated = batch["grounding_targets"].to(device).bool() & subjects[..., None]
+    owners = annotated & (annotated.sum(1) == 1)[:, None]
+    members = owners & (safe & unique)[:, None]
+    counts = batch["context_required_member_counts"].to(device)
+    complete_subjects = ((members.sum(-1) == counts) & (counts > 0)) | ~subjects
+    complete_query = complete_subjects.all(-1) & subjects.any(-1)
+    members &= complete_query[:, None, None]
+    selected = members.any(1)
+    target_safe = (
+        batch["target_mask"].to(device).bool()
+        & (target_labels >= 0)
+        & ~batch["context_target_multi_head_crops"].to(device).bool()
+    )
+    matches = (
+        (labels[:, None, :, None] == target_labels[:, :, None])
+        & target_safe[:, :, None]
+        & selected[:, None, :, None]
+    )
+    complete = complete_query[:, None] & (
+        (matches.sum(-1) == 1) | ~selected[:, None]
+    ).all(-1)
+    shape = (*target_labels.shape[:2], labels.shape[1])
+    indices = (
+        matches.long().argmax(-1)
+        if target_labels.shape[-1]
+        else torch.full(shape, -1, device=device, dtype=torch.long)
+    )
+    indices.masked_fill_(~(complete[..., None] & selected[:, None]), -1)
+    return members.to(query.membership.dtype), indices, complete
 
 
 def _fda_pair_error(binding: Tensor, pairs: Tensor) -> Tensor:
@@ -524,13 +679,22 @@ def compute_loss(
     context_rejection_weight: float = 0.0,
     rejection_loss_mode: str = "softplus",
     context_verify_members: bool = False,
+    context_recover_members: bool = False,
     context_swap_weight: float = 0.0,
     context_temperature: float = 0.1,
     context_score_weight: float = DEFAULT_CONTEXT_WEIGHT,
     coverage_score_weight: float = DEFAULT_COVERAGE_WEIGHT,
     context_batch_size: int = 64,
 ):
-    """Use only train labels in objectives; selection/assignment stay label-free."""
+    """Train on predicted correspondences and optional verified recovery pairs.
+
+    Grounding, identity objectives, rejection and inference keep their predicted
+    route. Train-only labels may recover otherwise unavailable semantic pairs.
+    """
+    if context_recover_members and not context_verify_members:
+        raise ValueError(
+            "loss config: context_recover_members requires context_verify_members"
+        )
     if (
         context_weight
         and not {"fafa_query", "fafa_targets", "fafa_pooling"} <= batch.keys()
@@ -749,22 +913,107 @@ def compute_loss(
             if context_verify_members:
                 pairs = verified_pairs
                 pair_options["pair_mask"] = pairs
-        if "semantic_context_mask" in batch:
-            semantic_context_used = (
-                pairs.any(1) & batch["semantic_context_mask"]
-            ).sum()
         # Train H against the binding and coverage margin of each verified pair.
         with torch.no_grad():
             base = binding_scale.float() * binding.float() + scores["coverage_bonus"]
+        semantic_scores = (base + scores["context_contribution"]) / context_temperature
         semantic = retrieval_loss(
-            (base + scores["context_contribution"]) / context_temperature,
+            semantic_scores,
             positive,
             valid,
             **pair_options,
         )
-        context = semantic
         fda_error = _fda_pair_error(binding, pairs)
-        context_active = pairs.any((1, 2)).float().mean()
+        effective_pairs = pairs
+        if context_recover_members:
+            members, recovered_assignments, complete = _recovered_context_members(
+                query, batch
+            )
+            # Prediction coverage must not gate recovery: absent selected roles
+            # and all-null predicted matching are precisely the lost supervision.
+            recovered_pairs = (
+                _ranking_pairs(positive.bool(), identity_positive.bool())
+                & ~pairs
+                & complete[:, :, None]
+                & complete[:, None, :]
+            )
+            needed = recovered_pairs.any(1) | recovered_pairs.any(2)
+            recovered_rows = needed.detach().cpu().flatten().nonzero().flatten()
+            if len(recovered_rows):
+                recovered_query = model.reassign_query(
+                    query,
+                    batch["query_persons"],
+                    batch["query_person_mask"],
+                    members,
+                    **{
+                        key: batch.get(key)
+                        for key in (
+                            "change",
+                            "subject_pos",
+                            "change_mask",
+                            "subject_token_mask",
+                            "subject_ids",
+                        )
+                    },
+                )
+                recovered_h, recovered_c, recovered_b, _ = _context_scores(
+                    model,
+                    recovered_query,
+                    batch,
+                    patch_hw,
+                    context_batch_size,
+                    eligible=needed,
+                    positions_cpu=recovered_rows,
+                    assignments=recovered_assignments,
+                )
+                recovered_scores = linear_score_components(
+                    recovered_b,
+                    recovered_h,
+                    recovered_c,
+                    binding_scale,
+                    context_score_weight,
+                    coverage_score_weight,
+                )
+                with torch.no_grad():
+                    recovered_base = (
+                        binding_scale.float() * recovered_b.float()
+                        + recovered_scores["coverage_bonus"]
+                    )
+                semantic = _routed_retrieval_loss(
+                    semantic_scores,
+                    pairs,
+                    (recovered_base + recovered_scores["context_contribution"])
+                    / context_temperature,
+                    recovered_pairs,
+                )
+                wrong = ((binding[:, None, :] >= binding[:, :, None]) & pairs).sum()
+                recovered_wrong = (
+                    (recovered_b[:, None, :] >= recovered_b[:, :, None])
+                    & recovered_pairs
+                ).sum()
+                fda_error = (
+                    (wrong + recovered_wrong)
+                    / (pairs.sum() + recovered_pairs.sum()).clamp_min(1)
+                ).detach()
+            effective_pairs = pairs | recovered_pairs
+            for name, values in (
+                ("fine_recovered_pairs", recovered_pairs.sum((1, 2))),
+                ("fine_recovered_queries", recovered_pairs.any((1, 2))),
+            ):
+                fine_counts[:, FINE_COUNT_FIELDS.index(name)] = values
+        if fine_counts is not None:
+            fine_counts[:, FINE_COUNT_FIELDS.index("fine_effective_pairs")] = (
+                effective_pairs.sum((1, 2))
+            )
+            fine_counts[:, FINE_COUNT_FIELDS.index("fine_effective_queries")] = (
+                effective_pairs.any((1, 2))
+            )
+        if "semantic_context_mask" in batch:
+            semantic_context_used = (
+                effective_pairs.any(1) & batch["semantic_context_mask"]
+            ).sum()
+        context = semantic
+        context_active = effective_pairs.any((1, 2)).float().mean()
         if context_rejection_weight:
             hard = batch["hard_identity_negative_mask"].bool()
             check_tensor(

@@ -55,16 +55,16 @@ warmup and joint training, and at the final epoch. Each validation calibrates
 the configured scoring coefficients and can select `best.pt` under the
 [benchmark protocol](benchmark_protocol.md).
 
-The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v5`.
+The aligned person/pair CLS architecture is `fafa-aligned-pair-cls-v6`.
 Start a fresh run to use this schedule. Grounding and context
 reasoning share one binding for `train.context_warmup_epochs` epochs, including
 any validation reasoning. Before mining or training in the following epoch,
 reasoning receives a copy of the warmed parameters and buffers. Grounding keeps
 its AdamW state, while reasoning starts with fresh state. Zero warmup epochs
-split the bindings before epoch 1. A v4 checkpoint supports retrieval using
-its shared binding weights.
-Resuming a v4 training run requires its original implementation and optimizer
-state. Both architectures use the same frozen feature caches.
+split the bindings before epoch 1. V5 pooled-person checkpoints and v4
+shared-binding checkpoints still support retrieval. Resuming an older training
+run requires its original implementation and optimizer state. All three
+architectures use the same frozen feature caches.
 
 With the supplied configuration, epochs 1–4 train the base and CLIP text
 LoRA with context loss disabled. Validation runs at epochs 2 and 4. Epochs
@@ -76,7 +76,18 @@ prefix and visual caches can be reused.
 The semantic loss ranks verified same-ID pairs by their fine-score margin,
 with binding and coverage detached. Training uses `a_train=0.04`,
 `b_train=0.10` and `context_temperature=0.10`. The sampler uses two reserved
-base negatives, a pool of 128 and zero raw-context replacements.
+base negatives, a pool of 128 and up to two raw-context replacements.
+
+The supplied configuration enables `model.context_person_tokens` and
+`loss.context_recover_members`. The first adds a zero-initialized residual
+read of the existing native FAFA target tokens, conditioned on each composed
+Subject. It leaves the scene at 49 patches and keeps identity matching and
+native FDA unchanged. The second restores semantic comparisons only when
+complete, unambiguous train detections support every required member in the
+reference and both target images. It requires `context_verify_members=true`.
+Each restored comparison recomputes all three fine components with its verified
+correspondence. Rejection, retrieval and mining use predicted correspondence.
+No new cache extraction is needed, but a fresh training run is required.
 
 At each validation the first grid entry, `(a,b,eta)=(0.045,0.02375,0.10625)`,
 is the reference measured on the previous pool-128 checkpoint at epoch 10.
@@ -90,6 +101,44 @@ preserving the baseline objective. The mode changes only the rejection term;
 candidate eligibility, quotas, mining schedule and calibration follow the same
 process in both modes.
 
+### Context token and correspondence ablation
+
+Use the same dataset snapshot, seed, caches, runtime, sampling schedule and
+validation calibration grid for all arms. These options change the model and
+training loss; they are not retrieval-time score toggles.
+
+| Arm | `model.context_person_tokens` | `loss.context_recover_members` |
+| --- | --- | --- |
+| Existing pooled-person control | `false` | `false` |
+| Conditioned person tokens | `true` | `false` |
+| Verified correspondence recovery | `false` | `true` |
+| Both changes (supplied config) | `true` | `true` |
+
+For example, run the control with:
+
+```bash
+.venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
+  --set model.context_person_tokens=false loss.context_recover_members=false \
+  output.dir=runs/proposed-control
+```
+
+The method and W&B name remain `proposed`; choose a fresh output directory for
+each arm. The token reader adds two projection matrices. Its output starts at
+zero; subsequent training can change context scores. Recovery adds a second
+context pass for candidates in recovered pairs, so report measured training
+time and peak memory alongside retrieval quality.
+
+`train_fine_active_fraction` retains the predicted-route verification measure.
+`train_fine_recovered_pairs` and `train_fine_recovered_queries` count additional
+comparisons and query rows using recovery. `train_fine_effective_pairs` and
+`train_fine_effective_fraction` report the union used by semantic training.
+Recovered and effective fractions both divide by all sampled query rows;
+a recovered query may already have predicted-route pairs. Counts include
+repeated sampling draws. The `_dual` and `_relational` breakdowns and W&B
+`epoch/fine_*` fields use the same definitions. Recovery can add pairs even
+when predicted coverage is zero, so the effective count can exceed the existing
+`fine_unfiltered_pairs`, whose definition requires positive predicted coverage.
+
 ### Subject member verification ablation
 
 Run the two arms with the same seed, LoRA settings, warmup and mining schedule.
@@ -98,9 +147,11 @@ rejection objective use the same settings in both arms.
 
 ```bash
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set loss.context_verify_members=false output.dir=runs/proposed-mask-control
+  --set loss.context_verify_members=false loss.context_recover_members=false \
+  output.dir=runs/proposed-mask-control
 .venv-proposed/bin/python tools/run.py train --config configs/proposed.yaml \
-  --set loss.context_verify_members=true output.dir=runs/proposed-mask-verified
+  --set loss.context_verify_members=true loss.context_recover_members=false \
+  output.dir=runs/proposed-mask-verified
 ```
 
 Joint epochs report `train_fine_full_pairs`, `train_fine_partial_pairs` and
@@ -191,7 +242,7 @@ up to two new images from the first four in the H ranking. Configurations that
 omit `semantic_top_quota` sample the entire hard window randomly.
 `train_candidate_semantic_context` counts actual replacements.
 `train_candidate_semantic_context_used` counts replacements appearing in at
-least one semantic loss pair after the configured verification. The counters
+least one semantic loss pair after verification and any enabled recovery. The counters
 in `history.jsonl` are epoch totals.
 Use a fresh output directory for this training experiment. Mid-epoch resume
 restores hard pools, including the rejection context

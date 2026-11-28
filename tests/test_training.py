@@ -2058,7 +2058,15 @@ def test_verified_members_filter_only_semantic_loss_and_log_pair_counts(
 
     assert before["semantic_context_used"].item() == 6
     assert after["semantic_context_used"].item() == 2
-    torch.testing.assert_close(before["fine_pair_counts"], after["fine_pair_counts"])
+    original_fields = [
+        index
+        for index, name in enumerate(losses.FINE_COUNT_FIELDS)
+        if not name.startswith("fine_effective_")
+    ]
+    torch.testing.assert_close(
+        before["fine_pair_counts"][:, original_fields],
+        after["fine_pair_counts"][:, original_fields],
+    )
     totals = {}
     training._record_fine_counts(
         totals,
@@ -2075,6 +2083,334 @@ def test_verified_members_filter_only_semantic_loss_and_log_pair_counts(
     assert reported["fine_full_pairs_dual"] == reported["fine_partial_pairs_dual"] == 1
     assert reported["fine_multi_head_query_crops_dual"] == 1
     assert reported["fine_multi_head_target_matches_dual"] == 1
+
+
+def _recovery_annotations():
+    roles = torch.tensor([[[True, True, False], [False, False, True]]])
+    query = SimpleNamespace(
+        membership=roles.flip(1).float(), subjects=torch.ones(1, 2, dtype=torch.bool)
+    )
+    batch = {
+        "query_identity_labels": torch.tensor([[10, 20, 30]]),
+        "query_person_mask": torch.ones(1, 3, dtype=torch.bool),
+        "grounding_targets": roles,
+        "context_required_member_counts": torch.tensor([[2, 1]]),
+        "context_query_multi_head_crops": torch.zeros(1, 3, dtype=torch.bool),
+        "context_target_identity_labels": torch.tensor([[[30, 10, 20]] * 2]),
+        "context_target_multi_head_crops": torch.zeros(1, 2, 3, dtype=torch.bool),
+        "target_mask": torch.ones(1, 2, 3, dtype=torch.bool),
+    }
+    return query, batch
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        "query_unknown",
+        "query_duplicate",
+        "query_multi_head",
+        "query_overlap",
+        "query_padded",
+        "group_incomplete",
+        "target_duplicate",
+        "target_multi_head",
+        "target_unknown",
+        "target_padded",
+    ],
+)
+def test_context_recovery_requires_unique_complete_group_correspondences(invalid):
+    query, batch = _recovery_annotations()
+    if invalid == "query_unknown":
+        batch["query_identity_labels"][0, 1] = -1
+    elif invalid == "query_duplicate":
+        batch["query_identity_labels"][0, 1] = 10
+    elif invalid == "query_multi_head":
+        batch["context_query_multi_head_crops"][0, 1] = True
+    elif invalid == "query_overlap":
+        batch["grounding_targets"][0, 1, 1] = True
+    elif invalid == "query_padded":
+        batch["query_person_mask"][0, 1] = False
+    elif invalid == "group_incomplete":
+        batch["context_required_member_counts"][0, 0] = 3
+    elif invalid == "target_duplicate":
+        batch["context_target_identity_labels"][0, 0, 2] = 10
+    elif invalid == "target_multi_head":
+        batch["context_target_multi_head_crops"][0, 0, 1] = True
+    elif invalid == "target_unknown":
+        batch["context_target_identity_labels"][0, 0, 1] = -1
+    elif invalid == "target_padded":
+        batch["target_mask"][0, 0, 1] = False
+    membership, indices, complete = losses._recovered_context_members(query, batch)
+    if invalid is None:
+        torch.testing.assert_close(membership.bool(), batch["grounding_targets"])
+        assert complete.tolist() == [[True, True]]
+        assert indices.tolist() == [[[1, 2, 0], [1, 2, 0]]]
+    elif invalid.startswith("target"):
+        assert complete.tolist() == [[False, True]]
+        assert indices.tolist() == [[[-1, -1, -1], [1, 2, 0]]]
+    else:
+        assert not complete.any() and not membership.any()
+        assert (indices == -1).all()
+
+
+def test_context_routes_average_pairs_within_queries_without_cross_route_scores():
+    predicted = torch.tensor([[1.0, 2.0, 9.0], [4.0, 2.0, 3.0]], requires_grad=True)
+    recovered = torch.tensor([[3.0, 99.0, 1.0], [0.0, 2.0, 3.0]], requires_grad=True)
+    pairs = torch.zeros(2, 3, 3, dtype=torch.bool)
+    pairs[0, 0, 1] = True
+    pairs[1, 0, 1:] = True
+    recovered_pairs = torch.zeros_like(pairs)
+    recovered_pairs[0, 0, 2] = True
+    value = losses._routed_retrieval_loss(predicted, pairs, recovered, recovered_pairs)
+    expected = (
+        torch.nn.functional.softplus(torch.tensor([1.0, -2.0])).mean()
+        + torch.nn.functional.softplus(torch.tensor([-2.0, -1.0])).mean()
+    ) / 2
+    torch.testing.assert_close(value, expected)
+    value.backward()
+    assert predicted.grad[0, 2] == 0
+    assert recovered.grad[0, 1] == 0 and not recovered.grad[1].any()
+    with pytest.raises(ValueError, match="disjoint"):
+        losses._routed_retrieval_loss(predicted, pairs, recovered, pairs)
+
+
+def test_context_recovery_handles_empty_detections_and_rejects_missing_safety_labels():
+    query, batch = _recovery_annotations()
+    for name in (
+        "context_target_identity_labels",
+        "context_target_multi_head_crops",
+        "target_mask",
+    ):
+        batch[name] = batch[name][..., :0]
+    _, indices, complete = losses._recovered_context_members(query, batch)
+    assert not complete.any() and (indices == -1).all()
+    del batch["context_query_multi_head_crops"]
+    with pytest.raises(ValueError, match="context_query_multi_head_crops"):
+        losses._recovered_context_members(query, batch)
+
+
+def _two_subject_context_batch(batch):
+    batch = dict(batch)
+    persons = torch.randn(1, 2, 8)
+    boxes = torch.tensor([[[0.0, 0, 0.4, 1], [0.6, 0, 1, 1]]])
+    batch.update(
+        query_persons=persons,
+        query_boxes=boxes,
+        query_person_mask=torch.ones(1, 2, dtype=torch.bool),
+        query_identity_labels=torch.tensor([[0, 1]]),
+        grounding_targets=torch.eye(2).bool()[None],
+        selections=torch.randn(1, 2, 3, 8),
+        selection_mask=torch.ones(1, 2, 3, dtype=torch.bool),
+        change=torch.randn(1, 5, 8),
+        change_mask=torch.ones(1, 5, dtype=torch.bool),
+        subject_pos=torch.tensor([[1, 3]]),
+        subject_token_mask=torch.tensor(
+            [[[False, True, False, False, False], [False, False, False, True, False]]]
+        ),
+        subject_ids=torch.tensor([[1, 2]]),
+        subject_mask=torch.ones(1, 2, dtype=torch.bool),
+        target_persons=torch.stack((persons[0], persons[0].flip(0), persons[0]), 0)[
+            None
+        ].requires_grad_(),
+        target_boxes=boxes[:, None].expand(-1, 3, -1, -1),
+        target_mask=torch.ones(1, 3, 2, dtype=torch.bool),
+        context_required_member_counts=torch.tensor([[1, 1]]),
+        context_target_identity_labels=torch.tensor([[[0, 1], [1, 0], [-1, -1]]]),
+        context_query_multi_head_crops=torch.zeros(1, 2, dtype=torch.bool),
+        context_target_multi_head_crops=torch.zeros(1, 3, 2, dtype=torch.bool),
+        positive_mask=torch.tensor([[True, False, False]]),
+        identity_positive_mask=torch.tensor([[True, True, False]]),
+        hard_identity_negative_mask=torch.tensor([[False, False, True]]),
+        fafa_query=torch.randn(1, 2, 2, 5),
+        fafa_targets=torch.randn(1, 3, 2, 3, 5),
+    )
+    return batch
+
+
+@pytest.mark.parametrize("failure", ["ownership", "matching"])
+@pytest.mark.parametrize("person_tokens", [False, True])
+def test_context_recovery_rebuilds_reference_and_learns_when_prediction_is_wrong(
+    objective_batch, monkeypatch, failure, person_tokens
+):
+    model, original = objective_batch
+    if person_tokens:
+        model = training.RCRModel(
+            dim=8,
+            identity_dim=6,
+            num_heads=2,
+            context_person_tokens=True,
+            native_input_dim=5,
+            fine_matching={"identity_threshold": -1.0},
+        ).eval()
+    batch = _two_subject_context_batch(original)
+    logits = torch.tensor([[[20.0, -20.0], [-20.0, 20.0]]])
+    if failure == "ownership":
+        logits = logits.flip(1)
+    else:
+        model.fine_matching["identity_threshold"] = 1.0
+        batch["target_persons"] = torch.randn_like(
+            batch["target_persons"]
+        ).requires_grad_()
+    monkeypatch.setattr(model.grounding, "forward", lambda *args, **kwargs: logits)
+    settings = {
+        **_only_loss("context"),
+        "context_verify_members": True,
+        "context_rejection_weight": 0.5,
+        "context_batch_size": 1,
+    }
+    query = _encode(model, batch)
+    predicted = _context_scores(model, query, batch, (2, 2), 1)
+    _, before = compute_loss(model, batch, (2, 2), **settings)
+    total, after = compute_loss(
+        model, batch, (2, 2), **{**settings, "context_recover_members": True}
+    )
+    assert before["context_semantic"] == 0 and before["context_active_fraction"] == 0
+    assert after["context_semantic"] > 0 and after["context_active_fraction"] == 1
+    torch.testing.assert_close(after["context_rejection"], before["context_rejection"])
+    counts = dict(
+        zip(losses.FINE_COUNT_FIELDS, after["fine_pair_counts"][0], strict=True)
+    )
+    assert counts["fine_recovered_pairs"] == counts["fine_effective_pairs"] == 1
+    assert counts["fine_active_queries"] == 0
+
+    # Verify the objective against a complete reassignment of both endpoints,
+    # including FDA and coverage; predicted base margins are not reused.
+    recovered = model.reassign_query(
+        query,
+        batch["query_persons"],
+        batch["query_person_mask"],
+        batch["grounding_targets"].float(),
+        **{
+            key: batch[key]
+            for key in (
+                "change",
+                "subject_pos",
+                "change_mask",
+                "subject_token_mask",
+                "subject_ids",
+            )
+        },
+    )
+    if failure == "ownership":
+        assert not torch.equal(recovered.reference, query.reference)
+    assignments = torch.tensor([[[0, 1], [1, 0], [-1, -1]]])
+    context, coverage, binding, _ = _context_scores(
+        model,
+        recovered,
+        batch,
+        (2, 2),
+        1,
+        eligible=batch["identity_positive_mask"],
+        assignments=assignments,
+    )
+    expected_scores = model.binding_scale * binding + 0.04 * coverage + 0.1 * context
+    expected = retrieval_loss(
+        expected_scores / 0.1,
+        batch["positive_mask"],
+        batch["identity_positive_mask"],
+    )
+    torch.testing.assert_close(after["context_semantic"], expected)
+    total.backward()
+    assert _has_gradient(model.reasoner) and _has_gradient(model.reasoning_binding)
+    if person_tokens:
+        assert model.context_token_output.weight.grad.abs().sum() > 0
+    assert batch["target_persons"].grad[0, :2].abs().sum() > 0
+    after_prediction = _context_scores(model, _encode(model, batch), batch, (2, 2), 1)
+    for first, second in zip(predicted, after_prediction, strict=True):
+        torch.testing.assert_close(first, second)
+
+
+def test_recovered_person_token_context_has_finite_checkpointed_cpu_amp_gradients(
+    objective_batch, monkeypatch
+):
+    _, original = objective_batch
+    model = training.RCRModel(
+        dim=8,
+        identity_dim=6,
+        num_heads=2,
+        context_person_tokens=True,
+        native_input_dim=5,
+        fine_matching={"identity_threshold": 1.0},
+    ).eval()
+    batch = _two_subject_context_batch(original)
+    monkeypatch.setattr(
+        model.grounding,
+        "forward",
+        lambda *args, **kwargs: torch.tensor([[[-20.0, 20.0], [20.0, -20.0]]]),
+    )
+    settings = {
+        **_only_loss("context"),
+        "context_verify_members": True,
+        "context_recover_members": True,
+        "context_batch_size": 1,
+    }
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        value, parts = compute_loss(model, batch, (2, 2), **settings)
+    assert torch.isfinite(value) and value > 0
+    assert parts["context_active_fraction"] == 1
+    value.backward()
+    assert _has_gradient(model.reasoner)
+    assert model.context_token_output.weight.grad.abs().sum() > 0
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in model.parameters()
+    )
+
+
+def test_context_recovery_adds_only_missing_pairs_and_keeps_each_route_gradient(
+    objective_batch, monkeypatch
+):
+    model, original = objective_batch
+    batch = _two_subject_context_batch(original)
+    batch["target_persons"] = batch["target_persons"].detach().clone()
+    batch["target_persons"][:, 2] = batch["target_persons"][:, 1]
+    batch["target_persons"].requires_grad_()
+    batch["context_target_identity_labels"][:, 2] = torch.tensor([0, 1])
+    batch["identity_positive_mask"].fill_(True)
+    batch["hard_identity_negative_mask"].fill_(False)
+    monkeypatch.setattr(
+        model.grounding,
+        "forward",
+        lambda *args, **kwargs: torch.tensor([[[20.0, -20.0], [-20.0, 20.0]]]),
+    )
+    routes = []
+    routed_loss = losses._routed_retrieval_loss
+
+    def observe(scores, pairs, recovered_scores, recovered_pairs):
+        scores.retain_grad()
+        recovered_scores.retain_grad()
+        routes.append((scores, pairs, recovered_scores, recovered_pairs))
+        return routed_loss(scores, pairs, recovered_scores, recovered_pairs)
+
+    monkeypatch.setattr(losses, "_routed_retrieval_loss", observe)
+    value, parts = compute_loss(
+        model,
+        batch,
+        (2, 2),
+        **{
+            **_only_loss("context"),
+            "context_verify_members": True,
+            "context_recover_members": True,
+            "context_batch_size": 1,
+        },
+    )
+    assert len(routes) == 1
+    scores, pairs, recovered_scores, recovered_pairs = routes[0]
+    assert pairs.nonzero().tolist() == [[0, 0, 1]]
+    assert recovered_pairs.nonzero().tolist() == [[0, 0, 2]]
+    expected = torch.nn.functional.softplus(
+        torch.stack(
+            (
+                scores[0, 1] - scores[0, 0],
+                recovered_scores[0, 2] - recovered_scores[0, 0],
+            )
+        )
+    ).mean()
+    torch.testing.assert_close(parts["context_semantic"], expected)
+    value.backward()
+    assert scores.grad[0, 1] > 0 and scores.grad[0, 2] == 0
+    assert recovered_scores.grad[0, 1] == 0 and recovered_scores.grad[0, 2] > 0
 
 
 @pytest.mark.parametrize("rejection_loss_mode", ["softplus", "hinge"])
@@ -2844,6 +3180,8 @@ def test_incompatible_resume_leaves_run_untouched(
         ("train.sampling.rejection_mining_context_weight", 0.006),
         ("loss.rejection_loss_mode", "softplus"),
         ("loss.context_verify_members", False),
+        ("loss.context_recover_members", False),
+        ("model.context_person_tokens", False),
         ("model.fine_matching.owner_mode", "raw_logit"),
     ],
 )
@@ -2856,6 +3194,8 @@ def test_changed_training_settings_require_a_new_run(
     path = Path(cfg["output"]["dir"]) / "last.pt"
     digest = sha256_file(path)
     cfg = override_config(cfg, {key: value})
+    if key == "loss.context_verify_members" and not value:
+        cfg["loss"]["context_recover_members"] = False
     with pytest.raises(ValueError, match="config"):
         training.train(cfg, resume="auto")
     assert sha256_file(path) == digest
