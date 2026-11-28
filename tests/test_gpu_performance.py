@@ -434,8 +434,11 @@ def test_packed_person_projection_preserves_objective_and_gradients(
         expanded[:, :, :1] = value
         batch[name] = expanded
     batch["target_persons"], batch["target_mask"] = padded, mask
+    # Keep test inputs as leaves for deepcopy. Force a copy on CPU as well.
     batch = {
-        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        key: value.detach().to(device, copy=True).requires_grad_(value.requires_grad)
+        if isinstance(value, torch.Tensor)
+        else value
         for key, value in batch.items()
     }
     reference = deepcopy(model)
